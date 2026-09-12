@@ -302,6 +302,28 @@ describe("the two writes", () => {
     expect(setSecret).not.toHaveBeenCalled();
   });
 
+  it("refuses an over-long DELETE by its declared length, even on the query path", async () => {
+    // The query path reads no body, so a STREAM cannot cost this route
+    // anything there — but a declared length is free to check, and a request
+    // announcing megabytes has no business being answered.
+    const res = await route.DELETE(new Request(
+      "http://clawbox.local/setup-api/coding-agent/secrets?name=VERCEL_TOKEN",
+      {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          host: "clawbox.local",
+          origin: "http://clawbox.local",
+          cookie: ownerCookie(),
+          "content-length": String(MAX_SECRET_VALUE_CHARS * 20),
+        },
+        body: "x".repeat(MAX_SECRET_VALUE_CHARS * 20),
+      },
+    ));
+    expect(res.status).toBe(413);
+    expect(deleteSecret).not.toHaveBeenCalled();
+  });
+
   it("removes by name and scope from the query, and from a body too", async () => {
     await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), query: "?name=SHOP_TOKEN&scope=shop" }));
     expect(deleteSecret).toHaveBeenCalledWith({ name: "SHOP_TOKEN", scope: "shop" });

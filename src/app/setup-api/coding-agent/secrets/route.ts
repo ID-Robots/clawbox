@@ -117,6 +117,22 @@ const MAX_BODY_BYTES = MAX_SECRET_VALUE_CHARS * 8 + 4_096;
 const TOO_LONG = "That request is larger than one secret can be.";
 
 /**
+ * Does the request ANNOUNCE more than one secret's worth?
+ *
+ * A header read and nothing else, so it is worth asking even on the path that
+ * never touches the body: DELETE with `?name=` reads no body at all, which is
+ * why a stream cannot cost this route anything there — but a declared length is
+ * free to check and a request that says it is sending megabytes has no business
+ * being answered (found in review). The one thing NOT done about that path is
+ * to start reading the body in order to bound it, which would turn a request
+ * this route ignores into one it buffers.
+ */
+function declaredTooLong(request: Request): boolean {
+  const declared = Number(request.headers.get("content-length"));
+  return Number.isFinite(declared) && declared > MAX_BODY_BYTES;
+}
+
+/**
  * A JSON body, as an object or nothing — METERED on the way in.
  *
  * `request.json()` buffers and parses whatever arrives, and neither Next's
@@ -134,8 +150,7 @@ const TOO_LONG = "That request is larger than one secret can be.";
  * something else".
  */
 async function objectBody(request: Request): Promise<Record<string, unknown> | "too_long" | null> {
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return "too_long";
+  if (declaredTooLong(request)) return "too_long";
   if (!request.body) return null;
   const bounded = boundedBody(request.body, { limit: MAX_BODY_BYTES, message: TOO_LONG });
   let text: string;
@@ -225,6 +240,11 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const denied = await guard(request, true);
   if (denied) return denied;
+  // Asked before the input source is chosen, because the query path below
+  // never reads the body and would otherwise answer a request that announced
+  // far more than one secret. `objectBody` asks again for the body path, where
+  // the meter is what covers a body that declares no length.
+  if (declaredTooLong(request)) return refuse(413, "invalid", TOO_LONG, "value_too_long");
   const query = new URL(request.url).searchParams;
   let name: unknown = query.get("name");
   let scope: unknown = query.get("scope");
