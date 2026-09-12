@@ -249,6 +249,48 @@ describe("the two writes", () => {
     expect(setSecret).not.toHaveBeenCalled();
   });
 
+  it("refuses an over-long BODY before it is parsed, by the header and by the meter", async () => {
+    // Neither Next's config nor production-server.js bounds a body in front of
+    // this route, so `request.json()` would have buffered and parsed whatever
+    // arrived on the Jetson before the value-length check below ever looked.
+    const huge = JSON.stringify({ name: "BIG_ONE", value: "x".repeat(MAX_SECRET_VALUE_CHARS * 12) });
+
+    // The declared length, refused without reading a byte.
+    const declared = await route.POST(new Request("http://clawbox.local/setup-api/coding-agent/secrets", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        host: "clawbox.local",
+        origin: "http://clawbox.local",
+        cookie: ownerCookie(),
+        "content-length": String(huge.length),
+      },
+      body: huge,
+    }));
+    expect(declared.status).toBe(413);
+    expect(setSecret).not.toHaveBeenCalled();
+
+    // And a CHUNKED body, which declares no length at all — the case a header
+    // check alone would miss. `Request` with a stream body sends no
+    // content-length, so the meter is the only thing in its way.
+    const chunked = await route.POST(new Request("http://clawbox.local/setup-api/coding-agent/secrets", {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "clawbox.local", origin: "http://clawbox.local", cookie: ownerCookie() },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Pushed in pieces, so nothing but the meter can notice the total.
+          for (let i = 0; i < 12; i += 1) controller.enqueue(new TextEncoder().encode("x".repeat(MAX_SECRET_VALUE_CHARS)));
+          controller.close();
+        },
+      }),
+      // @ts-expect-error — duplex is required for a stream body and is not in
+      // this lib's RequestInit yet.
+      duplex: "half",
+    }));
+    expect(chunked.status).toBe(413);
+    expect(setSecret).not.toHaveBeenCalled();
+  });
+
   it("refuses an over-long value at the door, before the store reads it", async () => {
     const res = await route.POST(request({
       method: "POST",
