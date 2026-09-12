@@ -47,19 +47,24 @@ const LOG_TIMEOUT_MS = 120_000;
 /**
  * The most of one job's failed-step log that is ever held in memory.
  *
- * `runChild` accumulates stdout unbounded, and a failing matrix job can print
- * megabytes. Only the TAIL is ever quoted back to the run (the error is at the
- * end of a log, not the beginning), so nothing above this is worth carrying.
+ * Passed INTO `runChild` as `maxStdoutChars` rather than sliced off what it
+ * gives back: a failing matrix job prints megabytes, and a cap applied after
+ * the child resolves bounds what is kept without ever bounding what was held —
+ * on a Jetson with one long-lived web server on it. Only the TAIL is ever
+ * quoted back to the run anyway, because the error is at the end of a log.
  */
-const MAX_LOG_BYTES = 200_000;
+const MAX_LOG_CHARS = 200_000;
 
 /** How many failing checks' logs are fetched. Each is a zip download. */
 const MAX_LOG_FETCHES = 5;
 
-function run(bin: string, args: string[], cwd: string, timeoutMs = CALL_TIMEOUT_MS): Promise<ChildResult> {
+function run(bin: string, args: string[], cwd: string, timeoutMs = CALL_TIMEOUT_MS, maxStdoutChars?: number): Promise<ChildResult> {
   return runChild(bin, args, {
     cwd,
     timeoutMs,
+    // Unset for every call but the log fetch: a JSON answer that arrived
+    // truncated would be worse than one that cost memory.
+    ...(maxStdoutChars === undefined ? {} : { maxStdoutChars }),
     env: {
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
       HOME: process.env.HOME ?? "/home/clawbox",
@@ -215,10 +220,11 @@ export async function readFailedCheckLogs(dir: string, checks: readonly ReviewCh
         logs.push({ check, log: null });
         continue;
       }
-      const viewed = await run("gh", ["run", "view", runId, "--log-failed"], cwd, LOG_TIMEOUT_MS);
+      const viewed = await run("gh", ["run", "view", runId, "--log-failed"], cwd, LOG_TIMEOUT_MS, MAX_LOG_CHARS);
       // Even a failing `gh run view` sometimes prints the useful part before
-      // it gives up, so stdout is taken when there is any.
-      byRun.set(runId, viewed.stdout.slice(-MAX_LOG_BYTES));
+      // it gives up, so stdout is taken when there is any. Already bounded by
+      // the cap above, so nothing is sliced here.
+      byRun.set(runId, viewed.stdout);
     }
     const log = byRun.get(runId) ?? "";
     logs.push({ check, log: log.trim() ? log : null });

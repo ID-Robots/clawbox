@@ -197,6 +197,16 @@ describe("the body", () => {
     }
   });
 
+  it("REFUSES a fractional round count rather than rounding it into one", async () => {
+    // `clampReviewRounds` rounds, so 1.5 would have been SAVED as 2 — an
+    // answer to a question the caller did not ask.
+    for (const bad of [1.5, 0.5, 2.0001]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: bad } }));
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error as string).toContain("whole number");
+    }
+  });
+
   it("refuses the agent the merge switch — a consent it must not give itself", async () => {
     const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { autoMerge: true } }));
     expect(res.status).toBe(403);

@@ -230,6 +230,24 @@ describe("the review loop's watcher", () => {
     expect(run?.pr?.phase).toBe("blocked");
   });
 
+  it("refuses to merge when the automatic review pass did not finish cleanly", async () => {
+    // `pr.reviewOk` is written when the pull request opens and is the loop's
+    // only knowledge of the reviewer. Without reading it, a green suite merged
+    // work the review had rejected — which is exactly what the checks-only
+    // watcher has always refused (decideMerge).
+    review.readReviewSnapshot.mockResolvedValue(snap());
+    await boot({ coding_agent_auto_merge: true });
+    const rec = record();
+    rec.pr.reviewOk = false;
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify([rec]));
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("needs_owner"); });
+
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    expect(lib.getRun(RUN_ID)?.review?.detail).toContain("review pass");
+  });
+
   it("refuses to merge into main however green it is, and says so", async () => {
     review.readReviewSnapshot.mockResolvedValue(snap());
     await boot({ coding_agent_auto_merge: true });

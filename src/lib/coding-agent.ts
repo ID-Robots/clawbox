@@ -410,6 +410,8 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
+  CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
+  CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
@@ -1472,8 +1474,11 @@ export async function getReviewRounds(): Promise<number> {
 }
 
 export async function setReviewRounds(rounds: unknown): Promise<number> {
-  if (typeof rounds !== "number" || !Number.isFinite(rounds)) {
-    throw new CodingAgentError("invalid", "The number of review rounds must be a number.");
+  // Integer, not merely finite: `clampReviewRounds` rounds, so 1.5 would have
+  // been SAVED as 2 — an answer to a question the caller did not ask, and the
+  // same reason the range below is refused rather than clamped.
+  if (typeof rounds !== "number" || !Number.isInteger(rounds)) {
+    throw new CodingAgentError("invalid", "The number of review rounds must be a whole number.");
   }
   if (rounds < MIN_REVIEW_ROUNDS || rounds > MAX_REVIEW_ROUNDS) {
     // Refused rather than clamped: a caller that asked for 20 rounds meant
@@ -5173,6 +5178,14 @@ function watchReviewLoop(runId: string): void {
       // what the run was promised, but the merge is a consent, and an owner
       // who switches it off while a loop runs has said no to THIS merge.
       autoMerge: await getAutoMerge(),
+      // The automatic review pass's verdict, recorded when the pull request was
+      // opened. The checks-only watcher has always gated its merge on it
+      // (decideMerge), and the loop has to as well: a green suite over a review
+      // that did not finish cleanly answers a different question, and without
+      // this a run whose review pass failed was merged the moment CI went
+      // green. Read off the record each tick like everything else, so a loop
+      // rebuilt after a restart decides as the first one did.
+      reviewOk: run.pr?.reviewOk !== false,
       base: review.base,
     });
 

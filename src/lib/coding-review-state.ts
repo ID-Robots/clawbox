@@ -330,9 +330,17 @@ export function decideReviewRound(input: {
   waitedMs: number;
   /** The owner's merge switch. */
   autoMerge: boolean;
+  /**
+   * The automatic review pass's verdict, off `PrState.reviewOk`. False means a
+   * review was due and did not finish cleanly, and then nothing here may merge
+   * — the same gate `decideMerge` applies to the checks-only watcher, because
+   * the suite and the reviewer answer different questions. True when no review
+   * was due, so the checks alone decide.
+   */
+  reviewOk: boolean;
   base: string | null;
 }): ReviewDecision {
-  const { snapshot, round, maxRounds, waitedMs, autoMerge, base } = input;
+  const { snapshot, round, maxRounds, waitedMs, autoMerge, reviewOk, base } = input;
 
   if (snapshot.state === "MERGED") {
     return { action: "done", state: "merged", detail: "The pull request is merged." };
@@ -370,7 +378,20 @@ export function decideReviewRound(input: {
     return { action: "feedback", problems };
   }
 
-  // Nothing to fix. Whether the box may finish the job is the owner's call.
+  // Nothing GitHub can see is wrong. The review pass is the thing it cannot
+  // see, and it is answered before the merge switch is even consulted: a run
+  // whose review did not finish cleanly is not a pull request this box signs
+  // off, whatever the suite says and whether or not the owner asked for a
+  // merge. Saying so is the point — `clean` here would read as "green, go
+  // ahead" over work nothing vouched for.
+  if (!reviewOk) {
+    return {
+      action: "done",
+      state: "needs_owner",
+      detail: "Nothing is outstanding on GitHub, but the automatic review pass did not finish cleanly, so this was not merged.",
+    };
+  }
+  // Whether the box may finish the job is the owner's call.
   if (!autoMerge) {
     return { action: "done", state: "clean", detail: null };
   }

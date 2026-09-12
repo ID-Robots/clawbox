@@ -156,7 +156,7 @@ describe("foldReviewChecks", () => {
 });
 
 describe("decideReviewRound", () => {
-  const base = { round: 0, maxRounds: 3, waitedMs: 30_000, autoMerge: false, base: "beta" };
+  const base = { round: 0, maxRounds: 3, waitedMs: 30_000, autoMerge: false, reviewOk: true, base: "beta" };
 
   it("waits while any check is still running, rather than spending a round on it", () => {
     // A round is a whole Claude Code turn. Handing one over while the suite is
@@ -213,6 +213,29 @@ describe("decideReviewRound", () => {
     expect(verdict).toMatchObject({ action: "done", state: "needs_owner" });
     expect(verdict.action === "done" && verdict.detail).toContain("3 review rounds did not clear it");
     expect(verdict.action === "done" && verdict.detail).toContain("build");
+  });
+
+  it("NEVER merges when the automatic review pass did not finish cleanly", () => {
+    // The suite and the reviewer answer different questions, and the
+    // checks-only watcher has always gated on this (decideMerge). Without it
+    // here, a run whose review pass failed was merged the moment CI went green.
+    const verdict = decideReviewRound({ ...base, autoMerge: true, reviewOk: false, snapshot: snap() });
+    expect(verdict).toMatchObject({ action: "done", state: "needs_owner" });
+    expect(verdict.action === "done" && verdict.detail).toContain("review pass");
+  });
+
+  it("says the review pass failed even with the merge switch off, rather than calling it clean", () => {
+    // `clean` reads as "green, go ahead" — which is the opposite of what
+    // happened to work nothing vouched for.
+    expect(decideReviewRound({ ...base, autoMerge: false, reviewOk: false, snapshot: snap() }))
+      .toMatchObject({ action: "done", state: "needs_owner" });
+  });
+
+  it("still spends rounds on real problems when the review pass failed", () => {
+    // The verdict gates the MERGE, not the loop: a failing check is worth
+    // fixing whatever the review pass said.
+    expect(decideReviewRound({ ...base, reviewOk: false, snapshot: snap({ checks: [check("build", "fail")] }) }).action)
+      .toBe("feedback");
   });
 
   it("ends CLEAN rather than merging when the owner has not asked for a merge", () => {
