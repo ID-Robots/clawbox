@@ -318,6 +318,15 @@ describe("the scope prefix", () => {
   });
 });
 
+describe("the reattach step on the timeline", () => {
+  it("carries a label key, so a localised page does not draw the runner's English", async () => {
+    const { describeProgressLine, RUNNER_STEP } = await import("@/lib/coding-agent-progress");
+    // The pattern is anchored to the sentence the runner writes, so this fails
+    // the moment either side is reworded without the other.
+    expect(describeProgressLine(RUNNER_STEP.reattached)).toMatchObject({ labelKey: "reattached", icon: "link" });
+  });
+});
+
 describe("the stream log", () => {
   it("is denied to the run whose output it holds, even on the very first spawn", () => {
     // The directory is created by the first spawn, AFTER that spawn's deny
