@@ -126,6 +126,16 @@ import {
   type DenialInput,
 } from "@/lib/coding-permission-rules";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
+import {
+  isReservedSecretName,
+  MAX_SECRETS,
+  resolveSecretsForRun,
+  SECRET_INJECT_CONFIG_KEY,
+  SECRET_NAME_RE,
+  SECRETS_FILE_NAME,
+  type ResolvedRunSecrets,
+} from "@/lib/project-secrets";
+import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
   decideMerge,
@@ -474,6 +484,11 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
+  // The CONSENT for handing a run the owner's stored secrets, so "start over"
+  // withdraws it. The SECRETS themselves are deliberately not cleared — they
+  // are credentials the owner pasted, and the same reasoning applies as to the
+  // Anthropic key below.
+  SECRET_INJECT_CONFIG_KEY,
   // The account a run is paid from is a SETTING, so "start over" puts it back
   // to the box's own plan. Without this a reset left `anthropic` selected, and
   // on a box with no Anthropic credential the wizard it reopened reported the
@@ -1098,6 +1113,18 @@ export interface CodingRun {
    * time" offers in the same breath as saving a rule. See the comment there.
    */
   allowRules: string[];
+  /**
+   * The NAMES of the owner's secrets this run was handed
+   * (src/lib/project-secrets.ts) — never the values, which live in the child's
+   * environment and in one in-memory table for the life of the run.
+   *
+   * On the record because the owner's page has to be able to say what a run was
+   * given, and because it is the honest answer to "why did the deploy work for
+   * that run and not this one". Safe to put here for the reason the values are
+   * not: this file is answered by a route the MCP bearer reaches, and the agent
+   * may already list the names (mcp/tools/coding-agent.ts).
+   */
+  secretNames: string[];
   /** The effort the run was started with. Recorded per-run because the owner
    *  can change the setting while a run is in flight. */
   effort: CodingEffort;
@@ -1467,6 +1494,9 @@ export interface CodingAgentStatus {
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
   maxAllowRules: number;
+  /** May a run be handed the owner's stored secrets? OFF when absent — it is a
+   *  consent, not a preference (src/lib/project-secrets.ts). */
+  injectSecrets: boolean;
   harnessCommand: string;
   maxTaskChars: number;
   /** Which account pays for a run the caller does not name one for. */
@@ -2736,6 +2766,10 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
     maxAllowRules: MAX_ALLOW_RULES,
+    // Read off the same config snapshot as everything else here rather than
+    // through `getInjectSecrets`, which would open the file a second time on a
+    // route the app polls. `=== true` is the same reading that getter makes.
+    injectSecrets: config[SECRET_INJECT_CONFIG_KEY] === true,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     provider,
@@ -2881,6 +2915,14 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // Re-validated rather than trusted: this list is what a resume hands to the
     // CLI, and the floor it had to clear when the run started may have risen.
     allowRules: normalizeAllowRules(raw.allowRules, allowRuleHomeContext()),
+    // A record from before the store existed has none. The names are re-filtered
+    // rather than trusted: this list is rendered, and the file it comes from is
+    // the one a restore or a hand edit can have touched.
+    secretNames: Array.isArray((raw as { secretNames?: unknown }).secretNames)
+      ? ((raw as { secretNames: unknown[] }).secretNames)
+          .filter((v): v is string => typeof v === "string" && SECRET_NAME_RE.test(v))
+          .slice(0, MAX_SECRETS)
+      : [],
     effort: isEffort(raw.effort) ? raw.effort : DEFAULT_EFFORT,
     // A record written before this field existed, or one left by a restart,
     // has no live sub-agents by definition.
@@ -3459,6 +3501,7 @@ function cloneRun(run: CodingRun): CodingRun {
     deniedActions: [...run.deniedActions],
     denials: run.denials.map((d) => ({ ...d })),
     allowRules: [...run.allowRules],
+    secretNames: [...run.secretNames],
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
     subagents: run.subagents.map((a) => ({ ...a })),
     subagentsByType: { ...run.subagentsByType },
@@ -3974,7 +4017,13 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // spawn, after that spawn's rules have already been computed from what was on
 // disk, so discovery alone would leave it open for one run — every other run's
 // log is deleted at its settle, but a team's three workers are live together.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams"];
+//
+// secrets.json is the newest and the plainest of them: the owner's own
+// credentials, encrypted with a key derived from `.session-secret` — which is
+// already on this list, and the two are worth nothing apart. A run is HANDED
+// the secrets the owner ticked for it, as environment variables; reading the
+// file would hand it the ones they did not, including another project's.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", SECRETS_FILE_NAME];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -4300,6 +4349,106 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
 }
 
 /**
+ * WHICH project a run belongs to, for the secret store's scope.
+ *
+ * The same identity the projects listing gives a row (`CodingProject.folder`),
+ * derived the same way: a code project's id, else the FIRST folder under the
+ * owner's project folder that the run's directory sits in — at any depth, which
+ * is how a run in `~/Projects/shop/api` gets the `shop` project's secrets.
+ *
+ * Deliberately NOT `run.projectId`, which is set only for a code project: a
+ * scope keyed on it would have left every folder project — the kind the owner's
+ * own project folder holds — unable to have a secret of its own.
+ *
+ * Null when the run is in no project of the owner's (a bare absolute folder, or
+ * a box with no project folder set). Such a run gets the box-scoped entries
+ * alone; it is not a project, so no project's secrets are its own.
+ */
+async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">): Promise<string | null> {
+  if (typeof run.projectId === "string" && run.projectId) return run.projectId;
+  if (typeof run.directory !== "string" || !run.directory) return null;
+  const folders = await readProjectFolders();
+  if (!folders) return null;
+  // Both spellings of the base, the way listProjects matches them: a run
+  // records its folder symlink-resolved, and the owner's setting may not be.
+  const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
+  for (const base of new Set([folders.base, realBase])) {
+    if (!run.directory.startsWith(base + path.sep)) continue;
+    const first = path.relative(base, run.directory).split(path.sep)[0];
+    // A dot-folder is state, not a project — the same cut listProjects makes.
+    if (first && !first.startsWith(".")) return first;
+  }
+  return null;
+}
+
+/**
+ * The plaintext an in-flight run holds, keyed by run id.
+ *
+ * IN MEMORY, never on the record and never persisted: the run record goes to
+ * `data/coding-agent-runs.json` and is answered by a route the MCP bearer
+ * reaches, and the whole point of the store is that the value is not lying
+ * about in a file. What DOES go on the record is the NAMES
+ * (`CodingRun.secretNames`), which the owner's page shows and the agent may
+ * already list.
+ *
+ * Filled by `prepareRunSecrets` on the async path just before each spawn — the
+ * resolve is a disk read and `spawnRun` is synchronous — and dropped by
+ * `cleanupRunResources` when the run settles. A resume re-resolves rather than
+ * reusing what is here, so an entry the owner has since un-ticked is not handed
+ * back to a run that already had it.
+ */
+const runSecretEnv = new Map<string, Record<string, string>>();
+
+/**
+ * Work out what this run may have, put it where the spawn can reach it, and
+ * arm the redaction table for everything the run will say.
+ *
+ * Awaited by every caller before `spawnOrSettle`, and the ONE place those two
+ * facts are set together: an environment armed without the redaction table
+ * would hand a run a token and then print it.
+ */
+async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
+  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
+  runSecretEnv.set(run.id, resolved.env);
+  registerRunSecrets(run.id, Object.entries(resolved.env).map(([name, value]) => ({ name, value })));
+  run.secretNames = resolved.names;
+  if (resolved.names.length > 0) pushProgress(run, RUNNER_STEP.secretsInjected(resolved.names));
+  // Said in the run's own feed rather than only in the log: an entry the owner
+  // ticked and this box cannot open is a run working without a credential it
+  // was meant to have, and the failure it causes looks like anything else.
+  if (resolved.unreadable.length > 0) pushProgress(run, RUNNER_STEP.secretsUnreadable(resolved.unreadable));
+  return resolved;
+}
+
+/**
+ * Put a run's secrets back, from a copy taken before its settle dropped them.
+ *
+ * For ONE caller: the automatic transient retry in `finishRun`. That branch
+ * respawns the same record synchronously, from the child's own `close`
+ * handler, so it cannot re-resolve — the resolve is a disk read — and the
+ * cleanup above it has already emptied both tables. A retried child spawned
+ * with no redaction table armed is a child whose echoed token would reach the
+ * run record; one spawned with no environment is a retry that fails for the
+ * want of a credential the first attempt had.
+ *
+ * Every OTHER continuation is asynchronous and re-resolves instead
+ * (`prepareRunSecrets`): the owner's Resume, a drafted run, and each attempt of
+ * the deliverable gate. Those are the paths where re-reading is the right
+ * answer, because time has passed and the owner may have changed their mind.
+ */
+function restoreRunSecrets(runId: string, env: Record<string, string>): void {
+  runSecretEnv.set(runId, env);
+  registerRunSecrets(runId, Object.entries(env).map(([name, value]) => ({ name, value })));
+}
+
+/** Both tables, emptied for one run. The settle path's own step, and the undo
+ *  for a `restoreRunSecrets` whose child never started. */
+function dropRunSecrets(runId: string): void {
+  runSecretEnv.delete(runId);
+  forgetRunSecrets(runId);
+}
+
+/**
  * The environment a run gets — and nothing else. Exported for the contract test.
  *
  * The PROVIDER travels here and the credential does not: the wrapper reads
@@ -4310,7 +4459,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
  * (scripts/claude-ds unsets the whole of the other wiring); this side's job is
  * to name one of them and to pass no stale override that could contradict it.
  */
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; provider?: CodingProvider; model?: string | null } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; provider?: CodingProvider; model?: string | null; secrets?: Record<string, string> } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -4349,6 +4498,25 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
+  // The owner's secrets, LAST and never over the top of anything above.
+  //
+  // Resolved by the caller (`prepareRunSecrets`) because it is a disk read and
+  // this function is synchronous — and gated three times before it gets here:
+  // the owner's switch, the entry's own tick, and the scope (project-secrets.ts).
+  //
+  // The two guards here are defence in depth, not the fence. `setSecret`
+  // refuses a reserved name at save time, so neither can fire today; they are
+  // what makes this loop safe to read on its own, and what covers a store
+  // written by an older build. `in env` is checked rather than assigned over,
+  // because everything above decides which account pays for the run, where its
+  // evidence goes and what its PATH is — an entry that could overwrite one of
+  // those would be a way to move a run onto another account by saving a
+  // "secret".
+  for (const [name, value] of Object.entries(opts.secrets ?? {})) {
+    if (name in env) continue;
+    if (!SECRET_NAME_RE.test(name) || isReservedSecretName(name)) continue;
+    env[name] = value;
+  }
   return env;
 }
 
@@ -4486,6 +4654,12 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // The run's own tab, never the owner's: browser sessions are tagged with the
   // run that opened them and a run always gets a new page (browser-sessions.ts).
   void closeSessionsForRun(run.id).catch(() => {});
+  // The owner's secrets, out of memory the moment the run is over — including
+  // for a PAUSED run, which re-resolves them on resume rather than being handed
+  // back an entry the owner has since un-ticked. Nothing written after this
+  // point can contain a value: the child is gone, and `secretNames` on the
+  // record is names only.
+  dropRunSecrets(run.id);
   if ((run.status === "completed" && !run.team) || run.status === "paused") {
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
@@ -4546,7 +4720,12 @@ export function killRunLeftovers(id: string): CodingRun {
 }
 
 function pushProgress(run: CodingRun, line: string): void {
-  const cleaned = line.replace(/\s+/g, " ").trim();
+  // Scrubbed FIRST, before the collapse and the cap: this feed is persisted on
+  // the run record and answered by a route the MCP bearer reaches, and a tool
+  // name or an agent sentence is exactly where an echoed token turns up. A cap
+  // applied first could also cut a value in half and leave the front of it in
+  // the line unmatched. No-op on every run that holds no secrets.
+  const cleaned = redactForRun(run.id, line).replace(/\s+/g, " ").trim();
   if (!cleaned) return;
   run.progress.push(cleaned.length > MAX_PROGRESS_LINE_CHARS ? `${cleaned.slice(0, MAX_PROGRESS_LINE_CHARS - 1)}…` : cleaned);
   // When it happened, kept in step with the line: the timeline shows it on hover.
@@ -5343,7 +5522,11 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       // one list or the other, never one indexed into the other.
       run.denials = (continuation ? [...run.denials, ...parsed] : parsed).slice(0, MAX_DENIALS_KEPT);
     }
-    const text = typeof event.result === "string" ? event.result.trim() : "";
+    // Scrubbed before it is cut, for the reason pushProgress is: the summary is
+    // persisted, rendered, filed as report.md and read back by the agent's own
+    // status tool, and a run's closing words are where it explains what it did
+    // with the token it was given.
+    const text = typeof event.result === "string" ? redactForRun(run.id, event.result).trim() : "";
     if (text) {
       run.summary = text.slice(0, MAX_SUMMARY_CHARS);
       run.resultText = text;
@@ -6603,6 +6786,13 @@ async function startCompletionAttempt(
   run.lastActivityAt = Date.now();
   openAttempt(run);
   pushProgress(run, RUNNER_STEP.anotherAttempt(attempt, run.completionAttempts));
+  // RE-RESOLVED for this attempt, like a resume's. The previous attempt's
+  // settle dropped the values out of memory (cleanupRunResources), so they have
+  // to be worked out again either way — and re-reading is the safer of the two
+  // answers: an entry the owner un-ticked while the run was working is not
+  // handed back to it, and the redaction table is armed again before the child
+  // that would echo one exists.
+  await prepareRunSecrets(run);
   persist(true);
   console.error(`[coding-agent] ${run.id} attempt ${attempt} of ${run.completionAttempts} at its deliverable`);
   startProjectIcon(run);
@@ -6765,7 +6955,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // error, so it is the one this reaches.
       run.status = state.outcome.status;
       if (state.outcome.resumable) run.resumable = true;
-      if (state.outcome.error && !run.error) run.error = state.outcome.error;
+      if (state.outcome.error && !run.error) run.error = redactForRun(run.id, state.outcome.error);
     } else if (state.endRequested === "pause") {
       // Paused, not stopped: the session is intact and Resume respawns into
       // it. completedAt freezes the elapsed clock; resume clears it.
@@ -6790,7 +6980,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.error = LOST_TO_RESTART;
     } else {
       run.status = "failed";
-      const tail = stderrTail(state.stderr);
+      // The harness's own stderr: a curl that failed with the token on its
+      // command line lands here whole, so the tail is scrubbed of anything the
+      // run was given before it reaches the record or the fault note.
+      const tail = redactForRun(run.id, stderrTail(state.stderr));
       // systemd turning the scope away, before the harness ever ran. Recorded
       // for readiness — no probe can find this out by looking — and the retry
       // below then starts the run directly, which is what the box would have
@@ -6818,6 +7011,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // A stop that raced the final message keeps "completed": the work is done.
   run.exitCode = exitCode;
   run.completedAt = Date.now();
+  // The owner's secrets, taken before the cleanup below drops them — for the
+  // retry branch alone, which cannot re-resolve them. See restoreRunSecrets.
+  const carriedSecrets = runSecretEnv.get(run.id);
   // Timers, the run's browser tab, and the verdict on what it left running.
   // Before the retry branch below, which respawns into a fresh state and a
   // fresh process group: a retry that inherited the first attempt's timers
@@ -6870,6 +7066,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       pushProgress(run, RUNNER_STEP.providerSilent);
       persist(true);
       console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
+      // The same credentials and the same redaction table as the attempt that
+      // got nowhere: this is one run making a second try at the same work, not
+      // a new decision by the owner.
+      if (carriedSecrets) restoreRunSecrets(run.id, carriedSecrets);
       try {
         spawnRun(run, null, state.tools, state.settings);
         return;
@@ -6879,6 +7079,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.status = "failed";
         run.completedAt = Date.now();
         run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+        // And take back what restoreRunSecrets put in memory for a child that
+        // never came into being. The cleanup above this branch has already run
+        // and will not run again, so without this the owner's plaintext would
+        // sit in this process until it restarted (found in review).
+        dropRunSecrets(run.id);
       }
     }
   }
@@ -7205,7 +7410,12 @@ function spawnRun(
   // The web server tails the log instead — see STREAM_DIR.
   const logs = openStreamLogs(run.id);
   run.streamOffset = 0;
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, provider: run.provider, model: run.requestedModel });
+  // The secrets were resolved on the async path just before this call
+  // (prepareRunSecrets), or put back for the transient retry, which respawns
+  // from a `close` handler and cannot read the disk (restoreRunSecrets).
+  // Absent — `undefined`, which the merge loop reads as nothing — for every
+  // run on a box that has not switched injection on.
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, provider: run.provider, model: run.requestedModel, secrets: runSecretEnv.get(run.id) });
   let child: ChildProcess;
   try {
     child = spawn(bin, argv, {
@@ -7483,6 +7693,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // without one never grows the list.
   openAttempt(run);
 
+  // Before the record is persisted, so the names and the two progress lines are
+  // in the first thing the app reads rather than appearing a poll later.
+  await prepareRunSecrets(run);
   insertRun(loadRuns(), run);
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
@@ -7625,6 +7838,9 @@ function newRunRecord(fields: {
     deniedActions: [],
     denials: [],
     allowRules: [...fields.settings.allowRules],
+    // Filled at spawn by prepareRunSecrets, which is the only thing that knows
+    // what this run's project resolved to.
+    secretNames: [],
     effort: fields.settings.effort,
     subagentsActive: 0,
     activeSubagents: [],
@@ -7909,6 +8125,10 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   if (gaveUp) reopenPullRequestStep(run);
   openAttempt(run);
   pushProgress(run, RUNNER_STEP.resumedByOwner);
+  // RE-RESOLVED, like the permission rules just above and for the same reason:
+  // a resume is the owner's own deliberate act, so an entry they have un-ticked
+  // since the pause is not handed back, and one they have ticked is.
+  await prepareRunSecrets(run);
   persist(true);
   console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : "pause"}`);
   startProjectIcon(run);
@@ -8005,6 +8225,9 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // The bar the draft was created with, now that it is actually starting.
   openAttempt(run);
   pushProgress(run, RUNNER_STEP.startedFromDraft);
+  // Resolved now and not when the draft was written: a draft can sit for days,
+  // and the secrets a run gets are the ones ticked at the moment it starts.
+  await prepareRunSecrets(run);
   persist(true);
   console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
   startProjectIcon(run);

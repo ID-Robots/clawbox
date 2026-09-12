@@ -93,6 +93,15 @@ function forbidden() {
  * again, changed plan) should not have to wait out a clock to prove it. Only
  * `true` does anything: there is no way to ASSERT a fault from outside, which
  * would be a way to disable the coding agent by POST.
+ * The one switch of this feature's that is NOT here: whether a run may be
+ * handed the owner's stored secrets (`coding_agent_inject_secrets`). It lives
+ * on /setup-api/coding-agent/secrets instead, with the store it governs,
+ * because it needs a fence this route does not carry: a same-origin check as
+ * well as the owner's cookie. Everything above is the owner's preference about
+ * their own agent, where the cookie is the whole question; that one hands
+ * credentials to an unattended shell, which is the fence the permission rules
+ * and the import routes carry for the same reason. The status still REPORTS it
+ * (`injectSecrets`), because reading is not the half that needs the fence.
  * POST { reviewPass: boolean } → the automatic review pass: one extra run in
  * the same session after every completed run that changed project files
  * (the status payload reports it as `reviewPass`; a review run carries

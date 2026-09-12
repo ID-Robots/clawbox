@@ -94,6 +94,10 @@ const BRAND_ONLY = new Set([
   // literal text the owner would type — the tool name and the `//` path
   // pattern are the CLI's own syntax — so a translated rule is not a rule.
   "Read(//home/clawbox/Projects/notes/**)",
+  // An environment variable name, shown as the secrets card's placeholder. The
+  // store's names ARE shell variable names — capitals, digits, underscores —
+  // and a translated one would be a variable no service ever reads.
+  "VERCEL_TOKEN",
 ]);
 
 function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {

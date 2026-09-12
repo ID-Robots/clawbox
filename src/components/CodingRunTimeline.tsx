@@ -86,6 +86,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   deliverableMissing: "codingAgent.stepDeliverableMissing",
   anotherAttempt: "codingAgent.stepAnotherAttempt",
   droppedSteps: "codingAgent.stepDropped",
+  secretsInjected: "codingAgent.stepSecretsInjected",
+  secretsUnreadable: "codingAgent.stepSecretsUnreadable",
 };
 
 /**

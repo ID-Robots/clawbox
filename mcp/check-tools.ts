@@ -174,6 +174,10 @@ const NO_CAPABILITIES: Posture = {
  */
 const PROBE_GATED_COMMON = [
   "coding_agent_run", "coding_agent_status", "coding_agent_stop",
+  // The owner's secret store, read-only and names-only: registered under the
+  // coding agent's own gate, because what it answers about is what a RUN will
+  // find in its environment.
+  "coding_secret_list",
   "coding_team_run", "coding_team_status", "coding_team_stop",
   "disk_cleanup", "disk_usage", "email_list", "email_read",
   "logs_tail", "screen_capture",
