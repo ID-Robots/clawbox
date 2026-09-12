@@ -188,6 +188,8 @@ export const RUNNER_STEP = {
   continuing: "Continuing after a background helper finished",
   tokenLimit: "Token limit reached",
   resuming: "Resuming the previous session",
+  // The web server restarted and this run outlived it in its own systemd scope.
+  reattached: "The web server restarted; this run kept going and was picked back up",
   noRepository:
     "Not a git repository yet: the work is committed into a new one when the run settles, and there is no pull request to open.",
   merged: "Merged into the base branch",

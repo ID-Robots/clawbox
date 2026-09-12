@@ -1910,9 +1910,9 @@ describe("after a restart", () => {
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
     // The count is the operator's only signal that a restart killed work.
-    expect(lib.reconcileAfterRestart()).toBe(1);
+    expect(await lib.reconcileAfterRestart()).toBe(1);
     // Idempotent: the second sweep finds nothing left to settle.
-    expect(lib.reconcileAfterRestart()).toBe(0);
+    expect(await lib.reconcileAfterRestart()).toBe(0);
     const run = lib.getRun("run-lostrun1");
     expect(run?.status).toBe("failed");
     expect(run?.error).toMatch(/restarted/);
@@ -1948,7 +1948,7 @@ describe("after a restart", () => {
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
     // Nothing was settled, so the operator's count stays at zero.
-    expect(lib.reconcileAfterRestart()).toBe(0);
+    expect(await lib.reconcileAfterRestart()).toBe(0);
     const run = lib.getRun("run-leftover1");
     expect(run?.pgid).toBeNull();
     expect(run?.leftover).toBe(false);

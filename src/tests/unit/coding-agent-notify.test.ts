@@ -90,6 +90,8 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     reviewPass: false,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
+    unit: null,
+    streamOffset: 0,
     leftover: false,
     commitError: null,
     deliverable: null,
