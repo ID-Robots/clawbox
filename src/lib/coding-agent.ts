@@ -6580,6 +6580,10 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
     throw new CodingAgentError("invalid", "Only a paused run can be resumed in place. Start a new run instead.");
   }
   await assertCanSpawn(run.team ?? null);
+  // The account the session was OPENED on — a resume cannot move to another
+  // one, so if that credential is gone the resume is refused rather than
+  // quietly re-enacted somewhere else.
+  await assertProviderReady(run.provider);
   const setprivPath = await requireSetpriv();
   // The folder must still be there. A team worker's worktree is removed when
   // its task is decided, and a run resumed into a cwd that no longer exists
@@ -6644,9 +6648,11 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
   const { directory, projectId } = await resolveWorkingDirectory(input);
   // Snapshot of today's settings for the card; re-read at start, because the
   // run keeps the settings it STARTS with, not the ones it was drafted under.
-  // A draft freezes its account the way a run does: the owner may change their
-  // default between drafting and starting, and the card that was written said
-  // which one it would use.
+  // A draft freezes its account. Unlike the effort and the ceilings — which
+  // startDraftRunOnce deliberately re-reads, because they have no per-run form
+  // and can only have come from the owner's default — the provider and its
+  // model are something the CALLER may have named here, and re-reading would
+  // throw that choice away without saying so.
   const settings = await applyProviderChoice(await readRunSettings(), input, null);
   const run = newRunRecord({ task, directory, projectId, source: input.source, status: "draft", settings });
   pushProgress(run, RUNNER_STEP.drafted);
@@ -6667,10 +6673,20 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   if (run.status === "running") return cloneRun(run);
   if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
   await assertCanSpawn(run.team ?? null);
+  // The account this draft named, not whatever the default is now. Checked
+  // before the record is flipped to "running": a draft for an account whose
+  // key the owner has since removed should be refused with a sentence, not
+  // spawned into a wrapper that dies.
+  await assertProviderReady(run.provider);
   const setprivPath = await requireSetpriv();
   // The folder must still be there — it was only checked when drafted.
   run.directory = await realDirectory(run.directory);
   // Settings are read at START: a run keeps what it starts with.
+  //
+  // The provider and its model are deliberately NOT among them. They are the
+  // one setting here a caller can name PER RUN, so re-reading would silently
+  // overwrite a choice the draft was created with; the others have no per-run
+  // form and can only have come from the owner's stored default anyway.
   const settings = await readRunSettings();
   run.effort = settings.effort;
   run.maxTurns = settings.maxTurns;
