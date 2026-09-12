@@ -255,6 +255,29 @@ describe("telling the running agent", () => {
     expect(reloadMcp).not.toHaveBeenCalled();
   });
 
+  it("reloads when clearing a harness fault makes the family available again", async () => {
+    // A remembered fault makes `readiness.ready` false, so clearing one can
+    // flip the family from unavailable to available — the same move the switch
+    // makes, and it has to reach the running child the same way. Without this
+    // the owner presses Try again, the panel says ready, and the agent still
+    // has no coding_agent_run until something unrelated respawns it.
+    readyGoes(false, true);
+    const res = await POST(request({ cookie: ownerCookie(), body: { clearHarnessFault: true } }));
+    expect(res.status).toBe(200);
+    expect(clearHarnessFault).toHaveBeenCalledTimes(1);
+    expect(reloadMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT reload when clearing a fault changed no verdict", async () => {
+    // Clearing a fault on a box that was already refusing runs for another
+    // reason — no harness installed, ClawBox AI not connected — moves nothing
+    // the agent can see, and a reload respawns every MCP child.
+    readyGoes(false, false);
+    const res = await POST(request({ cookie: ownerCookie(), body: { clearHarnessFault: true } }));
+    expect(res.status).toBe(200);
+    expect(reloadMcp).not.toHaveBeenCalled();
+  });
+
   it("does NOT reload for the settings that leave the family alone", async () => {
     // effort, step limit, token ceiling, default folder — none of them change
     // WHICH tools exist, so none of them may cost a reload.

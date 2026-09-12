@@ -180,7 +180,10 @@ vi.mock("@/lib/harness", async (importOriginal) => ({
   getActiveHarness: vi.fn(),
 }));
 
-vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn() }));
+// `clearHarnessFault` belongs in the factory, not just the type: omitted, the
+// route's call is `undefined()` and falls into its own catch, so the case
+// below would pass over a clear that never happened.
+vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(), clearHarnessFault: vi.fn(async () => undefined) }));
 
 // The Hermes apply, which on this SKU is what tells the agent anything at all.
 // Partial, so `ClawaiApplyError` stays the real class the route catches.
@@ -215,7 +218,7 @@ import {
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
-import { getCodingAgentStatus } from "@/lib/coding-agent";
+import { clearHarnessFault, getCodingAgentStatus } from "@/lib/coding-agent";
 import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
 
 
@@ -370,6 +373,27 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // mock could be trimmed back to `getAll`/`setMany` and every case here
     // would go on passing over an image-ops gate that never ran (TASK-727).
     expect(vi.mocked(configGet)).toHaveBeenCalledWith("clawai_credential_refused_at");
+  });
+
+  it("forgets a remembered harness fault, because this save is what the fault told the owner to do", async () => {
+    // When a run dies because the harness could not get a model to answer, the
+    // device remembers it and refuses new runs for a while — and the message
+    // sends the owner HERE ("check ClawBox AI is connected and that your plan
+    // covers the model the harness asks for"). Landing back on a box that
+    // still refuses runs, over a clock they were never shown, would make this
+    // route the one place that advice does not work. A fresh credential is
+    // newer evidence than the fault.
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(clearHarnessFault)).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the fault alone for a save that is not ClawBox AI", async () => {
+    // The harness only ever speaks to ClawBox AI, so another provider's
+    // credential is no evidence at all about whether it can get a model.
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-not-a-real-key-0000000000" }));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(clearHarnessFault)).not.toHaveBeenCalled();
   });
 
   it("hands the credential to HERMES, which is the agent answering on this box", async () => {

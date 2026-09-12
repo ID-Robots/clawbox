@@ -170,7 +170,13 @@ export async function POST(request: Request) {
     // and one readdir, on the one branch that flips a switch — and null here
     // means "this request cannot move the family", which is every other setting
     // the route carries.
-    const readyBefore = hasEnabled ? (await getCodingAgentStatus()).ready : null;
+    // `clearHarnessFault` belongs here with the switch, and for exactly the
+    // same reason: a remembered fault makes `readiness.ready` false, so
+    // clearing one can flip the family from unavailable to available while the
+    // running MCP child still has none of the three coding_agent_* tools.
+    // Without it the owner presses Try again, the panel says ready, and the
+    // agent cannot start a run until something unrelated respawns the child.
+    const readyBefore = hasEnabled || clearsFault ? (await getCodingAgentStatus()).ready : null;
     if (hasDirectory) {
       const saved = await setDefaultDirectory(fields.defaultDirectory as string | null);
       console.error(`[coding-agent] default folder ${saved ? "set" : "cleared"} by the owner`);

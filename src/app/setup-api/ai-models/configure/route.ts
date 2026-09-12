@@ -32,6 +32,7 @@ import {
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
+import { clearHarnessFault } from "@/lib/coding-agent";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
 import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
 // The PLAN this account pays for, recorded in the same store write as the
@@ -3325,6 +3326,30 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           hermesWarning =
             "Saved, but the on-device agent has not taken the credential yet — open Settings → AI Models and save again.";
         }
+      }
+    }
+
+    // A ClawBox AI save is the owner doing the thing a harness fault told them
+    // to do.
+    //
+    // When a run dies because the harness could not get a model to answer, the
+    // device remembers it and refuses new runs for a while so they do not die
+    // the same way — and the message sent the owner HERE ("check ClawBox AI is
+    // connected and that your plan covers the model the harness asks for").
+    // Landing back on a box that still refuses runs, because a clock they were
+    // never shown has not run out, would make this route the one place the
+    // advice does not work. The fault is only evidence, and a fresh credential
+    // is newer evidence.
+    //
+    // Before the `readyAfter` read below, so the flip this causes is the one
+    // that gets the MCP children refreshed. Best effort: the credential is
+    // already on disk, and a fault that outlives this still expires on its own
+    // and still has its own button.
+    if (isClawAI) {
+      try {
+        await clearHarnessFault();
+      } catch (err) {
+        console.warn("[ai-models/configure] could not clear the coding harness fault:", err instanceof Error ? err.message : err);
       }
     }
 
