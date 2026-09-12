@@ -68,6 +68,41 @@ function denied(rules: readonly string[], abs: string): boolean {
   });
 }
 
+describe("the deny rules name every file tool a run is given", () => {
+  it("file-tools-cover-every-file-tool: no tool in CLAUDE_TOOLS is left undenied", async () => {
+    // A permission rule in Claude Code is PER TOOL, so a path is only shut for
+    // the tools named. `FILE_TOOLS` carried Read/Edit/Write while runs are
+    // given Glob, Grep and NotebookEdit too — the floor held at three of the
+    // six doors. Pinned against CLAUDE_TOOLS so adding a tool there and not to
+    // FILE_TOOLS reopens it loudly instead of silently.
+    const lib = await import("@/lib/coding-agent");
+    const given = lib.CLAUDE_TOOLS.split(",").map((t) => t.trim());
+    // Bash is a command tool, not a path tool: BASH_KILL_DENYLIST covers it.
+    const fileToolsGiven = given.filter((t) => t !== "Bash");
+    const emitted = new Set(lib.fileDenyRules().map((r) => r.split("(")[0]));
+    for (const tool of fileToolsGiven) {
+      expect([...emitted], `${tool} is given to runs but never denied a path`).toContain(tool);
+    }
+  });
+
+  it("shuts a protected file to SEARCH as well as to Read", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const rules = lib.fileDenyRules();
+    const secret = pathMod.join(home, ".ssh", "id_ed25519");
+    // The whole point: the contents were reachable with Grep, and the names
+    // with Glob, for a path Read could not open.
+    for (const tool of ["Read", "Grep", "Glob", "NotebookEdit", "Edit", "Write"]) {
+      const covered = rules.some((r) => {
+        const m = new RegExp(`^${tool}\\(/(.+?)(/\\*\\*)?\\)$`).exec(r);
+        if (!m) return false;
+        const root = `/${m[1]}`.replace(/\/+/g, "/");
+        return m[2] ? secret === root || secret.startsWith(`${root}/`) : secret === root;
+      });
+      expect(covered, `${tool} may still reach ${secret}`).toBe(true);
+    }
+  });
+});
+
 describe("fileDenyRules with no owner rules", () => {
   it("denies each harness state directory wholesale", async () => {
     const { fileDenyRules } = await import("@/lib/coding-agent");

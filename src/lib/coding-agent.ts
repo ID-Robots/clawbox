@@ -2924,7 +2924,21 @@ export const MEDIA_BRIEF_AUDIO = [
   "Keep the clips short and few: the box has one voice and the chat shares it, so \"busy\" or a memory refusal means try once more later and then carry on without sound.",
 ].join(" ");
 
-const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
+/**
+ * Every tool a deny rule has to name to shut a path — which is every FILE tool
+ * a run is actually given (`CLAUDE_TOOLS`), not just the three that open a file
+ * by name.
+ *
+ * A permission rule in Claude Code is PER TOOL: `Read(//x/**)` says nothing
+ * about `Grep`. With only Read/Edit/Write here, a run could `Grep` the contents
+ * of `data/config.json` or `Glob` the credential stores it may not `Read` — the
+ * protected-path floor held for three of the six doors and stood open at the
+ * others. `NotebookEdit` is the one that could WRITE through the gap.
+ *
+ * Kept in step with `CLAUDE_TOOLS` by `file-tools-cover-every-file-tool` in the
+ * unit suite: a tool added there and not here reopens exactly this hole.
+ */
+const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as const;
 /** Always denied under data/, whether or not they exist yet. */
 // email-outcomes.json sits beside email-pending.json for the same reason: it
 // names who the owner mailed and what about. A run has no business reading
