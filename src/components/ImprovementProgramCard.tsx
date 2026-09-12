@@ -49,6 +49,54 @@ interface ProgramState {
 
 const MODES: Mode[] = ["off", "ask", "auto"];
 
+const FALLBACK: ProgramState = {
+  mode: "off",
+  repo: "ID-Robots/clawbox",
+  pending: 0,
+  reported: 0,
+  total: 0,
+  maxIssuesPerDay: 5,
+  remainingToday: 0,
+  github: { installed: false, connected: false, login: null },
+  incidents: [],
+};
+
+/**
+ * The route's answer, made whole.
+ *
+ * A settings card must not be able to take the Settings window down with it,
+ * and this one could: `state?.github.connected` optional-chained the STATE and
+ * then dereferenced `github` unconditionally, so any answer without that field
+ * — an older server, a partial fixture, a 200 from something that is not this
+ * route — threw during render and unmounted the whole page. One normaliser is
+ * the fix rather than an optional chain at each of the six use sites, because
+ * the next field added would need the seventh.
+ */
+function normalize(payload: unknown): ProgramState {
+  const raw = (typeof payload === "object" && payload !== null ? payload : {}) as Partial<ProgramState>;
+  const gh = (typeof raw.github === "object" && raw.github !== null ? raw.github : {}) as Partial<ProgramState["github"]>;
+  const num = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+  return {
+    mode: MODES.includes(raw.mode as Mode) ? raw.mode as Mode : FALLBACK.mode,
+    repo: typeof raw.repo === "string" && raw.repo ? raw.repo : FALLBACK.repo,
+    pending: num(raw.pending, 0),
+    reported: num(raw.reported, 0),
+    total: num(raw.total, 0),
+    maxIssuesPerDay: num(raw.maxIssuesPerDay, FALLBACK.maxIssuesPerDay),
+    remainingToday: num(raw.remainingToday, 0),
+    github: {
+      installed: gh.installed === true,
+      connected: gh.connected === true,
+      login: typeof gh.login === "string" ? gh.login : null,
+    },
+    // Rows the card can actually draw, and nothing else: a malformed entry
+    // must not be the thing that blanks the page.
+    incidents: (Array.isArray(raw.incidents) ? raw.incidents : []).filter(
+      (i): i is IncidentRow => typeof i === "object" && i !== null && typeof (i as IncidentRow).id === "string",
+    ),
+  };
+}
+
 const MODE_KEYS: Record<Mode, { label: string; hint: string }> = {
   off: { label: "improvement.modeOff", hint: "improvement.modeOffHint" },
   ask: { label: "improvement.modeAsk", hint: "improvement.modeAskHint" },
@@ -72,7 +120,7 @@ export default function ImprovementProgramCard() {
     try {
       const res = await fetch("/setup-api/improvement-program", { cache: "no-store" });
       if (!res.ok) throw new Error("load");
-      setState(await res.json() as ProgramState);
+      setState(normalize(await res.json()));
       setError(null);
     } catch {
       setError(t("improvement.loadFailed"));
@@ -106,7 +154,7 @@ export default function ImprovementProgramCard() {
         body: JSON.stringify({ mode }),
       });
       if (!res.ok) throw new Error(await readError(res, t("improvement.saveFailed")));
-      setState(await res.json() as ProgramState);
+      setState(normalize(await res.json()));
     } catch (err) {
       setError(err instanceof Error ? err.message : t("improvement.saveFailed"));
     } finally {
@@ -138,7 +186,7 @@ export default function ImprovementProgramCard() {
 
   if (loading) return null;
 
-  const mode = state?.mode ?? "off";
+  const mode = state?.mode ?? FALLBACK.mode;
   const connected = state?.github.connected === true;
   const shown = (state?.incidents ?? []).slice(0, SHOWN);
 

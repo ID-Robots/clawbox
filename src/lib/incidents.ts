@@ -288,6 +288,16 @@ export interface RecordIncidentInput {
   now?: number;
 }
 
+/**
+ * The shape `nextId` mints, and the only shape a caller may name.
+ *
+ * Exported so the report route can refuse anything else at the door rather
+ * than carrying a caller's string as far as a lookup — and as far as a LOG
+ * line, which is what CodeQL flagged: an id with a newline in it forges log
+ * entries in a file an operator reads to find out what a box did.
+ */
+export const INCIDENT_ID_RE = /^inc-[a-z0-9]{1,32}$/;
+
 let idCounter = 0;
 
 function nextId(now: number): string {

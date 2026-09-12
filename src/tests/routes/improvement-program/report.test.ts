@@ -95,6 +95,19 @@ describe("the body", () => {
     expect(reportIncident).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["a newline, which would forge a log entry", "inc-abc\nreported as issue #1"],
+    ["a carriage return", "inc-abc\rinjected"],
+    ["a path segment", "../../etc/passwd"],
+    ["an id that is not the shape the store mints", "incident-abc"],
+    ["an over-long id", `inc-${"a".repeat(40)}`],
+  ])("refuses %s before anything is looked up or logged", async (_name, id) => {
+    const res = await route.POST(request({ id }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("malformed");
+    expect(reportIncident).not.toHaveBeenCalled();
+  });
+
   it("trims the id rather than passing whitespace through", async () => {
     reportIncident.mockResolvedValue({ ok: true, action: "created", issueNumber: 1 });
     await route.POST(request({ id: "  inc-abc  " }));

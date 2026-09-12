@@ -259,6 +259,38 @@ describe("the Report button", () => {
   });
 });
 
+describe("a payload the card did not expect", () => {
+  /**
+   * The card sits inside Settings → System. A throw during its render unmounts
+   * the WHOLE window — which is exactly what happened: `state?.github.connected`
+   * optional-chained the state and then dereferenced `github`, so a 200 without
+   * that field took the Settings window off the screen (caught by the e2e
+   * `shelf-system-settings` and `settings-workflow` specs, where the window
+   * never appeared at all).
+   */
+  it.each([
+    ["no github field", { mode: "ask", incidents: [] }],
+    ["no incidents field", { mode: "auto", github: { connected: true, login: "ada" } }],
+    ["an empty object", {}],
+    ["a mode that is not one of the three", { mode: "everything", github: {}, incidents: [] }],
+    ["incidents that are not rows", { mode: "ask", github: {}, incidents: [null, 7, "x"] }],
+    ["a body that is not an object at all", [1, 2, 3]],
+  ])("renders rather than taking Settings down: %s", async (_name, body) => {
+    mockFetch([() => json(body)]);
+    render(<ImprovementProgramCard />);
+    expect(await screen.findByTestId("improvement-program-card")).toBeTruthy();
+    // …and falls back to the safe end of every field it could not read.
+    expect(screen.getByTestId("improvement-counts").textContent).toBe(t("improvement.none"));
+  });
+
+  it("falls back to OFF for a mode it does not recognise — never to a sending one", async () => {
+    mockFetch([() => json(state({ mode: "everything" }))]);
+    render(<ImprovementProgramCard />);
+    await screen.findByTestId("improvement-program-card");
+    expect(screen.getByTestId("improvement-mode-off").getAttribute("aria-checked")).toBe("true");
+  });
+});
+
 describe("when the box cannot be read", () => {
   it("says so instead of rendering an empty card", async () => {
     mockFetch([() => json({ error: "nope" }, 500)]);

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { reportIncident, type ReportRefusal } from "@/lib/incident-report";
+import { INCIDENT_ID_RE } from "@/lib/incidents";
 
 export const dynamic = "force-dynamic";
 
@@ -45,15 +46,22 @@ export async function POST(request: Request) {
   const id = typeof body === "object" && body !== null && !Array.isArray(body)
     ? (body as { id?: unknown }).id
     : undefined;
-  if (typeof id !== "string" || !id.trim()) {
+  // Held to the shape the store MINTS, not merely to "a non-empty string".
+  // An id that is not one is refused before it reaches a lookup or a log line:
+  // a newline in it forges entries in the file an operator reads to find out
+  // what this box did (CodeQL js/log-injection). The refusal is the same
+  // `malformed` an absent id gets, because "there is no such incident" is not
+  // a fact this route established.
+  const trimmed = typeof id === "string" ? id.trim() : "";
+  if (!INCIDENT_ID_RE.test(trimmed)) {
     return NextResponse.json({ error: "Name the incident to report, as { id: string }.", code: "malformed" }, { status: 400 });
   }
 
-  const outcome = await reportIncident(id.trim());
+  const outcome = await reportIncident(trimmed);
   if (!outcome.ok) {
     return NextResponse.json({ ok: false, error: outcome.detail, code: outcome.code }, { status: STATUS[outcome.code] });
   }
-  console.error(`[improvement-program] incident ${id.trim()} ${outcome.action} as issue #${outcome.issueNumber}`);
+  console.error(`[improvement-program] incident ${trimmed} ${outcome.action} as issue #${outcome.issueNumber}`);
   return NextResponse.json({
     ok: true,
     action: outcome.action,
