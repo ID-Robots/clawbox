@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
+import { logSafe } from "@/lib/log-safe";
 import { hasOwnerSession } from "@/lib/owner-session";
 import {
   clearHarnessFault,
@@ -267,7 +268,12 @@ export async function POST(request: Request) {
     }
     if (hasMaxParallelRuns) {
       const saved = await setMaxParallelRuns(fields.maxParallelRuns);
-      console.error(`[coding-agent] up to ${saved} run(s) at once, by the owner's choice`);
+      // Through logSafe, though `saved` is a whole number between 1 and 4 that
+      // the setter has already refused anything else for: the value still
+      // arrived in the request body, and this repo's answer to `js/log-injection`
+      // is one helper rather than an argument about which values are provably
+      // safe. It costs a String() on a branch that runs once per click.
+      console.error(`[coding-agent] up to ${logSafe(String(saved))} run(s) at once, by the owner's choice`);
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);
