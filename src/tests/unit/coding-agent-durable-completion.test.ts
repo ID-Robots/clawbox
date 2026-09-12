@@ -144,6 +144,19 @@ function installHarnessThatDeliversOnAttempt(n: number, file = "app.js"): void {
   ].join("\n"));
 }
 
+/**
+ * A harness that reports success AT ONCE and then lingers, so a Stop can land
+ * while the run is still alive but its result event has already been parsed —
+ * the race that settles a stopped run as `completed`.
+ */
+function installHarnessThatLingersAfterSucceeding(): void {
+  installWrapper([
+    `printf '%s\\n%s\\n' "$STDIN" '${STDIN_DELIMITER}' >> "${path.join(base, "stdin.log")}"`,
+    `printf '%s\\n' '${INIT}' '${okResult()}'`,
+    "sleep 20",
+  ].join("\n"));
+}
+
 function writeConfig(cfg: Record<string, unknown>): void {
   fs.mkdirSync(path.join(root, "data"), { recursive: true });
   fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({
@@ -760,6 +773,43 @@ describe("an EXPLICIT pull-request deliverable after the flow failed", () => {
     expect(run.status).toBe("completed");
     expect(run.deliverableCheck).toMatchObject({ ok: true });
     expect(run.attempts).toHaveLength(2);
+  });
+});
+
+describe("the owner's own Stop", () => {
+  it("decides the ending instead of the deliverable, and is still announced", async () => {
+    // A run the owner stopped can still settle `completed` — the final result
+    // event is applied ahead of the stop, so a Stop that raced the finish keeps
+    // the work. The gate must then step aside: judging the deliverable would
+    // answer a question the owner has already closed, and `gave_up` over a Stop
+    // would read as the box blaming the harness for obeying.
+    //
+    // But `finishRun` is holding the notice for this run, so "step aside" cannot
+    // mean "say nothing" — without the announce on that branch a stopped run with
+    // a deliverable would be reported nowhere at all.
+    installHarnessThatLingersAfterSucceeding();
+    const started = await lib.startRun({
+      task: "build", projectId: "site", source: "owner",
+      deliverable: { kind: "paths", paths: ["app.js"] },
+    });
+    // Wait until the result event has been PARSED — that is what makes the race
+    // settle as `completed` — then stop it while the process is still alive.
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.summary).toBeTruthy();
+    }, { timeout: 20_000, interval: 25 });
+    lib.stopRun(started.id);
+    const run = await settledForGood(started.id);
+
+    // The owner's gesture did not cost them the work…
+    expect(run.status).toBe("completed");
+    // …the deliverable was NOT judged, although it was never delivered…
+    expect(run.deliverableCheck).toBeNull();
+    expect(run.status).not.toBe("gave_up");
+    // …the attempt was closed rather than left hanging…
+    expect(run.attempts.some((a) => a.endedAt === null)).toBe(false);
+    expect(run.attempts[0]?.reason).toBeNull();
+    // …and they were told exactly once. Without the announce on that branch: 0.
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
   });
 });
 
