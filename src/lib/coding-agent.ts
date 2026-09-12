@@ -3914,7 +3914,13 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // (email-approval-prompts.ts), so reading it yields nothing usable — but it is
 // the approval machinery's own record, it sits in the same directory as the two
 // above, and a run that has no business in either has none in it.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json"];
+//
+// coding-agent-streams/ is the runs' own stream logs (STREAM_DIR). Listed for
+// exactly the reason this list exists: the directory is created by the FIRST
+// spawn, after that spawn's rules have already been computed from what was on
+// disk, so discovery alone would leave it open for one run — every other run's
+// log is deleted at its settle, but a team's three workers are live together.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams"];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
