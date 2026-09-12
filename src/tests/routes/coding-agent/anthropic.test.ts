@@ -154,9 +154,13 @@ describe("saving a key", () => {
     expect((await res.json()).verified).toBe(true);
   });
 
-  it("refuses something that is not an Anthropic key, and writes nothing", async () => {
+  it("refuses something that is not an Anthropic key WITHOUT sending it anywhere", async () => {
+    // Whatever was pasted here is about to go to a third party, so a password
+    // typed into the wrong field must be refused by the box rather than
+    // forwarded to Anthropic to be refused there.
     const res = await POST(req("POST", { body: { apiKey: "hunter2" } }));
     expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(configSet).not.toHaveBeenCalled();
   });
 
@@ -193,6 +197,7 @@ describe("saving a key", () => {
     for (const body of [{}, { apiKey: 5 }, { apiKey: "  " }]) {
       expect((await POST(req("POST", { body }))).status).toBe(400);
     }
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(configSet).not.toHaveBeenCalled();
   });
 

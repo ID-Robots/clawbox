@@ -4,6 +4,7 @@ import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   clearAnthropicKey,
   getAnthropicConnection,
+  looksLikeAnthropicKey,
   MAX_ANTHROPIC_KEY_CHARS,
   setAnthropicKey,
   verifyAnthropicKey,
@@ -96,17 +97,30 @@ export async function POST(request: Request) {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const apiKey = (body as { apiKey?: unknown }).apiKey;
-  if (typeof apiKey !== "string" || apiKey.trim() === "") {
+  const raw = (body as { apiKey?: unknown }).apiKey;
+  if (typeof raw !== "string" || raw.trim() === "") {
     return NextResponse.json({ error: "An API key is required.", kind: "invalid" }, { status: 400 });
   }
   // Bounded before anything is done with it, so a megabyte of paste never
   // reaches the shape check, the network or the config file.
-  if (apiKey.length > MAX_ANTHROPIC_KEY_CHARS) {
+  if (raw.length > MAX_ANTHROPIC_KEY_CHARS) {
     return NextResponse.json({ error: "That API key is too long.", kind: "invalid" }, { status: 400 });
   }
+  const apiKey = raw.trim();
+  // THE SHAPE FIRST, AND ONLY THEN THE NETWORK. Whatever was pasted here is
+  // about to be sent to a third party, so something that cannot be a key —
+  // the contents of the clipboard, a password typed into the wrong field —
+  // must be refused by this box rather than forwarded to Anthropic to be
+  // refused there. `setAnthropicKey` applies the same rule again before it
+  // writes; this is the copy that runs before anything leaves the device.
+  if (!looksLikeAnthropicKey(apiKey)) {
+    return NextResponse.json(
+      { error: `That does not look like an Anthropic API key — they start with "sk-ant-".`, kind: "invalid" },
+      { status: 400 },
+    );
+  }
 
-  const verdict = await verifyAnthropicKey(apiKey.trim());
+  const verdict = await verifyAnthropicKey(apiKey);
   if (verdict === "rejected") {
     return NextResponse.json(
       { error: "Anthropic did not accept that API key.", kind: "rejected" },
@@ -116,8 +130,9 @@ export async function POST(request: Request) {
   try {
     await setAnthropicKey(apiKey);
   } catch (err) {
-    // setAnthropicKey throws only on the shape, and its sentence names the
-    // prefix a key starts with — which is what the owner needs to see.
+    // The shape again, as the library's own last word before the write. It
+    // cannot fire after the check above; kept because this route is not the
+    // only thing that may ever call it.
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not save that API key.", kind: "invalid" },
       { status: 400 },

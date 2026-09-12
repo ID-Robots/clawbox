@@ -152,7 +152,8 @@ export function hasAnthropicLogin(): boolean {
 
 /** The whole connection state, for the status payload and for readiness. */
 export async function getAnthropicConnection(): Promise<AnthropicConnection> {
-  const [hasKey, hasLogin] = [await hasAnthropicKey(), hasAnthropicLogin()];
+  const hasKey = await hasAnthropicKey();
+  const hasLogin = hasAnthropicLogin();
   return {
     connected: hasKey || hasLogin,
     hasKey,
