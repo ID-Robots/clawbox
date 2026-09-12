@@ -8,6 +8,7 @@ import { localModelsEn } from "@/lib/edition-translations/en-local-models";
 import { systemProfileEn } from "@/lib/edition-translations/en-system-profile";
 import { codingAgentEn } from "@/lib/edition-translations/en-coding-agent";
 import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
+import { improvementEn } from "@/lib/edition-translations/en-improvement";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -54,6 +55,9 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // Pre-exec shell scanning notice (HERMES-08) — the box's only statement that
   // a security control is off. An owner who cannot read it is not warned.
   { name: "Shell scanning notice", matches: (k) => k.startsWith("shellScan.") },
+  // ClawBox Improvement Program. The card IS the consent — an owner who cannot
+  // read what is sent and what never is has not been asked anything.
+  { name: "Improvement Program card", matches: (k) => k.startsWith("improvement.") },
 ];
 
 /**
@@ -109,6 +113,7 @@ describe("edition-translations (TASK-458)", () => {
       ["systemProfileEn", systemProfileEn, (k) => k.startsWith("systemProfile.")],
       ["codingAgentEn", codingAgentEn, (k) => k.startsWith("codingAgent.")],
       ["shellScanEn", shellScanEn, (k) => k.startsWith("shellScan.")],
+      ["improvementEn", improvementEn, (k) => k.startsWith("improvement.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

@@ -19,6 +19,7 @@ import RemoteControlPanel from "./RemoteControlPanel";
 import LocalAiPanel from "./LocalAiPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
+import ImprovementProgramCard from "./ImprovementProgramCard";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 // The ending vocabulary and the gesture table, from the module that owns the
@@ -6157,6 +6158,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <span className="text-sm">{t("settings.loadingStats")}</span>
               </div>
             )}
+
+            {/* ClawBox Improvement Program — opt-in error reports to the
+                developers. OUTSIDE the `stats` branch: the choice and what it
+                sends are facts about the box that do not depend on a stats
+                poll having answered, and folded inside it the card vanished
+                for as long as that poll was in flight. */}
+            <ImprovementProgramCard />
 
           </div>
         )}

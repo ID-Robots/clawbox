@@ -122,6 +122,7 @@ describe("translations", () => {
         "openclaw",
         "drawer",
         "login",
+        "improvement",
         "updateNotification",
         "remoteControl",
         "clawkeep",
