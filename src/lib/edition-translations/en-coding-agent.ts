@@ -155,28 +155,48 @@ export const codingAgentEn: Record<string, string> = {
 
   // ── Allowing a refused action next time ──────────────────────────────────
   // A refusal is only half an answer while the owner cannot say "yes, that one
-  // is fine". `allowNextTime` is the button on a refused action; the rules card
-  // in Settings is where the standing list is read and edited; `ruleRefused*`
-  // are the validator's codes, one sentence each, because a refusal the owner
-  // cannot act on is a refusal they will meet again.
+  // is fine". `allow*` is the button on a refused action and the confirmation
+  // it opens; the `rules*` card in Settings is where the standing list is read
+  // and edited; `ruleRefused*` are the validator's codes, one sentence each,
+  // because a refusal the owner cannot act on is a refusal they will meet
+  // again.
   "codingAgent.allowNextTime": "Allow next time",
-  "codingAgent.allowNextTimeFailed": "Could not save that permission rule.",
-  "codingAgent.allowedAlready": "Allowed from now on",
+  "codingAgent.allowConfirmTitle": "Allow this from now on?",
+  "codingAgent.allowConfirmHint": "Every later run may open that folder. You can take it back in Settings.",
+  "codingAgent.allowSave": "Allow",
+  "codingAgent.allowCancel": "Cancel",
+  "codingAgent.allowSaved": "Allowed. Runs started from now on may do this.",
+  "codingAgent.allowResumeHint": "Resume this run to let it carry on with the new permission.",
+  "codingAgent.allowFailed": "Could not save that permission rule.",
+  // Shown instead of the button on a refusal no rule could ever answer: the
+  // path holds credentials or this box's own state.
+  "codingAgent.allowProtected": "Cannot be allowed: protected location.",
+
   "codingAgent.rulesTitle": "Allowed from now on",
   "codingAgent.rulesHint":
-    "Things you have told this box a coding run may do, on top of what it allows by default. A run started before you added a rule keeps the rules it started with.",
+    "Folders you have told this box a coding run may open, on top of the ones it allows by default. A run already working keeps the rules it started with; resuming a paused run picks up the current list.",
   "codingAgent.rulesEmpty": "Nothing yet. When a run is refused something, you can allow it from the run's page.",
   "codingAgent.rulesLabel": "Permission rule",
-  "codingAgent.rulesPlaceholder": "Bash(git log:*)",
+  "codingAgent.rulesPlaceholder": "Read(//home/clawbox/Projects/notes/**)",
   "codingAgent.rulesAdd": "Add",
   "codingAgent.rulesRemove": "Remove",
+  "codingAgent.rulesRemoveOne": "Remove {rule}",
   "codingAgent.rulesCount": "{n} of {max}",
   "codingAgent.rulesFailed": "Could not change the permission rules.",
   "codingAgent.ruleRefusedEmpty": "Type a permission rule first.",
   "codingAgent.ruleRefusedTooLong": "That rule is too long.",
-  "codingAgent.ruleRefusedMalformed": "A rule looks like Bash(git log:*) or WebFetch(domain:example.com).",
-  "codingAgent.ruleRefusedUnknownTool": "That is not a tool a permission rule may name.",
-  "codingAgent.ruleRefusedTooBroad": "That rule is too wide. Name the command, the folder or the site.",
+  "codingAgent.ruleRefusedMalformed":
+    "A rule names a file tool and the paths it may open, like Read(//home/you/notes/**).",
+  "codingAgent.ruleRefusedUnknownTool":
+    "That is not a tool a permission rule may name. Use Read, Glob, Grep, Edit or Write.",
+  // Bash is not on the list and never will be: a run is already started with
+  // every command allowed, so a Bash rule would grant nothing, and the commands
+  // it may NOT run are the ones that kill processes by name, which nothing can
+  // open.
+  "codingAgent.ruleRefusedBash":
+    "A run may already use every command except the ones that kill processes by name, and those can never be allowed. A permission rule is for files.",
+  "codingAgent.ruleRefusedTooBroad": "That rule is too wide. Name the folder it is about.",
+  "codingAgent.ruleRefusedProtected": "That path holds credentials or this box's own state. No rule can open it.",
   "codingAgent.ruleRefusedUnsafe": "This box refuses that to every run, so the rule would grant nothing.",
   "codingAgent.ruleRefusedDuplicate": "That rule is already on the list.",
   "codingAgent.ruleRefusedTooMany": "The list is full. Remove a rule first.",

@@ -712,13 +712,50 @@ export const BASH_KILL_DENYLIST: readonly string[] = [
 ];
 
 /**
- * Folders (relative to the home directory) whose contents Claude Code's own
- * file tools must not open: the credential stores file-guard protects for the
- * ClawBox file tools — the SAME list, imported, so the two cannot drift — plus
- * Claude Code's own state directories (transcripts of every run and of the
- * owner's interactive sessions).
+ * Folders (relative to the home directory) that hold credential or key
+ * material, or this device's own state. NO owner rule may ever open one — the
+ * HARD half of the floor a permission rule has to clear.
+ *
+ * `PROTECTED_HOME_DIRS` is imported rather than restated so the list the Files
+ * API guards and the list Claude Code is denied cannot drift. Read entry by
+ * entry, every one of them guards a secret: `.ssh` and `.gnupg` are private
+ * keys; `.aws`, `.kube`, `.docker` and the three `.config` entries are cloud
+ * and registry credentials; `.openclaw`, `.hermes` and `.clawkeep` hold this
+ * box's own provider keys, billing token, signing secret and backup
+ * passphrase; `.codex` holds an OAuth token. There is no reading of any of
+ * them that is merely "outside the working folder", which is why this half
+ * takes no exceptions and ships on every single run.
  */
-const DENIED_HOME_SUBTREES: readonly string[] = [...PROTECTED_HOME_DIRS, ".claude", ".claude-ds"];
+const HARD_HOME_SUBTREES: readonly string[] = PROTECTED_HOME_DIRS;
+
+/**
+ * The harness's own state directories — denied wholesale by default, and the
+ * ONLY denied subtrees with an allowable part inside them.
+ *
+ * Each holds two very different things side by side. Directly in the folder:
+ * the OAuth credential (`.credentials.json`), the settings, the shell and
+ * session history — secrets, judged exactly like the HARD list above and named
+ * in `HARNESS_STATE_SECRETS` so they stay denied whatever else opens. And in
+ * `projects/<project>/`: the transcripts, plans and memory files a run writes
+ * about the folder it is working in. Those hold no credential. They are denied
+ * for one reason only — they sit outside the working folder — and that is a
+ * refusal an owner should be able to answer.
+ *
+ * So this is the SOFT half, and the split is a level deeper than the folder:
+ * the parent stays shut, one named `projects/<project>` opens. The rule
+ * grammar and the names of the openable children live in
+ * @/lib/coding-permission-rules (`SOFT_HOME_SUBTREES`), which is pure so the
+ * settings panel can judge a rule too; `fileDenyRules` below is what actually
+ * leaves a deny rule out of one run's argv.
+ */
+const HARNESS_STATE_SUBTREES: readonly string[] = [".claude", ".claude-ds"];
+
+/**
+ * Everything Claude Code's file tools are denied outside the working folder,
+ * hard and soft together. The order is the order the deny rules are built in;
+ * nothing reads it for anything else.
+ */
+const DENIED_HOME_SUBTREES: readonly string[] = [...HARD_HOME_SUBTREES, ...HARNESS_STATE_SUBTREES];
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -815,9 +852,13 @@ export interface CodingRun {
    * The owner's permission rules as they stood when this run STARTED.
    *
    * Frozen on the record for the same reason `effort`, `maxTurns` and `media`
-   * are: a resume, a retry and the review pass all re-spawn this record, and
-   * the tools a run holds must not appear or vanish under it because the owner
+   * are: a retry and the review pass both re-spawn from this record, and the
+   * tools a run holds must not appear or vanish under it because the owner
    * edited the list while it was working.
+   *
+   * `resumeRun` is the single exception, and re-reads the list — a resume is
+   * the owner's own deliberate act on a stopped run, and it is what "Allow next
+   * time" offers in the same breath as saving a rule. See the comment there.
    */
   allowRules: string[];
   /** The effort the run was started with. Recorded per-run because the owner
@@ -2866,6 +2907,35 @@ const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
 const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json"];
 
 /**
+ * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
+ * are denied by NAME, even when a project subtree beside them has been
+ * unlocked and even when they do not exist yet: the OAuth credential, the
+ * settings, the shell and session history, the daemon's own files.
+ *
+ * Listed rather than discovered, for the same belt-and-braces reason
+ * `DATA_SECRET_FILES` is: `denyEntries` denies every entry it can READ, so the
+ * list is what covers a store the harness has not written yet — on a fresh box
+ * most of these do not exist, and they must be shut the moment they appear.
+ *
+ * `backups`, `file-history` and `plans` earn their place for a second reason:
+ * they hold the CONTENT of files from every folder the harness has ever
+ * touched, so leaving one open would undo the containment the project split is
+ * for — a rule naming one project would read every other project's source.
+ */
+const HARNESS_STATE_SECRETS = [
+  // Credentials, settings and history.
+  ".credentials.json", ".claude.json", "settings.json", "settings.local.json",
+  "history.jsonl", "sessions", "session-env", "shell-snapshots", "todos",
+  // Cross-project file content — see above.
+  "backups", "file-history", "plans", "cache", "paste-cache",
+  // The daemon's own state, the IDE bridge, and everything installed into the
+  // harness rather than written by a run.
+  "daemon", "daemon.log", "daemon.status.json", "daemon.lock",
+  "ide", "plugins", "skills", "statsig", "telemetry", "debug", "downloads",
+  "jobs", "tasks", "stats-cache.json",
+];
+
+/**
  * Claude Code's Read/Edit/Write rules for the paths a run must not open.
  * `//` = absolute path in that rule syntax (a single leading slash would mean
  * "relative to the project root").
@@ -2895,17 +2965,6 @@ const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-sec
  * @param allowRules the owner's rules for THIS run, already validated; none
  *                   means the wholesale denials every other caller gets
  */
-/**
- * Entries of the harness's state directories that are denied by name, even when
- * a project subtree beside them has been unlocked and even when they do not
- * exist yet: the OAuth token, the settings, the shell and session history.
- */
-const HARNESS_STATE_SECRETS = [
-  ".credentials.json", ".claude.json", "settings.json", "settings.local.json",
-  "history.jsonl", "sessions", "session-env", "shell-snapshots", "ide", "plugins",
-  "statsig", "todos", "daemon.log", "daemon.status.json", "daemon.lock",
-];
-
 export function fileDenyRules(allowRules: readonly string[] = []): string[] {
   const home = homeDir();
   const rules: string[] = [];
@@ -2936,17 +2995,23 @@ export function fileDenyRules(allowRules: readonly string[] = []): string[] {
       else denyFile(abs);
     }
   };
-  const unlocked = new Set(unlockedSoftPaths(allowRules, home));
+  const unlocked = [...new Set(unlockedSoftPaths(allowRules, home))];
   for (const sub of DENIED_HOME_SUBTREES) {
     const root = path.join(home, sub);
     // The soft child of THIS subtree that holds an unlocked project, as its own
     // last segment ("projects"), and the folders inside it that are open.
     // SOFT_HOME_SUBTREES is one segment deep inside its parent by construction,
     // which is what makes that slice sound.
-    const open = SOFT_HOME_SUBTREES
+    //
+    // Only the HARNESS state directories are consulted at all. Every soft
+    // subtree that exists today is a child of one of them, and pinning it here
+    // is what makes that a GUARANTEE rather than a coincidence: a future
+    // `SOFT_HOME_SUBTREES` entry naming a child of `.ssh` or `.openclaw` opens
+    // nothing, because a hard subtree never reaches this branch.
+    const open = (HARNESS_STATE_SUBTREES.includes(sub) ? SOFT_HOME_SUBTREES : [])
       .filter((soft) => soft.startsWith(`${sub}/`))
       .map((soft) => ({ entry: soft.slice(sub.length + 1), dir: path.join(home, soft) }))
-      .filter(({ dir }) => [...unlocked].some((p) => p.startsWith(`${dir}${path.sep}`)));
+      .filter(({ dir }) => unlocked.some((p) => p.startsWith(`${dir}${path.sep}`)));
     if (open.length === 0) {
       denyTree(root);
       continue;
@@ -2956,7 +3021,7 @@ export function fileDenyRules(allowRules: readonly string[] = []): string[] {
     // Pass two: every project EXCEPT the ones the owner named. A project that
     // does not exist on disk yet gets no rule either way — there is nothing to
     // deny, and the allow rule is what would open it once it appears.
-    for (const { dir } of open) denyEntries(dir, [], (entry) => unlocked.has(path.join(dir, entry)));
+    for (const { dir } of open) denyEntries(dir, [], (entry) => unlocked.includes(path.join(dir, entry)));
   }
   denyEntries(DATA_DIR, DATA_SECRET_FILES, (entry) => DATA_DIR_PUBLIC_SUBTREES.has(entry));
   denyEntries(CONFIG_ROOT, [".env"], (entry) => path.join(CONFIG_ROOT, entry) === DATA_DIR);
@@ -5397,6 +5462,18 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   } catch {
     throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
   }
+  // The one place a run's permission rules are RE-READ rather than kept.
+  //
+  // Everything else about a run is frozen on its record precisely so the tools
+  // it holds cannot change under it while it works (see CodingRun.allowRules).
+  // A resume is the exception because it is not something that happens to a
+  // run — it is the owner pressing a button, deliberately, after the run
+  // stopped. "Allow next time" exists to answer a refusal on this very page and
+  // offers Resume in the same breath; carrying the old list through would hand
+  // the run back the refusal the owner just answered, and the button would be a
+  // lie. Narrowing works the same way: a rule removed before the resume is gone
+  // from the resumed run too.
+  run.allowRules = await getAllowRules();
   // The pause gap is not working time: shift the start forward by it, so the
   // elapsed clock and the ETA speak of effort, not of the night in between.
   if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
