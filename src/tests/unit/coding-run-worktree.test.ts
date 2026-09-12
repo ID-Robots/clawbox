@@ -206,6 +206,23 @@ describe("a run's worktree", () => {
     expect(await listRunWorktrees(dir)).toEqual([]);
   });
 
+  it("says whether the files are actually gone, not whether git was happy", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-report00", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    expect(await removeRunWorktree(dir, made.path)).toBe(true);
+    // A path git no longer knows and that is not there either is still "gone":
+    // only git's own registration was stale, and the caller wanted the files
+    // removed.
+    expect(await removeRunWorktree(dir, made.path)).toBe(true);
+    // A path that IS there and is not a worktree of this repository is not:
+    // recording it as removed would leave the disk unreclaimed with nothing to
+    // retry from.
+    const stranger = path.join(dir, "not-a-worktree");
+    fs.mkdirSync(stranger, { recursive: true });
+    expect(await removeRunWorktree(dir, stranger)).toBe(false);
+    expect(fs.existsSync(stranger)).toBe(true);
+  });
+
   it("drops a run branch on request", async () => {
     const made = await addRunWorktree({ projectDir: dir, runId: "run-dropped0", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);

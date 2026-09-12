@@ -156,7 +156,7 @@ interface Run {
    * — or absent/null when it worked in the project folder itself, which is
    * every run this box made before worktrees existed.
    */
-  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean } | null;
+  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean; branchRemoved?: boolean } | null;
   /** WHY a paused run is paused. Absent on a record written before it was
    *  kept, which reads the same as an ordinary pause: nothing to explain. */
   pauseReason?: CodingPauseReason | null;
@@ -692,7 +692,12 @@ export default function CodingAgentApp() {
     const command = livePreviewCommand({
       transcriptPath: run.transcriptPath ?? null,
       sessionId: run.sessionId ?? null,
-      directory: run.directory,
+      // A run whose own copy of the project has been removed has no folder to
+      // `cd` into, and `claude-ds --resume` finds nothing for a session keyed
+      // to it. Answered as "no folder", which makes the builder fall back to
+      // replaying the transcript — what happened, in a folder that exists.
+      // Resume is the control that brings the copy back.
+      directory: run.worktree?.removed ? null : run.directory,
       live: run.status === "running",
     });
     if (!command) return;
@@ -2224,7 +2229,7 @@ export default function CodingAgentApp() {
                   the timeline alone is the record. */}
               {isLive(run.status) && (() => {
                 const command = run.transcriptPath
-                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
+                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
                   : null;
                 const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
                 const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next });

@@ -223,7 +223,7 @@ interface RunPayload {
    * is the same string as `directory`; `project` is the folder the owner
    * knows the project by.
    */
-  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean } | null;
+  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean; branchRemoved?: boolean } | null;
   /** Set on the automatic review pass, naming the run it reviewed. */
   reviewOf?: string | null;
   /** Set on a review-loop turn, naming the run whose pull request it is fixing. */
@@ -371,9 +371,16 @@ function describeRun(run: RunPayload, tail: number): string {
   // where it actually is — and, once the copy is gone, that the branch is
   // where the work remains.
   if (run.worktree) {
+    // Three endings, said apart. A copy removed WITH its branch is the one the
+    // box makes when the run left nothing on it — telling the reader to look
+    // for work on a branch that no longer exists would send them after nothing.
+    const gone = run.worktree.removed
+      ? (run.worktree.branchRemoved
+        ? "; the copy and its branch have been removed — the run left nothing on them."
+        : "; the copy has been removed and its work is on the branch.")
+      : ".";
     parts.push(
-      `This run works in its own copy of ${run.worktree.project} on branch ${run.worktree.branch} (forked from ${run.worktree.base})`
-      + (run.worktree.removed ? `; the copy has been removed and its work is on the branch.` : "."),
+      `This run works in its own copy of ${run.worktree.project} on branch ${run.worktree.branch} (forked from ${run.worktree.base})${gone}`,
     );
   }
   const facts = [

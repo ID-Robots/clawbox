@@ -520,6 +520,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
   CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
+  CODING_AGENT_MAX_PARALLEL_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
@@ -1393,8 +1394,20 @@ export interface RunWorktree {
   base: string;
   /** The project folder the worktree belongs to. */
   project: string;
-  /** True once the settle (or the owner) has taken the files away; the branch may still be there. */
+  /** True once the settle (or the owner) has taken the files away. */
   removed: boolean;
+  /**
+   * True when the BRANCH went with them — which happens on exactly one path:
+   * the run left nothing on it, and an empty `clawbox/<runId>` per run would be
+   * litter in the owner's repository.
+   *
+   * A second flag rather than an inference from `removed`, because the two
+   * endings need different things said: a copy removed with its branch kept is
+   * "the work is on the branch", and one removed with the branch is "there was
+   * no work". Absent on a record written before this field, which reads as
+   * "the branch is still there" — the answer for every copy such a record has.
+   */
+  branchRemoved: boolean;
 }
 
 /** Which media a run may ask this box for — read once, at its start. */
@@ -3143,7 +3156,14 @@ function parseRunWorktree(raw: unknown): RunWorktree | null {
   if (typeof w.branch !== "string" || !w.branch) return null;
   if (typeof w.base !== "string" || !w.base) return null;
   if (typeof w.project !== "string" || !path.isAbsolute(w.project)) return null;
-  return { path: w.path, branch: w.branch, base: w.base, project: w.project, removed: w.removed === true };
+  return {
+    path: w.path,
+    branch: w.branch,
+    base: w.base,
+    project: w.project,
+    removed: w.removed === true,
+    branchRemoved: w.branchRemoved === true,
+  };
 }
 
 /**
@@ -6913,14 +6933,18 @@ async function startCompletionAttempt(
   }
 
   let tools: SpawnTools;
+  // Held across the two awaits below and given back the moment the record is
+  // live again (the flip after this block is synchronous) — see `startingRuns`.
+  let releaseSlot: (() => void) | null = null;
   try {
     // The same gates a start passes — the owner's switch, readiness, the
-    // one-run-at-a-time slot — because this IS a start, and the owner may have
-    // switched the agent off while the run worked.
-    await assertCanSpawn(null);
+    // slot — because this IS a start, and the owner may have switched the
+    // agent off while the run worked.
+    releaseSlot = await assertCanSpawn(null);
     tools = await requireSpawnTools();
     run.directory = await realDirectory(run.directory);
   } catch (err) {
+    releaseSlot?.();
     // Another attempt cannot be made now. The ending is still the honest one:
     // the deliverable is not there. The reason says both halves, so the owner
     // is not left wondering why the attempts stopped short.
@@ -6928,6 +6952,7 @@ async function startCompletionAttempt(
     giveUp(run, `${missing} Another attempt could not be started: ${why}`, run.attempts.length);
     return;
   }
+  releaseSlot?.();
 
   reopenPullRequestStep(run);
   run.status = "running";
@@ -7724,7 +7749,7 @@ async function attachRunWorktree(run: CodingRun, projectDir: string): Promise<vo
     if (made.reason === "failed") pushProgress(run, RUNNER_STEP.worktreeKept(`it could not be made — ${made.detail}`));
     return;
   }
-  run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false };
+  run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false, branchRemoved: false };
   run.directory = made.path;
   pushProgress(run, RUNNER_STEP.worktree(made.branch, made.base));
 }
@@ -7744,7 +7769,9 @@ async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> 
   const wt = previous.worktree;
   if (!wt) return null;
   const back = await restoreRunWorktree(wt.project, wt.path, wt.branch, wt.base).catch(() => false);
-  return { ...wt, removed: !back };
+  // A restore re-creates the branch when a settle had dropped an empty one, so
+  // a copy that is back has its branch back with it.
+  return { ...wt, removed: !back, branchRemoved: back ? false : wt.branchRemoved };
 }
 
 /** Every live run working in this exact folder — the question "is anybody still in there?". */
@@ -7792,11 +7819,20 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     if (ahead === 0) {
-      await removeRunWorktree(wt.project, wt.path);
+      // Recorded only if the files are actually gone: git can refuse the
+      // removal (a busy file, an index lock), and a record that claimed the
+      // copy had gone would leave the disk unreclaimed with nothing to retry
+      // from — the owner's Remove returns early on exactly that flag.
+      if (!(await removeRunWorktree(wt.project, wt.path))) {
+        pushProgress(run, RUNNER_STEP.worktreeKept("it could not be removed"));
+        persist(true);
+        return;
+      }
       // An empty branch is not history; a branch per run that changed nothing
       // would be the box leaving litter in the owner's repository.
       await deleteRunBranch(wt.project, wt.branch);
       wt.removed = true;
+      wt.branchRemoved = true;
       pushProgress(run, RUNNER_STEP.worktreeRemoved);
       persist(true);
       return;
@@ -7817,7 +7853,13 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
-    await removeRunWorktree(wt.project, wt.path);
+    if (!(await removeRunWorktree(wt.project, wt.path))) {
+      // The work IS home — the merge landed — so this is only the copy left
+      // behind, and the card's Remove is what answers it.
+      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
+      persist(true);
+      return;
+    }
     wt.removed = true;
     pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
     persist(true);
@@ -7844,10 +7886,17 @@ export async function removeRunWorktreeFor(id: string): Promise<CodingRun> {
     throw new CodingAgentError("busy", "A run is still working in that copy of the project. Stop it first.");
   }
   if (!wt.removed) {
+    let gone: boolean;
     try {
-      await removeRunWorktree(wt.project, wt.path);
+      gone = await removeRunWorktree(wt.project, wt.path);
     } catch (err) {
       throw new CodingAgentError("invalid", `Could not remove the run's copy of the project: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // Refused rather than recorded: this call returns early on `removed`, so a
+    // record written on git's word alone would make the button a no-op over a
+    // copy still sitting on the disk.
+    if (!gone) {
+      throw new CodingAgentError("invalid", `Could not remove the run's copy of the project (${wt.path}). Something may still be using it.`);
     }
   }
   wt.removed = true;
@@ -7951,183 +8000,193 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const intendedProvider = isCodingProvider(input.provider)
     ? input.provider
     : previous?.provider ?? await getCodingProvider();
-  await assertCanSpawn(input.team ?? null, intendedProvider);
-  const tools = await requireSpawnTools();
+  // The slot is HELD from the gate to the insert below. `assertCanSpawn` counts
+  // the runs it can see, and `loadRuns()` cannot see this one until
+  // `insertRun` — several awaits away (the spawn tools, the folder, the
+  // settings, the worktree, the auto-PR read) — so two starts that arrive
+  // together both saw room for one. The same answer `teamSpawnSlot` already
+  // gives with its `starting` count.
+  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider);
+  try {
+    const tools = await requireSpawnTools();
 
-  if (resumeRunId) {
-    if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
-    if (previous.status === "running") throw new CodingAgentError("busy", "That run is still in progress; wait for it to finish before resuming it.");
-    if (!previous.sessionId) throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
-    // The session lives in the wrapper's state dir keyed by the folder it ran
-    // in, so a resume always happens where the original run happened — which
-    // for a run with a worktree is the worktree. A settle removes the worktree
-    // of a run that left nothing on its branch, so it is put back from that
-    // branch first; the tree is the only thing that was removed.
-    inheritedWorktree = await reopenWorktree(previous);
-    directory = await realDirectory(previous.directory);
-    assertDirectoryFree(directory);
-    projectId = previous.projectId;
-    // A session poisoned by an authentication or transport failure REPLAYS
-    // that failure on every resume — Claude Code persists it in the session,
-    // so resuming is a re-enactment, not a retry. Measured on a real box: a
-    // transient upstream error at 09:01 was resumed at 09:05 into the same
-    // session and failed identically, which is how a passing cloud hiccup
-    // became a permanently broken project.
-    //
-    // So the work carries on in a FRESH session instead. The task text is the
-    // caller's and says what to continue; what is lost is the old
-    // conversation, which was worthless anyway — it contains one failed
-    // request. Refusing outright would be worse: it would leave the owner
-    // with a project that can never be resumed.
-    // A COMPLETED session is also safe to continue — it is not poisoned, it
-    // simply finished — and continuing it is what carries the built-up context
-    // into a follow-up ("fix these review findings", the automatic review
-    // pass). A stopped run, or a failure that is not a ceiling, starts fresh.
-    resumeSessionId = previous.resumable || previous.status === "completed" ? previous.sessionId : null;
-    inherited = { provider: previous.provider, model: previous.requestedModel };
-  } else {
-    ({ directory, projectId } = await resolveWorkingDirectory(input));
-    assertDirectoryFree(directory);
-  }
-
-  // Read once, here: a run keeps the settings it started with even if the
-  // owner changes them while it works.
-  const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
-  await assertProviderReady(settings.provider);
-  const run = newRunRecord({
-    task,
-    directory,
-    projectId,
-    source: input.source,
-    status: "running",
-    settings,
-    deliverable: requireDeliverable(input),
-    reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
-    reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
-    team: input.team ?? null,
-    readOnly: input.readOnly === true,
-    extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
-  });
-  if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
-  else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf));
-  else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
-  else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
-
-  // THE RUN'S OWN COPY OF THE PROJECT, before anything else touches the
-  // folder. A resume carries the previous run's forward — same tree, same
-  // branch, same session — and a team's worker already has one the team made.
-  // A read-only run (the team's planner) reads the project itself: it writes
-  // nothing, so there is nothing to isolate, and a worktree would only hide
-  // the folder it was asked to look at.
-  if (resumeRunId) {
-    run.worktree = inheritedWorktree;
-  } else if (!run.team && !run.readOnly) {
-    await attachRunWorktree(run, directory);
-  }
-
-  // The run's own branch, made BEFORE any work happens.
-  //
-  // This is the only simple moment for it: commitRunWork commits to whatever
-  // branch is checked out, so branching first puts the commits where a pull
-  // request needs them and no history has to be rewritten afterwards. A review
-  // pass is deliberately excluded — it resumes in the same folder and belongs
-  // on the same branch, which it is already on.
-  // A team's run is excluded too: a worker already sits on its own branch
-  // in its own worktree (coding-team-worktree.ts), and a second branch
-  // under it would take the commits away from the merge the team makes.
-  // A review-loop turn is excluded for the reason a review pass is: it resumes
-  // in the same folder, on the branch its own pull request is already open
-  // from, and a second branch under it would take the fixes away from that
-  // pull request.
-  if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
-    if (run.worktree) {
-      // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
-      // already forked it, off the project's own branch, and the run is
-      // standing in it. Calling startRunBranch here would `checkout -b` a
-      // SECOND branch of the same name — in the worktree, where it would
-      // fail, or in the project checkout, which is precisely the move that
-      // cannot happen once two runs share a repository.
-      const { branch, base } = run.worktree;
-      run.pr = {
-        phase: "opening",
-        number: null,
-        url: null,
-        branch,
-        base,
-        checks: emptyChecks(),
-        detail: null,
-        startedAt: Date.now(),
-        endedAt: null,
-        reviewOk: true,
-      };
-      pushProgress(run, RUNNER_STEP.workingOnBranch(branch, base));
+    if (resumeRunId) {
+      if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
+      if (previous.status === "running") throw new CodingAgentError("busy", "That run is still in progress; wait for it to finish before resuming it.");
+      if (!previous.sessionId) throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+      // The session lives in the wrapper's state dir keyed by the folder it ran
+      // in, so a resume always happens where the original run happened — which
+      // for a run with a worktree is the worktree. A settle removes the worktree
+      // of a run that left nothing on its branch, so it is put back from that
+      // branch first; the tree is the only thing that was removed.
+      inheritedWorktree = await reopenWorktree(previous);
+      directory = await realDirectory(previous.directory);
+      assertDirectoryFree(directory);
+      projectId = previous.projectId;
+      // A session poisoned by an authentication or transport failure REPLAYS
+      // that failure on every resume — Claude Code persists it in the session,
+      // so resuming is a re-enactment, not a retry. Measured on a real box: a
+      // transient upstream error at 09:01 was resumed at 09:05 into the same
+      // session and failed identically, which is how a passing cloud hiccup
+      // became a permanently broken project.
+      //
+      // So the work carries on in a FRESH session instead. The task text is the
+      // caller's and says what to continue; what is lost is the old
+      // conversation, which was worthless anyway — it contains one failed
+      // request. Refusing outright would be worse: it would leave the owner
+      // with a project that can never be resumed.
+      // A COMPLETED session is also safe to continue — it is not poisoned, it
+      // simply finished — and continuing it is what carries the built-up context
+      // into a follow-up ("fix these review findings", the automatic review
+      // pass). A stopped run, or a failure that is not a ceiling, starts fresh.
+      resumeSessionId = previous.resumable || previous.status === "completed" ? previous.sessionId : null;
+      inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
-      const branched = await startRunBranch({
-        directory: run.directory,
-        runId: run.id,
-        // DATA_DIR is <clawbox>/data, so its parent is the checkout a run must
-        // never branch — see startRunBranch.
-        protectedRoot: path.dirname(DATA_DIR),
-      });
-      if (!branched.ok && branched.reason === "no_repository") {
-        // Not a failure of the flow — there is no repository for a branch to
-        // live in yet. The settle makes one and commits into it
-        // (commitRunWork); a pull request needs a remote the owner adds later
-        // through Back up. Stamping this "failed" with git's raw fatal put a
-        // red line at the top of every fresh-folder run in bench cycle 1.
-        run.pr = null;
-        pushProgress(run, RUNNER_STEP.noRepository);
-      } else if (branched.ok) {
+      ({ directory, projectId } = await resolveWorkingDirectory(input));
+      assertDirectoryFree(directory);
+    }
+
+    // Read once, here: a run keeps the settings it started with even if the
+    // owner changes them while it works.
+    const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+    await assertProviderReady(settings.provider);
+    const run = newRunRecord({
+      task,
+      directory,
+      projectId,
+      source: input.source,
+      status: "running",
+      settings,
+      deliverable: requireDeliverable(input),
+      reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
+      reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
+      team: input.team ?? null,
+      readOnly: input.readOnly === true,
+      extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
+    });
+    if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
+    else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf));
+    else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
+    else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
+
+    // THE RUN'S OWN COPY OF THE PROJECT, before anything else touches the
+    // folder. A resume carries the previous run's forward — same tree, same
+    // branch, same session — and a team's worker already has one the team made.
+    // A read-only run (the team's planner) reads the project itself: it writes
+    // nothing, so there is nothing to isolate, and a worktree would only hide
+    // the folder it was asked to look at.
+    if (resumeRunId) {
+      run.worktree = inheritedWorktree;
+    } else if (!run.team && !run.readOnly) {
+      await attachRunWorktree(run, directory);
+    }
+
+    // The run's own branch, made BEFORE any work happens.
+    //
+    // This is the only simple moment for it: commitRunWork commits to whatever
+    // branch is checked out, so branching first puts the commits where a pull
+    // request needs them and no history has to be rewritten afterwards. A review
+    // pass is deliberately excluded — it resumes in the same folder and belongs
+    // on the same branch, which it is already on.
+    // A team's run is excluded too: a worker already sits on its own branch
+    // in its own worktree (coding-team-worktree.ts), and a second branch
+    // under it would take the commits away from the merge the team makes.
+    // A review-loop turn is excluded for the reason a review pass is: it resumes
+    // in the same folder, on the branch its own pull request is already open
+    // from, and a second branch under it would take the fixes away from that
+    // pull request.
+    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
+      if (run.worktree) {
+        // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
+        // already forked it, off the project's own branch, and the run is
+        // standing in it. Calling startRunBranch here would `checkout -b` a
+        // SECOND branch of the same name — in the worktree, where it would
+        // fail, or in the project checkout, which is precisely the move that
+        // cannot happen once two runs share a repository.
+        const { branch, base } = run.worktree;
         run.pr = {
           phase: "opening",
           number: null,
           url: null,
-          branch: branched.branch,
-          base: branched.base,
+          branch,
+          base,
           checks: emptyChecks(),
           detail: null,
           startedAt: Date.now(),
           endedAt: null,
-          // No verdict yet; the one that counts is written when the pull
-          // request opens, which is the only way into "waiting".
           reviewOk: true,
         };
-        pushProgress(run, RUNNER_STEP.workingOnBranch(branched.branch, branched.base));
+        pushProgress(run, RUNNER_STEP.workingOnBranch(branch, base));
       } else {
-        // Not fatal: the work is worth doing on whatever branch this is. The
-        // owner is told why there will be no pull request.
-        run.pr = {
-          phase: "failed",
-          number: null,
-          url: null,
-          branch: null,
-          base: null,
-          checks: emptyChecks(),
-          detail: branched.detail,
-          startedAt: Date.now(),
-          endedAt: Date.now(),
-          reviewOk: false,
-        };
-        pushProgress(run, RUNNER_STEP.noPullRequest(branched.detail));
+        const branched = await startRunBranch({
+          directory: run.directory,
+          runId: run.id,
+          // DATA_DIR is <clawbox>/data, so its parent is the checkout a run must
+          // never branch — see startRunBranch.
+          protectedRoot: path.dirname(DATA_DIR),
+        });
+        if (!branched.ok && branched.reason === "no_repository") {
+          // Not a failure of the flow — there is no repository for a branch to
+          // live in yet. The settle makes one and commits into it
+          // (commitRunWork); a pull request needs a remote the owner adds later
+          // through Back up. Stamping this "failed" with git's raw fatal put a
+          // red line at the top of every fresh-folder run in bench cycle 1.
+          run.pr = null;
+          pushProgress(run, RUNNER_STEP.noRepository);
+        } else if (branched.ok) {
+          run.pr = {
+            phase: "opening",
+            number: null,
+            url: null,
+            branch: branched.branch,
+            base: branched.base,
+            checks: emptyChecks(),
+            detail: null,
+            startedAt: Date.now(),
+            endedAt: null,
+            // No verdict yet; the one that counts is written when the pull
+            // request opens, which is the only way into "waiting".
+            reviewOk: true,
+          };
+          pushProgress(run, RUNNER_STEP.workingOnBranch(branched.branch, branched.base));
+        } else {
+          // Not fatal: the work is worth doing on whatever branch this is. The
+          // owner is told why there will be no pull request.
+          run.pr = {
+            phase: "failed",
+            number: null,
+            url: null,
+            branch: null,
+            base: null,
+            checks: emptyChecks(),
+            detail: branched.detail,
+            startedAt: Date.now(),
+            endedAt: Date.now(),
+            reviewOk: false,
+          };
+          pushProgress(run, RUNNER_STEP.noPullRequest(branched.detail));
+        }
       }
     }
+
+    // After the branch, because the auto-PR switch is what gives a run with no
+    // named deliverable an implied one, and `run.pr` is only set above. An
+    // attempt entry exists exactly for a run that HAS a bar to clear, so a run
+    // without one never grows the list.
+    openAttempt(run);
+
+    // Before the record is persisted, so the names and the two progress lines are
+    // in the first thing the app reads rather than appearing a poll later.
+    await prepareRunSecrets(run);
+    insertRun(loadRuns(), run);
+    persist(true);
+    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
+    startProjectIcon(run);
+    spawnOrSettle(run, resumeSessionId, tools, settings);
+    return cloneRun(run);
+  } finally {
+    releaseSlot();
   }
-
-  // After the branch, because the auto-PR switch is what gives a run with no
-  // named deliverable an implied one, and `run.pr` is only set above. An
-  // attempt entry exists exactly for a run that HAS a bar to clear, so a run
-  // without one never grows the list.
-  openAttempt(run);
-
-  // Before the record is persisted, so the names and the two progress lines are
-  // in the first thing the app reads rather than appearing a poll later.
-  await prepareRunSecrets(run);
-  insertRun(loadRuns(), run);
-  persist(true);
-  console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
-  startProjectIcon(run);
-  spawnOrSettle(run, resumeSessionId, tools, settings);
-  return cloneRun(run);
 }
 
 /**
@@ -8504,84 +8563,90 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // one, so if that credential is gone the resume is refused rather than
   // quietly re-enacted somewhere else. Handed to the gate rather than checked
   // beside it, so the box's own half and the credential are one verdict.
-  await assertCanSpawn(run.team ?? null, run.provider);
-  const tools = await requireSpawnTools();
-  // The folder must still be there. A team worker's worktree is removed when
-  // its task is decided, and a run resumed into a cwd that no longer exists
-  // makes Node report ENOENT against the EXECUTABLE — "spawn /usr/bin/setpriv
-  // ENOENT" — blaming a binary that is present, on a record that had already
-  // been flipped to running. Checked here, before that flip, the way a draft
-  // start checks it.
-  // A run with a copy of its own may have had it removed at settle (it left
-  // nothing on its branch) or by the weekly sweep. The BRANCH survived both,
-  // so the tree is made again from it and the resume carries on in the folder
-  // the session was opened in — which is what `--resume` needs.
-  if (run.worktree) run.worktree = await reopenWorktree(run);
+  // Held from the gate to the flip below, like every other start — see
+  // `startingRuns`.
+  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
   try {
-    run.directory = await realDirectory(run.directory);
-  } catch {
-    throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
+    const tools = await requireSpawnTools();
+    // The folder must still be there. A team worker's worktree is removed when
+    // its task is decided, and a run resumed into a cwd that no longer exists
+    // makes Node report ENOENT against the EXECUTABLE — "spawn /usr/bin/setpriv
+    // ENOENT" — blaming a binary that is present, on a record that had already
+    // been flipped to running. Checked here, before that flip, the way a draft
+    // start checks it.
+    // A run with a copy of its own may have had it removed at settle (it left
+    // nothing on its branch) or by the weekly sweep. The BRANCH survived both,
+    // so the tree is made again from it and the resume carries on in the folder
+    // the session was opened in — which is what `--resume` needs.
+    if (run.worktree) run.worktree = await reopenWorktree(run);
+    try {
+      run.directory = await realDirectory(run.directory);
+    } catch {
+      throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
+    }
+    assertDirectoryFree(run.directory, run.id);
+    // The one place a run's permission rules are RE-READ rather than kept.
+    //
+    // Everything else about a run is frozen on its record precisely so the tools
+    // it holds cannot change under it while it works (see CodingRun.allowRules).
+    // A resume is the exception because it is not something that happens to a
+    // run — it is the owner pressing a button, deliberately, after the run
+    // stopped. "Allow next time" exists to answer a refusal on this very page and
+    // offers Resume in the same breath; carrying the old list through would hand
+    // the run back the refusal the owner just answered, and the button would be a
+    // lie. Narrowing works the same way: a rule removed before the resume is gone
+    // from the resumed run too.
+    run.allowRules = await getAllowRules(allowRuleContext());
+    // Read BEFORE the flip below, which is what makes this a resume: the
+    // continuation text and the pull-request step both depend on which of the two
+    // resumable endings this run is coming back from.
+    const gaveUp = run.status === "gave_up";
+    // The pause gap is not working time: shift the start forward by it, so the
+    // elapsed clock and the ETA speak of effort, not of the night in between.
+    if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
+    run.status = "running";
+    run.completedAt = null;
+    run.error = null;
+    run.exitCode = null;
+    // The pause is over, so its reason is history. Left in place it would sit
+    // on a running record and, worse, survive into the run's next settle.
+    run.pauseReason = null;
+    run.lastActivityAt = Date.now();
+    // The owner's own go at the deliverable, on the record like every other. It
+    // is NOT counted against the cap before it is made — the cap bounds what the
+    // BOX spends unasked, and a Resume the owner pressed is their decision, not
+    // the box's budget. The gate judges it when it settles, exactly as it judged
+    // the attempts before it.
+    // A run that gave up with no pull request ever opened gets the step back, so
+    // the owner's Resume can actually reach the deliverable it is resumed for.
+    if (gaveUp) reopenPullRequestStep(run);
+    openAttempt(run);
+    pushProgress(run, RUNNER_STEP.resumedByOwner);
+    // RE-RESOLVED, like the permission rules just above and for the same reason:
+    // a resume is the owner's own deliberate act, so an entry they have un-ticked
+    // since the pause is not handed back, and one they have ticked is.
+    await prepareRunSecrets(run);
+    persist(true);
+    console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : "pause"}`);
+    startProjectIcon(run);
+    // The session already holds the task; replaying it verbatim would read as
+    // "start over". Say what actually happened instead — and for a run that gave
+    // up, what it is being resumed FOR: the owner pressed Resume on a page whose
+    // one red sentence is the missing deliverable, so arriving back in the session
+    // with "you were paused" would be the box losing the thread of its own
+    // question.
+    const missing = gaveUp ? run.deliverableCheck?.missing?.trim() : null;
+    const deliverable = gaveUp ? deliverableFor(run) : null;
+    const continuation = !run.sessionId
+      ? undefined
+      : missing && deliverable
+        ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
+        : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
+    spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
+    return cloneRun(run);
+  } finally {
+    releaseSlot();
   }
-  assertDirectoryFree(run.directory, run.id);
-  // The one place a run's permission rules are RE-READ rather than kept.
-  //
-  // Everything else about a run is frozen on its record precisely so the tools
-  // it holds cannot change under it while it works (see CodingRun.allowRules).
-  // A resume is the exception because it is not something that happens to a
-  // run — it is the owner pressing a button, deliberately, after the run
-  // stopped. "Allow next time" exists to answer a refusal on this very page and
-  // offers Resume in the same breath; carrying the old list through would hand
-  // the run back the refusal the owner just answered, and the button would be a
-  // lie. Narrowing works the same way: a rule removed before the resume is gone
-  // from the resumed run too.
-  run.allowRules = await getAllowRules(allowRuleContext());
-  // Read BEFORE the flip below, which is what makes this a resume: the
-  // continuation text and the pull-request step both depend on which of the two
-  // resumable endings this run is coming back from.
-  const gaveUp = run.status === "gave_up";
-  // The pause gap is not working time: shift the start forward by it, so the
-  // elapsed clock and the ETA speak of effort, not of the night in between.
-  if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
-  run.status = "running";
-  run.completedAt = null;
-  run.error = null;
-  run.exitCode = null;
-  // The pause is over, so its reason is history. Left in place it would sit
-  // on a running record and, worse, survive into the run's next settle.
-  run.pauseReason = null;
-  run.lastActivityAt = Date.now();
-  // The owner's own go at the deliverable, on the record like every other. It
-  // is NOT counted against the cap before it is made — the cap bounds what the
-  // BOX spends unasked, and a Resume the owner pressed is their decision, not
-  // the box's budget. The gate judges it when it settles, exactly as it judged
-  // the attempts before it.
-  // A run that gave up with no pull request ever opened gets the step back, so
-  // the owner's Resume can actually reach the deliverable it is resumed for.
-  if (gaveUp) reopenPullRequestStep(run);
-  openAttempt(run);
-  pushProgress(run, RUNNER_STEP.resumedByOwner);
-  // RE-RESOLVED, like the permission rules just above and for the same reason:
-  // a resume is the owner's own deliberate act, so an entry they have un-ticked
-  // since the pause is not handed back, and one they have ticked is.
-  await prepareRunSecrets(run);
-  persist(true);
-  console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : "pause"}`);
-  startProjectIcon(run);
-  // The session already holds the task; replaying it verbatim would read as
-  // "start over". Say what actually happened instead — and for a run that gave
-  // up, what it is being resumed FOR: the owner pressed Resume on a page whose
-  // one red sentence is the missing deliverable, so arriving back in the session
-  // with "you were paused" would be the box losing the thread of its own
-  // question.
-  const missing = gaveUp ? run.deliverableCheck?.missing?.trim() : null;
-  const deliverable = gaveUp ? deliverableFor(run) : null;
-  const continuation = !run.sessionId
-    ? undefined
-    : missing && deliverable
-      ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
-      : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
-  spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
-  return cloneRun(run);
 }
 
 /** Drafts the list will hold; beyond this, start or discard one first. */
@@ -8638,41 +8703,47 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
   // spawned into a wrapper that dies.
-  await assertCanSpawn(run.team ?? null, run.provider);
-  const tools = await requireSpawnTools();
-  // The folder must still be there — it was only checked when drafted.
-  run.directory = await realDirectory(run.directory);
-  assertDirectoryFree(run.directory, run.id);
-  // The copy of the project is made at START and not when the draft was
-  // written: a draft may sit for days, and a worktree made for one that is
-  // never started would be a branch and a folder nobody asked for.
-  if (!run.team && !run.readOnly && !run.worktree) await attachRunWorktree(run, run.directory);
-  // Settings are read at START: a run keeps what it starts with.
-  //
-  // The provider and its model are deliberately NOT among them. They are the
-  // one setting here a caller can name PER RUN, so re-reading would silently
-  // overwrite a choice the draft was created with; the others have no per-run
-  // form and can only have come from the owner's stored default anyway.
-  const settings = await readRunSettings();
-  run.effort = settings.effort;
-  run.maxTurns = settings.maxTurns;
-  run.tokenLimit = settings.tokenLimit;
-  run.media = { images: settings.generateImages, audio: settings.generateAudio };
-  run.completionAttempts = settings.completionAttempts;
-  run.status = "running";
-  run.startedAt = Date.now();
-  run.lastActivityAt = Date.now();
-  // The bar the draft was created with, now that it is actually starting.
-  openAttempt(run);
-  pushProgress(run, RUNNER_STEP.startedFromDraft);
-  // Resolved now and not when the draft was written: a draft can sit for days,
-  // and the secrets a run gets are the ones ticked at the moment it starts.
-  await prepareRunSecrets(run);
-  persist(true);
-  console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
-  startProjectIcon(run);
-  spawnOrSettle(run, null, tools, settings);
-  return cloneRun(run);
+  // Held from the gate to the flip below, like every other start — see
+  // `startingRuns`.
+  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  try {
+    const tools = await requireSpawnTools();
+    // The folder must still be there — it was only checked when drafted.
+    run.directory = await realDirectory(run.directory);
+    assertDirectoryFree(run.directory, run.id);
+    // The copy of the project is made at START and not when the draft was
+    // written: a draft may sit for days, and a worktree made for one that is
+    // never started would be a branch and a folder nobody asked for.
+    if (!run.team && !run.readOnly && !run.worktree) await attachRunWorktree(run, run.directory);
+    // Settings are read at START: a run keeps what it starts with.
+    //
+    // The provider and its model are deliberately NOT among them. They are the
+    // one setting here a caller can name PER RUN, so re-reading would silently
+    // overwrite a choice the draft was created with; the others have no per-run
+    // form and can only have come from the owner's stored default anyway.
+    const settings = await readRunSettings();
+    run.effort = settings.effort;
+    run.maxTurns = settings.maxTurns;
+    run.tokenLimit = settings.tokenLimit;
+    run.media = { images: settings.generateImages, audio: settings.generateAudio };
+    run.completionAttempts = settings.completionAttempts;
+    run.status = "running";
+    run.startedAt = Date.now();
+    run.lastActivityAt = Date.now();
+    // The bar the draft was created with, now that it is actually starting.
+    openAttempt(run);
+    pushProgress(run, RUNNER_STEP.startedFromDraft);
+    // Resolved now and not when the draft was written: a draft can sit for days,
+    // and the secrets a run gets are the ones ticked at the moment it starts.
+    await prepareRunSecrets(run);
+    persist(true);
+    console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
+    startProjectIcon(run);
+    spawnOrSettle(run, null, tools, settings);
+    return cloneRun(run);
+  } finally {
+    releaseSlot();
+  }
 }
 
 /** Discard a draft. Only drafts: everything else is history and history stays. */
@@ -8688,8 +8759,44 @@ export function deleteDraftRun(id: string): void {
   persist(true);
 }
 
-/** The gates every spawn passes: the owner's switch, readiness, the slot. */
-async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider): Promise<void> {
+/**
+ * Starts that have passed the gate and are not yet visible to `loadRuns()`.
+ *
+ * The gate counts LIVE runs, and a new one becomes live several awaits later —
+ * the spawn tools, the working folder, the settings, the worktree, the auto-PR
+ * read all sit in between. Two starts that arrive together therefore both saw
+ * room for one, and on a board sized for two `claude -p` processes the third is
+ * exactly what the setting exists to prevent. `teamSpawnSlot` already answers
+ * this shape with its `starting` count; this is the same answer for the runs
+ * that are nobody's team.
+ *
+ * Held from the gate to the insert, released in a `finally` so a start that
+ * throws in between gives its slot back.
+ */
+let startingRuns = 0;
+
+function holdSpawnSlot(): () => void {
+  startingRuns += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    // Never below zero: a double release would otherwise make the counter a
+    // permanent discount on the limit.
+    startingRuns = Math.max(0, startingRuns - 1);
+  };
+}
+
+/**
+ * The gates every spawn passes: the owner's switch, readiness, the slot.
+ *
+ * Answers the slot's RELEASE. The reservation is taken here, synchronously
+ * with the count it was judged against — a caller that took it after this
+ * resolved would still have raced another caller inside this function, whose
+ * own awaits (the switch, readiness, the limit) are where the two starts read
+ * the same number.
+ */
+async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider): Promise<() => void> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
@@ -8732,21 +8839,28 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     throw new CodingAgentError("not_ready", refusal);
   }
   if (team) {
-    // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory guard.
+    // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory
+    // guard — the team's own rule, and the orchestrator's `starting` count is
+    // what covers the gap there, so `startingRuns` is deliberately not read by
+    // it or the two would double-count one worker.
     const slot = await teamSpawnSlot(team);
     if (!slot.ok) throw new CodingAgentError("busy", slot.reason);
-    return;
+    return holdSpawnSlot();
   }
   const active = loadRuns().filter((r) => isLive(r.status));
   const limit = await getMaxParallelRuns();
-  if (active.length >= limit) {
+  // The runs already going PLUS the starts that have passed this gate and have
+  // not reached their record yet — see `startingRuns`.
+  const going = active.length + startingRuns;
+  if (going >= limit) {
     throw new CodingAgentError(
       "busy",
-      limit === 1
+      limit === 1 && active.length > 0
         ? `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`
-        : `This ClawBox is already running ${active.length} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
+        : `This ClawBox is already starting or running ${going} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
     );
   }
+  return holdSpawnSlot();
 }
 
 /**
@@ -8882,5 +8996,8 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   // Module state like the rest: left set, it would refuse the next test file's
   // runs from a fault the box under test never had.
   liveHarnessFault = null;
+  // A start this reset interrupted would otherwise leave its slot held for the
+  // life of the process, which is a permanent discount on the limit.
+  startingRuns = 0;
   return settleWork(killed, SETTLE_DRAIN_BUDGET_MS);
 }

@@ -950,7 +950,7 @@ export const de: Record<string, string> = {
   "codingAgent.completionAttemptsHint": "Ein Lauf gilt erst als fertig, wenn das Ergebnis wirklich da ist — die Dateien, die Ihr Assistent genannt hat, oder ein Pull Request, wenn Pull Requests an sind. Fehlt es, setzt ClawBox den Lauf in seiner eigenen Sitzung fort und sagt dabei, was fehlt. Der erste Anlauf des Laufs zählt als ein Versuch.",
   "codingAgent.completionAttemptsFailed": "Die Anzahl der Versuche konnte nicht geändert werden.",
   "codingAgent.maxParallelRunsLabel": "Gleichzeitige Läufe",
-  "codingAgent.maxParallelRunsHint": "Jeder Lauf arbeitet in einer eigenen Kopie des Projekts auf einem eigenen Branch, sodass Läufe sich nicht mehr gegenseitig halbfertige Dateien überschreiben. Wie viele sinnvoll sind, ist eine Frage des Arbeitsspeichers dieser ClawBox: zwei sind bequem, vier sind auf einem kleinen Board viel.",
+  "codingAgent.maxParallelRunsHint": "Ein Lauf in einem Git-Projekt arbeitet in einer eigenen Kopie davon auf einem eigenen Branch, sodass Läufe sich nicht mehr gegenseitig halbfertige Dateien überschreiben; ein Ordner ohne Git-Repository bekommt keine Kopie, dort arbeitet weiterhin nur ein Lauf zur Zeit. Wie viele sinnvoll sind, ist eine Frage des Arbeitsspeichers dieser ClawBox: zwei sind bequem, vier sind auf einem kleinen Board viel.",
   "codingAgent.maxParallelRunsFailed": "Die Anzahl gleichzeitiger Läufe konnte nicht geändert werden.",
   "codingAgent.worktreeKept": "Die eigene Kopie dieses Laufs liegt noch auf der Festplatte. Seine Arbeit liegt auf dem Branch {branch} — beim Entfernen der Kopie geht sie also nicht verloren.",
   "codingAgent.worktreeRemove": "Kopie entfernen",

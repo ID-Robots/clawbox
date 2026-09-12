@@ -242,6 +242,10 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // The attempt budget for a run's deliverable: spent only by a run that
       // has one, so a reset clears it with the rest of what the owner chose.
       "coding_agent_completion_attempts",
+      // How many runs at once. The one setting here with a MEMORY cost: a box
+      // left on four would carry four `claude -p` processes past a "start
+      // over" that has just presented a freshly configured agent.
+      "coding_agent_max_parallel_runs",
       // The two media switches are ON when absent, so clearing them is what
       // puts a reset box back to "yes, draw and speak for my projects".
       "coding_agent_generate_images",

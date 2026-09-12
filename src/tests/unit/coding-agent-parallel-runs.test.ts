@@ -156,6 +156,82 @@ describe("how many runs at once", () => {
     expect(c.status).toBe("running");
   });
 
+  /**
+   * The scenario the whole change exists for: two runs at once inside ONE
+   * repository. Two worktrees, two branches, one `.git` — and two settles
+   * merging back into one base branch through the shared per-checkout lock,
+   * which is what stops the second tripping over `.git/index.lock`.
+   */
+  it("runs two at once in ONE project, each in its own copy, and lands both merges in its history", async () => {
+    const dir = makeGitProject("alpha");
+    const flag = path.join(base, "go");
+    // Each run writes a file named after the folder it was given — its own
+    // copy — so the two can be told apart in the history afterwards.
+    installWrapper([
+      `while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+      'echo "new" > "$PWD/$(basename "$PWD").txt"',
+      `printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"%s/%s.txt"}}]}}\\n' "$PWD" "$(basename "$PWD")"`,
+      `echo '${JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: false }] } })}'`,
+      `echo '${result("wrote a file")}'`,
+      "exit 0",
+    ].join("\n"));
+
+    const a = await lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    const b = await lib.startRun({ task: "two", directory: "alpha", source: "owner" });
+    // Two copies of one project, each on its own branch, neither of them the
+    // project folder itself.
+    expect(a.directory).not.toBe(b.directory);
+    expect(a.worktree?.project).toBe(dir);
+    expect(b.worktree?.project).toBe(dir);
+    expect(a.worktree?.branch).toBe(`clawbox/${a.id}`);
+    expect(b.worktree?.branch).toBe(`clawbox/${b.id}`);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("master");
+
+    fs.writeFileSync(flag, "go");
+    await finished(a.id);
+    await finished(b.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(a.id)?.worktree?.removed).toBe(true);
+      expect(lib.getRun(b.id)?.worktree?.removed).toBe(true);
+    }, { timeout: 20_000 });
+
+    // Both merges landed — the lock serialised them rather than one failing.
+    expect(fs.existsSync(path.join(dir, `${a.id}.txt`))).toBe(true);
+    expect(fs.existsSync(path.join(dir, `${b.id}.txt`))).toBe(true);
+    const log = git(dir, "log", "--oneline");
+    expect(log).toContain(a.id);
+    expect(log).toContain(b.id);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
+  /**
+   * The gate counts LIVE runs, and a start does not become one until several
+   * awaits later. Two that arrive together therefore both saw room for one —
+   * the third `claude -p` on a board sized for two, which is the exact thing
+   * this setting exists to bound.
+   */
+  it("does not let two starts that arrive together both take the last slot", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    makeGitProject("alpha");
+    makeGitProject("beta");
+    await lib.setMaxParallelRuns(1);
+    const both = await Promise.allSettled([
+      lib.startRun({ task: "one", directory: "alpha", source: "owner" }),
+      lib.startRun({ task: "two", directory: "beta", source: "owner" }),
+    ]);
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = both.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(refused.reason).toMatchObject({ kind: "busy" });
+    expect(lib.runningCount()).toBe(1);
+    fs.writeFileSync(flag, "go");
+    const started = both.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ id: string }>;
+    await finished(started.value.id);
+    // The slot is given back, so the next start is not refused for ever.
+    const after = await lib.startRun({ task: "three", directory: "beta", source: "owner" });
+    expect(after.status).toBe("running");
+  });
+
   it("refuses a second run in the SAME folder even under the limit, because that folder gets no copy of its own", async () => {
     const flag = path.join(base, "go");
     installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
@@ -210,6 +286,22 @@ describe("a run's own copy of the project", () => {
     // An empty clawbox/<runId> per run would be litter in the owner's repo.
     expect(git(dir, "branch", "--list", branch)).toBe("");
     expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed/);
+  });
+
+  it("records that the BRANCH went too when the run left nothing on it, and not when it was merged home", async () => {
+    makeGitProject("alpha");
+    const nothing = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
+    await finished(nothing.id);
+    await vi.waitFor(() => { expect(lib.getRun(nothing.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    // Both gone, so no surface may tell the owner to look on a branch.
+    expect(lib.getRun(nothing.id)?.worktree?.branchRemoved).toBe(true);
+
+    installWrapper([...wrote("made.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
+    const worked = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    await finished(worked.id);
+    await vi.waitFor(() => { expect(lib.getRun(worked.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    // The copy went, the branch stayed: its commits are history.
+    expect(lib.getRun(worked.id)?.worktree?.branchRemoved).toBe(false);
   });
 
   it("keeps the copy when the merge cannot be made, and says why", async () => {

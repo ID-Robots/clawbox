@@ -275,11 +275,29 @@ export function mergeRunBranch(input: {
   });
 }
 
-/** The worktree's files go; the branch stays as history unless the caller asks otherwise. */
-export function removeRunWorktree(projectDir: string, worktreePath: string): Promise<void> {
+/**
+ * The worktree's files go; the branch stays as history unless the caller asks
+ * otherwise.
+ *
+ * Answers whether the files are actually GONE, not whether git was happy:
+ * `worktree remove --force` can fail on a busy file, a permission error or an
+ * index lock, and a caller that recorded the removal on git's word alone would
+ * leave a record claiming the copy is gone while it sits on the disk — and the
+ * owner's Remove button, which returns early on that record, would never try
+ * again. A path that is not there is a success whatever git said, which is the
+ * case where only git's own registration was stale.
+ */
+export function removeRunWorktree(projectDir: string, worktreePath: string): Promise<boolean> {
   return withDirLock(projectDir, async () => {
-    await gitIn(path.resolve(projectDir), ["worktree", "remove", "--force", worktreePath]);
+    const removed = await gitIn(path.resolve(projectDir), ["worktree", "remove", "--force", worktreePath]);
     await gitIn(path.resolve(projectDir), ["worktree", "prune"]);
+    if (ok(removed)) return true;
+    try {
+      fs.statSync(worktreePath);
+      return false;
+    } catch {
+      return true;
+    }
   });
 }
 
@@ -406,6 +424,8 @@ export async function sweepRunWorktrees(projectDir: string, options: {
       age = now - fs.statSync(resolved).mtimeMs;
     } catch {
       // The files are gone and only git's record of them is left: prune it.
+      // `removeRunWorktree` answers true for a path that is not there, so a
+      // git that refuses the stale registration is still a removal.
       await removeRunWorktree(dir, resolved);
       outcome.removed.push(resolved);
       continue;
@@ -422,7 +442,10 @@ export async function sweepRunWorktrees(projectDir: string, options: {
         continue;
       }
     }
-    await removeRunWorktree(dir, resolved);
+    if (!(await removeRunWorktree(dir, resolved))) {
+      outcome.kept.push(resolved);
+      continue;
+    }
     if (tree.branch) await deleteRunBranch(dir, tree.branch);
     outcome.removed.push(resolved);
   }
