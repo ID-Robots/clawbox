@@ -141,6 +141,8 @@ interface RunPayload {
   thinkingTokens?: number;
   lastActivityAt?: number;
   resumable: boolean;
+  /** Set when the DEVICE's harness failed, not the task. Absent on an older record. */
+  failureKind?: "harness_not_ready" | null;
   progress: string[];
   /** The run's own TodoWrite plan; absent on a record from before it was kept. */
   todos?: { content?: unknown; status?: unknown; activeForm?: unknown }[];
@@ -225,6 +227,19 @@ function describeRun(run: RunPayload, tail: number): string {
     );
   } else if (run.status === "completed") {
     parts.push("Finished. Relay the summary to the user; if it was a code project, call code_project_build to install the result on the desktop.");
+  } else if (run.status === "failed" && run.failureKind === "harness_not_ready") {
+    // The device, not the task. Said first so the two advice branches below
+    // cannot claim this one: "start a fresh run" is the worst possible answer
+    // here, because the fresh run asks for the same model and dies the same
+    // way — which is exactly what happened on the box this comes from, three
+    // runs in a row.
+    parts.push(
+      "This failed because the ClawBox's own coding harness could not get a model to answer — a fault in the DEVICE,"
+      + " not in the task. Do NOT start another run or resume this one: the box refuses new runs for a while precisely"
+      + " because they would fail the same way. Tell the user what the error says and that the fix is in"
+      + " Settings → AI Models on the ClawBox: check ClawBox AI is connected and that their plan covers the model the"
+      + " harness asks for.",
+    );
   } else if (run.status === "failed" && run.resumable && run.sessionId) {
     // Only where a resume can actually help — a turn or cost ceiling. Advising
     // it for an authentication or transport failure is what turned one
