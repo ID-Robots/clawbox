@@ -74,8 +74,14 @@ export default function CodingRunDenials({
 }) {
   const { t } = useT();
   const rows = denialRows(denials, deniedActions);
-  /** The rule the owner is being shown for confirmation, if any. */
-  const [armed, setArmed] = useState<string | null>(null);
+  /**
+   * Which ROW is showing its confirmation, by index — not which rule.
+   *
+   * Two refusals in one folder derive the SAME rule text (that is the point of
+   * deriving the folder), so keying this by the rule armed both rows at once
+   * and put two confirmation panels on screen for one decision.
+   */
+  const [armed, setArmed] = useState<number | null>(null);
   /** Rules saved from this panel, so a row can say so without a reload. */
   const [saved, setSaved] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -121,8 +127,11 @@ export default function CodingRunDenials({
       <p className="text-[11px] font-medium text-amber-400">{t("codingAgent.deniedTitle")}</p>
       <ul className="mt-1 space-y-1.5">
         {rows.map((row, i) => {
+          // Saved is still keyed by the RULE, and deliberately: when one rule
+          // covers two refusals, allowing it answers both, and saying so on
+          // only one of them would be the less honest answer.
           const isSaved = row.rule !== null && saved.includes(row.rule);
-          const isArmed = row.rule !== null && armed === row.rule;
+          const isArmed = row.rule !== null && armed === i;
           // A refusal only gets a sentence when there was a candidate rule to
           // judge. `protected` — the owner's own case, a credential store or
           // this box's state — gets the short note the panel is built around;
@@ -148,7 +157,7 @@ export default function CodingRunDenials({
               {row.rule !== null && !isSaved && !isArmed && (
                 <button
                   type="button"
-                  onClick={() => { setError(null); setArmed(row.rule); }}
+                  onClick={() => { setError(null); setArmed(i); }}
                   data-testid={`coding-agent-allow-${runId}-${i}`}
                   className={`${BTN_QUIET} mt-1`}
                 >
@@ -192,27 +201,9 @@ export default function CodingRunDenials({
               )}
 
               {isSaved && (
-                <div className="mt-1" data-testid="coding-agent-allow-saved">
-                  <span className="block text-[11px] text-emerald-400">{t("codingAgent.allowSaved")}</span>
-                  {/* Only a PAUSED run can be resumed in place. Offered here
-                      because the permission just granted is of no use to THIS
-                      run until it carries on, and a resume re-reads the list. */}
-                  {resumable && (
-                    <div className="mt-1">
-                      <span className="block text-[11px] text-[var(--text-muted)] leading-relaxed">
-                        {t("codingAgent.allowResumeHint")}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => onResume?.()}
-                        data-testid={`coding-agent-allow-resume-${runId}`}
-                        className={`${BTN_SECONDARY} mt-1`}
-                      >
-                        {t("codingAgent.resume")}
-                      </button>
-                    </div>
-                  )}
-                </div>
+                <span className="block mt-1 text-[11px] text-emerald-400" data-testid="coding-agent-allow-saved">
+                  {t("codingAgent.allowSaved")}
+                </span>
               )}
             </li>
           );
@@ -220,6 +211,28 @@ export default function CodingRunDenials({
       </ul>
       {error && (
         <p className="mt-1.5 text-[11px] text-red-300" data-testid="coding-agent-allow-error">{error}</p>
+      )}
+
+      {/* ONE Resume for the run, under the whole list rather than inside a row:
+          it is about the run and not about the refusal, and two refusals
+          answered by one rule would otherwise have drawn it twice.
+          Only a PAUSED run can carry on in place, and it is offered at all
+          because the permission just granted is of no use to THIS run until it
+          does — a resume re-reads the owner's list. */}
+      {resumable && saved.length > 0 && (
+        <div className="mt-2">
+          <span className="block text-[11px] text-[var(--text-muted)] leading-relaxed">
+            {t("codingAgent.allowResumeHint")}
+          </span>
+          <button
+            type="button"
+            onClick={() => onResume?.()}
+            data-testid={`coding-agent-allow-resume-${runId}`}
+            className={`${BTN_SECONDARY} mt-1`}
+          >
+            {t("codingAgent.resume")}
+          </button>
+        </div>
       )}
       <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
         {t("codingAgent.deniedHelp")}

@@ -165,6 +165,37 @@ describe("the run page's refusal panel", () => {
     expect(screen.queryByTestId("coding-agent-allow-resume-run-2")).toBeNull();
   });
 
+  it("arms ONE row at a time when two refusals derive the same rule", async () => {
+    // Two files in one folder derive the same rule — that is the point of
+    // deriving the folder. Arming by rule text put two confirmation panels on
+    // screen for one decision, and drew the Resume twice.
+    stubFetch(() => json({ allowRules: [RULE] }));
+    render(
+      <CodingRunDenials
+        runId="run-1"
+        denials={[
+          { text: "Read: …/memory/a.md", rule: RULE, refusal: null },
+          { text: "Read: …/memory/b.md", rule: RULE, refusal: null },
+        ]}
+        resumable
+      />,
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-allow-run-1-0"));
+    expect(screen.getAllByTestId("coding-agent-allow-confirm")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("coding-agent-allow-save-run-1-0"));
+    // Allowing it answers BOTH refusals, so both rows say so...
+    await waitFor(() => expect(screen.getAllByTestId("coding-agent-allow-saved")).toHaveLength(2));
+    // ...and there is still exactly one Resume, because it is about the run.
+    expect(screen.getAllByTestId("coding-agent-allow-resume-run-1")).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("offers no Resume until something has actually been allowed", () => {
+    stubFetch(() => json({}));
+    render(<CodingRunDenials runId="run-1" denials={[{ text: "Read: …", rule: RULE, refusal: null }]} resumable />);
+    expect(screen.queryByTestId("coding-agent-allow-resume-run-1")).toBeNull();
+  });
+
   it("words a refused save in the owner's language, from the code and not the sentence", async () => {
     stubFetch(() => json({ error: "That rule is already on the list.", kind: "invalid", code: "duplicate" }, 400));
     render(<CodingRunDenials runId="run-1" denials={[{ text: "Read: …", rule: RULE, refusal: null }]} resumable={false} />);
