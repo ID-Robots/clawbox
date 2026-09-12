@@ -82,6 +82,18 @@ import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
+import {
+  deriveAllowRule,
+  isAllowRuleRefusal,
+  MAX_ALLOW_RULES,
+  normalizeAllowRules,
+  SOFT_HOME_SUBTREES,
+  unlockedSoftPaths,
+  validateAllowRule,
+  type AllowRuleContext,
+  type AllowRuleRefusal,
+  type DenialInput,
+} from "@/lib/coding-permission-rules";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
@@ -301,6 +313,24 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
  */
 export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
 
+/**
+ * The owner's standing answer to "may a run do this?" — the permission rules
+ * every run is started with, on top of the ones the device ships.
+ *
+ * A LIST and not a switch, because the whole point is that each entry names
+ * one thing: `Bash(git log:*)`, `WebFetch(domain:docs.python.org)`. A headless
+ * run cannot be asked, so a refused action was refused again on every later
+ * run; this is where "Allow next time" on a refusal and the editor in Settings
+ * both land.
+ *
+ * Absent means an EMPTY list — no rule is the safe reading of a box that has
+ * never been asked. Every entry is re-validated on the way out
+ * (`normalizeAllowRules`), because the floor a rule must clear only ever grows
+ * and a rule that was legal under an older build must not reach a run's argv
+ * unchecked.
+ */
+export const CODING_AGENT_ALLOW_RULES_CONFIG_KEY = "coding_agent_allow_rules";
+
 /** Every key the reset clears. The switch is last: it is the consent, and a
  *  half-cleared box that is still switched on would be the one state where the
  *  wizard shows over a live delegated shell. */
@@ -314,6 +344,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
+  CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
   CODING_AGENT_SETUP_CONFIG_KEY,
   CODING_AGENT_CONFIG_KEY,
 ] as const;
@@ -762,6 +793,33 @@ export interface CodingRun {
    * template.
    */
   deniedActions: string[];
+  /**
+   * The same refusals, structured — one entry per refused action, self-contained.
+   *
+   * `deniedActions` is kept rather than replaced: it is what the run rows, an
+   * older desktop and the tests already read, and a record written before this
+   * field exists still has to render. A reader shows `denials` when it is there
+   * and falls back to the strings when it is not, which is why each entry
+   * carries its own `text` instead of being paired by index — two lists that
+   * must line up by position is exactly the bug a resumed run, which appends to
+   * one of them, would introduce.
+   *
+   * `rule` is the narrowest permission rule that would have allowed the action,
+   * or null when there is none to offer: the tool takes no rule, the target
+   * could not be read, or — the one that matters — the device refuses that path
+   * to EVERY run, so a rule would grant nothing. Computed here, on the server,
+   * because only the server knows what `fileDenyRules()` covers.
+   */
+  denials: CodingDenial[];
+  /**
+   * The owner's permission rules as they stood when this run STARTED.
+   *
+   * Frozen on the record for the same reason `effort`, `maxTurns` and `media`
+   * are: a resume, a retry and the review pass all re-spawn this record, and
+   * the tools a run holds must not appear or vanish under it because the owner
+   * edited the list while it was working.
+   */
+  allowRules: string[];
   /** The effort the run was started with. Recorded per-run because the owner
    *  can change the setting while a run is in flight. */
   effort: CodingEffort;
@@ -900,6 +958,25 @@ export interface FinishedSubagent extends ActiveSubagent {
   refused: boolean;
 }
 
+/**
+ * One refused action, as the owner reads it and as the box can answer it.
+ *
+ * `text` is what the rail has always shown ("Bash: curl http://example");
+ * `rule` is the "Allow next time" button's payload, or null when this box has
+ * no rule to offer for it.
+ *
+ * `refusal` is why there is no rule, and only when there WAS a rule to judge:
+ * the action named a path the device keeps every run out of, so the page says
+ * so instead of showing a button that could not work. Null covers both "there
+ * is a rule" and "this kind of action never had one to offer" (a Bash command,
+ * a tool no rule may name) — neither is a refusal the owner can act on.
+ */
+export interface CodingDenial {
+  text: string;
+  rule: string | null;
+  refusal: AllowRuleRefusal | null;
+}
+
 /** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
 export const SUBAGENT_HISTORY_KEPT = 40;
 
@@ -938,6 +1015,10 @@ export interface CodingAgentStatus {
   generateAudio: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
+  /** The owner's standing permission rules, in the order they saved them. */
+  allowRules: string[];
+  /** How many they may keep, so the editor can say so without guessing. */
+  maxAllowRules: number;
   harnessCommand: string;
   maxTaskChars: number;
   /** How hard a run thinks per turn. */
@@ -1252,6 +1333,91 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
   }
   await configSet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY, on);
   return on;
+}
+
+/**
+ * A refusal the owner can act on: the rule-level `code` beside the 400 every
+ * other bad setting answers with.
+ *
+ * A subclass rather than a second error type, so every route that already
+ * catches `CodingAgentError` keeps working unchanged — `httpStatusForCodingError`
+ * reads `kind` and answers 400 — while the one route that knows about rules can
+ * read `code` and let the panel say "that rule is already on the list" in the
+ * owner's own language.
+ */
+export class AllowRuleError extends CodingAgentError {
+  constructor(readonly code: AllowRuleRefusal, message: string) {
+    super("invalid", message);
+    this.name = "AllowRuleError";
+  }
+}
+
+/**
+ * What this box refuses to every run, in the shape the rule validator reads.
+ *
+ * Read fresh per call: `fileDenyRules()` walks data/ and the checkout, so the
+ * answer follows the box as files come and go. `BASH_KILL_DENYLIST` is the one
+ * command list actually passed to the CLI; `BASH_DENYLIST` is documentation
+ * today (see its comment) and is included anyway, because a command this device
+ * has written down as never-allowed must not become allowable through this door
+ * just because the current build grants `Bash(*)` and leans on the tool list.
+ */
+export function allowRuleContext(): AllowRuleContext {
+  return {
+    denyRules: [...fileDenyRules(), ...BASH_KILL_DENYLIST, ...BASH_DENYLIST],
+    homeDir: homeDir(),
+  };
+}
+
+/** The owner's saved permission rules, re-validated on the way out. */
+export async function getAllowRules(): Promise<string[]> {
+  return normalizeAllowRules(await configGet(CODING_AGENT_ALLOW_RULES_CONFIG_KEY));
+}
+
+/**
+ * Save one rule — from the editor in Settings, or from "Allow next time" on a
+ * refusal.
+ *
+ * The list on disk is read first and handed to the validator, so the duplicate
+ * and the cap are decided against what is actually stored rather than against
+ * whatever the browser last saw. Appended, never sorted: the owner reads their
+ * own list in the order they built it.
+ *
+ * @param raw the rule as typed, or as the button offered it
+ * @returns the whole list as it now stands
+ * @throws AllowRuleError carrying the rule-level code on anything refused
+ */
+export async function addAllowRule(raw: unknown): Promise<string[]> {
+  const rules = await getAllowRules();
+  const verdict = validateAllowRule(raw, rules, allowRuleContext());
+  if (!verdict.ok) throw new AllowRuleError(verdict.code, verdict.message);
+  const next = [...rules, verdict.rule];
+  await configSet(CODING_AGENT_ALLOW_RULES_CONFIG_KEY, next);
+  return next;
+}
+
+/**
+ * Take one rule off the list.
+ *
+ * Removing a rule that is not there SUCCEEDS, which is why this does not answer
+ * 404: two open desktops poll the same status, and the second Remove of a rule
+ * the first one already took off is the owner asking for a state the box is
+ * already in. Narrowing what a run may do is never the request this device
+ * refuses on a technicality.
+ */
+export async function removeAllowRule(raw: unknown): Promise<string[]> {
+  if (typeof raw !== "string") {
+    throw new AllowRuleError("malformed", "A permission rule must be text.");
+  }
+  const wanted = raw.trim();
+  const rules = await getAllowRules();
+  const next = rules.filter((rule) => rule !== wanted);
+  // Nothing to write when nothing changed — the answer is still the list, so
+  // the caller re-renders from the truth either way.
+  if (next.length !== rules.length) {
+    await configSet(CODING_AGENT_ALLOW_RULES_CONFIG_KEY, next);
+  }
+  return next;
 }
 
 /** Record that the owner finished (or re-entered) the setup wizard. */
@@ -1781,6 +1947,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
+    allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY]),
+    maxAllowRules: MAX_ALLOW_RULES,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,
@@ -1901,6 +2069,25 @@ function normalizeRun(raw: CodingRun): CodingRun {
     deniedActions: Array.isArray(raw.deniedActions)
       ? raw.deniedActions.filter((d): d is string => typeof d === "string")
       : [],
+    // A record from before the structured list existed keeps its strings and
+    // gets no buttons — deriving a rule by re-parsing "Bash: curl …" would be
+    // guessing at what the tool was pointed at, and the one thing a button that
+    // widens a permission may not do is guess.
+    denials: Array.isArray(raw.denials)
+      ? raw.denials
+        .filter((d): d is CodingDenial => !!d && typeof d === "object" && typeof (d as CodingDenial).text === "string")
+        .map((d) => ({
+          text: d.text,
+          rule: typeof d.rule === "string" ? d.rule : null,
+          // A code this build does not know is dropped rather than passed on:
+          // the page words it from a fixed table, and an unknown code would
+          // render as nothing beside a refusal that then explains itself twice.
+          refusal: isAllowRuleRefusal(d.refusal) ? d.refusal : null,
+        }))
+      : [],
+    // Re-validated rather than trusted: this list is what a resume hands to the
+    // CLI, and the floor it had to clear when the run started may have risen.
+    allowRules: normalizeAllowRules(raw.allowRules),
     effort: isEffort(raw.effort) ? raw.effort : DEFAULT_EFFORT,
     // A record written before this field existed, or one left by a restart,
     // has no live sub-agents by definition.
@@ -2187,6 +2374,8 @@ function cloneRun(run: CodingRun): CodingRun {
     progress: [...run.progress],
     progressAt: [...run.progressAt],
     deniedActions: [...run.deniedActions],
+    denials: run.denials.map((d) => ({ ...d })),
+    allowRules: [...run.allowRules],
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
     subagents: run.subagents.map((a) => ({ ...a })),
     subagentsByType: { ...run.subagentsByType },
@@ -2689,8 +2878,35 @@ const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-sec
  * data/ itself, whose entries the first pass already covered. Without the
  * second pass the brief's promise that the checkout is off limits held for
  * nothing but data/ and .env: src/, mcp/ and scripts/ were open to Read.
+ *
+ * THE ONE EXCEPTION, AND WHAT IT COSTS. A deny rule outranks an allow rule in
+ * Claude Code, so while `~/.claude-ds/**` is denied wholesale no owner rule can
+ * reach the harness's own per-project notes — the refusal this feature exists to
+ * answer. Given an owner rule that names one such project folder
+ * (`unlockedSoftPaths`), the broad tree deny is replaced by TWO passes of
+ * entry-by-entry denials: everything in `~/.claude-ds` except `projects`, and
+ * everything in `~/.claude-ds/projects` except the one project the rule named.
+ * The OAuth token, the settings and every OTHER project stay denied; exactly one
+ * folder opens. `HARNESS_STATE_SECRETS` is listed even when absent, the same
+ * belt-and-braces `DATA_SECRET_FILES` gets, so a store that has not been written
+ * yet is still denied. `allowRules` must already be validated — `buildRunArgs`
+ * is the only caller that passes any, and it normalises first.
+ *
+ * @param allowRules the owner's rules for THIS run, already validated; none
+ *                   means the wholesale denials every other caller gets
  */
-export function fileDenyRules(): string[] {
+/**
+ * Entries of the harness's state directories that are denied by name, even when
+ * a project subtree beside them has been unlocked and even when they do not
+ * exist yet: the OAuth token, the settings, the shell and session history.
+ */
+const HARNESS_STATE_SECRETS = [
+  ".credentials.json", ".claude.json", "settings.json", "settings.local.json",
+  "history.jsonl", "sessions", "session-env", "shell-snapshots", "ide", "plugins",
+  "statsig", "todos", "daemon.log", "daemon.status.json", "daemon.lock",
+];
+
+export function fileDenyRules(allowRules: readonly string[] = []): string[] {
   const home = homeDir();
   const rules: string[] = [];
   const denyTree = (root: string) => {
@@ -2720,7 +2936,28 @@ export function fileDenyRules(): string[] {
       else denyFile(abs);
     }
   };
-  for (const sub of DENIED_HOME_SUBTREES) denyTree(path.join(home, sub));
+  const unlocked = new Set(unlockedSoftPaths(allowRules, home));
+  for (const sub of DENIED_HOME_SUBTREES) {
+    const root = path.join(home, sub);
+    // The soft child of THIS subtree that holds an unlocked project, as its own
+    // last segment ("projects"), and the folders inside it that are open.
+    // SOFT_HOME_SUBTREES is one segment deep inside its parent by construction,
+    // which is what makes that slice sound.
+    const open = SOFT_HOME_SUBTREES
+      .filter((soft) => soft.startsWith(`${sub}/`))
+      .map((soft) => ({ entry: soft.slice(sub.length + 1), dir: path.join(home, soft) }))
+      .filter(({ dir }) => [...unlocked].some((p) => p.startsWith(`${dir}${path.sep}`)));
+    if (open.length === 0) {
+      denyTree(root);
+      continue;
+    }
+    // Pass one: the harness's own state beside `projects` stays shut.
+    denyEntries(root, HARNESS_STATE_SECRETS, (entry) => open.some((o) => o.entry === entry));
+    // Pass two: every project EXCEPT the ones the owner named. A project that
+    // does not exist on disk yet gets no rule either way — there is nothing to
+    // deny, and the allow rule is what would open it once it appears.
+    for (const { dir } of open) denyEntries(dir, [], (entry) => unlocked.has(path.join(dir, entry)));
+  }
   denyEntries(DATA_DIR, DATA_SECRET_FILES, (entry) => DATA_DIR_PUBLIC_SUBTREES.has(entry));
   denyEntries(CONFIG_ROOT, [".env"], (entry) => path.join(CONFIG_ROOT, entry) === DATA_DIR);
   return rules;
@@ -2818,7 +3055,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -2887,10 +3124,24 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // prompt it cannot answer in headless mode. Reads only, and only there:
     // the deny rules below still win for anything secret, and a write
     // outside the folder is still refused.
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE);
+    // The owner's own rules come LAST, after everything the device ships, so
+    // the built-in prefix stays where the contract tests expect it. Validated
+    // again here rather than trusted: this is the last place before argv and it
+    // is exported, so a caller that assembled a list by hand (a test, a future
+    // surface) cannot put an unvetted string on a run's command line. An allow
+    // rule only ever ADDS: every deny rule below still outranks it, which is
+    // why a rule the device would refuse anyway is rejected at the door and
+    // never stored.
+    const allowRules = normalizeAllowRules(opts.allowRules);
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE, ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
-    args.push("--disallowedTools", ...fileDenyRules(), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST));
+    //
+    // The SAME rules the allow-list was built from, because a deny rule
+    // outranks an allow rule: without handing them over here, an owner rule for
+    // the harness's own project notes would sit in argv underneath the
+    // wholesale `~/.claude-ds/**` deny and grant exactly nothing.
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST));
   }
   return args;
 }
@@ -3290,19 +3541,83 @@ const MAX_DENIAL_CHARS = 160;
  * `{ tool_name, tool_use_id, tool_input }`; the useful part is the tool and
  * the one field that says what it was pointed at.
  */
-function describeDenial(entry: unknown): string {
-  if (!entry || typeof entry !== "object") return "an action";
+function denialParts(entry: unknown): { tool: string; target: string | null } {
+  if (!entry || typeof entry !== "object") return { tool: "tool", target: null };
   const e = entry as { tool_name?: unknown; tool_input?: unknown };
   const tool = typeof e.tool_name === "string" && e.tool_name ? e.tool_name : "tool";
   const input = (e.tool_input && typeof e.tool_input === "object" ? e.tool_input : {}) as Record<string, unknown>;
-  const target = ["command", "file_path", "notebook_path", "path", "pattern"]
+  // `url` joined the list so a refused WebFetch says WHICH address it was
+  // refused rather than "(no details)". It gets no "Allow next time" — only the
+  // file tools may be named in an owner rule (ALLOW_RULE_TOOLS) — but the
+  // sentence the owner reads is the poorer for leaving it out.
+  const target = ["command", "file_path", "notebook_path", "path", "url", "pattern"]
     .map((k) => input[k])
     .find((v): v is string => typeof v === "string" && v !== "");
+  return { tool, target: target ?? null };
+}
+
+function describeDenial(entry: unknown): string {
+  const { tool, target } = denialParts(entry);
   return `${tool}: ${target ?? "(no details)"}`.slice(0, MAX_DENIAL_CHARS);
+}
+
+/**
+ * What this box would have to allow for a refused action to go through — the
+ * narrowest such rule, already judged against the floor.
+ *
+ * Two halves, and only the first of them is portable: `deriveAllowRule` turns
+ * "Read of /…/memory/notes.md" into `Read(//…/memory/**)` with no knowledge of
+ * this device at all, and the validator then holds that text against what the
+ * box actually refuses (`allowRuleContext()`, walked from disk). Deny outranks
+ * allow in Claude Code, so a rule inside a denied tree would grant nothing:
+ * those come back as a `refusal` code rather than a rule, and the page says why
+ * instead of offering a button that could not work.
+ *
+ * `{ rule: null, refusal: null }` is the third answer and the commonest: a Bash
+ * command, a tool no rule may name, a refusal whose target could not be read.
+ * Nothing to offer, and nothing to explain either.
+ *
+ * @param denial the refused action's tool and what it was pointed at
+ * @param context what the device denies right now; read here when omitted
+ */
+export function suggestAllowRule(
+  denial: DenialInput,
+  context?: AllowRuleContext,
+): { rule: string | null; refusal: AllowRuleRefusal | null } {
+  const candidate = deriveAllowRule(denial);
+  if (!candidate) return { rule: null, refusal: null };
+  // No `known` list: this is the rule the action NEEDS, and whether the owner
+  // already saved it is the add route's question, not this one's.
+  const verdict = validateAllowRule(candidate, [], context ?? allowRuleContext());
+  return verdict.ok ? { rule: verdict.rule, refusal: null } : { rule: null, refusal: verdict.code };
+}
+
+/**
+ * The refusals of one result event, as the owner reads them AND as this box can
+ * answer them.
+ *
+ * The context is read at most ONCE per event — `fileDenyRules()` walks two
+ * directories — and only when there is a candidate rule to judge against it,
+ * which is why the cheap pure derivation is asked first.
+ */
+function denialsFrom(entries: readonly unknown[]): CodingDenial[] {
+  let context: AllowRuleContext | null = null;
+  return entries.map((entry) => {
+    const parts = denialParts(entry);
+    const text = describeDenial(entry);
+    if (!deriveAllowRule(parts)) return { text, rule: null, refusal: null };
+    context ??= allowRuleContext();
+    const { rule, refusal } = suggestAllowRule(parts, context);
+    return { text, rule, refusal };
+  });
 }
 
 /** Exported for the test: this parses a payload the device does not control. */
 export const describeDenialForTests = describeDenial;
+
+/** Exported for the same reason — and because the rule half is what decides
+ *  whether a refusal gets an "Allow next time" button at all. */
+export const denialsFromForTests = denialsFrom;
 
 /**
  * The `todos` a TodoWrite tool_use carries, or null when the payload is not a
@@ -3721,9 +4036,13 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       }
     }
     if (Array.isArray(event.permission_denials)) {
-      const described = event.permission_denials.map(describeDenial);
+      const parsed = denialsFrom(event.permission_denials);
+      const described = parsed.map((d) => d.text);
       run.permissionDenials = (continuation ? run.permissionDenials : 0) + event.permission_denials.length;
       run.deniedActions = (continuation ? [...run.deniedActions, ...described] : described).slice(0, MAX_DENIALS_KEPT);
+      // The same cut, kept apart rather than paired by index: a reader renders
+      // one list or the other, never one indexed into the other.
+      run.denials = (continuation ? [...run.denials, ...parsed] : parsed).slice(0, MAX_DENIALS_KEPT);
     }
     const text = typeof event.result === "string" ? event.result.trim() : "";
     if (text) {
@@ -4570,7 +4889,7 @@ function spawnRun(
   // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
   // the pass: in each case the flash reviewer would be a second look.
   const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, run: { id: run.id, directory: run.directory, media: run.media } }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -4829,13 +5148,15 @@ interface RunSettings {
   /** The owner's review-pass switch, read with the rest and frozen on the
    *  record (CodingRun.reviewPass): the brief and the pass decide from it. */
   reviewPass: boolean;
+  /** The owner's permission rules, frozen on the record for the same reason. */
+  allowRules: string[];
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass] = await Promise.all([
-    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
+  const [effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(), getAllowRules(),
   ]);
-  return { effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass };
+  return { effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules };
 }
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
@@ -4870,6 +5191,8 @@ function newRunRecord(fields: {
     commandsRun: 0,
     permissionDenials: 0,
     deniedActions: [],
+    denials: [],
+    allowRules: [...fields.settings.allowRules],
     effort: fields.settings.effort,
     subagentsActive: 0,
     activeSubagents: [],
