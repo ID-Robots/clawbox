@@ -400,7 +400,7 @@ import {
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
-import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_CHAT_MODEL_LABEL } from '@/lib/clawbox-ai-models'
+import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_CHAT_MODEL_LABEL, isClawboxAiProvider } from '@/lib/clawbox-ai-models'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
@@ -1304,7 +1304,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const effectiveThinkingLevel: ThinkingLevel = visibleThinkingLevels.includes(thinkingLevel)
     ? thinkingLevel
     : reasoningConfig.default
-  const isClawboxAiChat = headerProvider === 'clawai' || headerProvider === 'deepseek'
+  // Is this chat on ClawBox AI? Both spellings count — `clawai` from the UI's
+  // own normalisation and `deepseek` from the gateway config — which is why the
+  // test lives in clawbox-ai-models.ts rather than being re-typed per call site.
+  const isClawboxAiChat = isClawboxAiProvider(headerProvider)
   const chatProviderCatalog = useProviderCatalog(isClawboxAiChat ? null : headerProvider)
   // Does the greying-out rule apply to THIS box? `chatModelState` is refetched
   // whenever the provider changes or a configure lands, so this follows the
@@ -6811,11 +6814,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   triggerMaxWidth={130}
                   popoverWidth={220}
                 />
-                {/* ClawBox AI always uses Flash; other providers retain their model picker. */}
-                {hermesProvider === 'clawai' && (
-                  <span className="header-dropdown-trigger" style={{ cursor: 'default' }}>{CLAWBOX_AI_CHAT_MODEL_LABEL}</span>
-                )}
-                {hermesProvider !== 'clawai' && showModelPill && (
+                {/* ClawBox AI gets NO model pill at all — not a picker (it runs
+                    the one chat model) and not a read-only label either. The
+                    label was a pill-shaped thing that could not be clicked,
+                    naming a model nobody on this product chooses, and it spent
+                    the row's tightest resource — see the width budget in
+                    src/lib/chat-header-pills.ts — saying what the "ClawBox"
+                    pill beside it already says. The predicate is shared with
+                    the OpenClaw branch below so the two editions cannot drift
+                    on which spelling of the provider counts. */}
+                {!isClawboxAiProvider(hermesProvider) && showModelPill && (
                   <HeaderDropdown
                     ariaLabel={tr('chat.pillHermesModel', 'Hermes model')}
                     /* While the new provider's list loads there is no model to
@@ -6947,9 +6955,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               (option) => option.id === chatModelState.activeOptionId,
             )
             if (!activeOption?.provider) return null
-            if (isClawboxAiChat) {
-              return <span className="header-dropdown-trigger" style={{ cursor: 'default' }}>{CLAWBOX_AI_CHAT_MODEL_LABEL}</span>
-            }
+            // ClawBox AI: nothing here. Same rule as the Hermes branch above,
+            // through the same predicate — one product, one chat model, so the
+            // provider pill is the last word before the thinking dial. The row
+            // collapses rather than leaving a gap: this returns no node, and
+            // .chat-header-pills only puts a gap BETWEEN pills that render.
+            //
+            // Stated here even though `chatProviderCatalog` is already null for
+            // this provider (see useProviderCatalog above), because THIS is
+            // where the pill is built: a future change that gives ClawBox AI a
+            // catalogue again must not quietly give it a pill again too.
+            if (isClawboxAiChat) return null
             const catalog = chatProviderCatalog
             if (!catalog) return null
             // Show the dropdown when there are multiple models to pick OR

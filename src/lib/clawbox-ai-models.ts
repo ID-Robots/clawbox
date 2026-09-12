@@ -140,6 +140,29 @@ export function normalizeClawboxAiPlanTier(value: unknown): ClawboxAiPlanTier | 
 }
 
 /**
+ * Is `provider` the ClawBox AI proxy, under either of the two ids the product
+ * spells it with?
+ *
+ * `deepseek` is what the OpenClaw gateway config registers it under (the proxy
+ * forwards to DeepSeek), and `clawai` is what the UI normalises that to
+ * (`normalizeProvider` in src/app/setup-api/chat/model/route.ts) as well as
+ * Hermes' own custom-provider slug (src/lib/hermes-clawai.ts). BOTH reach the
+ * chat header — the OpenClaw branch reads a provider id that may still carry
+ * the wire spelling — so every surface that has to recognise ClawBox AI asks
+ * here instead of re-typing the pair. Two hand-written copies of this test are
+ * exactly how the header came to hide its model pill under one spelling and
+ * keep showing it under the other.
+ *
+ * Says WHICH proxy, not which model and not who may run it: see
+ * {@link isClawboxAiProModel} and {@link portalDeniesClawboxAiModel}.
+ */
+export function isClawboxAiProvider(provider: string | null | undefined): boolean {
+  if (typeof provider !== "string") return false;
+  const normalized = provider.trim().toLowerCase();
+  return normalized === CLAWBOX_AI_PROVIDER || normalized === "clawai";
+}
+
+/**
  * True if `model` is a fully-qualified ClawBox AI Pro slug
  * (`clawai/deepseek-v4-pro` or `deepseek/deepseek-v4-pro`).
  *
@@ -155,7 +178,7 @@ export function isClawboxAiProModel(model: string | null | undefined): boolean {
   const provider = model.slice(0, idx);
   const modelId = model.slice(idx + 1);
   if (modelId !== CLAWBOX_AI_PRO_MODEL_ID) return false;
-  return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
+  return isClawboxAiProvider(provider);
 }
 
 /**
@@ -194,8 +217,7 @@ function bareModelId(ref: string): string {
 function isClawboxAiModelRef(ref: string): boolean {
   const idx = ref.indexOf("/");
   if (idx <= 0) return false;
-  const provider = ref.slice(0, idx).trim().toLowerCase();
-  return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
+  return isClawboxAiProvider(ref.slice(0, idx));
 }
 
 /** The translation keys a picker draws one ClawBox AI chat tier with. */
