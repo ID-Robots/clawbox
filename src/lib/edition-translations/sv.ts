@@ -647,7 +647,7 @@ export const sv: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "En körning får redan använda alla kommandon utom de som dödar processer efter namn, och de kan aldrig tillåtas. En behörighetsregel gäller filer.",
   "codingAgent.ruleRefusedTooBroad": "Den regeln är för bred. Namnge mappen det gäller.",
   "codingAgent.ruleRefusedProtected": "Den sökvägen innehåller inloggningsuppgifter eller boxens eget tillstånd. Ingen regel kan öppna den.",
-  "codingAgent.ruleRefusedUnsafe": "Boxen nekar det för varje körning, så regeln skulle inte ge något.",
+  "codingAgent.ruleRefusedUnsafe": "En regel får inte gå utanför mappen den anger.",
   "codingAgent.ruleRefusedDuplicate": "Den regeln finns redan i listan.",
   "codingAgent.ruleRefusedTooMany": "Listan är full. Ta bort en regel först.",
   "codingAgent.stop": "Stoppa",

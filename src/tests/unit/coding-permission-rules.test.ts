@@ -30,6 +30,7 @@ import {
   validateAllowRule,
   type AllowRuleContext,
 } from "@/lib/coding-permission-rules";
+import { codingAgentEn as editionEn } from "@/lib/edition-translations/en-coding-agent";
 
 const HOME = "/home/clawbox";
 
@@ -243,19 +244,42 @@ describe("the soft half: one named harness project folder", () => {
 
   it("gives no exemption to a lookalike path outside this box's home", () => {
     expect(verdict("Read(//srv/elsewhere/.claude-ds/projects/app/**)", [], context())).toBe("protected");
-    // With no context there is no home to compare against, so the textual
-    // floor is all there is — and the server is what applies the rest.
-    expect(verdict("Read(//srv/elsewhere/.claude-ds/projects/app/**)")).toContain("projects/app");
+  });
+
+  it("gives no exemption to a lookalike under a HARD segment inside home", () => {
+    // The soft branch is judged first and returns before the hard floor, so a
+    // loose `.claude-ds/projects` match anywhere under the home was a way to
+    // store a rule naming a credential store. It granted nothing, which is
+    // exactly the "saved rule that lies about what the box allows" the module
+    // header refuses to ship.
+    expect(verdict(`Read(/${HOME}/.ssh/.claude-ds/projects/app/**)`, [], context())).toBe("protected");
+    expect(verdict(`Read(/${HOME}/.openclaw/.claude/projects/app/**)`, [], context())).toBe("protected");
+    // Nor may the subtree sit one level too deep under the home.
+    expect(verdict(`Read(/${HOME}/sub/.claude-ds/projects/app/**)`, [], context())).toBe("protected");
+  });
+
+  it("treats nothing as soft when the home is unknowable", () => {
+    // No home means no anchor to check, so the path falls through to the hard
+    // floor — the safe direction to be wrong in. Every caller that can STORE a
+    // rule or write argv passes a home (allowRuleHomeContext).
+    expect(verdict(`Read(/${HOME}/.claude-ds/projects/app/**)`)).toBe("protected");
+    expect(softProjectDir(`${HOME}/.claude-ds/projects/app`)).toBeNull();
   });
 
   it("softProjectDir names the ONE project folder, however deep the path went", () => {
-    expect(softProjectDir(`${HOME}/.claude-ds/projects/app`)).toBe(`${HOME}/.claude-ds/projects/app`);
-    expect(softProjectDir(`${HOME}/.claude-ds/projects/app/memory/notes.md`))
+    expect(softProjectDir(`${HOME}/.claude-ds/projects/app`, HOME)).toBe(`${HOME}/.claude-ds/projects/app`);
+    expect(softProjectDir(`${HOME}/.claude-ds/projects/app/memory/notes.md`, HOME))
       .toBe(`${HOME}/.claude-ds/projects/app`);
-    expect(softProjectDir(`${HOME}/.claude/projects/other`)).toBe(`${HOME}/.claude/projects/other`);
+    expect(softProjectDir(`${HOME}/.claude/projects/other`, HOME)).toBe(`${HOME}/.claude/projects/other`);
     // One segment short: the parent is not a project.
-    expect(softProjectDir(`${HOME}/.claude-ds/projects`)).toBeNull();
-    expect(softProjectDir(`${HOME}/Projects/app`)).toBeNull();
+    expect(softProjectDir(`${HOME}/.claude-ds/projects`, HOME)).toBeNull();
+    expect(softProjectDir(`${HOME}/Projects/app`, HOME)).toBeNull();
+    // Anchored: the subtree has to BE the home's, not merely look like it.
+    expect(softProjectDir(`${HOME}/.ssh/.claude-ds/projects/app`, HOME)).toBeNull();
+    expect(softProjectDir(`/elsewhere/.claude-ds/projects/app`, HOME)).toBeNull();
+    // A trailing slash on the home is the same home.
+    expect(softProjectDir(`${HOME}/.claude-ds/projects/app`, `${HOME}/`))
+      .toBe(`${HOME}/.claude-ds/projects/app`);
   });
 
   it("unlockedSoftPaths reports exactly the folders a saved list opens", () => {
@@ -276,6 +300,14 @@ describe("the soft half: one named harness project folder", () => {
 
   it("unlockedSoftPaths unlocks nothing outside this box's home", () => {
     expect(unlockedSoftPaths(["Read(//srv/other/.claude-ds/projects/app/**)"], HOME)).toEqual([]);
+  });
+
+  it("unlockedSoftPaths unlocks nothing for an unanchored lookalike", () => {
+    // This is the half that actually DROPS a deny rule, so the anchor matters
+    // here even more than at the door: it reported
+    // `<home>/.ssh/.claude-ds/projects/app` as an unlocked folder.
+    expect(unlockedSoftPaths([`Read(/${HOME}/.ssh/.claude-ds/projects/app/**)`], HOME)).toEqual([]);
+    expect(unlockedSoftPaths([`Read(/${HOME}/sub/.claude/projects/app/**)`], HOME)).toEqual([]);
   });
 });
 
@@ -414,6 +446,26 @@ describe("the refusal codes travel", () => {
   it("a code read back off a record is checked before it is trusted", () => {
     for (const code of ALLOW_RULE_REFUSALS) expect(isAllowRuleRefusal(code)).toBe(true);
     for (const bad of ["", "nope", null, undefined, 1, {}]) expect(isAllowRuleRefusal(bad)).toBe(false);
+  });
+
+  it("unsafe-code-matches-its-cause: the one thing it means is the one thing it says", () => {
+    // `unsafe` is returned from exactly one place — a specifier with a `..`
+    // segment — and the owner-facing sentence used to describe the OTHER,
+    // never-reached meaning ("this box refuses that to every run"), which is
+    // the `protected` cause. A reason that is not the reason is worse than no
+    // reason, so the pair is pinned.
+    const v = validateAllowRule("Read(//home/clawbox/Projects/../../.ssh/**)", [], context());
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.code).toBe("unsafe");
+      // The validator's own English and the catalogue key must tell one story.
+      expect(v.message.toLowerCase()).toContain("out of the folder it names");
+      expect(editionEn[ALLOW_RULE_REFUSAL_KEYS.unsafe].toLowerCase())
+        .toContain("out of the folder it names");
+    }
+    // ...and the two codes stay distinguishable in the catalogue.
+    expect(editionEn[ALLOW_RULE_REFUSAL_KEYS.unsafe])
+      .not.toBe(editionEn[ALLOW_RULE_REFUSAL_KEYS.protected]);
   });
 
   it("every refusal carries an English sentence beside the code", () => {

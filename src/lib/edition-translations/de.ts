@@ -650,7 +650,7 @@ export const de: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "Ein Lauf darf bereits jeden Befehl verwenden, außer denen, die Prozesse nach Namen beenden — und die lassen sich nie erlauben. Eine Berechtigungsregel gilt für Dateien.",
   "codingAgent.ruleRefusedTooBroad": "Diese Regel ist zu weit gefasst. Nennen Sie den Ordner, um den es geht.",
   "codingAgent.ruleRefusedProtected": "Dieser Pfad enthält Zugangsdaten oder den eigenen Zustand dieser Box. Keine Regel kann ihn öffnen.",
-  "codingAgent.ruleRefusedUnsafe": "Diese Box verweigert das jedem Lauf, die Regel würde also nichts gewähren.",
+  "codingAgent.ruleRefusedUnsafe": "Eine Regel darf nicht aus dem Ordner heraustreten, den sie benennt.",
   "codingAgent.ruleRefusedDuplicate": "Diese Regel steht bereits auf der Liste.",
   "codingAgent.ruleRefusedTooMany": "Die Liste ist voll. Entfernen Sie zuerst eine Regel.",
   "codingAgent.stop": "Stoppen",

@@ -653,7 +653,7 @@ export const ja: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "実行はすでに、名前でプロセスを終了させるもの以外のすべてのコマンドを使えます。そしてそれらは決して許可できません。権限ルールはファイルのためのものです。",
   "codingAgent.ruleRefusedTooBroad": "そのルールは広すぎます。対象のフォルダーを指定してください。",
   "codingAgent.ruleRefusedProtected": "そのパスには資格情報かこのボックス自身の状態が入っています。どのルールでも開けません。",
-  "codingAgent.ruleRefusedUnsafe": "このボックスはすべての実行にそれを拒否するため、ルールは何も与えません。",
+  "codingAgent.ruleRefusedUnsafe": "ルールは指定したフォルダーの外に出ることはできません。",
   "codingAgent.ruleRefusedDuplicate": "そのルールはすでに一覧にあります。",
   "codingAgent.ruleRefusedTooMany": "一覧がいっぱいです。先にルールを1つ削除してください。",
   "codingAgent.stop": "停止",

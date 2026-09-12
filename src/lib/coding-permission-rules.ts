@@ -93,8 +93,11 @@ export const ALLOW_RULE_REFUSALS = [
   "too_broad",
   /** A HARD subtree: credentials, keys, the box's own state. Never allowable. */
   "protected",
-  /** Something else the device refuses on its own, or a rule that walks out
-   *  of the folder it names. */
+  /** A rule that walks out of the folder it names (a `..` segment). The ONE
+   *  thing this code means, and `codingAgent.ruleRefusedUnsafe` says exactly
+   *  that: it used to read "the device refuses that to every run", which is
+   *  the `protected` cause, so the owner was given a reason that was not the
+   *  reason. `unsafe-code-matches-its-cause` in the unit suite pins the pair. */
   "unsafe",
   /** Already saved. Not an error the owner has to fix, but not a second row. */
   "duplicate",
@@ -279,16 +282,35 @@ function hasSegmentRun(segs: readonly string[], needle: string): boolean {
  * The bare `…/projects/**` is not soft: that is every project the harness has
  * ever touched, which is not what a one-click answer to one refusal should
  * open, and it is why the loop stops one short of the last segment.
+ *
+ * ANCHORED AT THE HOME, and that is the whole of what keeps this honest. The
+ * subtree must sit exactly at `<home>/.claude-ds/projects`, not merely somewhere
+ * with those two segments in a row: matched loosely,
+ * `//home/you/.ssh/.claude-ds/projects/app/**` was a soft path, and because the
+ * soft branch is judged FIRST and returns before the hard checks, a rule naming
+ * `.ssh` was accepted and stored. It granted nothing — `fileDenyRules` never
+ * matched that path to a deny it could drop — but a saved rule that grants
+ * nothing while looking like a permission is the exact failure this module
+ * exists to prevent (see the header).
+ *
+ * With NO home there is no anchor to check, so nothing is soft: the caller then
+ * falls through to the hard floor, which is the safe direction to be wrong in.
+ * Every path that can store a rule or write argv passes a home.
+ *
+ * @param absolutePath the concrete folder a rule or a refusal is about
+ * @param homeDir this box's home; omit only where it is genuinely unknowable
  */
-export function softProjectDir(absolutePath: string): string | null {
-  const segs = segmentsOf(absolutePath);
+export function softProjectDir(absolutePath: string, homeDir?: string): string | null {
+  const home = homeDir?.replace(/\/+$/, "") ?? "";
+  if (!home) return null;
   for (const sub of SOFT_HOME_SUBTREES) {
-    const want = segmentsOf(sub);
-    for (let i = 0; i + want.length < segs.length; i++) {
-      if (want.every((w, j) => segs[i + j] === w)) {
-        return `/${segs.slice(0, i + want.length + 1).join("/")}`;
-      }
-    }
+    const root = `${home}/${sub}`;
+    // One segment past the subtree at least — the project's own folder — and
+    // the subtree itself exactly at the home.
+    if (!absolutePath.startsWith(`${root}/`)) continue;
+    const rest = segmentsOf(absolutePath.slice(root.length));
+    if (rest.length === 0) continue;
+    return `${root}/${rest[0]}`;
   }
   return null;
 }
@@ -372,18 +394,18 @@ export function validateAllowRule(
     if (segmentsOf(target).length < 2) {
       return refuse("too_broad", "That rule matches a whole region of the box. Name the folder it is about.");
     }
-    const soft = softProjectDir(target);
     // A soft subtree is judged FIRST and on its own: its parent is on the hard
     // list (the harness keeps its token there) and the device's own deny rules
     // still cover the parent tree, so every check below would refuse the one
     // path this feature exists to open.
-    if (soft) {
-      const home = context?.homeDir.replace(/\/+$/, "") ?? "";
-      // Only the harness state under THIS box's home is soft. A lookalike path
-      // elsewhere gets no exemption.
-      if (!home || isAtOrInside(target, home)) {
-        return okRule(tool, trimmedSpecifier, known);
-      }
+    //
+    // `softProjectDir` anchors the match at the home itself, which is what
+    // makes returning early here safe: without the anchor, any path with
+    // `.claude-ds/projects` in it — `…/.ssh/.claude-ds/projects/app` — took
+    // this branch and skipped the hard floor below. With no home nothing is
+    // soft, so an unanchored path falls through to that floor.
+    if (softProjectDir(target, context?.homeDir)) {
+      return okRule(tool, trimmedSpecifier, known);
     }
     for (const prefix of HARD_PREFIXES) {
       if (isAtOrInside(target, prefix)) return protectedRefusal();
@@ -484,12 +506,12 @@ export function unlockedSoftPaths(rules: readonly string[], homeDir: string): st
     if (!(ALLOW_RULE_TOOLS as readonly string[]).includes(tool)) continue;
     const spec = specifier.trim();
     if (!spec.startsWith("//")) continue;
-    const project = softProjectDir(concretePrefix(spec));
+    // Anchored at the home inside `softProjectDir`, which is what actually
+    // keeps a deny rule from being dropped for a lookalike path: an
+    // `isAtOrInside(project, home)` test here passed
+    // `<home>/.ssh/.claude-ds/projects/app` and reported it as unlocked.
+    const project = softProjectDir(concretePrefix(spec), home);
     if (!project) continue;
-    // Only the harness state under THIS box's home is soft; the validator says
-    // the same thing when the rule is saved, and says it again here because
-    // this is what actually drops a deny rule.
-    if (home && !isAtOrInside(project, home)) continue;
     out.add(project);
   }
   return [...out];

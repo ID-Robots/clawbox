@@ -662,7 +662,7 @@ export const zh: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "运行已经可以使用除按名称结束进程之外的所有命令，而那些命令永远无法被允许。权限规则针对的是文件。",
   "codingAgent.ruleRefusedTooBroad": "该规则范围过宽。请指明具体的文件夹。",
   "codingAgent.ruleRefusedProtected": "该路径存放着凭据或这台设备自身的状态，任何规则都无法打开它。",
-  "codingAgent.ruleRefusedUnsafe": "这台设备对每次运行都拒绝该操作，因此规则不会带来任何权限。",
+  "codingAgent.ruleRefusedUnsafe": "规则不能越出它所指定的文件夹。",
   "codingAgent.ruleRefusedDuplicate": "该规则已在列表中。",
   "codingAgent.ruleRefusedTooMany": "列表已满。请先移除一条规则。",
   "codingAgent.stop": "停止",

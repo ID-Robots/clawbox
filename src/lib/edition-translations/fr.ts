@@ -651,7 +651,7 @@ export const fr: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "Une exécution peut déjà utiliser toutes les commandes sauf celles qui tuent des processus par nom, et celles-là ne peuvent jamais être autorisées. Une règle d'autorisation concerne les fichiers.",
   "codingAgent.ruleRefusedTooBroad": "Cette règle est trop large. Nommez le dossier concerné.",
   "codingAgent.ruleRefusedProtected": "Ce chemin contient des identifiants ou l'état propre de cette box. Aucune règle ne peut l'ouvrir.",
-  "codingAgent.ruleRefusedUnsafe": "Cette box le refuse à toute exécution, la règle n'accorderait donc rien.",
+  "codingAgent.ruleRefusedUnsafe": "Une règle ne peut pas sortir du dossier qu'elle nomme.",
   "codingAgent.ruleRefusedDuplicate": "Cette règle est déjà dans la liste.",
   "codingAgent.ruleRefusedTooMany": "La liste est pleine. Retirez d'abord une règle.",
   "codingAgent.stop": "Arrêter",

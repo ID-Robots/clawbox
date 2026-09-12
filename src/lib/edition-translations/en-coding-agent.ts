@@ -197,7 +197,7 @@ export const codingAgentEn: Record<string, string> = {
     "A run may already use every command except the ones that kill processes by name, and those can never be allowed. A permission rule is for files.",
   "codingAgent.ruleRefusedTooBroad": "That rule is too wide. Name the folder it is about.",
   "codingAgent.ruleRefusedProtected": "That path holds credentials or this box's own state. No rule can open it.",
-  "codingAgent.ruleRefusedUnsafe": "This box refuses that to every run, so the rule would grant nothing.",
+  "codingAgent.ruleRefusedUnsafe": "A rule may not step out of the folder it names.",
   "codingAgent.ruleRefusedDuplicate": "That rule is already on the list.",
   "codingAgent.ruleRefusedTooMany": "The list is full. Remove a rule first.",
   "codingAgent.stop": "Stop",

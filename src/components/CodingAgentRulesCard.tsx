@@ -196,8 +196,10 @@ export default function CodingAgentRulesCard() {
         </div>
       </div>
 
+      {/* Announced for the same reason as the run panel's: a refused Add or
+          Remove is only ever rendered after the route has answered. */}
       {error && (
-        <p className="mt-2 text-[11px] text-red-300" data-testid="coding-agent-rules-error">{error}</p>
+        <p role="alert" className="mt-2 text-[11px] text-red-300" data-testid="coding-agent-rules-error">{error}</p>
       )}
     </div>
   );

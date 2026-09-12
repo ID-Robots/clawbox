@@ -646,7 +646,7 @@ export const es: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "Una ejecución ya puede usar cualquier comando salvo los que matan procesos por nombre, y esos nunca pueden permitirse. Una regla de permisos es para archivos.",
   "codingAgent.ruleRefusedTooBroad": "Esa regla es demasiado amplia. Nombre la carpeta de la que se trata.",
   "codingAgent.ruleRefusedProtected": "Esa ruta contiene credenciales o el estado propio de esta caja. Ninguna regla puede abrirla.",
-  "codingAgent.ruleRefusedUnsafe": "Esta caja se lo deniega a toda ejecución, así que la regla no concedería nada.",
+  "codingAgent.ruleRefusedUnsafe": "Una regla no puede salir de la carpeta que nombra.",
   "codingAgent.ruleRefusedDuplicate": "Esa regla ya está en la lista.",
   "codingAgent.ruleRefusedTooMany": "La lista está llena. Quite antes una regla.",
   "codingAgent.stop": "Detener",

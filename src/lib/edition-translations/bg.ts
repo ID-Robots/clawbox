@@ -638,7 +638,7 @@ export const bg: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "Едно изпълнение вече може да използва всяка команда освен тези, които убиват процеси по име, а те никога не могат да бъдат разрешени. Правилото за достъп е за файлове.",
   "codingAgent.ruleRefusedTooBroad": "Това правило е твърде широко. Назовете папката, за която се отнася.",
   "codingAgent.ruleRefusedProtected": "Този път съдържа удостоверения или собственото състояние на кутията. Никое правило не може да го отвори.",
-  "codingAgent.ruleRefusedUnsafe": "Кутията отказва това на всяко изпълнение, така че правилото не би дало нищо.",
+  "codingAgent.ruleRefusedUnsafe": "Правило не може да излиза извън папката, която назовава.",
   "codingAgent.ruleRefusedDuplicate": "Това правило вече е в списъка.",
   "codingAgent.ruleRefusedTooMany": "Списъкът е пълен. Първо премахнете едно правило.",
   "codingAgent.stop": "Спри",

@@ -1411,6 +1411,23 @@ export function allowRuleContext(): AllowRuleContext {
 }
 
 /**
+ * The home alone, in the context shape — no directory walk.
+ *
+ * `softProjectDir` anchors a soft path at the home, so a validator given NO
+ * context treats nothing as soft and drops every harness-project rule on the
+ * floor. That is the safe default for an unknown box and the wrong answer for
+ * this one, which knows its own home: the three readers that cannot afford
+ * `allowRuleContext()`'s two readdirs — the status (read on a polled route), a
+ * run record read back off disk, and `buildRunArgs`, where asking for the deny
+ * rules would be circular — pass this instead. `denyRules` is empty on
+ * purpose: the deny half is either applied elsewhere (the status only
+ * displays) or computed from the very list being validated (`buildRunArgs`).
+ */
+export function allowRuleHomeContext(): AllowRuleContext {
+  return { denyRules: [], homeDir: homeDir() };
+}
+
+/**
  * The owner's saved permission rules, re-validated on the way out.
  *
  * `context` is what makes that re-validation complete: without it a stored rule
@@ -2001,7 +2018,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
-    allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY]),
+    // The home, so a harness-project rule is still on the list the panels
+    // read; the full context's directory walk is not worth it here.
+    allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
     maxAllowRules: MAX_ALLOW_RULES,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
@@ -2141,7 +2160,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
       : [],
     // Re-validated rather than trusted: this list is what a resume hands to the
     // CLI, and the floor it had to clear when the run started may have risen.
-    allowRules: normalizeAllowRules(raw.allowRules),
+    allowRules: normalizeAllowRules(raw.allowRules, allowRuleHomeContext()),
     effort: isEffort(raw.effort) ? raw.effort : DEFAULT_EFFORT,
     // A record written before this field existed, or one left by a restart,
     // has no live sub-agents by definition.
@@ -3220,7 +3239,12 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // rule only ever ADDS: every deny rule below still outranks it, which is
     // why a rule the device would refuse anyway is rejected at the door and
     // never stored.
-    const allowRules = normalizeAllowRules(opts.allowRules);
+    // With the HOME: `softProjectDir` anchors a soft path at it, so validating
+    // with no context at all would drop exactly the harness-project rules this
+    // feature exists to grant. The deny half cannot be passed here without
+    // circularity — `fileDenyRules` below is built FROM this list — and does
+    // not need to be: every deny rule it returns still outranks each allow.
+    const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
     args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE, ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).

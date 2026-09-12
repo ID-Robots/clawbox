@@ -651,7 +651,7 @@ export const nl: Record<string, string> = {
   "codingAgent.ruleRefusedBash": "Een run mag al elke opdracht gebruiken behalve de opdrachten die processen op naam beëindigen, en die kunnen nooit worden toegestaan. Een toestemmingsregel gaat over bestanden.",
   "codingAgent.ruleRefusedTooBroad": "Die regel is te breed. Noem de map waar het om gaat.",
   "codingAgent.ruleRefusedProtected": "Dat pad bevat inloggegevens of de eigen staat van deze box. Geen enkele regel kan het openen.",
-  "codingAgent.ruleRefusedUnsafe": "Deze box weigert dat aan elke run, dus de regel zou niets verlenen.",
+  "codingAgent.ruleRefusedUnsafe": "Een regel mag niet buiten de map stappen die hij noemt.",
   "codingAgent.ruleRefusedDuplicate": "Die regel staat al in de lijst.",
   "codingAgent.ruleRefusedTooMany": "De lijst is vol. Verwijder eerst een regel.",
   "codingAgent.stop": "Stoppen",
