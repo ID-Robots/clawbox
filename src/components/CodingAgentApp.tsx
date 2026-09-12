@@ -47,7 +47,8 @@ import CodingTeamCard from "./CodingTeamCard";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import { taskTitle } from "@/lib/task-title";
-import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
+import type { AgentStatus, CodingProviderId, Effort, GitHubState } from "./CodingAgentSettingsPanel";
+import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.
@@ -103,6 +104,13 @@ interface Run {
   /** When each progress line happened, one for one with `progress`; absent on a record from before the field. */
   progressAt?: number[];
   effort?: Effort;
+  /** Which account paid for this run, frozen when it started. Absent on a
+   *  record written before the selector existed — such a run was on ClawBox
+   *  AI, because there was nothing else to be on, but nothing is CLAIMED here:
+   *  an absent field simply draws no line. */
+  provider?: CodingProviderId;
+  /** The model it was STARTED with — not `model`, which is what answered. */
+  requestedModel?: string | null;
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
   subagentsTotal?: number;
@@ -1995,6 +2003,15 @@ export default function CodingAgentApp() {
                   <span>{run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}</span>
                   <span>· {t("codingAgent.startedAgo", { when: timeAgo(run.startedAt, t) })}</span>
                   {started && run.effort && <span>· {t(`codingAgent.effort.${run.effort}`)}</span>}
+                  {/* Whose account. Said on every run that has the field, not
+                      only the Anthropic ones: on a box where the owner moved
+                      the default, "this one was on the box's plan" is exactly
+                      as much news as the other way round. */}
+                  {run.provider && (
+                    <span data-testid="coding-agent-run-provider">
+                      · {t("codingAgent.runProvider", { provider: t(CODING_PROVIDER_NAME_KEY[run.provider]) })}
+                    </span>
+                  )}
                   {run.lastActivityAt && <span>· {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}</span>}
                   {(run.modelsUsed?.length ?? 0) > 0 && <span>· {run.modelsUsed?.join(" + ")}</span>}
                 </p>
@@ -2404,7 +2421,15 @@ export default function CodingAgentApp() {
                   label={t("codingAgent.deniedTitle")}
                   value={String(run.permissionDenials)}
                 />
-                <StatTile label={t("codingAgent.statModels")} value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : "—"} />
+                <StatTile
+                  label={t("codingAgent.statModels")}
+                  value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : (run.requestedModel ?? "—")}
+                  // What the run ASKED for, beside what actually answered: on
+                  // ClawBox AI the plan picks the model and these differ by
+                  // design, so the hint is the only place the owner's own
+                  // choice is visible after the fact.
+                  hint={run.requestedModel && run.modelsUsed?.length ? run.requestedModel : undefined}
+                />
               </div>
 
               {/* What was refused, spelled out — and, where this box can

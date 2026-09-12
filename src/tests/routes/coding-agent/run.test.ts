@@ -23,6 +23,7 @@ const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
 let POST: (req: Request) => Promise<Response>;
 let CodingAgentError: typeof import("@/lib/coding-agent").CodingAgentError;
+let ProviderChoiceError: typeof import("@/lib/coding-agent").ProviderChoiceError;
 let MAX_TASK_CHARS: number;
 let session: SessionFixture;
 let restore: () => void;
@@ -50,6 +51,7 @@ beforeEach(async () => {
   startRun.mockResolvedValue(RUN);
   const lib = await import("@/lib/coding-agent");
   CodingAgentError = lib.CodingAgentError;
+  ProviderChoiceError = lib.ProviderChoiceError;
   MAX_TASK_CHARS = lib.MAX_TASK_CHARS;
   const route = await import("@/app/setup-api/coding-agent/run/route");
   POST = route.POST;
@@ -138,5 +140,74 @@ describe("refusals the agent must be able to tell apart", () => {
     const res = await POST(req());
     expect(res.status).toBe(500);
     expect((await res.json()).error).toBe("spawn EACCES");
+  });
+});
+
+/**
+ * WHICH ACCOUNT PAYS. The route does not decide — `startRun` does, from the
+ * owner's stored default — so what is pinned here is that a caller's choice
+ * arrives UNTOUCHED (a route that coerced it would be a second, quieter
+ * validator beside src/lib/coding-provider.ts) and that the refusals keep the
+ * status codes the MCP layer reads.
+ */
+describe("provider and model", () => {
+  it("passes both through exactly as the caller sent them", async () => {
+    await POST(req({ body: { task: "Do the thing", projectId: "site", provider: "anthropic", model: "claude-sonnet-5" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ provider: "anthropic", model: "claude-sonnet-5" }));
+  });
+
+  it("passes `undefined` when the caller named neither, so the owner's default stands", async () => {
+    // NOT a default invented here: this process would be guessing, and a
+    // guess that disagreed with the stored setting would silently move a run
+    // onto the wrong bill.
+    await POST(req());
+    const input = startRun.mock.calls[0][0] as { provider?: unknown; model?: unknown };
+    expect(input.provider).toBeUndefined();
+    expect(input.model).toBeUndefined();
+  });
+
+  it("hands a junk provider to the runner rather than filtering it out", async () => {
+    // The refusal belongs to the one validator. Dropping the field here would
+    // turn "that provider does not exist" into a run on the default — the
+    // caller's mistake, silently honoured as something else.
+    await POST(req({ body: { task: "t", projectId: "site", provider: "openai" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ provider: "openai" }));
+  });
+
+  it("answers 400 when the runner refuses the pair", async () => {
+    startRun.mockRejectedValueOnce(new CodingAgentError("invalid", "Unknown provider. Use one of: clawbox-ai, anthropic."));
+    const res = await POST(req({ body: { task: "t", projectId: "site", provider: "openai" } }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/clawbox-ai, anthropic/);
+  });
+
+  it("marks a refused pair with a code, so a caller can tell it from a refused folder", async () => {
+    // Both are 400 `kind: "invalid"`, and they want opposite advice: the folder
+    // refusal says "use another folder", the pair refusal says "leave the
+    // folder alone". Without the code the MCP tool gave the folder advice to a
+    // caller whose folder was fine.
+    startRun.mockRejectedValueOnce(new ProviderChoiceError('ClawBox AI chooses its own model; name a model only with the "anthropic" provider.'));
+    const res = await POST(req({ body: { task: "t", projectId: "site", model: "claude-opus-5" } }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.kind).toBe("invalid");
+    expect(body.code).toBe("provider");
+  });
+
+  it("leaves a folder refusal without a code", async () => {
+    startRun.mockRejectedValueOnce(new CodingAgentError("invalid", "That folder holds credentials."));
+    const res = await POST(req({ body: { task: "t", directory: "/home/clawbox/clawbox/data" } }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).not.toHaveProperty("code");
+  });
+
+  it("answers 409 — never 403 or 500 — when that account is not connected", async () => {
+    // mcp/lib/errors.ts maps 409 to CONFLICT / do-not-retry. Anything else
+    // reads as "the device needs a restart", and the agent retries a refusal
+    // only the owner can clear.
+    startRun.mockRejectedValueOnce(new CodingAgentError("not_ready", "Your Anthropic account is not connected."));
+    const res = await POST(req({ body: { task: "t", projectId: "site", provider: "anthropic" } }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("not_ready");
   });
 });

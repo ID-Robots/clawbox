@@ -23,6 +23,18 @@
 # plan it is on (`clawai_tier`), and the chat path already maps that to a
 # model — this reads the same field and applies the same rule.
 #
+# WHICH ACCOUNT PAYS
+#
+# CLAUDE_DS_PROVIDER picks it, and the two wirings are mutually exclusive by
+# construction. `clawbox-ai` (the default, everything above) points Claude Code
+# at the proxy with the box's portal token and refuses to let an inherited
+# Anthropic credential outrank it. `anthropic` does the exact inverse: every
+# proxy variable is unset, the portal token is never read, the model is a real
+# Claude model, and the credential is either the API key the owner saved on the
+# box (read here, from the same 0600 config, never through argv or the parent's
+# environment) or the login `claude` already holds in this account's home.
+# Neither branch can see the other's credential.
+#
 # Usage:  claude-ds [any claude argument]     e.g.  claude-ds -p "explain this repo"
 #
 # Overrides (all optional):
@@ -31,7 +43,12 @@
 #   CLAUDE_DS_EFFORT        reasoning effort passed to Claude Code
 #   CLAUDE_DS_SUBAGENT_MODEL  force ONE model for every sub-agent (unset by
 #                           default so per-agent models work)
-#   CLAUDE_DS_CONFIG_DIR    where this harness keeps its own state
+#   CLAUDE_DS_CONFIG_DIR    where this harness keeps its own state (ClawBox AI
+#                           runs only; an Anthropic run uses Claude Code's own
+#                           default state, which is where the owner's login is)
+#   CLAUDE_DS_PROVIDER      which account pays: clawbox-ai (default) or
+#                           anthropic (the owner's own Claude Code login, or
+#                           the API key they saved on the box)
 #   CLAWBOX_AI_PROXY_URL    ClawBox AI base URL (same var the device uses)
 #   CLAUDE_DS_API_BASE_URL  override for Claude Code's non-inference API base
 #                           (account/entitlement calls); defaults to the proxy
@@ -49,15 +66,42 @@ PROXY_URL="${CLAWBOX_AI_PROXY_URL:-https://clawbox.com/api/ai}"
 
 die() { printf 'claude-ds: %s\n' "$*" >&2; exit 1; }
 
-# The portal token is about to be handed to whatever this URL names, so refuse
+# Which account pays. Checked before anything else reads a credential, so an
+# unknown value can never fall through to the default and quietly spend the
+# box's plan when the caller asked for the owner's own.
+PROVIDER="${CLAUDE_DS_PROVIDER:-clawbox-ai}"
+case "$PROVIDER" in
+  clawbox-ai|anthropic) ;;
+  *) die "unknown CLAUDE_DS_PROVIDER: $PROVIDER (use clawbox-ai or anthropic)" ;;
+esac
+
+# The portal token is about to be handed to whatever these URLs name, so refuse
 # to speak plaintext to anything but the loopback. Without this an
 # CLAWBOX_AI_PROXY_URL of http://... would put a live credential on the wire in
 # the clear, and the wrapper would look like it was working.
-case "$PROXY_URL" in
-  https://*) ;;
-  http://127.0.0.1[:/]*|http://127.0.0.1|http://localhost[:/]*|http://localhost) ;;
-  *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $PROXY_URL" ;;
-esac
+#
+# BOTH bases, because both carry the token: ANTHROPIC_BASE_URL moves the
+# messages API and CLAUDE_CODE_API_BASE_URL the account surface, and the run
+# exports ANTHROPIC_AUTH_TOKEN for whichever it is talking to. Checking only
+# the proxy left CLAUDE_DS_API_BASE_URL as an unguarded way to the same
+# outcome.
+#
+# Only for the branch that actually sends it: an Anthropic run never reads the
+# portal token at all, and refusing it over the shape of a proxy URL it does
+# not use would be a refusal about nothing.
+require_private_url() {
+  case "$2" in
+    https://*) ;;
+    http://127.0.0.1[:/]*|http://127.0.0.1|http://localhost[:/]*|http://localhost) ;;
+    *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $1=$2" ;;
+  esac
+}
+if [ "$PROVIDER" = "clawbox-ai" ]; then
+  require_private_url CLAWBOX_AI_PROXY_URL "$PROXY_URL"
+  if [ -n "${CLAUDE_DS_API_BASE_URL:-}" ]; then
+    require_private_url CLAUDE_DS_API_BASE_URL "$CLAUDE_DS_API_BASE_URL"
+  fi
+fi
 
 if ! command -v claude >/dev/null 2>&1; then
   die "Claude Code is not installed on this ClawBox.
@@ -68,51 +112,91 @@ if [ ! -r "$CONFIG_JSON" ]; then
   die "cannot read $CONFIG_JSON — is this a ClawBox? (set CLAWBOX_ROOT to override)"
 fi
 
-# Read the token and the plan in ONE pass. The token is never echoed, never
-# written to a second file and never passed on argv, where `ps` would show it.
+# Read the credential and the plan in ONE pass. Neither secret is ever echoed,
+# written to a second file, or passed on argv, where `ps` would show it. The
+# provider decides WHICH credential is read: the ClawBox AI branch never looks
+# at the owner's Anthropic key, and the Anthropic branch never looks at the
+# portal token.
 #
-# The helper always exits 0 and answers on three lines — status, then either
-# the token or the reason, then the tier. Signalling through the exit code
-# instead would collapse "no token yet" and "config.json is corrupt" into one
-# message, and those need different answers from the owner.
+# The helper always exits 0 and answers on five lines — status, then either the
+# credential or the reason, then the plan tier, the owner's effort, and whether
+# a `claude` login is present. Signalling through the exit code instead would
+# collapse "no token yet" and "config.json is corrupt" into one message, and
+# those need different answers from the owner.
 command -v python3 >/dev/null 2>&1 || die "python3 is missing; cannot read $CONFIG_JSON"
 
-CREDS="$(python3 - "$CONFIG_JSON" <<'PYEOF'
-import json, sys
+CREDS="$(python3 - "$CONFIG_JSON" "$PROVIDER" <<'PYEOF'
+import json, os, sys
+
+cfg_path, provider = sys.argv[1], sys.argv[2]
+
+
+def answer(status, secret, tier, effort, login):
+    for line in (status, secret, tier, effort, login):
+        print(line)
+    raise SystemExit(0)
+
 
 try:
-    with open(sys.argv[1]) as fh:
+    with open(cfg_path) as fh:
         cfg = json.load(fh)
 except Exception as exc:                       # unreadable or malformed
-    print("ERR")
-    print(f"{sys.argv[1]} is not readable JSON: {exc}")
-    print("")
-    raise SystemExit(0)
+    answer("ERR", f"{cfg_path} is not readable JSON: {exc}", "", "", "")
+
+effort = str(cfg.get("coding_agent_effort") or "").strip()
+
+
+def has_claude_login():
+    """Whether `claude` already holds a credential in this account's home.
+
+    Two places, because which one has it depends on the CLI version: the
+    credential file it writes on Linux, and the account block in its config.
+    Only asked — never read, never copied, never written.
+    """
+    home = os.path.expanduser("~")
+    creds = os.path.join(home, ".claude", ".credentials.json")
+    try:
+        if os.path.isfile(creds) and os.path.getsize(creds) > 0:
+            return True
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(home, ".claude.json")) as fh:
+            return isinstance(json.load(fh).get("oauthAccount"), dict)
+    except Exception:
+        return False
+
+
+if provider == "anthropic":
+    key = str(cfg.get("anthropic_api_key") or "").strip()
+    login = "1" if has_claude_login() else ""
+    if not key and not login:
+        answer("ERR",
+               "Anthropic is not connected on this ClawBox. Open the Coding Agent "
+               "app -> Settings and save an Anthropic API key, or run `claude` in "
+               "the Terminal app and sign in.", "", "", "")
+    answer("OK", key, "", effort, login)
 
 token = str(cfg.get("clawai_token") or "").strip()
 if not token:
-    print("ERR")
-    print("ClawBox AI is not connected yet. Open Settings -> AI Models on this "
-          "ClawBox and sign in to ClawBox AI first.")
-    print("")
-    raise SystemExit(0)
+    answer("ERR",
+           "ClawBox AI is not connected yet. Open Settings -> AI Models on this "
+           "ClawBox and sign in to ClawBox AI first.", "", "", "")
 
-print("OK")
-print(token)
-print(str(cfg.get("clawai_tier") or "").strip())
-print(str(cfg.get("coding_agent_effort") or "").strip())
+answer("OK", token, str(cfg.get("clawai_tier") or "").strip(), effort, "")
 PYEOF
 )"
 
 STATUS="$(printf '%s' "$CREDS" | sed -n 1p)"
 [ "$STATUS" = "OK" ] || die "$(printf '%s' "$CREDS" | sed -n 2p)"
 
-TOKEN="$(printf '%s' "$CREDS" | sed -n 2p)"
+SECRET="$(printf '%s' "$CREDS" | sed -n 2p)"
 TIER="$(printf '%s' "$CREDS" | sed -n 3p)"
 # The effort the owner picked in the Coding Agent app. Read here so a terminal
 # the app opens (`claude-ds --resume ...`) thinks as hard as the delegated runs
 # do, instead of at a default the wrapper made up.
 OWNER_EFFORT="$(printf '%s' "$CREDS" | sed -n 4p)"
+HAS_LOGIN="$(printf '%s' "$CREDS" | sed -n 5p)"
 
 # "pro" is the device's name for the Max plan — the only tier ClawBox AI lets
 # reach deepseek-v4-pro. Anything else (flash, free, unset) gets flash, which
@@ -122,9 +206,6 @@ case "$TIER" in
   *)   TIER_MODEL="deepseek-v4-flash" ;;
 esac
 
-MODEL="${CLAUDE_DS_MODEL:-$TIER_MODEL}"
-SMALL_MODEL="${CLAUDE_DS_SMALL_MODEL:-deepseek-v4-flash}"
-
 # Claude Code does not know these model names, so on a plain `deepseek-v4-flash`
 # it warns once and assumes a 200k window for auto-compact. That warning is left
 # in place deliberately. `[1m]` is accepted upstream for flash too, but accepted
@@ -132,35 +213,86 @@ SMALL_MODEL="${CLAUDE_DS_SMALL_MODEL:-deepseek-v4-flash}"
 # turns an early compact — a nuisance — into a failed request. Anyone who
 # measures the real flash window can set CLAUDE_DS_MODEL=deepseek-v4-flash[1m].
 
-# An inherited Anthropic credential outranks ANTHROPIC_AUTH_TOKEN, so a
-# leftover key in the environment would send this run to Anthropic with the
-# wrong model name and fail in a way that looks like a proxy bug.
+# EVERY Anthropic credential the environment may be carrying goes, in BOTH
+# branches and before either sets its own. Inherited, one of these outranks
+# what this script exports: on the ClawBox AI branch a stray ANTHROPIC_API_KEY
+# sends the run to Anthropic with a DeepSeek model name (a failure that reads
+# like a proxy bug), and on the Anthropic branch a stray ANTHROPIC_AUTH_TOKEN
+# — which is exactly what a nested claude-ds would have left — sends a run the
+# owner is paying Anthropic for straight back through the proxy.
 unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN
 
-export CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}"
-export ANTHROPIC_BASE_URL="${PROXY_URL%/}/anthropic"
-# ANTHROPIC_BASE_URL only moves the messages API. Claude Code keeps a SECOND
-# base for its non-inference calls — the account/entitlement surface behind
-# api.anthropic.com/api/oauth/claude_cli/* and /api/web/domain_info — and that
-# one is not covered by the variable above. On a box whose plan is ClawBox AI
-# those calls can only fail, and a failure there is reported to the owner as
-# "Failed to authenticate", which reads like the token is wrong when it is not.
-#
-# So point it at the same proxy. This is the wrapper's whole stated job: Claude
-# Code aimed at this box's plan instead of at Anthropic. It was only doing half
-# of it.
-#
-# HONESTY NOTE: this was NOT proven to fix the intermittent Cloudflare
-# challenge seen on 2026-08-26. During a healthy run nothing reaches this base
-# at all — a loopback logger pointed at it recorded zero requests — so the
-# fallback could not be observed directly, only read out of the binary's own
-# strings. Treat this as closing a door, not as a diagnosis.
-export CLAUDE_CODE_API_BASE_URL="${CLAUDE_DS_API_BASE_URL:-${PROXY_URL%/}/anthropic}"
-export ANTHROPIC_AUTH_TOKEN="$TOKEN"
-export ANTHROPIC_MODEL="$MODEL"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
+if [ "$PROVIDER" = "anthropic" ]; then
+  # THE INVERSE OF EVERYTHING BELOW.
+  #
+  # No proxy base (either of the two), no portal token, no DeepSeek model
+  # names in the Opus/Sonnet/Haiku slots — those exist only to make Claude
+  # Code's aliases resolve to something the proxy serves, and against real
+  # Anthropic they would override the account's own models with names it does
+  # not have. And no CLAUDE_CONFIG_DIR: this run uses Claude Code's DEFAULT
+  # state, because that is where the login the owner made in the Terminal app
+  # actually lives. ~/.claude-ds stays the ClawBox AI runs' alone.
+  unset ANTHROPIC_BASE_URL CLAUDE_CODE_API_BASE_URL
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+  unset CLAUDE_CONFIG_DIR
+
+  MODEL="${CLAUDE_DS_MODEL:-claude-opus-5}"
+  export ANTHROPIC_MODEL="$MODEL"
+  # The key when the owner saved one, otherwise nothing at all — and nothing
+  # is the right answer: Claude Code then uses the login it already holds.
+  # Exported only here, so a ClawBox AI run's environment never carries it.
+  if [ -n "$SECRET" ]; then
+    export ANTHROPIC_API_KEY="$SECRET"
+  fi
+
+  HARNESS_CONFIG_FILE="$HOME/.claude.json"
+  HARNESS_STATE_DIR="$HOME/.claude"
+  # The trust answer is seeded (see below); the onboarding wizard is NOT. On
+  # this branch the file is the owner's own Claude Code config, and the theme
+  # picker is a question their terminal has every right to ask them once.
+  SEED_ONBOARDING=0
+  PROVIDER_LABEL="Anthropic"
+  mkdir -p "$HARNESS_STATE_DIR"
+  chmod 700 "$HARNESS_STATE_DIR" 2>/dev/null || true
+else
+  # THE CLAWBOX AI BRANCH — the box's own plan, and what every run got
+  # before the selector existed.
+
+  MODEL="${CLAUDE_DS_MODEL:-$TIER_MODEL}"
+  SMALL_MODEL="${CLAUDE_DS_SMALL_MODEL:-deepseek-v4-flash}"
+
+  export CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}"
+  export ANTHROPIC_BASE_URL="${PROXY_URL%/}/anthropic"
+  # ANTHROPIC_BASE_URL only moves the messages API. Claude Code keeps a SECOND
+  # base for its non-inference calls — the account/entitlement surface behind
+  # api.anthropic.com/api/oauth/claude_cli/* and /api/web/domain_info — and that
+  # one is not covered by the variable above. On a box whose plan is ClawBox AI
+  # those calls can only fail, and a failure there is reported to the owner as
+  # "Failed to authenticate", which reads like the token is wrong when it is not.
+  #
+  # So point it at the same proxy. This is the wrapper's whole stated job: Claude
+  # Code aimed at this box's plan instead of at Anthropic. It was only doing half
+  # of it.
+  #
+  # HONESTY NOTE: this was NOT proven to fix the intermittent Cloudflare
+  # challenge seen on 2026-08-26. During a healthy run nothing reaches this base
+  # at all — a loopback logger pointed at it recorded zero requests — so the
+  # fallback could not be observed directly, only read out of the binary's own
+  # strings. Treat this as closing a door, not as a diagnosis.
+  export CLAUDE_CODE_API_BASE_URL="${CLAUDE_DS_API_BASE_URL:-${PROXY_URL%/}/anthropic}"
+  export ANTHROPIC_AUTH_TOKEN="$SECRET"
+  export ANTHROPIC_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
+
+  HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
+  HARNESS_STATE_DIR="$CLAUDE_CONFIG_DIR"
+  SEED_ONBOARDING=1
+  PROVIDER_LABEL="ClawBox AI"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
+fi
 # NOT set by default, deliberately. CLAUDE_CODE_SUBAGENT_MODEL outranks a
 # per-agent `model:`, so setting it forces every sub-agent onto one model and
 # makes the whole point of defining agents — a cheap reader, an expensive
@@ -222,9 +354,6 @@ else
   fi
 fi
 
-mkdir -p "$CLAUDE_CONFIG_DIR"
-chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
-
 # PRE-ANSWER THE TWO QUESTIONS THAT HAVE ONLY ONE ANSWER ON THIS BOX.
 #
 # THE FIRST-RUN ONBOARDING. Before an interactive session, Claude Code walks a
@@ -268,11 +397,18 @@ chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 # wizard again on exactly the boxes this exists for. A config whose answers
 # are already `true` is left alone, byte for byte — and every write goes
 # through a temp file plus rename.
+#
+# On the ANTHROPIC branch the file is Claude Code's own ~/.claude.json — the
+# owner's, not this harness's — so only the trust answer is seeded there
+# ($SEED_ONBOARDING is 0): the theme picker is a question their terminal may
+# still ask them once, and answering it on their behalf in a file we do not own
+# would be taking a choice rather than removing a pointless one.
 seed_harness_config() {
-  python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$1" <<'PYEOF' || true
+  python3 - "$HARNESS_CONFIG_FILE" "$1" "$SEED_ONBOARDING" <<'PYEOF' || true
 import json, os, sys, tempfile
 
 cfg_path, trusted_dir = sys.argv[1], sys.argv[2]
+seed_onboarding = sys.argv[3] == "1"
 try:
     with open(cfg_path) as fh:
         cfg = json.load(fh)
@@ -287,12 +423,13 @@ except Exception:
     raise SystemExit(0)
 
 changed = False
-if cfg.get("hasCompletedOnboarding") is not True:
-    cfg["hasCompletedOnboarding"] = True
-    changed = True
-if "theme" not in cfg:
-    cfg["theme"] = "dark"
-    changed = True
+if seed_onboarding:
+    if cfg.get("hasCompletedOnboarding") is not True:
+        cfg["hasCompletedOnboarding"] = True
+        changed = True
+    if "theme" not in cfg:
+        cfg["theme"] = "dark"
+        changed = True
 
 projects = cfg.setdefault("projects", {})
 entry = projects.setdefault(trusted_dir, {}) if isinstance(projects, dict) else None
@@ -324,8 +461,10 @@ PYEOF
 # in, so that is the one whose question is answered.
 seed_harness_config "$PWD"
 
-# Say which model is actually about to answer. "Chosen vs actually used" is the
-# question this banner exists to close: the plan, not the wrapper, picks it.
-printf 'claude-ds: ClawBox AI (%s) — state in %s\n' "$MODEL" "$CLAUDE_CONFIG_DIR" >&2
+# Say which account and which model are actually about to answer. "Chosen vs
+# actually used" is the question this banner exists to close: on ClawBox AI the
+# plan picks the model, not the wrapper, and on Anthropic the credential in use
+# is not the one the rest of the box runs on.
+printf 'claude-ds: %s (%s) — state in %s\n' "$PROVIDER_LABEL" "$MODEL" "$HARNESS_STATE_DIR" >&2
 
 exec claude "${EFFORT_ARGS[@]}" "${SOURCES_ARGS[@]}" "$@"

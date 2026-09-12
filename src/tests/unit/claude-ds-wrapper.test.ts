@@ -557,3 +557,168 @@ describe("the first-run onboarding", () => {
     expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);
   });
 });
+
+/**
+ * CLAUDE_DS_PROVIDER — which account pays, and the isolation that makes it
+ * safe to have two.
+ *
+ * The whole point of the second provider is that the two credentials never
+ * meet. Every one of these runs the SHIPPED wrapper with a hostile parent
+ * environment — the OTHER provider's variables already exported — because
+ * that is exactly what a nested `claude-ds`, a stale shell or an owner's
+ * ~/.bashrc would leave behind, and inherited variables OUTRANK what the
+ * wrapper exports.
+ */
+describe("the provider split", () => {
+  /** Where the Anthropic branch keeps Claude Code's own state. */
+  const anthropicConfig = () => path.join(home, ".claude.json");
+
+  function writeNativeLogin(): void {
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    writeFileSync(path.join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }), "utf-8");
+  }
+
+  it("defaults to ClawBox AI when nothing names a provider", () => {
+    // The whole installed base is on this path; an absent variable must not
+    // move a single box onto the owner's own bill.
+    expect(runWrapper().status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("refuses a provider it does not know, before reading any credential", () => {
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "bogus" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/unknown CLAUDE_DS_PROVIDER/);
+    // Nothing started: a typo must not silently fall back to spending either
+    // account.
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("gives an anthropic run the owner's stored key and NONE of the proxy wiring", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", anthropic_api_key: "sk-ant-owner-key-0123456789" });
+    const res = runWrapper({
+      CLAUDE_DS_PROVIDER: "anthropic",
+      // What a nested claude-ds would have left in the environment.
+      ANTHROPIC_AUTH_TOKEN: "claw_test_token",
+      ANTHROPIC_BASE_URL: "https://clawbox.com/api/ai/anthropic",
+      CLAUDE_CODE_API_BASE_URL: "https://clawbox.com/api/ai/anthropic",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro[1m]",
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude-ds"),
+    });
+    expect(res.status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-owner-key-0123456789");
+    // The portal token and both proxy bases are GONE — inherited, any one of
+    // them would have sent a run the owner is paying Anthropic for straight
+    // back through the box's plan.
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBeUndefined();
+    // And so are the DeepSeek aliases: against real Anthropic they would
+    // override the account's own models with names it does not have.
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBeUndefined();
+    // No CLAUDE_CONFIG_DIR either: the login the owner made in the Terminal
+    // app lives in Claude Code's DEFAULT state, not in ~/.claude-ds.
+    expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
+  });
+
+  it("never lets a ClawBox AI run see the owner's Anthropic key", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", anthropic_api_key: "sk-ant-owner-key-0123456789" });
+    // Hostile in both directions: the key is in the config AND already
+    // exported. ANTHROPIC_API_KEY outranks ANTHROPIC_AUTH_TOKEN, so leaving
+    // either in place would bill the owner for the box's own plan's work.
+    expect(runWrapper({ ANTHROPIC_API_KEY: "sk-ant-owner-key-0123456789" }).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
+    // And the key is nowhere else in the environment under any name.
+    expect(Object.values(env).some((v) => v.includes("sk-ant-owner-key"))).toBe(false);
+  });
+
+  it("uses the native `claude` login when there is no stored key", () => {
+    writeNativeLogin();
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
+    const env = capturedEnv();
+    // Nothing exported at all: Claude Code then uses the credential it holds.
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_MODEL).toBe("claude-opus-5");
+  });
+
+  it("reads an oauthAccount in Claude Code's config as a login too", () => {
+    // Which of the two files holds the answer depends on the CLI version.
+    writeFileSync(anthropicConfig(), JSON.stringify({ oauthAccount: { emailAddress: "owner@example.com" } }), "utf-8");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("claude-opus-5");
+  });
+
+  it("refuses an anthropic run with neither a key nor a login, and starts nothing", () => {
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/Anthropic is not connected/);
+    expect(res.stderr).toMatch(/Terminal/);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("takes the model from CLAUDE_DS_MODEL on the anthropic branch", () => {
+    writeNativeLogin();
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_MODEL: "claude-sonnet-5" }).status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("claude-sonnet-5");
+  });
+
+  it("seeds the trust answer but NOT the theme in the owner's own config", () => {
+    // ~/.claude.json is Claude Code's, not this harness's. A headless run
+    // cannot answer the trust dialog, so that one is seeded; the theme picker
+    // is a question the owner's own terminal may still ask them once.
+    writeNativeLogin();
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
+    const cfg = JSON.parse(readFileSync(anthropicConfig(), "utf-8")) as Record<string, unknown>;
+    expect(cfg.projects).toMatchObject({ [REPO]: { hasTrustDialogAccepted: true } });
+    expect(cfg.hasCompletedOnboarding).toBeUndefined();
+    expect(cfg.theme).toBeUndefined();
+  });
+
+  it("does not check the proxy URL for an anthropic run", () => {
+    // The https guard exists because the PORTAL TOKEN would go out in the
+    // clear. An Anthropic run never reads that token, so refusing it over the
+    // shape of a URL it does not use would be a refusal about nothing.
+    writeNativeLogin();
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAWBOX_AI_PROXY_URL: "http://example.invalid/api/ai" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+
+  it("still refuses a plaintext proxy URL for a ClawBox AI run", () => {
+    const res = runWrapper({ CLAWBOX_AI_PROXY_URL: "http://example.invalid/api/ai" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/non-HTTPS/);
+  });
+
+  it("refuses a plaintext SECOND base URL too — it carries the same token", () => {
+    // CLAUDE_CODE_API_BASE_URL is the account surface and the run exports
+    // ANTHROPIC_AUTH_TOKEN for it as well, so guarding only the proxy left an
+    // unchecked way to put a live credential on the wire in the clear.
+    const res = runWrapper({ CLAUDE_DS_API_BASE_URL: "http://example.invalid/anthropic" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/non-HTTPS/);
+    expect(res.stderr).toMatch(/CLAUDE_DS_API_BASE_URL/);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("accepts a loopback second base, the way it accepts a loopback proxy", () => {
+    const res = runWrapper({ CLAUDE_DS_API_BASE_URL: "http://127.0.0.1:8080/anthropic" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBe("http://127.0.0.1:8080/anthropic");
+  });
+
+  it("does not check the second base on an anthropic run, which never sets it", () => {
+    writeNativeLogin();
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_API_BASE_URL: "http://example.invalid/x" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBeUndefined();
+  });
+});

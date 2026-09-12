@@ -48,6 +48,8 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     startedAt: 1_000_000,
     completedAt: 1_000_000 + 95_000,
     sessionId: "sess-1",
+    provider: "clawbox-ai",
+    requestedModel: null,
     model: "deepseek-v4-flash",
     summary: SECRET_SUMMARY,
     error: null,
