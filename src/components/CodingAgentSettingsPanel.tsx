@@ -97,13 +97,12 @@ export interface AgentStatus {
    *  switches — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
-  /** The owner's standing permission rules — what a run may open beyond the
-   *  defaults — and how many they may keep. Optional: an older server does not
-   *  answer with them. Declared here because the status payload carries them,
-   *  though the card that edits them reads its own route
-   *  (CodingAgentRulesCard), which is also what the two writes answer with. */
-  allowRules?: string[];
-  maxAllowRules?: number;
+  // The owner's standing permission rules are deliberately NOT here, though the
+  // status payload carries them: CodingAgentRulesCard reads and writes its own
+  // route. This panel serialises its setting writes through one chain so two
+  // answers cannot land out of order, and a list with its own add and remove
+  // does not belong in that chain — declaring the fields it never reads would
+  // only suggest it did.
 }
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
