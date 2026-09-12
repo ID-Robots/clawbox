@@ -180,6 +180,68 @@ describe("the owner's default", () => {
   });
 });
 
+describe("the spawn gate judges the account the run will actually use", () => {
+  /**
+   * The box's OWN half of readiness — Claude Code, the wrapper, setpriv —
+   * depends on the machine running these tests, so what is asserted here is
+   * the SENTENCE, not whether the run started. That is the defect anyway: a
+   * run that named the working account was refused with a message about an
+   * account it had never asked for, because the gate read `readiness.problems`
+   * and those are the DEFAULT provider's.
+   */
+  async function refusalFor(input: { provider?: string }): Promise<string> {
+    configGet.mockImplementation(async (key: string) => {
+      if (key === "coding_agent_enabled") return true;
+      if (key === "clawai_token") return "claw_token";
+      if (key === CODING_AGENT_PROVIDER_CONFIG_KEY) return "anthropic";
+      return undefined;
+    });
+    configGetAll.mockResolvedValue({
+      coding_agent_enabled: true,
+      clawai_token: "claw_token",
+      [CODING_AGENT_PROVIDER_CONFIG_KEY]: "anthropic",
+    });
+    const lib = await import("@/lib/coding-agent");
+    try {
+      await lib.startRun({ task: "Do the thing", directory: "/nonexistent-for-this-test", source: "owner", ...input });
+      return "";
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  it("refuses at all, so the assertions below are about a real message", async () => {
+    // These cases assert what a refusal does NOT say, which would pass
+    // vacuously if nothing were refused. On a machine with no Claude Code the
+    // box's own half refuses; on one with it, the working folder does. Either
+    // way there IS a sentence.
+    getAnthropicConnection.mockResolvedValue(DISCONNECTED);
+    expect(await refusalFor({ provider: "clawbox-ai" })).not.toBe("");
+  });
+
+  it("never refuses a clawbox-ai run with the Anthropic account's sentence", async () => {
+    // The owner's default is `anthropic` and unconnected — which
+    // setCodingProvider deliberately allows, so they can pick the account
+    // before pasting the key. A run that explicitly named `clawbox-ai` must
+    // not be told about Anthropic at all.
+    getAnthropicConnection.mockResolvedValue(DISCONNECTED);
+    const message = await refusalFor({ provider: "clawbox-ai" });
+    expect(message).not.toMatch(/Anthropic account is not connected/);
+  });
+
+  it("still names Anthropic when the run is the one that wanted it", async () => {
+    getAnthropicConnection.mockResolvedValue(DISCONNECTED);
+    const message = await refusalFor({ provider: "anthropic" });
+    expect(message).toMatch(/Anthropic account is not connected/);
+  });
+
+  it("names neither once both accounts are connected", async () => {
+    getAnthropicConnection.mockResolvedValue(VIA_KEY);
+    const message = await refusalFor({ provider: "anthropic" });
+    expect(message).not.toMatch(/is not connected/);
+  });
+});
+
 describe("what a reset does and does not take away", () => {
   it("puts the account back to the box's own plan", async () => {
     // Left behind, an `anthropic` default made the wizard a reset reopened
