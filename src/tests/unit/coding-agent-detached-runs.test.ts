@@ -15,6 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
+import net from "net";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
@@ -42,6 +43,8 @@ let root: string;
 let binDir: string;
 let shimDir: string;
 let restore: () => void;
+/** Bus sockets a test opened, closed in teardown so no worker keeps a listener. */
+let listening: net.Server[] = [];
 
 const runsFile = () => path.join(root, "data", "coding-agent-runs.json");
 const streamLog = (id: string) => path.join(root, "data", "coding-agent-streams", `${id}.jsonl`);
@@ -90,13 +93,47 @@ function installSystemdRun(): void {
   );
 }
 
-/** A `systemd-run` that refuses, the way a box with no user manager does. */
-function installBrokenSystemdRun(): void {
+/**
+ * A `systemd-run` that refuses the way a box with no working user manager does —
+ * loudly, on stderr, after the spawn has already happened. That is the ONLY way
+ * this failure can be found out: the probe looks at the user bus rather than
+ * creating a throwaway scope, so the box learns the rest from a real spawn.
+ */
+function installRefusingSystemdRun(): void {
   fs.writeFileSync(
     path.join(shimDir, "systemd-run"),
-    ["#!/usr/bin/env bash", "echo 'Failed to connect to bus: No medium found' >&2", "exit 1"].join("\n"),
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(systemdRunLog())}`,
+      "echo 'Failed to start transient scope unit: Access denied' >&2",
+      "exit 1",
+    ].join("\n"),
     { mode: 0o755 },
   );
+}
+
+/**
+ * Point the probe's user-bus check at a directory with no `bus` in it, which is
+ * what a user with no systemd manager has.
+ */
+function withoutUserManager(): void {
+  process.env.XDG_RUNTIME_DIR = path.join(base, "no-runtime");
+  fs.mkdirSync(process.env.XDG_RUNTIME_DIR, { recursive: true });
+}
+
+/** A runtime directory with a real `bus` socket in it, the way a lingering user has. */
+function withUserManager(): void {
+  const dir = path.join(base, "runtime");
+  fs.mkdirSync(dir, { recursive: true });
+  const bus = path.join(dir, "bus");
+  if (!fs.existsSync(bus)) {
+    // A real AF_UNIX socket, because the probe asks `isSocket()` and a plain
+    // file would be the wrong answer to the right question.
+    const server = net.createServer();
+    server.listen(bus);
+    listening.push(server);
+  }
+  process.env.XDG_RUNTIME_DIR = dir;
 }
 
 function installSystemctl(state: "active" | "inactive" | "failed"): void {
@@ -177,7 +214,8 @@ function liveRecord(over: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 beforeEach(async () => {
-  restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "PATH", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN");
+  restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "PATH", "XDG_RUNTIME_DIR", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN");
+  listening = [];
   base = fs.mkdtempSync(path.join(os.tmpdir(), "coding-detached-"));
   home = path.join(base, "home");
   root = path.join(home, "clawbox");
@@ -201,6 +239,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await lib._resetCodingAgentStateForTests();
+  for (const server of listening) server.close();
+  listening = [];
   restore();
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
@@ -269,8 +309,9 @@ describe("the stream log", () => {
 });
 
 describe("readiness", () => {
-  it("says runs are detached when systemd-run works for this user", async () => {
+  it("says runs are detached when the binary is there and this user has a manager", async () => {
     installSystemdRun();
+    withUserManager();
     writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
     installWrapper("exit 0");
     const readiness = await lib.checkReadiness();
@@ -279,14 +320,13 @@ describe("readiness", () => {
   });
 
   it("says why not, and does not make it a problem that refuses runs", async () => {
-    installBrokenSystemdRun();
+    installSystemdRun();
+    withoutUserManager();
     writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
     installWrapper("exit 0");
     const readiness = await lib.checkReadiness();
     expect(readiness.detachedRuns).toBe(false);
-    // systemd's own reason, kept: "no bus" and "authentication required" need
-    // different answers from the operator.
-    expect(readiness.detachedRunsDetail).toMatch(/Failed to connect to bus/);
+    expect(readiness.detachedRunsDetail).toMatch(/enable-linger/);
     // A degradation, never a blocker: the run still happens as a plain child.
     expect(readiness.problems.join(" ")).not.toMatch(/systemd/i);
     expect(readiness.ready).toBe(true);
@@ -296,11 +336,25 @@ describe("readiness", () => {
     // Nothing but the (empty) shim directory: the machine running the suite may
     // well have systemd-run of its own, and this test is about a box that does not.
     process.env.PATH = shimDir;
+    withUserManager();
     writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
     installWrapper("exit 0");
     const readiness = await lib.checkReadiness();
     expect(readiness.detachedRuns).toBe(false);
     expect(readiness.detachedRunsDetail).toMatch(/not installed/);
+  });
+
+  it("spawns nothing to answer, so a caller that stubbed child_process cannot hang on it", async () => {
+    // The probe used to create a throwaway scope around `true`. Several route
+    // handlers reach readiness with `child_process` mocked, and a mocked
+    // execFile never calls back — so the probe hung until its own deadline and
+    // took the request with it. It asks the filesystem now.
+    installSystemdRun();
+    withUserManager();
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
+    installWrapper("exit 0");
+    expect((await lib.checkReadiness()).detachedRuns).toBe(true);
+    expect(shimCalls(systemdRunLog())).toHaveLength(0);
   });
 });
 
@@ -335,18 +389,45 @@ describe("spawning", () => {
     expect(fs.existsSync(streamLog(started.id))).toBe(false);
   });
 
-  it("falls back to a plain child when the box cannot give it a scope", async () => {
-    installBrokenSystemdRun();
+  it("falls back to a plain child when this user has no systemd manager", async () => {
+    installSystemdRun();
+    withoutUserManager();
     writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
     installWrapper(`echo '${RESULT}'\nexit 0`);
     const started = await lib.startRun({ task: "Build it", directory: path.join(home, "Projects", "site"), source: "owner" });
     const settled = await lib.waitForRun(started.id, 25_000);
     expect(settled?.status).toBe("completed");
     expect(settled?.summary).toContain("All done.");
-    // The refusing shim records nothing, and the spawn never went near it —
-    // asserted after the run has settled, so there was time for it to have.
+    // Asserted after the run has settled, so there was time for it to have.
     expect(spawnCalls()).toHaveLength(0);
     expect(settled?.unit).toBeNull();
+  });
+
+  it("learns from a scope systemd turns away: retries directly, and says so in readiness", async () => {
+    // The probe cannot find this out by looking — the binary is there and the
+    // user bus is there, and systemd still says no. So the box learns it from the
+    // spawn that failed: the one automatic retry goes without a scope (nothing
+    // happened that it could trip over, because the harness never ran), and
+    // readiness reports systemd's own words until a scope demonstrably works.
+    installRefusingSystemdRun();
+    withUserManager();
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true });
+    installWrapper(`echo '${RESULT}'\nexit 0`);
+    const started = await lib.startRun({ task: "Build it", directory: path.join(home, "Projects", "site"), source: "owner" });
+    const settled = await lib.waitForRun(started.id, 25_000);
+    // The retry ran the harness directly and it finished.
+    expect(settled?.status).toBe("completed");
+    expect(settled?.summary).toContain("All done.");
+    expect(settled?.retries).toBe(1);
+    expect(settled?.unit).toBeNull();
+    // Exactly one attempt went through systemd-run; the retry did not.
+    expect(spawnCalls()).toHaveLength(1);
+
+    const readiness = await lib.checkReadiness();
+    expect(readiness.detachedRuns).toBe(false);
+    expect(readiness.detachedRunsDetail).toMatch(/Access denied/);
+    // Still not a blocker — the run just finished.
+    expect(readiness.ready).toBe(true);
   });
 });
 
@@ -499,6 +580,60 @@ describe("after a restart", () => {
     expect(lib.getRun("run-detach01")?.status).toBe("failed");
     // No unit to ask about, so systemd was never asked.
     expect(shimCalls(systemctlLog())).toHaveLength(0);
+  });
+});
+
+describe("the review loop across a restart", () => {
+  it("does not start polling beside a fix turn the restart did not kill", async () => {
+    // The origin run's review says "working", which used to mean one thing only:
+    // the fix turn died with the previous server, so nothing would ever come
+    // back and polling is the only way on. A reattached fix turn will come back
+    // itself, and driving the loop from both ends opens a round over a fix that
+    // is still being written.
+    installSystemdRun();
+    installSystemctl("active");
+    const origin = {
+      ...liveRecord({ id: "run-origin01", status: "completed", completedAt: Date.now() - 5_000, unit: undefined }),
+      review: {
+        prNumber: 7,
+        url: "https://example.invalid/pr/7",
+        base: "main",
+        round: 1,
+        maxRounds: 3,
+        state: "working",
+        checks: [],
+        unresolvedThreads: 0,
+        reviewDecision: null,
+        lastPolledAt: null,
+        roundStartedAt: Date.now() - 30_000,
+        detail: null,
+        fixRunId: "run-fixturn1",
+      },
+      pr: {
+        phase: "waiting",
+        number: 7,
+        url: "https://example.invalid/pr/7",
+        branch: "clawbox/run-origin01",
+        base: "main",
+        checks: { total: 0, passed: 0, failed: 0, pending: 0 },
+        detail: null,
+        startedAt: Date.now() - 60_000,
+        endedAt: null,
+        reviewOk: true,
+      },
+    };
+    const fix = liveRecord({ id: "run-fixturn1", reviewLoopOf: "run-origin01" });
+    fs.writeFileSync(runsFile(), JSON.stringify([origin, fix]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    // The fix turn is reattached, so nothing is settled.
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    expect(lib.getRun("run-fixturn1")?.status).toBe("running");
+
+    lib.resumePullRequestWatches();
+    // Left alone: the reattached turn's own settle carries the loop on.
+    expect(lib.getRun("run-origin01")?.review?.state).toBe("working");
   });
 });
 

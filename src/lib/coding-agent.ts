@@ -186,8 +186,11 @@ import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
 import {
   isRunScopeUnit,
+  noteScopeRefused,
+  noteScopeWorked,
   probeSystemdRun,
   runScopeUnit,
+  SCOPE_REFUSED,
   scopeEnv,
   stopUnit,
   unitActive,
@@ -3050,6 +3053,11 @@ interface LiveRun {
   /** Where the harness's stderr is, so the settle can quote its last words. */
   stderrPath: string | null;
   /**
+   * systemd turned this spawn away, so the harness never ran. Makes the one
+   * automatic retry apply (directly, with no scope) and is what tells readiness.
+   */
+  scopeRefused: boolean;
+  /**
    * This run was found alive-on-paper but its scope was gone: the box restarted
    * while it worked. Read by finishRun, which would otherwise report the
    * harness's silence as a crash of the harness.
@@ -3299,6 +3307,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     streamTimer: null,
     unitWatch: null,
     stderrPath: null,
+    scopeRefused: false,
     lostToRestart,
     openSubagents: new Map<string, ActiveSubagent>(),
     billedMessageIds: new Set<string>(),
@@ -5102,6 +5111,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // Same session, same process: any init after the first is a
     // continuation, not a fresh start.
     pushProgress(run, state.sawInit ? RUNNER_STEP.continuing : RUNNER_STEP.started(run.model));
+    // The harness is talking to us from inside its scope, which is the only real
+    // proof that scopes work on this box — enough to retire a refusal the box
+    // learned earlier and has been reporting ever since.
+    if (!state.sawInit && state.unit) noteScopeWorked();
     state.sawInit = true;
     return;
   }
@@ -5838,6 +5851,15 @@ function watchPullRequest(runId: string): void {
  * was, with the branch named for the owner to push themselves. A paused
  * run's is left alone: the run is kept, and its resume opens it.
  */
+/** Is a review-loop fix turn for this run still going in this process? */
+function liveFixTurnFor(originId: string): boolean {
+  const list = loadRuns();
+  for (const id of live.keys()) {
+    if (list.find((r) => r.id === id)?.reviewLoopOf === originId) return true;
+  }
+  return false;
+}
+
 export function resumePullRequestWatches(): void {
   for (const run of loadRuns()) {
     // The review loop first: its phase is pending too, and it owns the pull
@@ -5848,6 +5870,12 @@ export function resumePullRequestWatches(): void {
       // failed, so nothing will ever come back to resumeReviewAfterFix for it.
       // Whatever it committed is on disk; polling again is what picks it up.
       if (run.review.state === "working") {
+        // Unless the fix turn SURVIVED the restart in its own scope and was
+        // reattached (reconcileAfterRestart, which runs before this): it is
+        // still working and will come back to resumeReviewAfterFix itself when
+        // it settles. Polling beside it would drive one loop from two places —
+        // a round opened over a fix that is still being written.
+        if (liveFixTurnFor(run.id)) continue;
         run.review = { ...run.review, state: "polling", roundStartedAt: Date.now() };
         persist(true);
       }
@@ -6755,6 +6783,17 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     } else {
       run.status = "failed";
       const tail = stderrTail(state.stderr);
+      // systemd turning the scope away, before the harness ever ran. Recorded
+      // for readiness — no probe can find this out by looking — and the retry
+      // below then starts the run directly, which is what the box would have
+      // done had it known. Only when nothing was heard from the harness at all:
+      // once it has spoken, its own words are the failure.
+      if (state.unit && !state.sawInit && SCOPE_REFUSED.test(state.stderr)) {
+        state.scopeRefused = true;
+        state.tools = { ...state.tools, scopePath: null };
+        noteScopeRefused(tail);
+        console.error(`[coding-agent] ${run.id}: systemd refused the run's scope; running directly from now on`);
+      }
       run.error = ULTRACODE_REFUSED.test(state.stderr)
         // The CLI refuses the flag before the first turn when dynamic
         // workflows are off for this install or the plan does not allow
@@ -6797,7 +6836,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && run.retries === 0
     && state.endRequested === null
     && !state.timedOut
-    && isTransientFailure(run.error)
+    // A scope systemd refused counts here too: the harness never started, so
+    // nothing happened that a second attempt could trip over — and this one goes
+    // without the scope, which is the whole difference.
+    && (isTransientFailure(run.error) || state.scopeRefused)
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
@@ -7194,6 +7236,7 @@ function spawnRun(
     streamTimer: null,
     unitWatch: null,
     stderrPath: null,
+    scopeRefused: false,
     lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
     billedMessageIds: new Set<string>(),

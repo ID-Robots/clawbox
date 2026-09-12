@@ -49,22 +49,17 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /** How long a systemd question is given before it counts as unanswered. */
 const SYSTEMD_TIMEOUT_MS = 5_000;
-/** How long the `--scope true` probe is given, bus round trip included. */
-const PROBE_TIMEOUT_MS = 8_000;
+/** How long a probe answer is reused. It costs two `stat`s, so this is only to
+ *  keep a tight polling loop off the filesystem. */
+const PROBE_TTL_MS = 30_000;
 /**
- * How long a probe answer is reused, and why the two differ.
+ * How long a scope refusal the box LEARNED from a real spawn is remembered.
  *
- * A YES is cached for much longer because it does not go stale — a box whose
- * user manager is up does not stop being able to make a scope — and because the
- * probe is the one thing here that costs something visible: it creates a real
- * transient unit, so systemd writes a journal line for every probe, and the
- * Coding Agent app polls readiness for as long as its window is open.
- *
- * A NO is cached briefly, so a box that has just been given `enable-linger` is
- * not told "no" for the rest of the web server's life.
+ * Long, because the thing it records does not come and go — a user manager that
+ * will not create a scope needs an operator — but not for ever, so a box that
+ * has just been given `enable-linger` comes back on its own.
  */
-const PROBE_TTL_OK_MS = 600_000;
-const PROBE_TTL_FAIL_MS = 60_000;
+const REFUSAL_TTL_MS = 30 * 60_000;
 
 /**
  * A scope unit name, or null when the token is not something this module will
@@ -182,40 +177,57 @@ export interface SystemdRunProbe {
 
 const NO_SYSTEMD_RUN =
   "systemd-run is not installed, so a coding run is an ordinary child of the web server and does not survive a restart.";
+const NO_USER_MANAGER =
+  "This user has no systemd user manager (no session bus under its runtime directory), so a coding run is an ordinary child of the web server and does not survive a restart. `loginctl enable-linger` is what gives it one.";
+
+/** The user bus a `--user` call needs. Its absence IS the failure being probed. */
+function userBusSocket(): string {
+  return path.join(scopeEnv().XDG_RUNTIME_DIR, "bus");
+}
 
 let probeCache: { at: number; value: SystemdRunProbe } | null = null;
 let probeInFlight: Promise<SystemdRunProbe> | null = null;
+/** What a real spawn taught us, which no probe can find out on its own. */
+let refusal: { at: number; detail: string } | null = null;
 
 /**
- * Does `systemd-run --user --scope` WORK for this user — not "is the binary
- * there", which answers nothing on a box with no user manager.
+ * Can this box put a run in a scope of its own?
  *
- * So the probe actually creates a throwaway scope around `true`. That is one
- * bus round trip, cached for a minute and shared between concurrent callers,
- * which is what keeps it off the status poll's bill. The same environment the
- * spawn will use, or the probe would be answering a different question from the
- * one asked.
+ * TWO FACTS, and deliberately no spawn. `systemd-run` has to be installed, and
+ * this user has to have a systemd user manager — which is what
+ * `$XDG_RUNTIME_DIR/bus` being a socket says, and whose absence (no
+ * `loginctl enable-linger`, no session) is the failure this is about.
+ *
+ * It used to create a throwaway scope around `true`, which proved more and cost
+ * too much for what readiness is: a journal line per probe on a box whose app
+ * polls readiness while its window is open, and — the reason it had to go — a
+ * spawn on a path several route handlers reach with `child_process` mocked, where
+ * it hung until its own deadline. A readiness probe may not be able to hang the
+ * request that asks for it.
+ *
+ * What the two facts do NOT prove is that systemd will accept the scope (a
+ * refused resource-control property, a name still being collected). That is
+ * learned from the real thing instead: `noteScopeRefused` records a spawn that
+ * systemd turned away and this answers `false` for half an hour afterwards, and
+ * `noteScopeWorked` clears it the moment one actually runs.
  */
 export async function probeSystemdRun(): Promise<SystemdRunProbe> {
   const now = Date.now();
-  if (probeCache && now - probeCache.at < (probeCache.value.available ? PROBE_TTL_OK_MS : PROBE_TTL_FAIL_MS)) {
-    return probeCache.value;
+  if (refusal && now - refusal.at < REFUSAL_TTL_MS) {
+    return { available: false, path: null, detail: refusal.detail };
   }
+  if (probeCache && now - probeCache.at < PROBE_TTL_MS) return probeCache.value;
   if (probeInFlight) return probeInFlight;
   probeInFlight = (async (): Promise<SystemdRunProbe> => {
     const binary = await findSystemdTool("systemd-run");
     if (!binary) return { available: false, path: null, detail: NO_SYSTEMD_RUN };
-    const unit = `${RUN_UNIT_PREFIX}probe-${process.pid}-${now.toString(36)}`;
-    const { argv } = buildScopeArgv(binary, unit, "/bin/true", []);
     try {
-      await execFileAsync(binary, argv, {
-        timeout: PROBE_TIMEOUT_MS,
-        env: scopeEnv({ PATH: toolSearchPath() }) as NodeJS.ProcessEnv,
-      });
-      return { available: true, path: binary, detail: null };
-    } catch (err) {
-      return { available: false, path: null, detail: probeRefusal(err) };
+      const stat = await fs.promises.stat(userBusSocket());
+      if (!stat.isSocket()) return { available: false, path: null, detail: NO_USER_MANAGER };
+    } catch {
+      return { available: false, path: null, detail: NO_USER_MANAGER };
     }
+    return { available: true, path: binary, detail: null };
   })();
   try {
     const value = await probeInFlight;
@@ -226,29 +238,41 @@ export async function probeSystemdRun(): Promise<SystemdRunProbe> {
   }
 }
 
+/** Does this read like systemd turning a transient unit away, rather than the harness failing? */
+export const SCOPE_REFUSED = /Failed to (connect to bus|start transient|create bus)|transient scope unit|Interactive authentication required|Unit .* already exists/i;
+
 /**
- * systemd's own reason, normalised to one line and bounded.
+ * Remember that systemd turned a real spawn away.
  *
- * Kept rather than replaced with a generic sentence: "Failed to connect to bus"
- * and "Interactive authentication required" need different answers from the
- * operator, and this field is the only place either is ever said.
+ * The one thing the probe cannot find out by looking, and the reason it does not
+ * have to: the box learns it from the spawn that failed, reports it as readiness
+ * for half an hour, and runs directly meanwhile.
+ *
+ * systemd's own words are kept rather than replaced with a generic sentence —
+ * "Failed to connect to bus" and "Interactive authentication required" need
+ * different answers from the operator, and this is the only place either is said.
  */
-function probeRefusal(err: unknown): string {
-  const raw = [
-    (err as { stderr?: string } | null)?.stderr,
-    (err as { message?: string } | null)?.message,
-  ]
-    .find((value): value is string => typeof value === "string" && value.trim() !== "");
-  const line = (raw ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
-  return line
-    ? `systemd-run --user does not work for this user, so a coding run does not survive a web-server restart: ${line}`
-    : "systemd-run --user does not work for this user, so a coding run does not survive a web-server restart.";
+export function noteScopeRefused(stderr: string): void {
+  const line = (stderr || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  refusal = {
+    at: Date.now(),
+    detail: line
+      ? `systemd refused a scope for a coding run, so runs are ordinary children of the web server and do not survive a restart: ${line}`
+      : "systemd refused a scope for a coding run, so runs are ordinary children of the web server and do not survive a restart.",
+  };
+  probeCache = null;
 }
 
-/** Forget the cached probe. Test hook, and the reset a swapped environment needs. */
+/** A scope demonstrably works: forget any refusal, whatever it once said. */
+export function noteScopeWorked(): void {
+  refusal = null;
+}
+
+/** Forget the cached probe and anything learned. Test hook, and what a swapped environment needs. */
 export function _resetSystemdRunProbeForTests(): void {
   probeCache = null;
   probeInFlight = null;
+  refusal = null;
 }
 
 /**
