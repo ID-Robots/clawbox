@@ -199,8 +199,10 @@ import {
   listDeployments,
   matchDeployment,
   readBuildLog,
+  readDeployment,
   VERCEL_MAX_WAIT_MS,
   VERCEL_POLL_INTERVAL_MS,
+  type VercelAuth,
   type VercelDeployment,
   type VercelPhase,
   type VercelPromotion,
@@ -6279,7 +6281,9 @@ function settleDeploy(run: CodingRun, phase: VercelPhase, detail: string | null)
  * watcher holding the old answer would go on polling with a credential its
  * owner has replaced — or worse, one they deliberately took away.
  */
-async function deployContextFor(run: CodingRun): Promise<{ scope: string; projectId: string; teamId: string | null; auth: Awaited<ReturnType<typeof resolveVercelAuth>> } | { error: string }> {
+async function deployContextFor(run: CodingRun): Promise<
+  { scope: string; projectId: string; teamId: string | null; auth: VercelAuth } | { error: string }
+> {
   const scope = await projectScopeFor(run);
   if (!scope) return { error: "This run is not in a project, so there is no Vercel link for it." };
   const link = await readVercelLink(scope);
@@ -6389,20 +6393,29 @@ function watchDeployment(runId: string): void {
       return;
     }
 
-    const listed = await listDeployments(context.auth, context.projectId);
-    if (!listed.ok) {
+    // Once the build is KNOWN, it is asked about directly; only before that is
+    // the project's page searched. Cheaper, and correct where the page is not:
+    // the list is bounded, so a busy project can push this run's build off the
+    // end of it, and a watch that went on matching against the page would then
+    // lose a deployment it had already found.
+    const found = run.vercel.deploymentId
+      ? await readDeployment(context.auth, run.vercel.deploymentId)
+      : await listDeployments(context.auth, context.projectId);
+    if (!found.ok) {
       // A fault that says nothing about the build is waited through, under the
       // same ceiling a build that never finishes gets — the lesson
       // `watchPullRequest` learned: without it, a token that expired or a box
       // offline for the evening left the record pending for good and polled
       // again after every restart.
-      if (isTransient(listed.kind) && waitedMs < VERCEL_MAX_WAIT_MS) { schedule(); return; }
-      settleDeploy(run, "abandoned", listed.detail);
+      if (isTransient(found.kind) && waitedMs < VERCEL_MAX_WAIT_MS) { schedule(); return; }
+      settleDeploy(run, "abandoned", found.detail);
       deployWatchers.delete(runId);
       return;
     }
 
-    const match = matchDeployment(listed.deployments, { sha: run.vercel.sha, branch: run.vercel.branch });
+    const match = "deployment" in found
+      ? found.deployment
+      : matchDeployment(found.deployments, { sha: run.vercel.sha, branch: run.vercel.branch });
     recordDeployment(run, match);
 
     const verdict = decideDeployment({ deployment: match, waitedMs });

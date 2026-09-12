@@ -36,6 +36,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const vercel = vi.hoisted(() => ({
   listDeployments: vi.fn(),
+  readDeployment: vi.fn(),
   readBuildLog: vi.fn(),
 }));
 vi.mock("@/lib/vercel", async (importOriginal) => ({
@@ -180,6 +181,7 @@ describe("the deployment watch", () => {
     link.readVercelLink.mockResolvedValue(LINK);
     link.resolveVercelAuth.mockResolvedValue({ token: TOKEN, teamId: null });
     vercel.listDeployments.mockResolvedValue({ ok: true, deployments: [] });
+    vercel.readDeployment.mockResolvedValue({ ok: true, deployment: deployment() });
     vercel.readBuildLog.mockResolvedValue({ ok: true, log: "" });
     review.pushBranch.mockResolvedValue({ ok: true });
   });
@@ -266,6 +268,21 @@ describe("the deployment watch", () => {
     expect(lib.getRun(RUN_ID)?.vercel?.detail).toContain("refused");
   });
 
+  it("asks about the KNOWN build directly, and stops searching the project's page for it", async () => {
+    // The state a second poll finds: the deployment has already been matched.
+    vercel.readDeployment.mockResolvedValue({ ok: true, deployment: deployment({ readyState: "ready" }) });
+    await boot();
+    writeRecord({ vercel: { phase: "building", deploymentId: "dpl_1" } });
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.vercel?.phase).toBe("ready"); });
+
+    // The page is BOUNDED, so a busy project can push this build off the end of
+    // it; a watch that went on searching would lose one it had already found.
+    expect(vercel.readDeployment).toHaveBeenCalledWith({ token: TOKEN, teamId: null }, "dpl_1");
+    expect(vercel.listDeployments).not.toHaveBeenCalled();
+  });
+
   it("gives up on a push no deployment ever appeared for, once the grace period is spent", async () => {
     await boot();
     // Armed long enough ago that the grace period has passed.
@@ -343,6 +360,10 @@ describe("a failed build going back to the harness", () => {
     vercel.listDeployments.mockResolvedValue({
       ok: true,
       deployments: [deployment({ readyState: "error", errorMessage: 'Command "npm run build" exited with 1' })],
+    });
+    vercel.readDeployment.mockResolvedValue({
+      ok: true,
+      deployment: deployment({ readyState: "error", errorMessage: 'Command "npm run build" exited with 1' }),
     });
     vercel.readBuildLog.mockResolvedValue({ ok: true, log: "> next build\nType error: x is not assignable to y" });
     review.pushBranch.mockResolvedValue({ ok: true });
