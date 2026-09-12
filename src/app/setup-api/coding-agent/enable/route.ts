@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hasOwnerSession } from "@/lib/owner-session";
 import {
+  clearHarnessFault,
   CodingAgentError,
   getCodingAgentStatus,
   httpStatusForCodingError,
@@ -64,6 +65,12 @@ function forbidden() {
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
  * shows the wizard instead of its home page until this is true; the reset
  * route is what puts it back to false).
+ * POST { clearHarnessFault: true } → forget a recorded harness fault, so runs
+ * are accepted again at once. The fault expires on its own and a completed run
+ * drops it, but an owner who has just fixed what the message named (signed in
+ * again, changed plan) should not have to wait out a clock to prove it. Only
+ * `true` does anything: there is no way to ASSERT a fault from outside, which
+ * would be a way to disable the coding agent by POST.
  * POST { reviewPass: boolean } → the automatic review pass: one extra run in
  * the same session after every completed run that changed project files
  * (the status payload reports it as `reviewPass`; a review run carries
@@ -111,6 +118,7 @@ export async function POST(request: Request) {
     generateAudio?: unknown;
     realBrowser?: unknown;
     setupComplete?: unknown;
+    clearHarnessFault?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -119,6 +127,9 @@ export async function POST(request: Request) {
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
+  // Only `true`. `false` is not the other half of a switch here — it would
+  // mean "record a fault", and nothing outside the runner may do that.
+  const clearsFault = fields.clearHarnessFault === true;
   const hasEffort = typeof fields.effort === "string";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
@@ -128,7 +139,7 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasGenImages && !hasGenAudio && !hasRealBrowser) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -136,8 +147,8 @@ export async function POST(request: Request) {
           + "{ effort: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
-          + "{ realBrowser: boolean } or "
-          + "{ setupComplete: boolean } or { autoPr: boolean }.",
+          + "{ realBrowser: boolean }, "
+          + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
     );
@@ -191,6 +202,10 @@ export async function POST(request: Request) {
     if (hasRealBrowser) {
       const saved = await setRealBrowser(fields.realBrowser);
       console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
+    }
+    if (clearsFault) {
+      await clearHarnessFault();
+      console.error("[coding-agent] recorded harness fault cleared by the owner");
     }
     if (hasSetupComplete) {
       const saved = await setSetupComplete(fields.setupComplete);

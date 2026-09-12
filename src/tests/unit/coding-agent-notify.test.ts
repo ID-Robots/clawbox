@@ -75,6 +75,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     lastActivityAt: 1_000_000 + 95_000,
     retries: 0,
     resumable: false,
+    failureKind: null,
     progress: [], progressAt: [],
     todos: [],
     exitCode: 0,

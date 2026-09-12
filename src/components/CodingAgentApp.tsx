@@ -81,6 +81,10 @@ interface Run {
   completedAt: number | null;
   summary: string | null;
   error: string | null;
+  /** Set when the run died because the DEVICE's harness could not get a model
+   *  to answer, rather than because of anything about the task. Absent on a
+   *  record written before it was kept. */
+  failureKind?: "harness_not_ready" | null;
   numTurns: number;
   /** The run's plan, as it last wrote it with TodoWrite. */
   todos?: { content?: string; status?: string; activeForm?: string }[];
@@ -910,6 +914,12 @@ export default function CodingAgentApp() {
       { label: t("codingAgent.claudeCode"), ok: readiness.claudeInstalled, badText: t("codingAgent.missing") },
       { label: t("codingAgent.wrapper"), ok: readiness.wrapperInstalled, badText: t("codingAgent.missing") },
       { label: t("codingAgent.clawai"), ok: readiness.clawaiConnected, badText: t("codingAgent.notConnected") },
+      // A row of its own rather than a line in `problems` alone, because this
+      // is the one entry the owner can be looking at while everything above
+      // it is ticked: Claude Code is installed, the wrapper is there, the
+      // token is saved — and runs still die on arrival. `!== false` so a
+      // server that predates the field never draws a failure it never sent.
+      { label: t("codingAgent.harness"), ok: readiness.harnessHealthy !== false, badText: t("codingAgent.harnessNotReady") },
     ]
     : [];
 
@@ -2200,6 +2210,18 @@ export default function CodingAgentApp() {
               {run.error && (
                 <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
                   <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
+                  {/* The device's verdict FIRST, in the owner's own language,
+                      and only where the record says so — never guessed at from
+                      the English below. What the harness actually printed is
+                      an error code wrapped in JSON; it stays, because it names
+                      the model that was refused and that is what anyone
+                      looking into this needs, but it is no longer the first
+                      and only thing the owner is handed. */}
+                  {run.failureKind === "harness_not_ready" && (
+                    <p className="mt-1 text-xs text-amber-300 leading-relaxed" data-testid="coding-agent-run-harness-not-ready">
+                      {t("codingAgent.harnessNotReadyDetail")}
+                    </p>
+                  )}
                   <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
                 </div>
               )}
