@@ -27,6 +27,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 const listSecrets = vi.hoisted(() => vi.fn());
 const setSecret = vi.hoisted(() => vi.fn());
 const setSecretInject = vi.hoisted(() => vi.fn());
+const setInjectSecrets = vi.hoisted(() => vi.fn());
 const deleteSecret = vi.hoisted(() => vi.fn());
 const getInjectSecrets = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/project-secrets", async (importOriginal) => ({
@@ -34,12 +35,13 @@ vi.mock("@/lib/project-secrets", async (importOriginal) => ({
   listSecrets,
   setSecret,
   setSecretInject,
+  setInjectSecrets,
   deleteSecret,
   getInjectSecrets,
 }));
 
 // The real error class, so the route's `instanceof` is the one a device takes.
-import { MAX_SECRET_VALUE_CHARS, SecretStoreError } from "@/lib/project-secrets";
+import { BOX_SCOPE, MAX_SECRET_VALUE_CHARS, SecretStoreError } from "@/lib/project-secrets";
 
 const SESSION_SECRET = "a".repeat(64);
 /** A bearer that really verifies, so "the agent" in these tests is the agent. */
@@ -47,7 +49,7 @@ const MCP_TOKEN = "c".repeat(48);
 const TOKEN = "vrc_live_9Q3k2Zx7pLmN4tR8sW1yB6dF0hJ5aC";
 const VIEW = {
   name: "VERCEL_TOKEN",
-  scope: "box",
+  scope: BOX_SCOPE,
   createdAt: 1_700_000_000_000,
   updatedAt: 1_700_000_000_000,
   inject: true,
@@ -96,6 +98,7 @@ beforeEach(async () => {
   setSecretInject.mockResolvedValue({ ...VIEW, inject: false });
   deleteSecret.mockResolvedValue([]);
   getInjectSecrets.mockResolvedValue(false);
+  setInjectSecrets.mockImplementation(async (on: boolean) => on);
   route = await import("@/app/setup-api/coding-agent/secrets/route");
   names = await import("@/app/setup-api/coding-agent/secrets/names/route");
 });
@@ -182,6 +185,35 @@ describe("no verb answers with a value", () => {
   });
 });
 
+describe("the master switch", () => {
+  it("is written HERE, behind the origin fence the other switches do not carry", async () => {
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { injectSecrets: true } }));
+    expect(res.status).toBe(200);
+    expect(setInjectSecrets).toHaveBeenCalledWith(true);
+    // Neither entry write was mistaken for it, and no `name` was needed.
+    expect(setSecret).not.toHaveBeenCalled();
+    expect(setSecretInject).not.toHaveBeenCalled();
+  });
+
+  it("refuses the MCP bearer and another origin, like every other write here", async () => {
+    const bearer = await route.POST(request({ method: "POST", bearer: MCP_TOKEN, body: { injectSecrets: true } }));
+    expect(bearer.status).toBe(403);
+    expect((await bearer.json()).kind).toBe("owner_only");
+    const foreign = await route.POST(request({
+      method: "POST", cookie: ownerCookie(), origin: "http://evil.example", body: { injectSecrets: true },
+    }));
+    expect(foreign.status).toBe(403);
+    expect((await foreign.json()).kind).toBe("cross_origin");
+    expect(setInjectSecrets).not.toHaveBeenCalled();
+  });
+
+  it("answers the whole re-read payload, so the card renders the box's own state", async () => {
+    getInjectSecrets.mockResolvedValue(true);
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { injectSecrets: true } }));
+    expect(await res.json()).toMatchObject({ injectSecrets: true, secrets: [VIEW] });
+  });
+});
+
 describe("the two writes", () => {
   it("saves a value, ticked, in the scope the owner chose", async () => {
     await route.POST(request({
@@ -197,10 +229,12 @@ describe("the two writes", () => {
     const res = await route.POST(request({
       method: "POST",
       cookie: ownerCookie(),
-      body: { name: "VERCEL_TOKEN", scope: "box", inject: false },
+      body: { name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: false },
     }));
     expect(res.status).toBe(200);
-    expect(setSecretInject).toHaveBeenCalledWith({ name: "VERCEL_TOKEN", scope: "box", inject: false });
+    // The route passes the scope through verbatim; the STORE is what maps an
+    // absent one onto the box scope, and what refuses a label it does not know.
+    expect(setSecretInject).toHaveBeenCalledWith({ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: false });
     expect(setSecret).not.toHaveBeenCalled();
   });
 
@@ -231,8 +265,8 @@ describe("the two writes", () => {
     expect(deleteSecret).toHaveBeenCalledWith({ name: "SHOP_TOKEN", scope: "shop" });
 
     deleteSecret.mockClear();
-    await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), body: { name: "OTHER_TOKEN", scope: "box" } }));
-    expect(deleteSecret).toHaveBeenCalledWith({ name: "OTHER_TOKEN", scope: "box" });
+    await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), body: { name: "OTHER_TOKEN", scope: BOX_SCOPE } }));
+    expect(deleteSecret).toHaveBeenCalledWith({ name: "OTHER_TOKEN", scope: BOX_SCOPE });
   });
 
   it("reads an absent ?scope= as the whole box, not as an empty label", async () => {
@@ -294,9 +328,9 @@ describe("secrets/names — the agent's own narrower door", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.names).toEqual([
-      { name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true },
+      { name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true },
       { name: "SHOP_TOKEN", scope: "shop", inject: false, readable: true },
-      { name: "OLD_TOKEN", scope: "box", inject: true, readable: false },
+      { name: "OLD_TOKEN", scope: BOX_SCOPE, inject: true, readable: false },
     ]);
     expect(JSON.stringify(body)).not.toContain(TOKEN);
     // No `value`, no `iv`, no `tag` — not even an empty one a caller could

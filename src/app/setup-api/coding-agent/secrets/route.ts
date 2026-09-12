@@ -9,6 +9,7 @@ import {
   MAX_SECRET_VALUE_CHARS,
   MAX_SECRETS,
   SecretStoreError,
+  setInjectSecrets,
   setSecret,
   setSecretInject,
 } from "@/lib/project-secrets";
@@ -40,12 +41,20 @@ export const dynamic = "force-dynamic";
  * only into a run's environment.
  *
  * GET                                            → { secrets, max, maxValueChars, injectSecrets }
+ * POST   { injectSecrets: boolean }              → the master switch
  * POST   { name, value, scope?, inject? }        → save (or replace) a value
  * POST   { name, scope?, inject: boolean }       → tick or un-tick one entry
  * DELETE ?name=…&scope=…                         → take one back
  *
  * Every write answers with the re-read list, so the card renders the box's own
  * answer rather than the list it hoped for.
+ *
+ * THE MASTER SWITCH IS HERE rather than on `coding-agent/enable` with the
+ * feature's other switches, and that is the point: it is the consent for
+ * handing credentials to an unattended shell, so it needs the same-origin check
+ * as well as the cookie, and `enable` carries only the cookie. Its config key
+ * (`coding_agent_inject_secrets`) and the `injectSecrets` field in the coding
+ * agent's status are unchanged — reading it is not the half that needs a fence.
  */
 
 function refuse(status: number, kind: string, error: string, code?: string) {
@@ -120,12 +129,24 @@ export async function POST(request: Request) {
   if (denied) return denied;
   const body = await objectBody(request);
   if (!body) {
-    return refuse(400, "invalid", "Invalid body. Expected { name, value, scope?, inject? } or { name, scope?, inject }.", "malformed");
+    return refuse(400, "invalid", "Invalid body. Expected { injectSecrets }, { name, value, scope?, inject? } or { name, scope?, inject }.", "malformed");
   }
-  // Which of the two writes this is. `value` present means "save a value";
-  // `inject` alone means "tick or un-tick the entry that is already there".
-  // Bounded before the store sees it, so an eight-megabyte paste is refused at
-  // the door rather than after it has been read into a string and a cipher.
+  // The MASTER switch, which names no entry — checked first, so `{ injectSecrets }`
+  // is never mistaken for a body missing its `name`.
+  if (typeof body.injectSecrets === "boolean") {
+    try {
+      const saved = await setInjectSecrets(body.injectSecrets);
+      console.error(`[secrets] handing runs the owner's stored secrets switched ${saved ? "on" : "off"} by the owner`);
+      return NextResponse.json(await payload());
+    } catch (err) {
+      return failed(err);
+    }
+  }
+  // Which of the two entry writes this is. `value` present means "save a
+  // value"; `inject` alone means "tick or un-tick the entry that is already
+  // there". Bounded before the store sees it, so an eight-megabyte paste is
+  // refused at the door rather than after it has been read into a string and a
+  // cipher.
   const hasValue = "value" in body;
   if (hasValue && typeof body.value === "string" && body.value.length > MAX_SECRET_VALUE_CHARS) {
     return refuse(400, "invalid", `A secret's value may be at most ${MAX_SECRET_VALUE_CHARS} characters.`, "value_too_long");
@@ -141,7 +162,7 @@ export async function POST(request: Request) {
       const saved = await setSecretInject({ name: body.name, scope: body.scope, inject: body.inject });
       console.error(`[secrets] ${saved.name} (${saved.scope}) ${saved.inject ? "ticked for" : "taken out of"} a run's environment by the owner`);
     } else {
-      return refuse(400, "invalid", "Invalid body. Expected { name, value, scope?, inject? } or { name, scope?, inject }.", "malformed");
+      return refuse(400, "invalid", "Invalid body. Expected { injectSecrets }, { name, value, scope?, inject? } or { name, scope?, inject }.", "malformed");
     }
     return NextResponse.json(await payload());
   } catch (err) {

@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSecretsCard from "@/components/CodingAgentSecretsCard";
+import { BOX_SCOPE, MIN_SECRET_VALUE_CHARS } from "@/lib/project-secrets-shape";
 
 // The card's own words, in English, the way the rules-card suite does it:
 // asserting on the catalogue's copy rather than on the key is what catches a
@@ -56,19 +57,18 @@ function stubFetch(): void {
     if (url.startsWith("/setup-api/coding-agent/projects")) {
       return json({ directory: "/home/clawbox/Projects", projects: [{ folder: "shop", name: "Corner Shop", kind: "folder" }] });
     }
-    if (url.startsWith("/setup-api/coding-agent/enable")) {
-      if (refuse) { const r = refuse; refuse = null; return json(r.body, r.status); }
-      if (body && typeof body.injectSecrets === "boolean") injectSecrets = body.injectSecrets;
-      return json(payload());
-    }
     if (url.startsWith("/setup-api/coding-agent/secrets")) {
       if (method === "GET") return json(payload());
       if (refuse) { const r = refuse; refuse = null; return json(r.body, r.status); }
+      if (body && typeof body.injectSecrets === "boolean") {
+        injectSecrets = body.injectSecrets;
+        return json(payload());
+      }
       if (method === "DELETE") {
         const name = new URL(url, "http://x").searchParams.get("name");
         secrets = secrets.filter((s) => (s as { name: string }).name !== name);
       } else if (body && typeof body.value === "string") {
-        secrets = [...secrets, { name: body.name, scope: body.scope ?? "box", inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+        secrets = [...secrets, { name: body.name, scope: body.scope ?? BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
       } else if (body && typeof body.inject === "boolean") {
         secrets = secrets.map((s) => ((s as { name: string }).name === body.name ? { ...(s as object), inject: body.inject } : s));
       }
@@ -105,7 +105,7 @@ describe("the list", () => {
   });
 
   it("shows a name and its scope, and never a value", async () => {
-    secrets = [{ name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    secrets = [{ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
     await mounted();
     const row = await screen.findByTestId("coding-agent-secret-row");
     expect(row).toHaveTextContent("VERCEL_TOKEN");
@@ -121,8 +121,8 @@ describe("the list", () => {
 
   it("says so when the box can no longer decrypt an entry, and only then", async () => {
     secrets = [
-      { name: "OLD_TOKEN", scope: "box", inject: true, readable: false, createdAt: 1, updatedAt: 1 },
-      { name: "NEW_TOKEN", scope: "box", inject: true, readable: true, createdAt: 1, updatedAt: 1 },
+      { name: "OLD_TOKEN", scope: BOX_SCOPE, inject: true, readable: false, createdAt: 1, updatedAt: 1 },
+      { name: "NEW_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 },
     ];
     await mounted();
     // One warning, for the one entry that has the problem.
@@ -192,11 +192,14 @@ describe("saving one", () => {
 });
 
 describe("the two switches", () => {
-  it("posts the master switch to the switch route, not to the store", async () => {
+  it("posts the master switch to the STORE's route, which is the one with the origin fence", async () => {
+    // Not `enable`, where the feature's other switches live: this one is the
+    // consent for handing credentials to an unattended shell, so it has to
+    // land on the route that checks the origin as well as the cookie.
     await mounted();
     fireEvent.click(screen.getByTestId("coding-agent-secrets-inject"));
     await waitFor(() => expect(calls).toHaveLength(1));
-    expect(calls[0].url).toBe("/setup-api/coding-agent/enable");
+    expect(calls[0].url).toBe("/setup-api/coding-agent/secrets");
     expect(calls[0].body).toEqual({ injectSecrets: true });
     await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-inject")).toHaveAttribute("aria-checked", "true"));
   });
@@ -267,7 +270,7 @@ describe("a refusal", () => {
   });
 
   it("keeps the list it last knew when the read itself fails", async () => {
-    secrets = [{ name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    secrets = [{ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
     await mounted();
     await screen.findByTestId("coding-agent-secret-row");
     // A card that claimed the list was empty would invite the owner to
@@ -279,9 +282,50 @@ describe("a refusal", () => {
   });
 });
 
+describe("a read that failed", () => {
+  it("does not draw the empty state, and does not unlock the add form", async () => {
+    // The hole this closes: `loaded` used to be set in a `finally`, so a failed
+    // FIRST read drew "this box has no secrets" over a list nobody could see
+    // and enabled Save over it — and a save REPLACES an entry of the same name
+    // and scope, so the owner could overwrite a credential the card had never
+    // shown them.
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/projects")) return json({ projects: [] });
+      return json({ error: "gone" }, 500);
+    }));
+    render(<CodingAgentSecretsCard />);
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error")).toBeInTheDocument());
+    expect(screen.queryByTestId("coding-agent-secrets-empty")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-secret-add")).toBeDisabled();
+    expect(screen.getByTestId("coding-agent-secret-name")).toBeDisabled();
+    expect(screen.getByTestId("coding-agent-secret-value")).toBeDisabled();
+    expect(screen.getByTestId("coding-agent-secrets-inject")).toBeDisabled();
+  });
+});
+
+describe("the fields have names of their own", () => {
+  it("labels both inputs, so a placeholder is not the only thing naming them", async () => {
+    // A placeholder is gone the moment the owner types and is not an
+    // accessible name; the one visible label belongs to the group.
+    await mounted();
+    expect(screen.getByLabelText("Variable name")).toBe(screen.getByTestId("coding-agent-secret-name"));
+    expect(screen.getByLabelText("Value")).toBe(screen.getByTestId("coding-agent-secret-value"));
+  });
+
+  it("refuses a value under the floor before it leaves the browser", async () => {
+    await mounted();
+    fireEvent.change(screen.getByTestId("coding-agent-secret-name"), { target: { value: "SHORT_ONE" } });
+    fireEvent.change(screen.getByTestId("coding-agent-secret-value"), { target: { value: "x".repeat(MIN_SECRET_VALUE_CHARS - 1) } });
+    fireEvent.click(screen.getByTestId("coding-agent-secret-add"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error")).toBeInTheDocument());
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("one write at a time", () => {
   it("disables the other controls while a write is in flight", async () => {
-    secrets = [{ name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    secrets = [{ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
     await mounted();
     // `let` with a narrowing assignment inside the closure reads as `never` to
     // TypeScript; the box keeps the resolver at a type the caller can call.

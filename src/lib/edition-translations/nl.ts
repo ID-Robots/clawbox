@@ -1088,4 +1088,7 @@ export const nl: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "Dat geheim bestaat niet meer.",
   "codingAgent.stepSecretsInjected": "Geheimen in de omgeving: {names}",
   "codingAgent.stepSecretsUnreadable": "Deze geheimen konden niet worden gelezen: {names}",
+  "codingAgent.secretsNameLabel": "Variabelenaam",
+  "codingAgent.secretsValueLabel": "Waarde",
+  "codingAgent.secretsRefusedShort": "Een waarde moet minstens {n} tekens lang zijn, zodat deze box hem uit de uitvoer van een run kan houden.",
 };

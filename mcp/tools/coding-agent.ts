@@ -43,6 +43,9 @@ import {
   DEFAULT_CODING_PROVIDER,
   resolveRunProvider,
 } from "../../src/lib/coding-provider";
+// Pure too: the store's own bounds, so the output cap below is derived from
+// what the device can actually hold rather than from a round number.
+import { MAX_SECRETS } from "../../src/lib/project-secrets-shape";
 // Pure too: what a run was held to and how to say it, so this tool cannot
 // describe a bar the server never set.
 import {
@@ -54,6 +57,34 @@ import {
 } from "../../src/lib/coding-deliverable";
 
 const MAX_TASK_CHARS = 4_000;
+/**
+ * Room for a FULL secret store — MEASURED, not guessed.
+ *
+ * `json()` pretty-prints with a two-space indent, so a row is six lines rather
+ * than one and a per-row figure written by hand is wrong the moment a field is
+ * added. The bound is therefore the real serialisation of the widest row the
+ * store can hold (two 64-character labels, both flags present), times
+ * the store can hold, as an array of `MAX_SECRETS` of them — the same call the
+ * tool itself makes, so the two cannot disagree. A first attempt used a flat
+ * 160 characters a row and still cut the JSON in half; a second added the
+ * nesting indent by hand and was 378 characters short.
+ *
+ * It comes out around 14 kB, which is well above the list cap other tools use —
+ * and is the PATHOLOGICAL case: a store with 64 entries whose every label is
+ * the longest the alphabet allows. A real answer here is a few hundred bytes.
+ * The bound is set by what cannot be cut in half rather than by what is tidy,
+ * because a truncated JSON array is worse for a small model than a long one.
+ */
+const SECRET_LIST_MAX_CHARS = JSON.stringify(
+  Array.from({ length: MAX_SECRETS }, () => ({
+    name: "N".repeat(64),
+    scope: "S".repeat(64),
+    given_to_runs: true,
+    unreadable: true,
+  })),
+  null,
+  2,
+).length;
 const MAX_WAIT_SECONDS = 120;
 /** Summaries are capped at 6 000 chars server-side; leave room for the rest. */
 const STATUS_OUTPUT_CHARS = 12_000;
@@ -654,7 +685,14 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     "coding_secret_list",
     "List the NAMES of the secrets the owner has stored on this ClawBox for coding runs — a deploy token, a test API key, an SSH target. Use it before starting a run that needs a credential, so you can tell the user which name is there and which is missing instead of watching the run fail for the want of one. There is no way to read a value, here or anywhere: the owner types it in Settings and only a run's own environment ever sees it. A name with inject:false is stored but deliberately NOT handed to runs, and one with readable:false cannot be handed over at all — in both cases tell the user to look at the secret in the Coding Agent's settings rather than starting a run that will fail.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 2_000 },
+    // LIST_MAX_CHARS, not the 2,000 this started with: the store keeps up to
+    // MAX_SECRETS entries and each row serialises to roughly 130 characters
+    // (two 64-character labels and two flags), so a full store is ~9 kB — and
+    // `capResult` cuts mid-string, which would hand a model a truncated,
+    // unparseable JSON array with entries silently missing (found in review).
+    // SECRET_LIST_MAX_CHARS is derived from those two numbers rather than
+    // guessed, so a change to either cannot quietly reintroduce the cut.
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: SECRET_LIST_MAX_CHARS },
     async () => {
       const data = await apiGet<{ names?: { name: string; scope: string; inject: boolean; readable: boolean }[] }>(
         "/setup-api/coding-agent/secrets/names",

@@ -1089,4 +1089,7 @@ export const ja: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "そのシークレットはもうありません。",
   "codingAgent.stepSecretsInjected": "環境内のシークレット: {names}",
   "codingAgent.stepSecretsUnreadable": "次のシークレットを読み取れませんでした: {names}",
+  "codingAgent.secretsNameLabel": "変数名",
+  "codingAgent.secretsValueLabel": "値",
+  "codingAgent.secretsRefusedShort": "値は {n} 文字以上にしてください。そうでないと、このボックスは実行の出力から値を取り除けません。",
 };

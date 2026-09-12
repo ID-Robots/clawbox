@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged, onCodingAgentChanged } from "@/lib/ui-events";
-import { BOX_SCOPE, SECRET_NAME_RE } from "@/lib/project-secrets-shape";
+import { BOX_SCOPE, MIN_SECRET_VALUE_CHARS, SECRET_NAME_RE } from "@/lib/project-secrets-shape";
 import { BTN_QUIET, BTN_SECONDARY, CARD, FIELD, INSET_SURFACE } from "./coding-agent-ui";
 import CodingAgentSwitch from "./CodingAgentSwitch";
 import HelpTip from "./HelpTip";
@@ -118,13 +118,19 @@ export default function CodingAgentSecretsCard() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       apply(await res.json() as SecretsPayload);
       setError(null);
+      // ONLY here, never in a `finally`. `loaded` is what unlocks the add form
+      // and the master switch, and it is what turns "no rows yet" into "this
+      // box has no secrets". A failed FIRST read that set it would draw the
+      // empty state over a list nobody could see and enable Save over it — and
+      // a save replaces an entry of the same name and scope, so the owner
+      // could overwrite a credential the card never showed them (found in
+      // review). A read that failed leaves the card locked and says so.
+      setLoaded(true);
     } catch {
       // The card keeps what it last knew rather than claiming the list is
       // empty — the same reasoning as the rules card's: an empty list invites
       // the owner to re-enter a credential that is already there.
       setError(t("codingAgent.secretsFailed"));
-    } finally {
-      setLoaded(true);
     }
   }, [apply, t]);
 
@@ -185,8 +191,15 @@ export default function CodingAgentSecretsCard() {
       setError(t("codingAgent.secretsRefusedName"));
       return;
     }
-    if (!value.trim()) {
+    const trimmedValue = value.trim();
+    if (!trimmedValue) {
       setError(t("codingAgent.secretsRefusedEmpty"));
+      return;
+    }
+    // The same floor the store enforces, checked here so the owner is told
+    // before a credential leaves the browser.
+    if (trimmedValue.length < MIN_SECRET_VALUE_CHARS) {
+      setError(t("codingAgent.secretsRefusedShort", { n: MIN_SECRET_VALUE_CHARS }));
       return;
     }
     const ok = await write(
@@ -231,7 +244,10 @@ export default function CodingAgentSecretsCard() {
     return project ? project.name : s;
   };
 
+  // Locked until the first read came back: see `load`. `full` is the other
+  // reason the form is closed, and the count beside the title explains it.
   const full = rows.length >= max;
+  const formLocked = !loaded || busy !== null || full;
 
   return (
     <div className={CARD} data-testid="coding-agent-secrets-card">
@@ -266,7 +282,10 @@ export default function CodingAgentSecretsCard() {
           testId="coding-agent-secrets-inject"
           onChange={(next) => void write(
             { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ injectSecrets: next }) },
-            "/setup-api/coding-agent/enable",
+            // The store's own route, not `enable`: this switch is the consent
+            // for handing credentials to an unattended shell, and that route
+            // carries the same-origin check the others do not need.
+            "/setup-api/coding-agent/secrets",
             "inject",
           )}
         />
@@ -335,8 +354,9 @@ export default function CodingAgentSecretsCard() {
           autoCapitalize="characters"
           autoCorrect="off"
           placeholder={t("codingAgent.secretsNamePlaceholder")}
+          aria-label={t("codingAgent.secretsNameLabel")}
           onChange={(e) => setName(e.target.value)}
-          disabled={busy !== null || full}
+          disabled={formLocked}
           data-testid="coding-agent-secret-name"
           className={`w-full text-base sm:text-xs ${FIELD}`}
         />
@@ -351,9 +371,14 @@ export default function CodingAgentSecretsCard() {
           autoComplete="new-password"
           maxLength={maxValueChars}
           placeholder={t("codingAgent.secretsValuePlaceholder")}
+          // A placeholder is not a label: it is gone the moment the owner types
+          // and it is not an accessible name. Both fields carry one of their
+          // own, because the one visible `<label>` above belongs to the group
+          // rather than to either input (found in review).
+          aria-label={t("codingAgent.secretsValueLabel")}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void add(); }}
-          disabled={busy !== null || full}
+          disabled={formLocked}
           data-testid="coding-agent-secret-value"
           className={`w-full text-base sm:text-xs ${FIELD}`}
         />
@@ -361,7 +386,7 @@ export default function CodingAgentSecretsCard() {
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value)}
-            disabled={busy !== null || full}
+            disabled={formLocked}
             aria-label={t("codingAgent.secretsScopeLabel")}
             data-testid="coding-agent-secret-scope"
             className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
@@ -374,7 +399,7 @@ export default function CodingAgentSecretsCard() {
           <button
             type="button"
             onClick={() => void add()}
-            disabled={busy !== null || full}
+            disabled={formLocked}
             data-testid="coding-agent-secret-add"
             className={`${BTN_SECONDARY} shrink-0`}
           >
@@ -414,6 +439,7 @@ const REFUSAL_KEYS: Record<string, string> = {
   invalid_scope: "codingAgent.secretsRefusedScope",
   invalid_value: "codingAgent.secretsRefusedEmpty",
   value_too_long: "codingAgent.secretsRefusedLong",
+  value_too_short: "codingAgent.secretsRefusedShort",
   full: "codingAgent.secretsRefusedFull",
   not_found: "codingAgent.secretsRefusedGone",
   store_unreadable: "codingAgent.secretsStoreFailed",

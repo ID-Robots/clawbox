@@ -38,7 +38,9 @@
  *    boundary against a run that is trying to exfiltrate what it was given —
  *    the containment for that is the owner's switch and the per-entry tick, in
  *    src/lib/project-secrets.ts.
- *  - A VALUE SHORTER THAN `MIN_REDACT_CHARS`. See that constant.
+ *  - NOTHING on account of its length. A value shorter than `MIN_REDACT_CHARS`
+ *    is not scrubbed here, and cannot be stored either — the store refuses it
+ *    at the save, so the two cannot disagree. See that constant.
  *  - A RESTART. The table is in memory, so a run whose record survives a web
  *    server restart is settled as lost (`coding-agent.ts`) and nothing more is
  *    written to it; there is no path where output is recorded with the table
@@ -46,16 +48,25 @@
  */
 
 /**
- * The shortest value worth replacing.
+ * The shortest value this module will replace — and, by construction, the
+ * shortest the STORE will keep.
  *
- * A secret of three characters is not a secret, and matching one would turn
- * every `abc` in every progress line into `<secret:X>` — an unreadable timeline,
- * and one that tells an attentive reader the value by showing which substrings
- * vanish. Eight is comfortably below any real credential (the shortest thing
- * anybody stores here is a PIN-like test key) and comfortably above the length
- * at which substring collisions are routine.
+ * Matching a three-character value would turn every `abc` in every progress
+ * line into `<secret:X>`: an unreadable timeline, and one that tells an
+ * attentive reader the value by showing which substrings vanish. So there has
+ * to be a floor. What must not exist is a value BELOW the floor that is
+ * injected anyway — the box would then hand a run a credential it could not
+ * scrub, which is precisely what this module is for (found in review).
+ *
+ * The two numbers are therefore one number: this is
+ * `MIN_SECRET_VALUE_CHARS`, and `requireSecretValue` refuses anything shorter
+ * at the save. The filter below is what remains: an invariant rather than a
+ * hole, and the thing that keeps this function honest for a caller that
+ * assembles a list by hand.
  */
-export const MIN_REDACT_CHARS = 8;
+export const MIN_REDACT_CHARS = MIN_SECRET_VALUE_CHARS;
+
+import { MIN_SECRET_VALUE_CHARS } from "@/lib/project-secrets-shape";
 
 export interface RunSecret {
   name: string;

@@ -1083,4 +1083,7 @@ export const es: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "Ese secreto ya no está.",
   "codingAgent.stepSecretsInjected": "Secretos en el entorno: {names}",
   "codingAgent.stepSecretsUnreadable": "No se pudieron leer estos secretos: {names}",
+  "codingAgent.secretsNameLabel": "Nombre de la variable",
+  "codingAgent.secretsValueLabel": "Valor",
+  "codingAgent.secretsRefusedShort": "Un valor debe tener al menos {n} caracteres para que esta caja pueda mantenerlo fuera de la salida de una ejecución.",
 };

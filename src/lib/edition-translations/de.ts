@@ -1087,4 +1087,7 @@ export const de: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "Dieses Geheimnis ist nicht mehr vorhanden.",
   "codingAgent.stepSecretsInjected": "Geheimnisse in der Umgebung: {names}",
   "codingAgent.stepSecretsUnreadable": "Diese Geheimnisse konnten nicht gelesen werden: {names}",
+  "codingAgent.secretsNameLabel": "Variablenname",
+  "codingAgent.secretsValueLabel": "Wert",
+  "codingAgent.secretsRefusedShort": "Ein Wert muss mindestens {n} Zeichen haben, damit diese Box ihn aus der Ausgabe eines Laufs heraushalten kann.",
 };

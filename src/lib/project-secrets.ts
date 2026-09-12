@@ -65,6 +65,7 @@ import {
   isValidSecretScope,
   MAX_SECRET_VALUE_CHARS,
   MAX_SECRETS,
+  MIN_SECRET_VALUE_CHARS,
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
@@ -83,6 +84,7 @@ export {
   isValidSecretScope,
   MAX_SECRET_VALUE_CHARS,
   MAX_SECRETS,
+  MIN_SECRET_VALUE_CHARS,
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRET_SCOPE_RE,
@@ -256,6 +258,13 @@ function requireSecretValue(value: unknown): string {
   }
   const trimmed = value.trim();
   if (!trimmed) throw new SecretStoreError("invalid_value", "A secret needs a value.");
+  // Refused rather than stored-and-unscrubbable: see MIN_SECRET_VALUE_CHARS.
+  if (trimmed.length < MIN_SECRET_VALUE_CHARS) {
+    throw new SecretStoreError(
+      "value_too_short",
+      `A secret's value must be at least ${MIN_SECRET_VALUE_CHARS} characters, so this ClawBox can keep it out of a run's own output.`,
+    );
+  }
   if (trimmed.length > MAX_SECRET_VALUE_CHARS) {
     throw new SecretStoreError("value_too_long", `A secret's value may be at most ${MAX_SECRET_VALUE_CHARS} characters.`);
   }
@@ -518,8 +527,10 @@ export async function resolveSecretsForRun(run: { project?: string | null }): Pr
     const project = typeof run.project === "string" && isValidSecretScope(run.project) ? run.project : null;
     const env: Record<string, string> = {};
     const unreadable: string[] = [];
-    // Box scope first, the project's over the top: see the precedence note.
-    for (const scope of project && project !== BOX_SCOPE ? [BOX_SCOPE, project] : [BOX_SCOPE]) {
+    // Box scope first, the project's over the top: see the precedence note. A
+    // project scope can never BE the box scope — `BOX_SCOPE` is outside the
+    // project alphabet — so the two passes are always distinct.
+    for (const scope of project ? [BOX_SCOPE, project] : [BOX_SCOPE]) {
       for (const entry of entries) {
         if (entry.scope !== scope || !entry.inject) continue;
         // Checked again here rather than trusted from the save: the floor only
@@ -528,10 +539,20 @@ export async function resolveSecretsForRun(run: { project?: string | null }): Pr
         if (!SECRET_NAME_RE.test(entry.name) || isReservedSecretName(entry.name)) continue;
         const value = open(entry, k);
         if (value === null) {
+          // The OVERRIDE could not be opened, so the box-wide value under the
+          // same name must go with it. Keeping it would hand the run a
+          // different credential from the one the owner chose for this project
+          // — silently, which is the worst of the three outcomes (found in
+          // review). Nothing, and a named reason, is the honest answer.
+          delete env[entry.name];
           if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
           continue;
         }
         env[entry.name] = value;
+        // The other direction: a box-wide entry this box cannot open, overridden
+        // by a project entry it can, is not a problem to report.
+        const stale = unreadable.indexOf(entry.name);
+        if (stale >= 0) unreadable.splice(stale, 1);
       }
     }
     return { env, names: Object.keys(env), unreadable };

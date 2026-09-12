@@ -1084,4 +1084,7 @@ export const sv: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "Den hemligheten finns inte längre.",
   "codingAgent.stepSecretsInjected": "Hemligheter i miljön: {names}",
   "codingAgent.stepSecretsUnreadable": "Dessa hemligheter kunde inte läsas: {names}",
+  "codingAgent.secretsNameLabel": "Variabelnamn",
+  "codingAgent.secretsValueLabel": "Värde",
+  "codingAgent.secretsRefusedShort": "Ett värde måste vara minst {n} tecken, så att den här boxen kan hålla det borta från en körnings utmatning.",
 };

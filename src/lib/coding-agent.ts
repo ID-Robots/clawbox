@@ -4441,6 +4441,13 @@ function restoreRunSecrets(runId: string, env: Record<string, string>): void {
   registerRunSecrets(runId, Object.entries(env).map(([name, value]) => ({ name, value })));
 }
 
+/** Both tables, emptied for one run. The settle path's own step, and the undo
+ *  for a `restoreRunSecrets` whose child never started. */
+function dropRunSecrets(runId: string): void {
+  runSecretEnv.delete(runId);
+  forgetRunSecrets(runId);
+}
+
 /**
  * The environment a run gets — and nothing else. Exported for the contract test.
  *
@@ -4652,8 +4659,7 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // back an entry the owner has since un-ticked. Nothing written after this
   // point can contain a value: the child is gone, and `secretNames` on the
   // record is names only.
-  runSecretEnv.delete(run.id);
-  forgetRunSecrets(run.id);
+  dropRunSecrets(run.id);
   if ((run.status === "completed" && !run.team) || run.status === "paused") {
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
@@ -7073,6 +7079,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.status = "failed";
         run.completedAt = Date.now();
         run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+        // And take back what restoreRunSecrets put in memory for a child that
+        // never came into being. The cleanup above this branch has already run
+        // and will not run again, so without this the owner's plaintext would
+        // sit in this process until it restarted (found in review).
+        dropRunSecrets(run.id);
       }
     }
   }

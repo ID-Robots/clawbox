@@ -29,6 +29,22 @@ export const MAX_SECRETS = 64;
 export const MAX_SECRET_VALUE_CHARS = 8_192;
 
 /**
+ * The SHORTEST value this store will keep, and why it is a number rather than
+ * "anything non-empty".
+ *
+ * It is the redaction floor (`MIN_REDACT_CHARS` in src/lib/secret-redact.ts is
+ * this constant). Redaction cannot match a three-character value without
+ * turning every `abc` in a run's timeline into a marker — which is both
+ * unreadable and a way to read the value off by watching which substrings
+ * vanish. So the two have to agree on one number, and the honest place to
+ * enforce it is the SAVE: a value the box would inject but could not scrub is a
+ * credential it would print, which is exactly what this feature exists to
+ * prevent (found in review). Eight characters is below any real credential and
+ * above the length at which substring collisions are routine.
+ */
+export const MIN_SECRET_VALUE_CHARS = 8;
+
+/**
  * ENV_STYLE, and nothing else: the name becomes an environment variable in a
  * run's process, so the alphabet is the one a shell can name. A leading digit
  * is refused (`2FA_TOKEN` is not a variable a shell can read back), and lower
@@ -37,14 +53,24 @@ export const MAX_SECRET_VALUE_CHARS = 8_192;
  */
 export const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
-/** The scope that means "every run on this box". */
-export const BOX_SCOPE = "box";
+/**
+ * The scope that means "every run on this box".
+ *
+ * `@box`, not `box`, and the `@` is the whole point: a project scope is a
+ * project id or folder name, and a folder can perfectly well be CALLED `box`.
+ * With the plain word as the sentinel, a secret the owner saved for that one
+ * project was stored as box-wide and handed to every run on the device — an
+ * authorisation hole with no error anywhere, found in review. `@` is outside
+ * `SECRET_SCOPE_RE`, so no project scope can ever collide with this one.
+ */
+export const BOX_SCOPE = "@box";
 
 /**
  * A project scope is a project id or a project folder's name — one path segment
  * out of the alphabet those already use. Never a path: the scope is a label
  * this module compares, and a scope that could hold `/` or `..` would be a path
- * waiting for somebody to join it to something.
+ * waiting for somebody to join it to something. And never `@`-anything, which
+ * is what keeps `BOX_SCOPE` in a namespace of its own.
  */
 export const SECRET_SCOPE_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -71,14 +97,18 @@ export const SECRET_SCOPE_RE = /^[A-Za-z0-9_-]{1,64}$/;
  */
 const RESERVED_NAMES: ReadonlySet<string> = new Set([
   "HOME", "USER", "LOGNAME", "PATH", "LANG", "TERM", "NO_COLOR", "SHELL", "SHELLOPTS",
-  "IFS", "ENV", "PS4", "CDPATH", "PWD", "OLDPWD",
+  "BASHOPTS", "IFS", "ENV", "PS4", "CDPATH", "PWD", "OLDPWD",
   "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PERL5OPT", "PERL5LIB",
   "RUBYOPT", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_CONFIG",
   "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "SSH_ASKPASS",
 ]);
 
 /** Prefixes reserved for the same reason — see RESERVED_NAMES. */
-const RESERVED_PREFIXES: readonly string[] = ["CLAWBOX_", "CLAUDE_", "ANTHROPIC_", "BASH_FUNC_", "LD_", "DYLD_"];
+// `BASH_` whole rather than `BASH_FUNC_` alone: `BASH_ENV` is read and SOURCED
+// by a non-interactive bash before it runs a line of its own body, which is a
+// way to run code inside `scripts/claude-ds` itself (found in review). The
+// prefix covers it, `BASH_FUNC_x` and whatever bash adds next.
+const RESERVED_PREFIXES: readonly string[] = ["CLAWBOX_", "CLAUDE_", "ANTHROPIC_", "BASH_", "LD_", "DYLD_"];
 
 /** True when this name is the device's to write, not the owner's. */
 export function isReservedSecretName(name: string): boolean {
@@ -102,6 +132,7 @@ export type SecretRefusal =
   | "invalid_scope"
   | "invalid_value"
   | "value_too_long"
+  | "value_too_short"
   | "full"
   | "not_found"
   | "store_unreadable"

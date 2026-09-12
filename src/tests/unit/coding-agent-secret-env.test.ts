@@ -79,10 +79,18 @@ describe("buildRunEnv and the owner's secrets", () => {
     // through: the reserved-name check is what refuses it.
     const env = buildRunEnv({
       effort: "high",
-      secrets: { LD_PRELOAD: "/tmp/evil.so", BASH_FUNC_DEPLOY: "() { rm -rf /; }", NODE_OPTIONS: "--require /tmp/evil.js" },
+      secrets: {
+        LD_PRELOAD: "/tmp/evil.so",
+        BASH_FUNC_DEPLOY: "() { rm -rf /; }",
+        // Sourced by a non-interactive bash before its own body runs, which is
+        // a way into `scripts/claude-ds` itself.
+        BASH_ENV: "/tmp/evil.sh",
+        NODE_OPTIONS: "--require /tmp/evil.js",
+      },
     });
     expect(env).not.toHaveProperty("LD_PRELOAD");
     expect(env).not.toHaveProperty("BASH_FUNC_DEPLOY");
+    expect(env).not.toHaveProperty("BASH_ENV");
     expect(env).not.toHaveProperty("NODE_OPTIONS");
   });
 

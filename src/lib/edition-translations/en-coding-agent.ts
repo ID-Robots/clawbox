@@ -643,4 +643,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "That secret is no longer there.",
   "codingAgent.stepSecretsInjected": "Secrets in the environment: {names}",
   "codingAgent.stepSecretsUnreadable": "Could not read these secrets: {names}",
+  "codingAgent.secretsNameLabel": "Variable name",
+  "codingAgent.secretsValueLabel": "Value",
+  "codingAgent.secretsRefusedShort": "A value must be at least {n} characters, so this box can keep it out of a run's output.",
 };

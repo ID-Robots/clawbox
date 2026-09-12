@@ -1074,4 +1074,7 @@ export const bg: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "Тази тайна вече не съществува.",
   "codingAgent.stepSecretsInjected": "Тайни в средата: {names}",
   "codingAgent.stepSecretsUnreadable": "Тези тайни не можаха да бъдат прочетени: {names}",
+  "codingAgent.secretsNameLabel": "Име на променливата",
+  "codingAgent.secretsValueLabel": "Стойност",
+  "codingAgent.secretsRefusedShort": "Стойността трябва да е поне {n} знака, за да може тази кутия да я скрие от изхода на изпълнението.",
 };

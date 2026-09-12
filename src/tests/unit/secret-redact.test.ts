@@ -22,6 +22,7 @@ import {
   registerRunSecrets,
   _resetRunSecretsForTests,
 } from "@/lib/secret-redact";
+import { MIN_SECRET_VALUE_CHARS } from "@/lib/project-secrets-shape";
 
 const TOKEN = "vrc_live_9Q3k2Zx7pLmN4tR8sW1yB6dF0hJ5aC";
 
@@ -60,10 +61,13 @@ describe("redactSecrets", () => {
     expect(redactSecrets(`KEY=${value} rest`, [{ name: "KEY", value }])).toBe("KEY=<secret:KEY> rest");
   });
 
-  it("leaves a value shorter than the floor alone", () => {
+  it("leaves a value shorter than the floor alone — and the store keeps none", () => {
     // Matching three characters would turn every "abc" in a timeline into a
     // marker — unreadable, and it would show an attentive reader the value by
-    // showing which substrings vanish.
+    // showing which substrings vanish. The floor is therefore the store's
+    // minimum, enforced at the SAVE (project-secrets.test.ts), so a value this
+    // function would skip cannot be injected in the first place.
+    expect(MIN_REDACT_CHARS).toBe(MIN_SECRET_VALUE_CHARS);
     const tiny = "x".repeat(MIN_REDACT_CHARS - 1);
     expect(redactSecrets(`A=${tiny}`, [{ name: "A", value: tiny }])).toBe(`A=${tiny}`);
     const enough = "x".repeat(MIN_REDACT_CHARS);
@@ -113,10 +117,11 @@ describe("the per-run table", () => {
     expect(redactForRun("run-a", `saw ${TOKEN}`)).toBe(`saw ${TOKEN}`);
   });
 
-  it("keeps a short value for the environment while never trying to scrub it", () => {
-    // registerRunSecrets does not filter — the run is HANDED short values too —
-    // and the length floor is applied when redacting. A filter at registration
-    // would have meant a four-character secret was never injected.
+  it("keeps a short value in the table rather than dropping it at registration", () => {
+    // registerRunSecrets does not filter, and the length floor is applied when
+    // redacting. The store refuses a value that short, so this is an invariant
+    // rather than a hole — and a filter at registration would have hidden the
+    // difference between "not scrubbed" and "not held".
     const tiny = "abc";
     registerRunSecrets("run-a", [{ name: "TINY", value: tiny }, { name: "TOK", value: TOKEN }]);
     expect(redactForRun("run-a", `${tiny} and ${TOKEN}`)).toBe(`${tiny} and <secret:TOK>`);
@@ -139,6 +144,20 @@ describe("the two ways a run continues", () => {
    * These are the table's own halves of that; the runner's wiring is pinned in
    * coding-agent-secret-env.test.ts and the store's in project-secrets.test.ts.
    */
+  it("a table restored for a child that never started must not be left behind", () => {
+    // `spawnRun` can throw synchronously — a cwd that vanished, a setpriv that
+    // is not executable — after restoreRunSecrets has already put the values
+    // back. The cleanup that would have dropped them ran BEFORE the retry
+    // branch and does not run again, so that branch has to drop them itself:
+    // otherwise the owner's plaintext sits in this process until it restarts.
+    registerRunSecrets("run-a", [{ name: "TOK", value: TOKEN }]);
+    forgetRunSecrets("run-a");
+    registerRunSecrets("run-a", [{ name: "TOK", value: TOKEN }]);
+    // What the catch does.
+    forgetRunSecrets("run-a");
+    expect(redactForRun("run-a", `saw ${TOKEN}`)).toBe(`saw ${TOKEN}`);
+  });
+
   it("a carried table scrubs the second attempt exactly as it scrubbed the first", () => {
     registerRunSecrets("run-a", [{ name: "TOK", value: TOKEN }]);
     const carried = [{ name: "TOK", value: TOKEN }];

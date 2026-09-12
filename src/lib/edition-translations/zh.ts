@@ -1098,4 +1098,7 @@ export const zh: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "该密钥已经不存在了。",
   "codingAgent.stepSecretsInjected": "环境中的密钥：{names}",
   "codingAgent.stepSecretsUnreadable": "无法读取这些密钥：{names}",
+  "codingAgent.secretsNameLabel": "变量名",
+  "codingAgent.secretsValueLabel": "值",
+  "codingAgent.secretsRefusedShort": "值至少需要 {n} 个字符，这样本机才能把它从运行的输出里去掉。",
 };

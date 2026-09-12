@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { SecretStoreError, setInjectSecrets } from "@/lib/project-secrets";
 import {
   clearHarnessFault,
   CodingAgentError,
@@ -94,12 +93,15 @@ function forbidden() {
  * again, changed plan) should not have to wait out a clock to prove it. Only
  * `true` does anything: there is no way to ASSERT a fault from outside, which
  * would be a way to disable the coding agent by POST.
- * POST { injectSecrets: boolean } → may a run be handed the owner's stored
- * secrets as environment variables? OFF when absent, and the only switch here
- * that is a CONSENT rather than a preference: storing a token is one decision
- * and giving it to an unattended shell that reaches the internet is another.
- * The per-entry tick and the scope are the other two gates
- * (src/lib/project-secrets.ts); this one is the master.
+ * The one switch of this feature's that is NOT here: whether a run may be
+ * handed the owner's stored secrets (`coding_agent_inject_secrets`). It lives
+ * on /setup-api/coding-agent/secrets instead, with the store it governs,
+ * because it needs a fence this route does not carry: a same-origin check as
+ * well as the owner's cookie. Everything above is the owner's preference about
+ * their own agent, where the cookie is the whole question; that one hands
+ * credentials to an unattended shell, which is the fence the permission rules
+ * and the import routes carry for the same reason. The status still REPORTS it
+ * (`injectSecrets`), because reading is not the half that needs the fence.
  * POST { reviewPass: boolean } → the automatic review pass: one extra run in
  * the same session after every completed run that changed project files
  * (the status payload reports it as `reviewPass`; a review run carries
@@ -152,7 +154,6 @@ export async function POST(request: Request) {
     setupComplete?: unknown;
     clearHarnessFault?: unknown;
     provider?: unknown;
-    injectSecrets?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -164,7 +165,6 @@ export async function POST(request: Request) {
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
-  const hasInjectSecrets = typeof fields.injectSecrets === "boolean";
   // Only `true`. `false` is not the other half of a switch here — it would
   // mean "record a fault", and nothing outside the runner may do that.
   const clearsFault = fields.clearHarnessFault === true;
@@ -178,7 +178,7 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasInjectSecrets && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -187,7 +187,6 @@ export async function POST(request: Request) {
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
           + "{ realBrowser: boolean }, { reviewRounds: number }, "
-          + "{ injectSecrets: boolean }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
@@ -270,10 +269,6 @@ export async function POST(request: Request) {
       const saved = await setRealBrowser(fields.realBrowser);
       console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
     }
-    if (hasInjectSecrets) {
-      const saved = await setInjectSecrets(fields.injectSecrets);
-      console.error(`[coding-agent] handing runs the owner's stored secrets switched ${saved ? "on" : "off"} by the owner`);
-    }
     if (clearsFault) {
       await clearHarnessFault();
       console.error("[coding-agent] recorded harness fault cleared by the owner");
@@ -313,12 +308,6 @@ export async function POST(request: Request) {
     // only invalid/not_found, so the shared table answers 400/404 here.)
     if (err instanceof CodingAgentError) {
       return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
-    }
-    // The secret switch's own refusal. Understood and refused, like the folder
-    // rules above — a 400 with the store's `code` beside it, so the card can
-    // word it in the owner's language.
-    if (err instanceof SecretStoreError) {
-      return NextResponse.json({ error: err.message, kind: "invalid", code: err.code }, { status: 400 });
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to change the coding agent setting" },

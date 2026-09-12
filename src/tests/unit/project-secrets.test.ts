@@ -92,7 +92,7 @@ function switchOn(on: boolean): void {
 
 describe("what reaches the disk", () => {
   it("keeps no cleartext, and gives the value back exactly", async () => {
-    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: "box", inject: true });
+    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
 
     // THE headline assertion: the bytes the owner typed are not in the file,
     // under any key and in no encoding this store uses.
@@ -109,16 +109,16 @@ describe("what reaches the disk", () => {
   });
 
   it("writes 0600, and still 0600 after a rewrite", async () => {
-    await store.setSecret({ name: "A_TOKEN", value: TOKEN, scope: "box" });
+    await store.setSecret({ name: "A_TOKEN", value: TOKEN, scope: store.BOX_SCOPE });
     expect(mode()).toBe("600");
-    await store.setSecret({ name: "B_TOKEN", value: "another-long-enough-value", scope: "box" });
+    await store.setSecret({ name: "B_TOKEN", value: "another-long-enough-value", scope: store.BOX_SCOPE });
     expect(mode()).toBe("600");
     expect(rows()).toHaveLength(2);
   });
 
   it("gives each entry its own IV, so two rows holding the same value do not match", async () => {
-    await store.setSecret({ name: "ONE", value: TOKEN, scope: "box" });
-    await store.setSecret({ name: "TWO", value: TOKEN, scope: "box" });
+    await store.setSecret({ name: "ONE", value: TOKEN, scope: store.BOX_SCOPE });
+    await store.setSecret({ name: "TWO", value: TOKEN, scope: store.BOX_SCOPE });
     const [a, b] = rows();
     expect(a.iv).not.toBe(b.iv);
     // The ciphertexts differ too — which is what the IV buys. Equal
@@ -128,18 +128,18 @@ describe("what reaches the disk", () => {
   });
 
   it("never puts a value in a view, however the list is read", async () => {
-    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: "box", inject: true });
+    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
     const list = await store.listSecrets();
     expect(JSON.stringify(list)).not.toContain(TOKEN);
-    expect(list[0]).toMatchObject({ name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true });
+    expect(list[0]).toMatchObject({ name: "VERCEL_TOKEN", scope: store.BOX_SCOPE, inject: true, readable: true });
   });
 
   it("does not lose the owner's list when a save follows an unreadable store", async () => {
-    await store.setSecret({ name: "KEEP_ME", value: TOKEN, scope: "box" });
+    await store.setSecret({ name: "KEEP_ME", value: TOKEN, scope: store.BOX_SCOPE });
     fs.writeFileSync(secretsPath(), "{ not json");
     // Refused, not read as empty: read-as-empty would be written back empty by
     // the next save, taking the list with it.
-    await expect(store.setSecret({ name: "NEW_ONE", value: TOKEN, scope: "box" }))
+    await expect(store.setSecret({ name: "NEW_ONE", value: TOKEN, scope: store.BOX_SCOPE }))
       .rejects.toMatchObject({ code: "store_unreadable" });
     expect(fileText()).toBe("{ not json");
   });
@@ -162,7 +162,7 @@ describe("the label is bound to the row", () => {
   });
 
   it("refuses to open a row renamed to another variable", async () => {
-    await store.setSecret({ name: "REAL_NAME", value: TOKEN, scope: "box", inject: true });
+    await store.setSecret({ name: "REAL_NAME", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
     const edited = rows();
     edited[0].name = "OTHER_NAME";
     fs.writeFileSync(secretsPath(), JSON.stringify(edited));
@@ -173,7 +173,7 @@ describe("the label is bound to the row", () => {
   });
 
   it("reports a row sealed under another box's key as unreadable, not as corrupt", async () => {
-    await store.setSecret({ name: "OLD_BOX", value: TOKEN, scope: "box", inject: true });
+    await store.setSecret({ name: "OLD_BOX", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
     // What a factory reset leaves behind: the store, and a new session secret.
     fs.writeFileSync(path.join(dataDir, ".session-secret"), "a1".repeat(32), { mode: 0o600 });
     store._resetSecretKeyCacheForTests();
@@ -186,9 +186,9 @@ describe("the label is bound to the row", () => {
 
 describe("what a run is given", () => {
   beforeEach(async () => {
-    await store.setSecret({ name: "BOX_WIDE", value: "box-scope-value-long-enough", scope: "box", inject: true });
+    await store.setSecret({ name: "BOX_WIDE", value: "box-scope-value-long-enough", scope: store.BOX_SCOPE, inject: true });
     await store.setSecret({ name: "SHOP_ONLY", value: "shop-scope-value-long-enough", scope: "shop", inject: true });
-    await store.setSecret({ name: "NOT_TICKED", value: "untick-scope-value-long-enough", scope: "box", inject: false });
+    await store.setSecret({ name: "NOT_TICKED", value: "untick-scope-value-long-enough", scope: store.BOX_SCOPE, inject: false });
   });
 
   it("gives a run nothing at all while the owner's switch is off", async () => {
@@ -223,11 +223,65 @@ describe("what a run is given", () => {
   });
 
   it("lets a project's entry win over a box-wide one of the same name", async () => {
-    await store.setSecret({ name: "STRIPE_KEY", value: "box-level-stripe-key-value", scope: "box", inject: true });
+    await store.setSecret({ name: "STRIPE_KEY", value: "box-level-stripe-key-value", scope: store.BOX_SCOPE, inject: true });
     await store.setSecret({ name: "STRIPE_KEY", value: "shop-level-stripe-key-value", scope: "shop", inject: true });
     switchOn(true);
     expect((await store.resolveSecretsForRun({ project: "shop" })).env.STRIPE_KEY).toBe("shop-level-stripe-key-value");
     expect((await store.resolveSecretsForRun({ project: "warehouse" })).env.STRIPE_KEY).toBe("box-level-stripe-key-value");
+  });
+
+  it("keeps a project ACTUALLY CALLED box apart from the box scope", async () => {
+    // The hole this closes: with the plain word `box` as the sentinel, a secret
+    // saved for a project of that name was stored as box-wide and handed to
+    // every run on the device. `BOX_SCOPE` is outside the project alphabet, so
+    // the two cannot collide.
+    expect(store.BOX_SCOPE).not.toMatch(store.SECRET_SCOPE_RE);
+    await store.setSecret({ name: "BOXPROJ_KEY", value: "a-project-called-box-value", scope: "box", inject: true });
+    switchOn(true);
+    // The project named "box" gets it…
+    expect((await store.resolveSecretsForRun({ project: "box" })).env).toHaveProperty("BOXPROJ_KEY");
+    // …and nobody else does, which is the whole point.
+    expect((await store.resolveSecretsForRun({ project: "shop" })).env).not.toHaveProperty("BOXPROJ_KEY");
+    expect((await store.resolveSecretsForRun({ project: null })).env).not.toHaveProperty("BOXPROJ_KEY");
+  });
+
+  it("hands over NOTHING for a name whose project override cannot be opened", async () => {
+    // Not the box-wide value: the owner chose a different credential for this
+    // project, and handing over the general one silently would be the worst of
+    // the three possible answers.
+    await store.setSecret({ name: "STRIPE_KEY", value: "box-level-stripe-key-value", scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "STRIPE_KEY", value: "shop-level-stripe-key-value", scope: "shop", inject: true });
+    const edited = rows();
+    // The project row, sealed under a key this box does not have.
+    const at = edited.findIndex((r) => r.name === "STRIPE_KEY" && r.scope === "shop");
+    edited[at].keyId = "0".repeat(16);
+    edited[at].tag = Buffer.alloc(16).toString("base64");
+    fs.writeFileSync(secretsPath(), JSON.stringify(edited));
+    store._resetSecretKeyCacheForTests();
+
+    switchOn(true);
+    const resolved = await store.resolveSecretsForRun({ project: "shop" });
+    expect(resolved.env).not.toHaveProperty("STRIPE_KEY");
+    expect(resolved.unreadable).toEqual(["STRIPE_KEY"]);
+    // Another project is unaffected: its runs get the box-wide value.
+    expect((await store.resolveSecretsForRun({ project: "warehouse" })).env.STRIPE_KEY).toBe("box-level-stripe-key-value");
+  });
+
+  it("does not report a box-wide row it cannot open when the project's own row opens", async () => {
+    await store.setSecret({ name: "STRIPE_KEY", value: "box-level-stripe-key-value", scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "STRIPE_KEY", value: "shop-level-stripe-key-value", scope: "shop", inject: true });
+    const edited = rows();
+    const at = edited.findIndex((r) => r.name === "STRIPE_KEY" && r.scope === store.BOX_SCOPE);
+    edited[at].keyId = "0".repeat(16);
+    edited[at].tag = Buffer.alloc(16).toString("base64");
+    fs.writeFileSync(secretsPath(), JSON.stringify(edited));
+    store._resetSecretKeyCacheForTests();
+
+    switchOn(true);
+    const resolved = await store.resolveSecretsForRun({ project: "shop" });
+    expect(resolved.env.STRIPE_KEY).toBe("shop-level-stripe-key-value");
+    // Nothing is wrong from this run's point of view, so nothing is reported.
+    expect(resolved.unreadable).toEqual([]);
   });
 
   it("answers nothing rather than throwing when the store cannot be read", async () => {
@@ -263,6 +317,9 @@ describe("what may be stored", () => {
     for (const name of [
       "PATH", "HOME", "SHELL", "IFS",
       "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "BASH_FUNC_DEPLOY",
+      // BASH_ENV is SOURCED by a non-interactive bash before its own body —
+      // a way to run code inside the claude-ds wrapper itself.
+      "BASH_ENV", "BASHOPTS",
       "NODE_OPTIONS", "PYTHONSTARTUP", "GIT_SSH_COMMAND",
       "CLAUDE_DS_PROVIDER", "CLAUDE_DS_MODEL", "CLAWBOX_RUN_ARTIFACTS_DIR", "ANTHROPIC_API_KEY",
     ]) {
@@ -279,15 +336,19 @@ describe("what may be stored", () => {
 
   it("refuses an empty value, an over-long one, and one with control characters", async () => {
     await expect(store.setSecret({ name: "OK_NAME", value: "   " })).rejects.toMatchObject({ code: "invalid_value" });
+    // Below the floor the redaction shares with it — a value the box would
+    // inject and could not scrub is refused at the save.
+    await expect(store.setSecret({ name: "OK_NAME", value: "short" }))
+      .rejects.toMatchObject({ code: "value_too_short" });
     await expect(store.setSecret({ name: "OK_NAME", value: "x".repeat(store.MAX_SECRET_VALUE_CHARS + 1) }))
       .rejects.toMatchObject({ code: "value_too_long" });
     // A NUL would truncate the variable where the kernel copies it.
-    await expect(store.setSecret({ name: "OK_NAME", value: "abc\u0000def" })).rejects.toMatchObject({ code: "invalid_value" });
+    await expect(store.setSecret({ name: "OK_NAME", value: "abcdefgh\u0000ijkl" })).rejects.toMatchObject({ code: "invalid_value" });
   });
 
   it("keeps the newlines a PEM key is made of, and trims the one a paste adds", async () => {
     const pem = "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBg\n-----END PRIVATE KEY-----";
-    await store.setSecret({ name: "DEPLOY_KEY", value: `${pem}\n`, scope: "box", inject: true });
+    await store.setSecret({ name: "DEPLOY_KEY", value: `${pem}\n`, scope: store.BOX_SCOPE, inject: true });
     switchOn(true);
     expect((await store.resolveSecretsForRun({ project: null })).env.DEPLOY_KEY).toBe(pem);
   });
@@ -303,8 +364,8 @@ describe("what may be stored", () => {
   });
 
   it("keeps createdAt and the owner's tick when a rotated value replaces one", async () => {
-    const first = await store.setSecret({ name: "ROTATED", value: TOKEN, scope: "box", inject: true });
-    const again = await store.setSecret({ name: "ROTATED", value: "the-rotated-value-long-enough", scope: "box" });
+    const first = await store.setSecret({ name: "ROTATED", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    const again = await store.setSecret({ name: "ROTATED", value: "the-rotated-value-long-enough", scope: store.BOX_SCOPE });
     expect(again.createdAt).toBe(first.createdAt);
     // Re-pasting a rotated token is not a reason to re-ask whether runs may
     // have it.
@@ -313,20 +374,20 @@ describe("what may be stored", () => {
   });
 
   it("holds one name per scope, and the same name in two scopes apart", async () => {
-    await store.setSecret({ name: "API_KEY", value: "box-level-value-long-enough", scope: "box" });
+    await store.setSecret({ name: "API_KEY", value: "box-level-value-long-enough", scope: store.BOX_SCOPE });
     await store.setSecret({ name: "API_KEY", value: "shop-level-value-long-enough", scope: "shop" });
-    await store.setSecret({ name: "API_KEY", value: "box-level-value-replaced-ok", scope: "box" });
+    await store.setSecret({ name: "API_KEY", value: "box-level-value-replaced-ok", scope: store.BOX_SCOPE });
     expect(rows()).toHaveLength(2);
   });
 });
 
 describe("the tick and the removal", () => {
   it("ticks and un-ticks one entry without touching its value", async () => {
-    await store.setSecret({ name: "TICKABLE", value: TOKEN, scope: "box", inject: false });
-    expect((await store.setSecretInject({ name: "TICKABLE", scope: "box", inject: true })).inject).toBe(true);
+    await store.setSecret({ name: "TICKABLE", value: TOKEN, scope: store.BOX_SCOPE, inject: false });
+    expect((await store.setSecretInject({ name: "TICKABLE", scope: store.BOX_SCOPE, inject: true })).inject).toBe(true);
     switchOn(true);
     expect((await store.resolveSecretsForRun({ project: null })).env.TICKABLE).toBe(TOKEN);
-    expect((await store.setSecretInject({ name: "TICKABLE", scope: "box", inject: false })).inject).toBe(false);
+    expect((await store.setSecretInject({ name: "TICKABLE", scope: store.BOX_SCOPE, inject: false })).inject).toBe(false);
     expect((await store.resolveSecretsForRun({ project: null })).env).toEqual({});
   });
 
@@ -336,10 +397,10 @@ describe("the tick and the removal", () => {
   });
 
   it("removes one entry and leaves the other scope's alone", async () => {
-    await store.setSecret({ name: "API_KEY", value: "box-level-value-long-enough", scope: "box" });
+    await store.setSecret({ name: "API_KEY", value: "box-level-value-long-enough", scope: store.BOX_SCOPE });
     await store.setSecret({ name: "API_KEY", value: "shop-level-value-long-enough", scope: "shop" });
     const left = await store.deleteSecret({ name: "API_KEY", scope: "shop" });
-    expect(left).toMatchObject([{ name: "API_KEY", scope: "box" }]);
+    expect(left).toMatchObject([{ name: "API_KEY", scope: store.BOX_SCOPE }]);
     expect(rows()).toHaveLength(1);
   });
 

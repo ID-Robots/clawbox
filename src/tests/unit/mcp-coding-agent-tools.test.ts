@@ -40,6 +40,7 @@ import { registerCodingAgentTools } from "../../../mcp/tools/coding-agent";
 import { ApiError } from "../../../mcp/lib/errors";
 import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
+import { MAX_SECRETS } from "../../../src/lib/project-secrets-shape";
 import { capText } from "../../../mcp/lib/guard";
 
 // `coding_secret_list` registers under the same switch: it is about what a
@@ -695,6 +696,26 @@ describe("coding_secret_list", () => {
     // case and a field saying so on every row is noise a small model reads.
     expect(rows[2]).toEqual({ name: "OLD_TOKEN", scope: "box", given_to_runs: true, unreadable: true });
     for (const row of rows) expect(Object.keys(row)).not.toContain("value");
+  });
+
+  it("answers a FULL store whole, rather than cutting the JSON in half", async () => {
+    // The cap used to be a round 2,000 characters against a store that holds 64
+    // entries, and `capResult` cuts mid-string: a model would have been handed
+    // an unparseable array with entries silently missing.
+    const names = Array.from({ length: MAX_SECRETS }, (_, i) => ({
+      // The longest labels the store allows, which is what the cap is derived
+      // from — a shorter fixture would pass over a cap that is still too small.
+      name: `S${"X".repeat(62)}${i % 10}`,
+      scope: "P".repeat(64),
+      inject: true,
+      readable: false,
+    }));
+    apiGet.mockResolvedValue({ names });
+    const out = await harness().call("coding_secret_list", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const rows = JSON.parse(out.text) as unknown[];
+    expect(rows).toHaveLength(MAX_SECRETS);
   });
 
   it("is read-only, so no host's approval gate stands between the assistant and a name", async () => {
