@@ -1118,7 +1118,7 @@ export const sv: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Vercel-projektets ID eller namn",
   "codingAgent.vercelTeamLabel": "Team-ID — lämna tomt för ett personligt konto",
   "codingAgent.vercelTokenLabel": "Vilken sparad hemlighet innehåller token",
-  "codingAgent.vercelTokenHint": "Spara först Vercel-token som en hemlighet på den här ClawBoxen; här namnges den bara, och värdet lämnar aldrig boxens förvar.",
+  "codingAgent.vercelTokenHint": "Spara först Vercel-token som en hemlighet på den här ClawBoxen; det här formuläret skickar bara namnet. Boxen läser det sparade värdet för att logga in på Vercel och visar det aldrig för dig eller för agenten.",
   "codingAgent.vercelNoSecrets": "Den här ClawBoxen har inga sparade hemligheter än. Spara Vercel-token i kodagentens inställningar först.",
   "codingAgent.vercelConnected": "Ansluten till Vercel som {user}",
   "codingAgent.vercelConnectedPlain": "Ansluten till Vercel",

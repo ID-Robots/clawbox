@@ -1122,7 +1122,7 @@ export const fr: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Identifiant ou nom du projet Vercel",
   "codingAgent.vercelTeamLabel": "Identifiant d'équipe — laissez vide pour un compte personnel",
   "codingAgent.vercelTokenLabel": "Quel secret enregistré contient le jeton",
-  "codingAgent.vercelTokenHint": "Enregistrez d'abord le jeton Vercel comme secret sur cette ClawBox ; ici il est seulement nommé, et la valeur ne quitte jamais le coffre de la box.",
+  "codingAgent.vercelTokenHint": "Enregistrez d'abord le jeton Vercel comme secret sur cette ClawBox ; ce formulaire n'envoie que son nom. La box lit la valeur stockée pour s'authentifier auprès de Vercel et ne vous la montre jamais, ni à l'agent.",
   "codingAgent.vercelNoSecrets": "Cette ClawBox n'a encore aucun secret enregistré. Enregistrez d'abord le jeton Vercel dans les réglages de l'agent de code.",
   "codingAgent.vercelConnected": "Connecté à Vercel en tant que {user}",
   "codingAgent.vercelConnectedPlain": "Connecté à Vercel",

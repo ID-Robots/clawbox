@@ -594,7 +594,16 @@ export async function resolveSecretsForRun(run: { project?: string | null }): Pr
  * their own refusal, and a store that cannot be read is not this function's to
  * explain.
  */
-export async function readSecretForProject(input: { name: string; project?: string | null }): Promise<string | null> {
+export type SecretLookup =
+  /** There is an entry, and this box can open it. */
+  | { found: true; value: string }
+  /** There is an entry and this box CANNOT open it — sealed under a key that is
+   *  gone (a factory reset took `.session-secret`), or edited by hand. */
+  | { found: false; reason: "unreadable" }
+  /** No entry of that name in either scope, or the store could not be read. */
+  | { found: false; reason: "missing" };
+
+export async function readSecretForProject(input: { name: string; project?: string | null }): Promise<SecretLookup> {
   try {
     const name = requireSecretName(input.name);
     const project = typeof input.project === "string" && isValidSecretScope(input.project) && input.project !== BOX_SCOPE
@@ -608,11 +617,16 @@ export async function readSecretForProject(input: { name: string; project?: stri
       // An override this box cannot OPEN takes the box-wide value with it, the
       // way it does for a run: handing back a different credential from the one
       // the owner chose for this project, silently, is the worst of the three
-      // outcomes.
-      return value;
+      // outcomes. Reported as its OWN reason rather than as "missing", because
+      // the two need opposite things said — "save it under that name" is
+      // useless advice about an entry that is already there (found in review).
+      return value === null ? { found: false, reason: "unreadable" } : { found: true, value };
     }
-    return null;
+    return { found: false, reason: "missing" };
   } catch {
-    return null;
+    // A store this box cannot read is reported as MISSING rather than as
+    // unreadable: "unreadable" is a statement about one entry, and there may be
+    // no entry at all.
+    return { found: false, reason: "missing" };
   }
 }

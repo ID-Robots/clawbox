@@ -1123,7 +1123,7 @@ export const ja: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Vercel プロジェクト ID または名前",
   "codingAgent.vercelTeamLabel": "チーム ID — 個人アカウントの場合は空のまま",
   "codingAgent.vercelTokenLabel": "どの保存済みシークレットにトークンが入っているか",
-  "codingAgent.vercelTokenHint": "まず Vercel トークンをこの ClawBox のシークレットとして保存してください。ここでは名前を指定するだけで、値がこの箱の保管庫を出ることはありません。",
+  "codingAgent.vercelTokenHint": "まず Vercel トークンをこの ClawBox のシークレットとして保存してください。このフォームが送るのは名前だけです。箱は保存された値を読み取って Vercel にサインインしますが、その値をあなたにもエージェントにも見せることはありません。",
   "codingAgent.vercelNoSecrets": "この ClawBox にはまだ保存されたシークレットがありません。まずコーディングエージェントの設定で Vercel トークンを保存してください。",
   "codingAgent.vercelConnected": "{user} として Vercel に接続済み",
   "codingAgent.vercelConnectedPlain": "Vercel に接続済み",

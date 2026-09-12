@@ -60,7 +60,7 @@ let VercelLinkError: typeof import("@/lib/vercel-state").VercelLinkError;
 const SESSION_SECRET = "a".repeat(64);
 /** A bearer that really verifies, so "the agent" in these tests is the agent. */
 const MCP_TOKEN = "c".repeat(48);
-const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE";
+const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE"; // gitleaks:allow
 
 const LINK = {
   projectId: "prj_acme",

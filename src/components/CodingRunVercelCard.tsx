@@ -71,6 +71,9 @@ export default function CodingRunVercelCard({ runId, vercel, t, onPromote, onOpe
   const [error, setError] = useState<string | null>(null);
 
   const pending = vercel.phase === "looking" || vercel.phase === "building";
+  // Held in a local so the click handler closes over a `string` rather than
+  // casting a nullable field the JSX has already tested.
+  const fixRunId = vercel.fixRunId;
   const promotable = vercel.phase === "ready" && vercel.deploymentId !== null && !vercel.promotion && onPromote;
 
   const promote = async () => {
@@ -147,14 +150,14 @@ export default function CodingRunVercelCard({ runId, vercel, t, onPromote, onOpe
         )}
         {/* The fix turn, when the box handed the failed build's log back. A
             chip to it rather than a repeat of its story. */}
-        {vercel.fixRunId && onOpenRun && (
+        {fixRunId && onOpenRun && (
           <button
             type="button"
-            onClick={() => onOpenRun(vercel.fixRunId as string)}
+            onClick={() => onOpenRun(fixRunId)}
             data-testid="coding-agent-deploy-fix-run"
             className={BTN_SECONDARY}
           >
-            {t("codingAgent.deployFixRun", { id: vercel.fixRunId })}
+            {t("codingAgent.deployFixRun", { id: fixRunId })}
           </button>
         )}
 
@@ -205,8 +208,11 @@ export default function CodingRunVercelCard({ runId, vercel, t, onPromote, onOpe
         </div>
       )}
 
+      {/* A live region: the refusal arrives after a network call with no focus
+          change, so without `role="alert"` a screen reader announces nothing at
+          all and the owner is left looking at an unchanged card. */}
       {error && (
-        <p className="mt-1.5 text-[11px] text-red-300/90 break-words" data-testid="coding-agent-deploy-promote-error">
+        <p role="alert" className="mt-1.5 text-[11px] text-red-300/90 break-words" data-testid="coding-agent-deploy-promote-error">
           {t("codingAgent.deployPromoteFailed", { reason: error })}
         </p>
       )}

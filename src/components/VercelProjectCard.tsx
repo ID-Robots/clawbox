@@ -94,10 +94,13 @@ export default function VercelProjectCard({ query, t }: VercelProjectCardProps) 
     }
   }, [query]);
 
+  // The card is KEYED by the project query at its call site, so a different
+  // project is a fresh mount with nothing held over — which is why this does
+  // not reset that state itself. (Resetting here was redundant and tripped
+  // react-hooks/set-state-in-effect; found in review. A future host that does
+  // not key the card must add the key rather than have this effect paper over
+  // it.)
   useEffect(() => {
-    setLoaded(false);
-    setLink(null);
-    setReadiness(null);
     void load(true);
   }, [load]);
 
@@ -282,7 +285,7 @@ export default function VercelProjectCard({ query, t }: VercelProjectCardProps) 
           </label>
           <p className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.vercelTokenHint")}</p>
           {error && (
-            <p className="text-[11px] text-red-300/90 break-words" data-testid="coding-agent-vercel-error">{error}</p>
+            <p role="alert" className="text-[11px] text-red-300/90 break-words" data-testid="coding-agent-vercel-error">{error}</p>
           )}
           <div className="flex items-center gap-2">
             <button
@@ -302,7 +305,7 @@ export default function VercelProjectCard({ query, t }: VercelProjectCardProps) 
       )}
 
       {!editing && error && (
-        <p className="mt-1.5 text-[11px] text-red-300/90 break-words" data-testid="coding-agent-vercel-error">{error}</p>
+        <p role="alert" className="mt-1.5 text-[11px] text-red-300/90 break-words" data-testid="coding-agent-vercel-error">{error}</p>
       )}
     </div>
   );

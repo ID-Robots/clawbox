@@ -31,8 +31,8 @@ let store: typeof import("@/lib/project-secrets");
 let saved: Record<string, unknown> = {};
 
 const SESSION_SECRET = "7c".repeat(32);
-const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE";
-const OTHER_TOKEN = "vrc_live_ZZZZfLm4Qp7sT1wZ8bN3dH6jR0aC5yE";
+const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE"; // gitleaks:allow
+const OTHER_TOKEN = "vrc_live_ZZZZfLm4Qp7sT1wZ8bN3dH6jR0aC5yE"; // gitleaks:allow
 
 function answer(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -160,6 +160,29 @@ describe("resolving the token", () => {
   it("says the secret is missing rather than calling with nothing", async () => {
     const link = await links.setVercelLink({ scope: "shop", projectId: "prj_a", tokenSecretName: "VERCEL_TOKEN" });
     await expect(links.resolveVercelAuth(link, "shop")).rejects.toMatchObject({ code: "token_missing" });
+  });
+
+  it("tells an entry this box CANNOT OPEN apart from one that is not there", async () => {
+    // The two need opposite things said: "save it under that name" is useless
+    // advice about an entry the owner can see in their own list (found in
+    // review). This is the state a factory reset leaves behind — the row is
+    // there, sealed under a session secret the box no longer has.
+    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: store.BOX_SCOPE });
+    const rows = JSON.parse(fs.readFileSync(path.join(dataDir, "secrets.json"), "utf-8")) as Record<string, unknown>[];
+    rows[0].value = Buffer.from("not what was sealed").toString("base64");
+    fs.writeFileSync(path.join(dataDir, "secrets.json"), JSON.stringify(rows));
+
+    const link = await links.setVercelLink({ scope: "shop", projectId: "prj_a", tokenSecretName: "VERCEL_TOKEN" });
+    await expect(links.resolveVercelAuth(link, "shop")).rejects.toMatchObject({ code: "token_unreadable" });
+
+    // And readiness says the token IS present, so the card does not tell the
+    // owner to save a secret that is already in their list.
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const readiness = await links.checkVercelReadiness("shop");
+    expect(readiness).toMatchObject({ linked: true, tokenPresent: true, ready: false, code: "token_unreadable" });
+    expect(readiness.problems[0]).toMatch(/save the vercel token again/i);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

@@ -829,10 +829,14 @@ export default function CodingAgentApp() {
    * Put one deployment in front of the project's users.
    *
    * The card asks the question; this sends the answer, with `confirm: true` on
-   * the wire so the button and the route agree about what the gesture is. It
-   * answers the refusal SENTENCE rather than throwing, because the card draws
-   * it in its own line beside the deployment — a promotion that was refused is
-   * about that one build, not about the page.
+   * the wire so the button and the route agree about what the gesture is.
+   *
+   * It answers the REASON rather than throwing — the card draws it in its own
+   * line beside the deployment, because a promotion that was refused is about
+   * that one build and not about the page. The reason ALONE, not a finished
+   * sentence: the card wraps it in `deployPromoteFailed`, and returning the
+   * whole sentence here had the owner read the prefix twice ("Could not
+   * promote: Could not promote: 500"), found in review.
    */
   const promoteDeployment = async (runId: string, deploymentId: string): Promise<string | null> => {
     try {
@@ -841,7 +845,7 @@ export default function CodingAgentApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ runId, deploymentId, confirm: true }),
       });
-      if (!res.ok) return await readError(res, t("codingAgent.deployPromoteFailed", { reason: String(res.status) }));
+      if (!res.ok) return await readError(res, String(res.status));
       // The record now carries the promotion; nothing else would make the page
       // look again inside the poll interval.
       await load();

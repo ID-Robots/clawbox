@@ -1108,7 +1108,7 @@ export const bg: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Идентификатор или име на проекта във Vercel",
   "codingAgent.vercelTeamLabel": "Идентификатор на екип — оставете празно за лична сметка",
   "codingAgent.vercelTokenLabel": "Коя запазена тайна съдържа токена",
-  "codingAgent.vercelTokenHint": "Първо запазете токена на Vercel като тайна на тази ClawBox; тук само се посочва името му, а стойността никога не напуска хранилището на кутията.",
+  "codingAgent.vercelTokenHint": "Първо запазете токена на Vercel като тайна на тази ClawBox; тази форма изпраща само името му. Кутията чете запазената стойност, за да влезе във Vercel, и никога не я показва нито на вас, нито на агента.",
   "codingAgent.vercelNoSecrets": "Тази ClawBox още няма запазени тайни. Първо запазете токена на Vercel в настройките на кодовия агент.",
   "codingAgent.vercelConnected": "Свързано с Vercel като {user}",
   "codingAgent.vercelConnectedPlain": "Свързано с Vercel",

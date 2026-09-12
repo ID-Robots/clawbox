@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { listRuns, recordDeployPromotion, resolveProjectScope } from "@/lib/coding-agent";
+import { readJsonObject } from "@/lib/bounded-json";
+import { CodingAgentError, httpStatusForCodingError, listRuns, recordDeployPromotion, resolveProjectScope } from "@/lib/coding-agent";
 import { readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
 import { promoteDeployment } from "@/lib/vercel";
 import { VercelLinkError } from "@/lib/vercel-state";
@@ -44,6 +45,7 @@ function refuse(status: number, code: string, error: string) {
 
 /** A body here is two ids and a flag. */
 const MAX_BODY_BYTES = 2_048;
+const TOO_LONG = "That request is larger than a promotion can be.";
 
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) {
@@ -52,21 +54,15 @@ export async function POST(request: Request) {
   if (!isSameOriginRequest(request)) {
     return refuse(403, "cross_origin", "A deployment can only be promoted from this ClawBox's own pages.");
   }
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    return refuse(413, "too_large", "That request is larger than a promotion can be.");
+  // METERED, not merely header-checked: a chunked request declares no length,
+  // so the header alone bounds exactly the callers that were never the problem.
+  const read = await readJsonObject(request, MAX_BODY_BYTES, TOO_LONG);
+  if (!read.ok) {
+    return read.reason === "too_long"
+      ? refuse(413, "too_large", TOO_LONG)
+      : refuse(400, "invalid_body", "That is not a promotion.");
   }
-
-  let body: Record<string, unknown>;
-  try {
-    const parsed: unknown = await request.json();
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return refuse(400, "invalid_body", "That is not a promotion.");
-    }
-    body = parsed as Record<string, unknown>;
-  } catch {
-    return refuse(400, "invalid_body", "That is not a promotion.");
-  }
+  const body = read.body;
 
   // NOT an authorization check, and deliberately AFTER the two that are: the
   // owner's session and the origin have already decided whether this request
@@ -130,6 +126,17 @@ export async function POST(request: Request) {
   } catch (err) {
     if (err instanceof VercelLinkError) {
       return NextResponse.json({ error: err.message, kind: "invalid", code: err.code }, { status: 400 });
+    }
+    // `resolveProjectScope` goes through `resolveWorkingDirectory`, which
+    // THROWS a CodingAgentError for a folder that is missing, malformed or
+    // outside the owner's project folder. Mapped the way the link route maps
+    // it, rather than answered 500 — the request was refused on its merits and
+    // the box is fine (found in review).
+    if (err instanceof CodingAgentError) {
+      return NextResponse.json(
+        { error: err.message, kind: err.kind, code: err.kind },
+        { status: httpStatusForCodingError(err.kind) },
+      );
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not promote that deployment" },

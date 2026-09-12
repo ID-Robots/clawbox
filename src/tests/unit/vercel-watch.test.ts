@@ -63,7 +63,7 @@ vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async (
 type Lib = typeof import("@/lib/coding-agent");
 
 const RUN_ID = "run-deploy0001";
-const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE";
+const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE"; // gitleaks:allow
 
 const LINK = {
   projectId: "prj_acme",
@@ -256,6 +256,19 @@ describe("the deployment watch", () => {
     await vi.waitFor(() => { expect(vercel.listDeployments).toHaveBeenCalled(); });
     // Still pending: the poll said nothing about the build.
     expect(lib.getRun(RUN_ID)?.vercel?.phase).toBe("looking");
+  });
+
+  it("stops polling a box that has been offline past the ceiling — the transient branch has its own", async () => {
+    // `decideDeployment` never sees this case: a failed list returns before the
+    // verdict, so the guard that stops a permanently offline box polling for
+    // ever is only reachable here (found in review).
+    vercel.listDeployments.mockResolvedValue({ ok: false, kind: "network", detail: "offline", status: null });
+    await boot();
+    writeRecord({ vercel: { startedAt: Date.now() - 10 * 60 * 60_000 } });
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.vercel?.phase).toBe("abandoned"); });
+    expect(lib.getRun(RUN_ID)?.vercel?.detail).toContain("offline");
   });
 
   it("stops watching when Vercel refuses the token, and says so", async () => {

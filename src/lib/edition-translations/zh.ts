@@ -1132,7 +1132,7 @@ export const zh: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Vercel 项目 ID 或名称",
   "codingAgent.vercelTeamLabel": "团队 ID — 个人账户请留空",
   "codingAgent.vercelTokenLabel": "哪个已保存的密钥存放着令牌",
-  "codingAgent.vercelTokenHint": "请先将 Vercel 令牌作为密钥保存在此 ClawBox 上；这里只是指定它的名称，其值绝不会离开盒子的存储。",
+  "codingAgent.vercelTokenHint": "请先将 Vercel 令牌作为密钥保存在此 ClawBox 上；此表单仅发送它的名称。盒子会读取已保存的值来登录 Vercel，但绝不会将它展示给您或代理。",
   "codingAgent.vercelNoSecrets": "此 ClawBox 还没有保存任何密钥。请先在编程代理的设置中保存 Vercel 令牌。",
   "codingAgent.vercelConnected": "已以 {user} 连接到 Vercel",
   "codingAgent.vercelConnectedPlain": "已连接到 Vercel",

@@ -1121,7 +1121,7 @@ export const de: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Vercel-Projekt-ID oder -Name",
   "codingAgent.vercelTeamLabel": "Team-ID — für ein persönliches Konto leer lassen",
   "codingAgent.vercelTokenLabel": "Welches gespeicherte Geheimnis enthält das Token",
-  "codingAgent.vercelTokenHint": "Speichern Sie das Vercel-Token zuerst als Geheimnis auf dieser ClawBox; hier wird es nur benannt, und der Wert verlässt den Speicher der Box nie.",
+  "codingAgent.vercelTokenHint": "Speichern Sie das Vercel-Token zuerst als Geheimnis auf dieser ClawBox; dieses Formular sendet nur dessen Namen. Die Box liest den gespeicherten Wert, um sich bei Vercel anzumelden, und zeigt ihn weder Ihnen noch dem Agenten.",
   "codingAgent.vercelNoSecrets": "Auf dieser ClawBox sind noch keine Geheimnisse gespeichert. Speichern Sie das Vercel-Token zuerst in den Einstellungen des Coding-Agenten.",
   "codingAgent.vercelConnected": "Mit Vercel verbunden als {user}",
   "codingAgent.vercelConnectedPlain": "Mit Vercel verbunden",

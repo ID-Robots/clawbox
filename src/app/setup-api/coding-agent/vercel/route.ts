@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
+import { declaredTooLong, readJsonObject } from "@/lib/bounded-json";
 import { CodingAgentError, httpStatusForCodingError, resolveProjectScope } from "@/lib/coding-agent";
 import {
   checkVercelReadiness,
@@ -103,15 +104,13 @@ function failed(err: unknown) {
  * The most this route will read.
  *
  * A body here is four short identifiers. Nothing about a link is long, and a
- * request that announces more than this has no business being buffered — the
- * check the secrets route arrived at in review, applied here from the start.
+ * request that announces more than this has no business being buffered — nor
+ * one that announces nothing and then sends it, which is what the METER in
+ * `readJsonObject` is for: `Content-Length` alone bounds only the callers that
+ * were never the problem, since a chunked request declares none.
  */
 const MAX_BODY_BYTES = 4_096;
-
-function declaredTooLong(request: Request): boolean {
-  const declared = Number(request.headers.get("content-length"));
-  return Number.isFinite(declared) && declared > MAX_BODY_BYTES;
-}
+const TOO_LONG = "That request is larger than one Vercel link can be.";
 
 export async function GET(request: Request): Promise<NextResponse> {
   const denied = await guard(request, false);
@@ -140,19 +139,13 @@ export async function GET(request: Request): Promise<NextResponse> {
 export async function POST(request: Request): Promise<NextResponse> {
   const denied = await guard(request, true);
   if (denied) return denied;
-  if (declaredTooLong(request)) {
-    return refuse(413, "too_large", "That request is larger than one Vercel link can be.", "too_large");
+  const read = await readJsonObject(request, MAX_BODY_BYTES, TOO_LONG);
+  if (!read.ok) {
+    return read.reason === "too_long"
+      ? refuse(413, "too_large", TOO_LONG, "too_large")
+      : refuse(400, "invalid", "That is not a Vercel link.", "invalid_body");
   }
-  let body: Record<string, unknown>;
-  try {
-    const parsed: unknown = await request.json();
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return refuse(400, "invalid", "That is not a Vercel link.", "invalid_body");
-    }
-    body = parsed as Record<string, unknown>;
-  } catch {
-    return refuse(400, "invalid", "That is not a Vercel link.", "invalid_body");
-  }
+  const body = read.body;
   try {
     const resolved = await scopeFor({
       projectId: typeof body.projectId === "string" ? body.projectId : null,
@@ -185,6 +178,12 @@ export async function POST(request: Request): Promise<NextResponse> {
 export async function DELETE(request: Request): Promise<NextResponse> {
   const denied = await guard(request, true);
   if (denied) return denied;
+  // This verb reads no body, so a stream cannot cost it anything — but a
+  // declared length is free to check, and a request announcing megabytes has no
+  // business being answered.
+  if (declaredTooLong(request, MAX_BODY_BYTES)) {
+    return refuse(413, "too_large", TOO_LONG, "too_large");
+  }
   const url = new URL(request.url);
   try {
     const resolved = await scopeFor({

@@ -72,19 +72,36 @@ export function requireLinkScope(scope: unknown): string {
  */
 export async function readVercelLinks(): Promise<VercelLinks> {
   const raw = await configGet(VERCEL_LINKS_CONFIG_KEY);
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
-  const links: VercelLinks = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return emptyLinks();
+  const links = emptyLinks();
   for (const [scope, value] of Object.entries(raw as Record<string, unknown>)) {
     if (scope !== BOX_SCOPE && isValidSecretScope(scope) && isLink(value)) links[scope] = value;
   }
   return links;
 }
 
+/**
+ * A map with NO PROTOTYPE.
+ *
+ * A project id is `[A-Za-z0-9_-]`, which spells `__proto__` perfectly well —
+ * and `links["__proto__"] = value` on a plain object literal sets the
+ * accumulator's PROTOTYPE instead of a key, after which `readVercelLink("…")`
+ * can answer an inherited value that is not a link at all. Found in review;
+ * `Object.create(null)` has no such key to set, and the own-key check below is
+ * the second half of the same fix.
+ */
+function emptyLinks(): VercelLinks {
+  return Object.create(null) as VercelLinks;
+}
+
 /** The link for one project, or null. */
 export async function readVercelLink(scope: string | null | undefined): Promise<VercelLink | null> {
   if (typeof scope !== "string" || !scope) return null;
   const links = await readVercelLinks();
-  return links[scope] ?? null;
+  // OWN keys only: see emptyLinks. Belt and braces, because a caller that built
+  // a map some other way must not be able to reach `Object.prototype` through
+  // this function either.
+  return Object.prototype.hasOwnProperty.call(links, scope) ? links[scope] : null;
 }
 
 /** Attach a Vercel project, or change the attachment. Answers the stored link. */
@@ -119,7 +136,7 @@ export async function setVercelLink(input: {
   const tokenSecretName = input.tokenSecretName;
 
   const links = await readVercelLinks();
-  const existing = links[scope] ?? null;
+  const existing = Object.prototype.hasOwnProperty.call(links, scope) ? links[scope] : null;
   if (!existing && Object.keys(links).length >= MAX_VERCEL_LINKS) {
     // Refused rather than evicted, for the reason the secret store refuses a
     // full list: dropping the oldest would take a working deploy away from a
@@ -142,7 +159,8 @@ export async function setVercelLink(input: {
 export async function deleteVercelLink(scope: unknown): Promise<boolean> {
   const key = requireLinkScope(scope);
   const links = await readVercelLinks();
-  if (!(key in links)) return false;
+  // `hasOwnProperty`, never `in`: see emptyLinks.
+  if (!Object.prototype.hasOwnProperty.call(links, key)) return false;
   const next = { ...links };
   delete next[key];
   await configSet(VERCEL_LINKS_CONFIG_KEY, next);
@@ -163,14 +181,22 @@ export async function deleteVercelLink(scope: unknown): Promise<boolean> {
  * under a session secret a factory reset took) need different sentences.
  */
 export async function resolveVercelAuth(link: VercelLink, scope: string): Promise<VercelAuth> {
-  const value = await readSecretForProject({ name: link.tokenSecretName, project: scope });
-  if (value === null) {
-    throw new VercelLinkError(
-      "token_missing",
-      `This ClawBox has no readable secret called ${link.tokenSecretName} for this project. Save the Vercel token under that name, or point the link at one that is there.`,
-    );
+  const found = await readSecretForProject({ name: link.tokenSecretName, project: scope });
+  if (!found.found) {
+    // The two reasons need opposite things said, which is why the store tells
+    // them apart: "save it under that name" is useless advice about an entry
+    // that is already there and merely cannot be opened.
+    throw found.reason === "unreadable"
+      ? new VercelLinkError(
+        "token_unreadable",
+        `This ClawBox has a secret called ${link.tokenSecretName} but can no longer open it — it was saved under a key this box has lost. Save the Vercel token again under the same name.`,
+      )
+      : new VercelLinkError(
+        "token_missing",
+        `This ClawBox has no secret called ${link.tokenSecretName} for this project. Save the Vercel token under that name, or point the link at one that is there.`,
+      );
   }
-  return { token: value, teamId: link.teamId };
+  return { token: found.value, teamId: link.teamId };
 }
 
 // ── readiness ───────────────────────────────────────────────────────────────
@@ -236,7 +262,14 @@ export async function checkVercelReadiness(scope: string | null | undefined): Pr
     auth = await resolveVercelAuth(link, scope);
   } catch (err) {
     const code = err instanceof VercelLinkError ? err.code : "token_missing";
-    return { ...base, code, problems: [err instanceof Error ? err.message : "This ClawBox could not read the Vercel token."] };
+    return {
+      ...base,
+      // An entry that is THERE and cannot be opened is present: the card must
+      // not tell the owner to save a secret they can see in their own list.
+      tokenPresent: code === "token_unreadable",
+      code,
+      problems: [err instanceof Error ? err.message : "This ClawBox could not read the Vercel token."],
+    };
   }
 
   const user = await verifyToken(auth);

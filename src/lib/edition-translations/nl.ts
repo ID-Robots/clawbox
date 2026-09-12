@@ -1122,7 +1122,7 @@ export const nl: Record<string, string> = {
   "codingAgent.vercelProjectLabel": "Vercel-project-ID of -naam",
   "codingAgent.vercelTeamLabel": "Team-ID — laat leeg voor een persoonlijk account",
   "codingAgent.vercelTokenLabel": "Welk opgeslagen geheim bevat het token",
-  "codingAgent.vercelTokenHint": "Sla het Vercel-token eerst als geheim op deze ClawBox op; hier wordt het alleen benoemd en de waarde verlaat de opslag van de box nooit.",
+  "codingAgent.vercelTokenHint": "Sla het Vercel-token eerst als geheim op deze ClawBox op; dit formulier stuurt alleen de naam. De box leest de opgeslagen waarde om bij Vercel in te loggen en laat die nooit aan u of aan de agent zien.",
   "codingAgent.vercelNoSecrets": "Deze ClawBox heeft nog geen opgeslagen geheimen. Sla het Vercel-token eerst op in de instellingen van de code-agent.",
   "codingAgent.vercelConnected": "Verbonden met Vercel als {user}",
   "codingAgent.vercelConnectedPlain": "Verbonden met Vercel",

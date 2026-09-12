@@ -27,7 +27,7 @@ import {
   type VercelAuth,
 } from "@/lib/vercel";
 
-const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE";
+const TOKEN = "vrc_live_Xk29fLm4Qp7sT1wZ8bN3dH6jR0aC5yE"; // gitleaks:allow
 const AUTH: VercelAuth = { token: TOKEN, teamId: null };
 const TEAM: VercelAuth = { token: TOKEN, teamId: "team_acme" };
 
