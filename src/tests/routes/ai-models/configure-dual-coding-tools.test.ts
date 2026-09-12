@@ -396,6 +396,22 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     expect(vi.mocked(clearHarnessFault)).not.toHaveBeenCalled();
   });
 
+  it("clears the fault BEFORE the Hermes hand-off, so the apply sees the box the save made", async () => {
+    // Ordering, and it is the whole finding. `applyClawaiToHermes` takes its
+    // OWN before/after readiness pair and does its own refresh. A fault still
+    // standing when it reads "after" keeps readiness false, so it asks for no
+    // reload — and `appliedToHermes` then suppresses this route's fallback
+    // refresh too. The save would report a ready box whose agent has none of
+    // the three coding_agent_* tools.
+    const order: string[] = [];
+    vi.mocked(clearHarnessFault).mockImplementation(async () => { order.push("clear"); });
+    applyClawaiToHermesMock.mockImplementation(async () => { order.push("hermes"); });
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["clear", "hermes"]);
+  });
+
   it("hands the credential to HERMES, which is the agent answering on this box", async () => {
     // The defect: everything the route does above configures OpenClaw, and on
     // the dual SKU Hermes is what the owner is talking to. It keeps its own
