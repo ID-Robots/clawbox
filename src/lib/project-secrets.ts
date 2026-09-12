@@ -1,0 +1,630 @@
+/**
+ * The owner's secret store: credentials a delegated coding run needs and only
+ * the owner may put there — a deploy token, a test-mode API key, the address
+ * of a machine it may reach.
+ *
+ * WHY IT EXISTS. A run is a headless Claude Code session with no person behind
+ * it (src/lib/coding-agent.ts). Anything it needs that is not on the box has to
+ * be somewhere it can read, and until now the only answers were "paste it into
+ * the task" — which puts it in the run record, the progress feed, the harness
+ * transcript and every status answer the agent can read — or "leave it in a
+ * file in the project", which commits it. This is the third answer: the owner
+ * types it once, the box keeps it encrypted, and a run the owner has switched
+ * injection on for gets it as an environment variable and never sees it in any
+ * of its own output (src/lib/secret-redact.ts).
+ *
+ * WHAT THIS FILE IS NOT. It is not a general-purpose vault for the agent. The
+ * value is write-only from every surface: it goes in through the owner's own
+ * browser session and comes out only into a run's environment. There is no
+ * route, no tool and no MCP verb that answers with a stored value —
+ * `listSecrets` returns names and scopes, which is what the picker and the
+ * agent's own tool need in order to talk about a secret without holding one.
+ *
+ * STORAGE. `data/secrets.json`, 0600, written temp+rename, exactly the
+ * discipline config-store and email-pending use. A separate file rather than a
+ * config key for the same reason the mail queue is: this is a keyed collection
+ * with a lifecycle, and it must not be in the blob every settings read parses
+ * and every config dump prints.
+ *
+ * ENCRYPTION AT REST. AES-256-GCM, one random 96-bit IV per entry, the tag
+ * kept beside it, and the entry's own `name` and `scope` as additional
+ * authenticated data — so a stored row cannot be relabelled into another
+ * project's scope or under another variable's name without the open failing.
+ *
+ * THE KEY, and why HKDF and not scrypt. It is derived from the box's existing
+ * session secret (`data/.session-secret`, 32 bytes from `crypto.randomBytes`,
+ * 0600, the file middleware signs cookies with) through HKDF-SHA256 with a
+ * fixed salt and info string. A password KDF is the right answer for
+ * LOW-entropy input — it buys a work factor against guessing. There is nothing
+ * to guess here: the input is already full-entropy random, and an attacker who
+ * has it is root or the app user, at which point they can read this file, the
+ * cookie secret and every other credential on the box anyway. So what
+ * encryption at rest buys is narrower and worth stating plainly: a secret does
+ * not sit in cleartext in a JSON file that gets copied into a backup, a support
+ * bundle, a stray `git add` or a ClawKeep snapshot whose passphrase is the
+ * thing protecting it. HKDF is the correct primitive for stretching one strong
+ * key into a purpose-separated one, and the `info` string is what keeps this
+ * key from being the cookie-signing key.
+ *
+ * WHAT FOLLOWS FROM THE KEY BEING THAT FILE. Lose `.session-secret` — a factory
+ * reset wipes it — and every stored value is unrecoverable. That is the right
+ * failure: the alternative is key material this box could not protect any
+ * better. Each row records the `keyId` it was written under, so a value that
+ * cannot be opened is reported as "written under a key this box no longer has"
+ * rather than as a corrupt file, and the owner is told to type it again.
+ */
+
+import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import { getOrCreateSecret } from "@/lib/auth";
+
+/** The store's file name. Named here so the run deny-lists can refuse it. */
+export const SECRETS_FILE_NAME = "secrets.json";
+
+const SECRETS_PATH = path.join(DATA_DIR, SECRETS_FILE_NAME);
+
+export function secretsStorePath(): string {
+  return SECRETS_PATH;
+}
+
+/**
+ * How many entries the owner may keep.
+ *
+ * A cap, not a limit anybody reaches by working: it exists because this file is
+ * read and rewritten whole on every change and merged into a run's environment,
+ * and an unbounded list is an unbounded environment block.
+ */
+export const MAX_SECRETS = 64;
+
+/**
+ * How long one value may be. A PEM-encoded key is a few thousand characters and
+ * this has to be able to hold one; a multi-megabyte paste is not a secret, it
+ * is a file.
+ */
+export const MAX_SECRET_VALUE_CHARS = 8_192;
+
+/**
+ * ENV_STYLE, and nothing else: the name becomes an environment variable in a
+ * run's process, so the alphabet is the one a shell can name. A leading digit
+ * is refused (`2FA_TOKEN` is not a variable a shell can read back), and lower
+ * case is refused so the list cannot hold two entries a careless reader sees as
+ * one.
+ */
+export const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/** The scope that means "every run on this box". */
+export const BOX_SCOPE = "box";
+
+/**
+ * A project scope is a project id or a project folder's name — one path segment
+ * out of the alphabet those already use. Never a path: the scope is a label
+ * this module compares, and a scope that could hold `/` or `..` would be a path
+ * waiting for somebody to join it to something.
+ */
+export const SECRET_SCOPE_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Names the box keeps for itself, refused at save time so the owner learns at
+ * once rather than wondering why a run ignored the entry.
+ *
+ * Two kinds, and both matter:
+ *
+ *  - THE DEVICE'S OWN WIRING. `buildRunEnv` writes HOME, PATH, the artifacts
+ *    folder and the `CLAUDE_DS_*` variables that decide which account pays for
+ *    a run and which model answers. An entry named one of those would either be
+ *    silently dropped (the injection never overwrites) or, in a future where it
+ *    was not, move a run onto another account. The whole `CLAWBOX_`, `CLAUDE_`
+ *    and `ANTHROPIC_` prefixes are reserved for that reason, not only the names
+ *    in use today.
+ *
+ *  - LOADER AND INTERPRETER HOOKS. `LD_PRELOAD`, `BASH_FUNC_*`, `NODE_OPTIONS`,
+ *    `PYTHONSTARTUP` and their family are not configuration; they are ways to
+ *    run code in every process a run spawns, including ones the device's own
+ *    deny rules are there to contain. This store is for credentials, and an
+ *    owner who wants to change how a run's shell starts has the permission
+ *    rules for it.
+ */
+const RESERVED_NAMES: ReadonlySet<string> = new Set([
+  "HOME", "USER", "LOGNAME", "PATH", "LANG", "TERM", "NO_COLOR", "SHELL", "SHELLOPTS",
+  "IFS", "ENV", "PS4", "CDPATH", "PWD", "OLDPWD",
+  "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PERL5OPT", "PERL5LIB",
+  "RUBYOPT", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_CONFIG",
+  "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "SSH_ASKPASS",
+]);
+
+/** Prefixes reserved for the same reason — see RESERVED_NAMES. */
+const RESERVED_PREFIXES: readonly string[] = ["CLAWBOX_", "CLAUDE_", "ANTHROPIC_", "BASH_FUNC_", "LD_", "DYLD_"];
+
+/** True when this name is the device's to write, not the owner's. */
+export function isReservedSecretName(name: string): boolean {
+  if (RESERVED_NAMES.has(name)) return true;
+  return RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * The owner's switch for injection.
+ *
+ * OFF when absent, unlike the coding agent's media and browser preferences:
+ * this is a CONSENT, not a preference. Storing a token is one decision, and
+ * handing it to an unattended shell that reaches the internet is another — a
+ * box that has never been asked must not have said yes.
+ */
+export const SECRET_INJECT_CONFIG_KEY = "coding_agent_inject_secrets";
+
+export type SecretRefusal =
+  | "invalid_name"
+  | "reserved_name"
+  | "invalid_scope"
+  | "invalid_value"
+  | "value_too_long"
+  | "full"
+  | "not_found"
+  | "store_unreadable"
+  | "store_unwritable"
+  | "key_unavailable";
+
+export class SecretStoreError extends Error {
+  constructor(readonly code: SecretRefusal, message: string) {
+    super(message);
+    this.name = "SecretStoreError";
+  }
+}
+
+/** What every surface may see: the label, never the value. */
+export interface SecretView {
+  name: string;
+  /** BOX_SCOPE, or the id of the project it belongs to. */
+  scope: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Did the owner tick this one for a run's environment? */
+  inject: boolean;
+  /**
+   * False when the row cannot be opened with this box's current key — the
+   * session secret was replaced (a factory reset), or the file was carried over
+   * from another device. The name is still shown, because the owner's next move
+   * is to type the value again under it.
+   */
+  readable: boolean;
+}
+
+interface StoredSecret {
+  name: string;
+  scope: string;
+  createdAt: number;
+  updatedAt: number;
+  inject: boolean;
+  /** base64: the 12-byte IV, the 16-byte GCM tag, the ciphertext. */
+  iv: string;
+  tag: string;
+  value: string;
+  /** Which derived key sealed it — see the header. */
+  keyId: string;
+}
+
+// ── the key ─────────────────────────────────────────────────────────────────
+
+const HKDF_SALT = "clawbox/secret-store/v1";
+const HKDF_INFO = "clawbox-project-secrets-aes-256-gcm";
+
+interface StoreKey {
+  key: Buffer;
+  id: string;
+}
+
+/**
+ * Derived once per process and cached: the session secret does not change while
+ * the web server runs (rotating it needs a restart — see auth.ts), and the read
+ * path runs on every poll of an open Settings window.
+ */
+let cachedKey: StoreKey | null = null;
+
+async function storeKey(): Promise<StoreKey> {
+  if (cachedKey) return cachedKey;
+  let secret: string;
+  try {
+    // The FILE, deliberately, and not `getSessionSigningSecret`: that one
+    // prefers `process.env.SESSION_SECRET`, which is an operator override that
+    // can be set, unset or changed between restarts. A key that followed it
+    // would make every stored value unreadable the first time somebody started
+    // the server without the variable.
+    secret = (await getOrCreateSecret()).trim();
+  } catch (err) {
+    throw new SecretStoreError(
+      "key_unavailable",
+      `This ClawBox could not read the key its secrets are encrypted with: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (secret.length < 32) {
+    throw new SecretStoreError("key_unavailable", "This ClawBox has no session secret yet, so there is no key to encrypt a secret with.");
+  }
+  const key = Buffer.from(crypto.hkdfSync(
+    "sha256",
+    Buffer.from(secret, "utf8"),
+    Buffer.from(HKDF_SALT, "utf8"),
+    Buffer.from(HKDF_INFO, "utf8"),
+    32,
+  ));
+  // A NAME for the key, not a piece of it: the hash is taken of the derived
+  // key, so it says which key sealed a row without being usable to open one.
+  const id = crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
+  cachedKey = { key, id };
+  return cachedKey;
+}
+
+/** Test seam: drop the cached key so a test can point HOME somewhere else. */
+export function _resetSecretKeyCacheForTests(): void {
+  cachedKey = null;
+}
+
+/** The AAD that binds a row to its label. See the header. */
+function aad(name: string, scope: string): Buffer {
+  return Buffer.from(`${name} ${scope}`, "utf8");
+}
+
+function seal(value: string, name: string, scope: string, k: StoreKey): Pick<StoredSecret, "iv" | "tag" | "value" | "keyId"> {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", k.key, iv);
+  // The label is authenticated, not encrypted: it is in the file in the clear
+  // (the picker needs it), and binding it here is what stops a row being moved
+  // to another scope or renamed by editing the JSON.
+  cipher.setAAD(aad(name, scope));
+  const body = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return {
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    value: body.toString("base64"),
+    keyId: k.id,
+  };
+}
+
+/**
+ * The stored value, or null when this box cannot open it.
+ *
+ * Never throws: an entry sealed under a key that is gone, or a row somebody
+ * edited by hand, must not take the whole store down — the other entries are
+ * still the owner's and still work.
+ */
+function open(entry: StoredSecret, k: StoreKey): string | null {
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-gcm", k.key, Buffer.from(entry.iv, "base64"));
+    decipher.setAAD(aad(entry.name, entry.scope));
+    decipher.setAuthTag(Buffer.from(entry.tag, "base64"));
+    return Buffer.concat([decipher.update(Buffer.from(entry.value, "base64")), decipher.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+// ── validation ──────────────────────────────────────────────────────────────
+
+function isValidScope(scope: string): boolean {
+  return scope === BOX_SCOPE || SECRET_SCOPE_RE.test(scope);
+}
+
+/** The name, checked. Throws the refusal the owner is shown. */
+export function requireSecretName(name: unknown): string {
+  if (typeof name !== "string" || !SECRET_NAME_RE.test(name)) {
+    throw new SecretStoreError(
+      "invalid_name",
+      "A secret's name is an environment variable name: capital letters, digits and underscores, starting with a letter — like VERCEL_TOKEN.",
+    );
+  }
+  if (isReservedSecretName(name)) {
+    throw new SecretStoreError(
+      "reserved_name",
+      `${name} is a name this ClawBox uses itself, so a run would never see your value under it. Choose another name.`,
+    );
+  }
+  return name;
+}
+
+/** The scope, checked. `undefined` and `null` both mean the whole box. */
+export function requireSecretScope(scope: unknown): string {
+  if (scope === undefined || scope === null || scope === BOX_SCOPE) return BOX_SCOPE;
+  if (typeof scope !== "string" || !isValidScope(scope)) {
+    throw new SecretStoreError("invalid_scope", 'A secret belongs either to the whole box ("box") or to one project, named by its id.');
+  }
+  return scope;
+}
+
+/**
+ * The value, checked.
+ *
+ * No C0 controls and no DEL, for the reason email-pending refuses them in a
+ * subject: this string becomes an environment variable, and a NUL would
+ * truncate it where the kernel copies it, while an ANSI escape would rewrite
+ * whatever terminal ever prints a line near it. Newlines and tabs are KEPT — a
+ * PEM key is multi-line and is exactly what this store has to hold. Surrounding
+ * whitespace is trimmed rather than refused, because a value pasted out of a
+ * file carries a trailing newline the owner cannot see and a token with one is
+ * a token that does not work.
+ */
+function requireSecretValue(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new SecretStoreError("invalid_value", "A secret's value must be text.");
+  }
+  const trimmed = value.trim();
+  if (!trimmed) throw new SecretStoreError("invalid_value", "A secret needs a value.");
+  if (trimmed.length > MAX_SECRET_VALUE_CHARS) {
+    throw new SecretStoreError("value_too_long", `A secret's value may be at most ${MAX_SECRET_VALUE_CHARS} characters.`);
+  }
+  if (CONTROL_CHARS_RE.test(trimmed)) {
+    throw new SecretStoreError(
+      "invalid_value",
+      "A secret's value has control characters in it that this ClawBox will not put in a run's environment.",
+    );
+  }
+  return trimmed;
+}
+
+/** C0 controls and DEL, less tab, newline and carriage return. */
+const CONTROL_CHARS_RE = /[ --]/;
+
+// ── the file ────────────────────────────────────────────────────────────────
+
+function isStoredSecret(value: unknown): value is StoredSecret {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.name === "string" && SECRET_NAME_RE.test(v.name)
+    && typeof v.scope === "string" && isValidScope(v.scope)
+    && typeof v.createdAt === "number" && typeof v.updatedAt === "number"
+    && typeof v.inject === "boolean"
+    && typeof v.iv === "string" && typeof v.tag === "string"
+    && typeof v.value === "string" && typeof v.keyId === "string";
+}
+
+/**
+ * Read the store.
+ *
+ * A missing file is an empty store — that is a box nobody has saved a secret
+ * on. Anything else is REPORTED, not swallowed: unlike the mail queue, where an
+ * unreadable file means "nothing is waiting", a secret store read as empty
+ * would be written back empty by the next save and take the owner's whole list
+ * with it. The same reasoning as `mutateExtraPaths`'s strict read.
+ */
+async function readStore(): Promise<StoredSecret[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(SECRETS_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw new SecretStoreError(
+      "store_unreadable",
+      `This ClawBox could not read its secret store: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new SecretStoreError(
+      "store_unreadable",
+      `This ClawBox's secret store is not readable JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new SecretStoreError("store_unreadable", "This ClawBox's secret store is not the list it should be.");
+  }
+  // A row that is not one of ours is dropped rather than refused: the shape
+  // check is what keeps a hand-edited file from reaching the cipher, and one
+  // bad row must not hide the rest of the owner's list.
+  return parsed.filter(isStoredSecret);
+}
+
+async function writeStore(entries: StoredSecret[]): Promise<void> {
+  // A unique temp name, like the timezone route's: two saves that overlapped on
+  // one fixed `.tmp` would each write half a file for the other to rename.
+  const tmp = `${SECRETS_PATH}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(tmp, JSON.stringify(entries, null, 2), { mode: 0o600 });
+    // Explicit, because `mode` is masked by the process umask and because a
+    // stale temp could have survived a crash at a wider mode.
+    await fs.chmod(tmp, 0o600);
+    await fs.rename(tmp, SECRETS_PATH);
+    // The renamed file carries the temp's mode; this is for a store written by
+    // an older build, or restored from an archive that lost the bits.
+    await fs.chmod(SECRETS_PATH, 0o600);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw new SecretStoreError(
+      "store_unwritable",
+      `This ClawBox could not save to its secret store: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Every change runs after the previous one has settled.
+ *
+ * The same mechanism and the same reason as `mutateExtraPaths`: a read-modify-
+ * write over one file, reachable from two clicks in two windows. Overlapped,
+ * the second save writes the list it read before the first one landed, and one
+ * entry disappears with both requests answering success. A failed mutation is
+ * its caller's to report and is never inherited by the next one.
+ */
+let chain: Promise<unknown> = Promise.resolve();
+
+function serialised<T>(work: () => Promise<T>): Promise<T> {
+  const next = chain.then(work, work);
+  chain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+// ── the public store ────────────────────────────────────────────────────────
+
+function viewOf(entry: StoredSecret, k: StoreKey): SecretView {
+  return {
+    name: entry.name,
+    scope: entry.scope,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    inject: entry.inject,
+    readable: entry.keyId === k.id && open(entry, k) !== null,
+  };
+}
+
+function sortViews(views: SecretView[]): SecretView[] {
+  return views.sort((a, b) => (a.scope === b.scope ? a.name.localeCompare(b.name) : a.scope.localeCompare(b.scope)));
+}
+
+/** Every entry, names and scopes only. Never a value — see the header. */
+export async function listSecrets(): Promise<SecretView[]> {
+  const [entries, k] = await Promise.all([readStore(), storeKey()]);
+  return sortViews(entries.map((entry) => viewOf(entry, k)));
+}
+
+/** Where an entry sits in the list: one name in one scope, and nowhere twice. */
+function indexOf(entries: StoredSecret[], name: string, scope: string): number {
+  return entries.findIndex((entry) => entry.name === name && entry.scope === scope);
+}
+
+/**
+ * Save a value under a name and a scope — a new entry, or a new value for one
+ * that is already there.
+ *
+ * Replacing keeps `createdAt` and the owner's `inject` tick unless this call
+ * names one: re-pasting a rotated token is not a reason to re-ask whether runs
+ * may have it.
+ */
+export async function setSecret(input: { name: unknown; value: unknown; scope?: unknown; inject?: unknown }): Promise<SecretView> {
+  const name = requireSecretName(input.name);
+  const scope = requireSecretScope(input.scope);
+  const value = requireSecretValue(input.value);
+  const inject = typeof input.inject === "boolean" ? input.inject : null;
+  return serialised(async () => {
+    const k = await storeKey();
+    const entries = await readStore();
+    const at = indexOf(entries, name, scope);
+    const now = Date.now();
+    if (at < 0 && entries.length >= MAX_SECRETS) {
+      // Refused, never evicted: the list is what the owner believes a run can
+      // reach, and a save that quietly dropped the oldest entry would take a
+      // working deploy token away from a project nobody was looking at.
+      throw new SecretStoreError("full", `This ClawBox keeps at most ${MAX_SECRETS} secrets. Remove one first.`);
+    }
+    const sealed = seal(value, name, scope, k);
+    const entry: StoredSecret = at < 0
+      ? { name, scope, createdAt: now, updatedAt: now, inject: inject ?? false, ...sealed }
+      : { ...entries[at], updatedAt: now, inject: inject ?? entries[at].inject, ...sealed };
+    if (at < 0) entries.push(entry);
+    else entries[at] = entry;
+    await writeStore(entries);
+    return viewOf(entry, k);
+  });
+}
+
+/** Tick or un-tick one entry for a run's environment. */
+export async function setSecretInject(input: { name: unknown; scope?: unknown; inject: unknown }): Promise<SecretView> {
+  const name = requireSecretName(input.name);
+  const scope = requireSecretScope(input.scope);
+  if (typeof input.inject !== "boolean") {
+    throw new SecretStoreError("invalid_value", "The injection tick must be true or false.");
+  }
+  const inject = input.inject;
+  return serialised(async () => {
+    const k = await storeKey();
+    const entries = await readStore();
+    const at = indexOf(entries, name, scope);
+    if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
+    entries[at] = { ...entries[at], inject, updatedAt: Date.now() };
+    await writeStore(entries);
+    return viewOf(entries[at], k);
+  });
+}
+
+/** Take one back. Answers the list as it now stands. */
+export async function deleteSecret(input: { name: unknown; scope?: unknown }): Promise<SecretView[]> {
+  const name = requireSecretName(input.name);
+  const scope = requireSecretScope(input.scope);
+  return serialised(async () => {
+    const k = await storeKey();
+    const entries = await readStore();
+    const at = indexOf(entries, name, scope);
+    if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
+    entries.splice(at, 1);
+    await writeStore(entries);
+    return sortViews(entries.map((e) => viewOf(e, k)));
+  });
+}
+
+// ── the switch ──────────────────────────────────────────────────────────────
+
+/** The owner's consent for injection. OFF when absent — see the key. */
+export async function getInjectSecrets(): Promise<boolean> {
+  return (await configGet(SECRET_INJECT_CONFIG_KEY)) === true;
+}
+
+export async function setInjectSecrets(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new SecretStoreError("invalid_value", "The secret-injection switch must be true or false.");
+  }
+  await configSet(SECRET_INJECT_CONFIG_KEY, on);
+  return on;
+}
+
+// ── what a run gets ─────────────────────────────────────────────────────────
+
+export interface ResolvedRunSecrets {
+  /** Name → value, ready to merge into the run's environment. */
+  env: Record<string, string>;
+  /** The names injected, in order. Safe to log and to put on the record. */
+  names: string[];
+  /** Ticked entries this box could not open — named so the owner can re-enter them. */
+  unreadable: string[];
+}
+
+const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [] };
+
+/**
+ * The secrets ONE run may have: the box-scoped ticked entries plus the ticked
+ * entries of its own project, and nothing else.
+ *
+ * THREE gates, and every one of them has to be open:
+ *   1. the owner's switch (`SECRET_INJECT_CONFIG_KEY`), off by default;
+ *   2. the entry's own `inject` tick, off by default;
+ *   3. the scope — a project's secret reaches that project's runs only.
+ * A run with no project (a bare folder the owner pointed the agent at) gets the
+ * box-scoped entries alone: it is not a project, so no project's secrets are
+ * its own.
+ *
+ * A project-scoped entry WINS over a box-scoped one of the same name, because
+ * the more specific statement is the one the owner made about this project — a
+ * `STRIPE_KEY` saved on the project is the project's key.
+ *
+ * Never throws. A store this box cannot read is reported as nothing injected:
+ * failing the run over it would be the worse outcome, and the resolved names go
+ * on the record so a run that got nothing can be told why.
+ */
+export async function resolveSecretsForRun(run: { projectId?: string | null }): Promise<ResolvedRunSecrets> {
+  try {
+    if (!(await getInjectSecrets())) return NOTHING;
+    const [entries, k] = await Promise.all([readStore(), storeKey()]);
+    const project = typeof run.projectId === "string" && isValidScope(run.projectId) ? run.projectId : null;
+    const env: Record<string, string> = {};
+    const unreadable: string[] = [];
+    // Box scope first, the project's over the top: see the precedence note.
+    for (const scope of project && project !== BOX_SCOPE ? [BOX_SCOPE, project] : [BOX_SCOPE]) {
+      for (const entry of entries) {
+        if (entry.scope !== scope || !entry.inject) continue;
+        // Checked again here rather than trusted from the save: the floor only
+        // ever grows, and a name that was allowed under an older build must not
+        // reach a run's environment unchecked.
+        if (!SECRET_NAME_RE.test(entry.name) || isReservedSecretName(entry.name)) continue;
+        const value = open(entry, k);
+        if (value === null) {
+          if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
+          continue;
+        }
+        env[entry.name] = value;
+      }
+    }
+    return { env, names: Object.keys(env), unreadable };
+  } catch (err) {
+    console.error("[secrets] could not resolve the secrets for a run:", err instanceof Error ? err.message : err);
+    return NOTHING;
+  }
+}

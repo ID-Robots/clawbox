@@ -205,6 +205,10 @@ const HARD_SEGMENTS: readonly string[] = [
   // The box's own stores.
   "config.json", "kv.json", "coding-agent-runs.json",
   "email-pending.json", "email-outcomes.json", "email-approval-prompts.json",
+  // The owner's secret store. A run is HANDED the entries the owner ticked for
+  // it as environment variables; the file holds every other project's too, and
+  // the key it is sealed with is `.session-secret` two lines up.
+  "secrets.json",
 ];
 
 /** Kernel and system trees a rule has no business naming. */

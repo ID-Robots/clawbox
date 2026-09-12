@@ -83,7 +83,11 @@ export type ProgressLabelKey =
   | "deliverableMet"
   | "deliverableMissing"
   | "anotherAttempt"
-  | "droppedSteps";
+  | "droppedSteps"
+  // The owner's secret store (src/lib/project-secrets.ts): which of their
+  // secrets this run was handed, and which one the box could not open.
+  | "secretsInjected"
+  | "secretsUnreadable";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -253,6 +257,21 @@ export const RUNNER_STEP = {
    * nothing marks is a run whose history quietly lies.
    */
   dropped: (count: number) => `… ${count} earlier steps are not kept`,
+  /**
+   * The owner's secrets this run holds — NAMES only, which is all that may ever
+   * be written here: the feed is persisted on the run record and answered by a
+   * route the MCP bearer reaches. The values are scrubbed out of everything
+   * else the run says (src/lib/secret-redact.ts); this line is the one place
+   * they are mentioned at all, and it mentions only what they are called.
+   */
+  secretsInjected: (names: readonly string[]) => `Secrets in this run's environment: ${names.join(", ")}`,
+  /**
+   * A ticked entry this box could not decrypt — the session secret it was
+   * sealed under is gone. Said in the run's own feed and not only in the log,
+   * because a run working without a credential it was meant to have fails in a
+   * way that looks like anything else.
+   */
+  secretsUnreadable: (names: readonly string[]) => `Could not read these secrets: ${names.join(", ")}`,
 } as const;
 
 /** One recognisable runner sentence: what it looks like, and what it means. */
@@ -323,6 +342,8 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Not finished yet: (.+)$/, labelKey: "deliverableMissing", icon: "pending", params: (m) => ({ reason: m[1] }) },
   { re: /^Attempt (\d+) of (\d+) at the deliverable$/, labelKey: "anotherAttempt", icon: "replay", params: (m) => ({ attempt: Number(m[1]), attempts: Number(m[2]) }) },
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
+  { re: /^Secrets in this run's environment: (.+)$/, labelKey: "secretsInjected", icon: "key", params: (m) => ({ names: m[1] }) },
+  { re: /^Could not read these secrets: (.+)$/, labelKey: "secretsUnreadable", icon: "key_off", params: (m) => ({ names: m[1] }) },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {
