@@ -513,6 +513,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.autoMergeLabel": "Merge a pull request the review rounds cleared",
   "codingAgent.autoMergeHint": "When every check has passed, no review comment is left unanswered and nobody has asked for changes, ClawBox squash-merges the pull request and deletes its branch. Off by default, and never into main whatever the pull request targets.",
   "codingAgent.autoMergeFailed": "Could not change the merge setting.",
+  "codingAgent.stepReattached": "The web server restarted; this run kept going and was picked back up",
   "codingAgent.stepReviewLoopTurn": "Review round for {id}",
   "codingAgent.stepReviewRound": "Review round {round} of {max} handed to the coding agent",
   "codingAgent.reviewOf": "review of {id}",

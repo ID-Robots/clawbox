@@ -931,6 +931,7 @@ export const ja: Record<string, string> = {
   "codingAgent.autoMergeLabel": "レビューラウンドが通したプルリクエストをマージする",
   "codingAgent.autoMergeHint": "すべてのチェックが成功し、未回答のレビューコメントがなく、誰も変更を要求していない場合、ClawBox はプルリクエストをスカッシュマージしてブランチを削除します。既定ではオフで、プルリクエストの対象が何であれ main へマージすることはありません。",
   "codingAgent.autoMergeFailed": "マージの設定を変更できませんでした。",
+  "codingAgent.stepReattached": "Web サーバーが再起動しましたが、この実行は続いており、再び追跡されました",
   "codingAgent.stepReviewLoopTurn": "{id} のレビューラウンド",
   "codingAgent.stepReviewRound": "レビューラウンド {round}/{max} をコーディングエージェントに委任",
   "codingAgent.reviewOf": "{id} のレビュー",

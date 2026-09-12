@@ -282,14 +282,34 @@ export async function register() {
     // agent's next status question is not answered with "still running".
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const codingAgent = require('./lib/coding-agent')
-    const stale: number = codingAgent.reconcileAfterRestart()
-    if (stale > 0) console.log(`[instrumentation] ${stale} coding run(s) left running by the previous server were marked failed`)
-    // Pull requests left pending by the restart. Same reason the approval
-    // poller is restarted below: nothing else polls them, so without this a run
-    // shows "waiting for checks" forever and is never merged. The watcher takes
-    // everything it decides on — the review verdict included — from the run
-    // record, so what it resumes with is what the previous server knew.
-    codingAgent.resumePullRequestWatches()
+    // Asynchronous since runs got scopes of their own: a run may have SURVIVED
+    // this restart, and only systemd can say which did. Chained rather than
+    // raced with the watches below, which read the records this settles.
+    codingAgent
+      .reconcileAfterRestart()
+      .then((stale: number) => {
+        if (stale > 0) console.log(`[instrumentation] ${stale} coding run(s) left running by the previous server were marked failed`)
+      })
+      .catch((err: unknown) => {
+        console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
+      })
+      .finally(() => {
+        // Pull requests left pending by the restart. Same reason the approval
+        // poller is restarted below: nothing else polls them, so without this a
+        // run shows "waiting for checks" forever and is never merged. The
+        // watcher takes everything it decides on — the review verdict included —
+        // from the run record, so what it resumes with is what the previous
+        // server knew.
+        //
+        // AFTER the reconciliation, which settles and reattaches the records
+        // this reads — and on its FAILED path too, in a `finally`: one boot step
+        // that throws must not take an unrelated one with it.
+        try {
+          codingAgent.resumePullRequestWatches()
+        } catch (err) {
+          console.error('[instrumentation] Could not resume the pull request watches:', err instanceof Error ? err.message : err)
+        }
+      })
   } catch (err) {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }

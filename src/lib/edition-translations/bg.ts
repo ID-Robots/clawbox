@@ -916,6 +916,7 @@ export const bg: Record<string, string> = {
   "codingAgent.autoMergeLabel": "Сливане на заявка, която кръговете на преглед са изчистили",
   "codingAgent.autoMergeHint": "Когато всяка проверка е минала, няма коментар от преглед без отговор и никой не е поискал промени, ClawBox слива заявката със squash и изтрива клона ѝ. По подразбиране изключено и никога към main, независимо накъде сочи заявката.",
   "codingAgent.autoMergeFailed": "Настройката за сливане не можа да бъде променена.",
+  "codingAgent.stepReattached": "Уеб сървърът се рестартира; това изпълнение продължи и беше поето отново",
   "codingAgent.stepReviewLoopTurn": "Кръг на преглед за {id}",
   "codingAgent.stepReviewRound": "Кръг на преглед {round} от {max} е предаден на кодиращия агент",
   "codingAgent.reviewOf": "преглед на {id}",

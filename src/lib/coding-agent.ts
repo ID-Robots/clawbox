@@ -65,6 +65,7 @@ import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-wo
  */
 
 import { spawn, type ChildProcess } from "child_process";
+import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -183,6 +184,18 @@ import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { captureIncident } from "@/lib/incident-report";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
+import {
+  isRunScopeUnit,
+  noteScopeRefused,
+  noteScopeWorked,
+  probeSystemdRun,
+  runScopeUnit,
+  SCOPE_REFUSED,
+  scopeEnv,
+  stopUnit,
+  unitActive,
+  buildScopeArgv,
+} from "@/lib/coding-run-unit";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -601,6 +614,45 @@ const CHILD_SETTLE_GRACE_MS = 400;
 
 /** How often the drain looks at whether the children it killed are gone. */
 const REAP_POLL_MS = 20;
+
+/**
+ * Where a run's stream-json output is written, and why it is a FILE and not
+ * just a pipe any more.
+ *
+ * A run lives in its own systemd scope now (coding-run-unit.ts), so it outlives
+ * the web server — and a process whose stdout pipe has just been closed by its
+ * dead parent dies on the next line it prints. So the harness writes into a log
+ * of its own and the web server TAILS it: nothing the run does depends on the
+ * reader being there, and a restarted server picks the tail up from the byte it
+ * had reached (`CodingRun.streamOffset`) rather than losing the rest of the run.
+ *
+ * Deliberately not the run's evidence folder: this is the box's own plumbing,
+ * not something the owner should find among a run's screenshots, and it is
+ * deleted when the run settles.
+ */
+const STREAM_DIR = path.join(DATA_DIR, "coding-agent-streams");
+
+function streamLogPath(runId: string): string {
+  return path.join(STREAM_DIR, `${runId}.jsonl`);
+}
+
+function stderrLogPath(runId: string): string {
+  return path.join(STREAM_DIR, `${runId}.err`);
+}
+
+/** How often the tail of a live run's stream log is read. */
+const STREAM_POLL_MS = 200;
+/** At most this many bytes are read from the log in one go. */
+const STREAM_READ_CHUNK = 512 * 1024;
+/** How long after the process is gone the log is read one last time. */
+const SETTLE_DRAIN_DELAY_MS = 250;
+/**
+ * How often a REATTACHED run's scope is asked whether it is still there.
+ *
+ * There is no child object to get an `exit` event from — the process belongs to
+ * init now — so the unit is the only thing that can say the run is over.
+ */
+const UNIT_POLL_MS = 3_000;
 
 /**
  * The run is spawned through this, not directly, so it starts with an empty
@@ -1171,6 +1223,27 @@ export interface CodingRun {
    */
   pgid: number | null;
   /**
+   * The transient systemd scope this run was put in — `clawbox-run-<id>.scope`
+   * — or null when the box could not give it one and it is an ordinary child of
+   * the web server (see readiness.detachedRuns).
+   *
+   * The name is what makes a run REATTACHABLE: after a restart it is the only
+   * question that can be asked about a process this server never spawned, and
+   * the pgid alone cannot answer it — Linux recycles pids, and a stale one would
+   * have the Kill button signalling a stranger.
+   */
+  unit: string | null;
+  /**
+   * How many bytes of this run's stream log have already been parsed.
+   *
+   * Persisted with every event, so a restarted server resumes the tail where it
+   * left off instead of replaying the run from its first line. The debounced
+   * flush means a CRASH can lose the last second of it and a few events may be
+   * read twice — duplicated progress lines rather than lost work, which is the
+   * safe direction for a fact that only ever moves forward.
+   */
+  streamOffset: number;
+  /**
    * Something the run started is STILL RUNNING now that the run has finished.
    *
    * Not a fault: the orientation guide tells a run to leave a server listening
@@ -1323,6 +1396,19 @@ export interface CodingHarnessReadiness {
    * box only ever learns it by being refused.
    */
   harnessHealthy: boolean;
+  /**
+   * Whether a run gets its own transient systemd scope, and so SURVIVES a
+   * web-server restart (coding-run-unit.ts).
+   *
+   * Deliberately not in `problems` and deliberately not part of `ready`: a box
+   * without it runs exactly as this device always has, and refusing to start a
+   * run over it would turn a degradation into an outage. It is reported because
+   * the difference is visible to the owner the day an update restarts the
+   * server under a run — which is precisely when nobody can find out why.
+   */
+  detachedRuns: boolean;
+  /** Why not, in systemd's own words. Null when runs are detached. */
+  detachedRunsDetail: string | null;
   /** Owner-facing sentences, one per missing piece. Empty when ready. */
   problems: string[];
   /**
@@ -2467,11 +2553,14 @@ const CLAWAI_MISSING =
  * provider's, because that is the run a caller who names nothing gets.
  */
 async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, anthropic] = await Promise.all([
+  const [wrapperInstalled, claudePath, setprivPath, anthropic, scope] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
     getAnthropicConnection(),
+    // Cached for a minute inside the module, so a status poll pays for the bus
+    // round trip at most once a minute.
+    probeSystemdRun(),
   ]);
   const claudeInstalled = claudePath !== null;
   const capabilityDropAvailable = setprivPath !== null;
@@ -2526,6 +2615,8 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     anthropicSource: anthropic.source,
     capabilityDropAvailable,
     harnessHealthy,
+    detachedRuns: scope.available,
+    detachedRunsDetail: scope.detail,
     // The default provider's own missing credential belongs in the flat list
     // the panels already render, or a box whose default cannot run would show
     // "not ready" with an empty checklist.
@@ -2863,6 +2954,14 @@ function normalizeRun(raw: CodingRun): CodingRun {
       audio: countOf(raw.mediaGenerated?.audio),
     },
     pgid: typeof raw.pgid === "number" && raw.pgid > 0 ? raw.pgid : null,
+    // Only a name this code could have written: the string reaches
+    // `systemctl stop`, so anything else on a hand-edited record is no unit at
+    // all and the run falls back to being judged by its pgid.
+    unit: isRunScopeUnit((raw as { unit?: unknown }).unit) ? (raw as { unit: string }).unit : null,
+    streamOffset: (() => {
+      const at = (raw as { streamOffset?: unknown }).streamOffset;
+      return typeof at === "number" && Number.isFinite(at) && at > 0 ? Math.floor(at) : 0;
+    })(),
     leftover: raw.leftover === true,
     commitError: typeof raw.commitError === "string" ? raw.commitError : null,
     // Only a deliverable this code could have written counts; anything else on
@@ -2910,8 +3009,60 @@ function writeAll(list: CodingRun[]): void {
   fs.renameSync(tmp, RUNS_PATH);
 }
 
+/** What a spawn needs off the disk, resolved once before the record flips to running. */
+interface SpawnTools {
+  /** The capability-dropping binary. A run never starts without it. */
+  setprivPath: string;
+  /**
+   * Absolute `systemd-run`, or null when this box cannot put a run in a scope
+   * of its own. Null means the run is an ordinary child again and dies with the
+   * web server — see readiness.detachedRuns.
+   */
+  scopePath: string | null;
+}
+
+/** The tail of a run's stream log, and where this process has read up to. */
+interface StreamFollower {
+  path: string;
+  /** Bytes consumed. Mirrored onto the record as `streamOffset` for the next server. */
+  offset: number;
+  /** A line that arrived without its newline yet. */
+  buffer: string;
+  /** So a multi-byte character split across two reads is not mangled. */
+  decoder: StringDecoder;
+}
+
 interface LiveRun {
-  child: ChildProcess;
+  /**
+   * The process, when THIS server spawned it. Null for a run this server
+   * REATTACHED to after a restart: that process belongs to init now, its pipes
+   * died with the server that opened them, and its scope and its process group
+   * are the only handles left on it.
+   */
+  child: ChildProcess | null;
+  /** The scope the run lives in, or null when it is a plain child. */
+  unit: string | null;
+  /** The process group — the only way to signal a reattached run. */
+  pgid: number | null;
+  /** The stream log being tailed. Null only if the log could not be opened. */
+  stream: StreamFollower | null;
+  /** Reads the tail of the stream log while the run works. */
+  streamTimer: NodeJS.Timeout | null;
+  /** Asks the scope whether a REATTACHED run is still there — it has no `exit` event. */
+  unitWatch: NodeJS.Timeout | null;
+  /** Where the harness's stderr is, so the settle can quote its last words. */
+  stderrPath: string | null;
+  /**
+   * systemd turned this spawn away, so the harness never ran. Makes the one
+   * automatic retry apply (directly, with no scope) and is what tells readiness.
+   */
+  scopeRefused: boolean;
+  /**
+   * This run was found alive-on-paper but its scope was gone: the box restarted
+   * while it worked. Read by finishRun, which would otherwise report the
+   * harness's silence as a crash of the harness.
+   */
+  lostToRestart: boolean;
   /** Rolling idle check — see RUN_IDLE_TIMEOUT_MS. */
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
@@ -3002,7 +3153,7 @@ interface LiveRun {
    *  task_progress reports (cumulative totals; only the delta is billed). */
   helperBilled: Map<string, number>;
   /** Resolved once at start, so a retry does not need an async lookup. */
-  setprivPath: string;
+  tools: SpawnTools;
   /** What this run was spawned with — a retry must match, not re-read. */
   settings: { effort: CodingEffort; maxTurns: number };
   /** A shell command ran whose effects can be proven neither read-only nor safe to repeat. */
@@ -3041,34 +3192,85 @@ function loadRuns(): CodingRun[] {
   return runs;
 }
 
+/** What a run lost to a restart is told, when nothing in its log says otherwise. */
+const LOST_TO_RESTART = "The box restarted while the run was live, so it did not finish. Start it again.";
+
 /**
- * Settle anything the previous web server left behind, from the boot hook
- * (src/instrumentation.ts) — before anyone asks. `live` is empty when this
- * process starts, so every "running" record on disk belongs to a process that
- * no longer exists: systemd kills the whole cgroup when clawbox-setup
- * restarts at the end of an update. Returns how many were settled — the one
- * signal an operator gets that a restart killed work in progress.
+ * What the previous web server left behind, from the boot hook
+ * (src/instrumentation.ts) — before anyone asks. Returns how many runs were
+ * SETTLED, which is the one signal an operator gets that a restart killed work.
+ *
+ * Three outcomes per record that says "running", because a run is no longer
+ * necessarily dead just because the server that started it is:
+ *
+ *  - its scope is still ACTIVE: the run survived, and this server REATTACHES —
+ *    it picks the stream log up at the byte the last server had read and watches
+ *    the unit for the exit it can no longer be told about. Nothing is settled.
+ *  - its scope is gone but the log has the harness's own closing result: the run
+ *    finished while nobody was watching, and it settles as what it said it was.
+ *  - anything else: the box restarted while it was live, and it says so.
+ *
+ * A record with no unit at all — a plain child of the old server, or a run from
+ * before this existed — can only ever be the third.
  */
-export function reconcileAfterRestart(): number {
+export async function reconcileAfterRestart(): Promise<number> {
   const list = loadRuns();
   let repaired = 0;
   let changed = false;
+  // Resolved once for the whole sweep rather than per run: a reattached run that
+  // fails transiently may still take its one automatic retry, and that retry
+  // needs the same two tools a fresh spawn does.
+  const tools: SpawnTools = await reattachTools();
   for (const run of list) {
-    // A recorded process group belonged to the cgroup this restart replaced, so
+    const orphaned = run.status === "running" && !live.has(run.id);
+    // Only a run that HAS a unit is asked about, which on a settled record means
+    // only one that recorded a leftover (every other settle forgets its unit),
+    // so this is a handful of systemctl calls at boot and usually none.
+    //
+    // A `null` answer — systemd could not be asked — counts as gone HERE, and
+    // deliberately not in the reattach watch. The difference is what else can be
+    // trusted: this process has held no handle on the run, so the recorded pid
+    // may since have been given to a stranger and cannot second the answer,
+    // while a reattach has already seen the scope alive with that pid in it. A
+    // record left "running" that nothing will ever settle is the worse outcome.
+    const unitStillUp = run.unit !== null && (await unitActive(run.unit)) === true;
+    if (orphaned && unitStillUp) {
+      // ALIVE. Its pgid and its unit are still the real handles on it, so
+      // neither is forgotten below.
+      reattach(run, tools);
+      pushProgress(run, RUNNER_STEP.reattached);
+      changed = true;
+      continue;
+    }
+    if (unitStillUp) {
+      // SETTLED, and its scope is still up — so something it left is still in
+      // that cgroup. A unit name, unlike a pid, is never handed to anybody else,
+      // so the Kill button still names exactly what it named before the restart:
+      // the unit is kept and only the pid is forgotten.
+      if (run.pgid !== null) {
+        run.pgid = null;
+        changed = true;
+      }
+      if (!run.leftover) {
+        run.leftover = true;
+        changed = true;
+      }
+      continue;
+    }
+    // A recorded process group belonged to a cgroup this restart replaced, so
     // whatever it named is gone — and Linux is free to hand that number to
     // something else, which the Kill button would then signal in this run's
     // name. Forgetting it costs nothing: `spawnRun` records a fresh group, and
     // an offer to end a process nobody can still identify is worse than no
     // offer at all.
-    if (run.pgid !== null || run.leftover) {
+    if (run.pgid !== null || run.unit !== null || run.leftover) {
       run.pgid = null;
+      run.unit = null;
       run.leftover = false;
       changed = true;
     }
-    if (run.status === "running" && !live.has(run.id)) {
-      run.status = "failed";
-      run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
-      run.completedAt = Date.now();
+    if (orphaned) {
+      settleLostRun(run, tools);
       repaired += 1;
       changed = true;
     }
@@ -3081,6 +3283,140 @@ export function reconcileAfterRestart(): number {
     }
   }
   return repaired;
+}
+
+/** setpriv and systemd-run for the boot sweep — best effort, never a reason to refuse it. */
+async function reattachTools(): Promise<SpawnTools> {
+  const [setprivPath, scope] = await Promise.all([
+    findExecutableOnPath(CAPABILITY_DROP_COMMAND),
+    probeSystemdRun(),
+  ]);
+  // An empty setpriv path is not a hole in the capability fence: it never
+  // reaches argv, because the only spawn that could use it — the one automatic
+  // retry — fails at `spawn` and is reported as "Retry could not start".
+  return { setprivPath: setprivPath ?? "", scopePath: scope.available ? scope.path : null };
+}
+
+/** The minimum LiveRun for a run this process did not spawn. */
+function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean): LiveRun {
+  const state: LiveRun = {
+    child: null,
+    unit: run.unit,
+    pgid: run.pgid,
+    stream: null,
+    streamTimer: null,
+    unitWatch: null,
+    stderrPath: null,
+    scopeRefused: false,
+    lostToRestart,
+    openSubagents: new Map<string, ActiveSubagent>(),
+    billedMessageIds: new Set<string>(),
+    outputBilledInSegment: 0,
+    helperBilled: new Map<string, number>(),
+    pendingFiles: new Map<string, string>(),
+    sawWriteAttempt: false,
+    sawThinking: false,
+    thinkingSeen: 0,
+    tools,
+    settings: { effort: run.effort, maxTurns: run.maxTurns },
+    commandMayHaveSideEffects: false,
+    timeout: setInterval(() => {
+      const idleFor = Date.now() - run.lastActivityAt;
+      if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
+      state.timedOut = true;
+      endProcess(state);
+    }, IDLE_CHECK_MS),
+    killTimer: null,
+    endRequested: null,
+    allowanceRefusal: null,
+    pauseReason: null,
+    timedOut: false,
+    // The harness's segment carries on across the restart, and the result it
+    // eventually prints reports that whole segment's totals — which is exactly
+    // what a first result event is applied as.
+    sawResult: false,
+    sawInit: false,
+    outcome: null,
+    stderr: "",
+  };
+  state.timeout.unref();
+  return state;
+}
+
+/**
+ * Take a surviving run back over: follow its log from where the last server got
+ * to, and watch its scope for the end.
+ *
+ * There is no child object and never will be one — the process was reparented to
+ * init when its server died — so the unit is the only thing that can say the run
+ * is over. When systemd cannot be asked at all, the recorded process group is
+ * the fallback question: "we could not look" must never be read as "it is gone",
+ * or a bus hiccup would settle a working run as lost.
+ */
+function reattach(run: CodingRun, tools: SpawnTools): void {
+  // The idle clock starts HERE, not at whatever the previous server last saw.
+  // `detachedState` arms the watchdog against `lastActivityAt`, and a run that
+  // outlived a restart longer than RUN_IDLE_TIMEOUT_MS would be judged idle on
+  // its first check — killed about a minute after boot, with "no sign of life"
+  // on the record — while it was working perfectly well. This process saw
+  // nothing during the gap, so it may not hold the run to that silence; the
+  // tail (`followStream`) is what moves the clock from now on.
+  run.lastActivityAt = Date.now();
+  const state = detachedState(run, tools, false);
+  live.set(run.id, state);
+  followStream(run, state);
+  installExitHook();
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    drainForSettle(run, state);
+    // No exit code: the process was not ours to wait on. Whatever the harness
+    // printed before it went is what the record is settled from.
+    finishRun(run, state, null);
+  };
+  state.unitWatch = setInterval(() => {
+    void (async () => {
+      if (settled) return;
+      // The HARNESS's own process first, because the SCOPE is not the same
+      // question: a run that deliberately left a server listening — the pattern
+      // the orientation guide documents — keeps its cgroup alive after it has
+      // finished, and waiting for the cgroup would leave a settled run showing
+      // "running" until the idle timeout killed it and the server with it.
+      if (state.pgid !== null && !processAlive(state.pgid)) {
+        settle();
+        return;
+      }
+      const active = run.unit ? await unitActive(run.unit) : false;
+      if (active === true) return;
+      // "Could not be asked" is not "gone": the process group is the second
+      // opinion, so a wedged user bus cannot settle a working run as lost.
+      if (active === null && groupAlive(state.pgid)) return;
+      settle();
+    })().catch(() => {});
+  }, UNIT_POLL_MS);
+  state.unitWatch.unref();
+  console.error(`[coding-agent] ${run.id} reattached to ${run.unit}`);
+}
+
+/**
+ * A run that was live and whose scope has gone.
+ *
+ * Its log is read to the end FIRST, because a run whose scope outlived the web
+ * server may well have finished properly while nothing was watching — and a
+ * closing result event in the log is the box's only record of that. Only when
+ * there is none is the restart reported as what ended it.
+ */
+function settleLostRun(run: CodingRun, tools: SpawnTools): void {
+  const state = detachedState(run, tools, true);
+  // Whatever it named is gone with the cgroup, so nothing here may be signalled.
+  state.pgid = null;
+  state.unit = null;
+  live.set(run.id, state);
+  state.stream = { path: streamLogPath(run.id), offset: run.streamOffset, buffer: "", decoder: new StringDecoder("utf8") };
+  state.stderrPath = stderrLogPath(run.id);
+  drainForSettle(run, state);
+  finishRun(run, state, null);
 }
 
 function persist(immediate = false): void {
@@ -3632,7 +3968,13 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // (email-approval-prompts.ts), so reading it yields nothing usable — but it is
 // the approval machinery's own record, it sits in the same directory as the two
 // above, and a run that has no business in either has none in it.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json"];
+//
+// coding-agent-streams/ is the runs' own stream logs (STREAM_DIR). Listed for
+// exactly the reason this list exists: the directory is created by the FIRST
+// spawn, after that spawn's rules have already been computed from what was on
+// disk, so discovery alone would leave it open for one run — every other run's
+// log is deleted at its settle, but a team's three workers are live together.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams"];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -4023,11 +4365,37 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
-/** SIGTERM now, SIGKILL after the grace period if the tree is still there. */
+/**
+ * One signal to whatever is left of a run: its child's process group when this
+ * server spawned it, or the recorded group when it was reattached after a
+ * restart and there is no child object to ask.
+ */
+function signalRun(state: LiveRun, signal: NodeJS.Signals): void {
+  if (state.child) {
+    killTree(state.child, signal);
+    return;
+  }
+  if (!state.pgid) return;
+  try {
+    process.kill(-state.pgid, signal);
+  } catch {
+    // already gone, which is the outcome wanted
+  }
+}
+
+/**
+ * SIGTERM now, SIGKILL after the grace period if the tree is still there.
+ *
+ * The SCOPE first, when the run has one: stopping the unit ends the whole
+ * cgroup, which reaches a grandchild that put itself in another process group
+ * and so slipped past the signal. Signals still follow, because systemd may not
+ * answer and a direct-spawn run has no unit to stop.
+ */
 function endProcess(state: LiveRun): void {
-  killTree(state.child, "SIGTERM");
+  if (state.unit) void stopUnit(state.unit).catch(() => {});
+  signalRun(state, "SIGTERM");
   if (state.killTimer) clearTimeout(state.killTimer);
-  state.killTimer = setTimeout(() => killTree(state.child, "SIGKILL"), STOP_GRACE_MS);
+  state.killTimer = setTimeout(() => signalRun(state, "SIGKILL"), STOP_GRACE_MS);
   state.killTimer.unref();
 }
 
@@ -4040,6 +4408,21 @@ function groupAlive(pgid: number | null): boolean {
   if (!pgid) return false;
   try {
     process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Is that ONE process still there? `groupAlive`'s narrower sibling, and the two
+ * answer different questions: the group is alive while anything the run forked
+ * is, the process is alive only while the HARNESS is.
+ */
+function processAlive(pid: number | null): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
@@ -4091,7 +4474,15 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   if (state) {
     clearInterval(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
+    if (state.streamTimer) clearInterval(state.streamTimer);
+    if (state.unitWatch) clearInterval(state.unitWatch);
+    state.streamTimer = null;
+    state.unitWatch = null;
   }
+  // The box's own plumbing, not evidence: the tail has been read by now, and a
+  // log kept past the settle is disk the owner never asked to spend. A retry
+  // (finishRun) opens a fresh pair.
+  removeStreamLogs(run.id);
   // The run's own tab, never the owner's: browser sessions are tagged with the
   // run that opened them and a run always gets a new page (browser-sessions.ts).
   void closeSessionsForRun(run.id).catch(() => {});
@@ -4105,14 +4496,20 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
     // hand to anybody. Forget it here for the same reason reconcileAfterRestart
     // forgets it across a restart: a record that keeps a recycled pid would let
     // the Kill button signal a stranger's process group in this run's name.
+    // The scope goes with it: nothing is in it, so `--collect` has taken it.
     run.pgid = null;
+    run.unit = null;
     return;
   }
   run.leftover = false;
+  // The scope as well as the group: `--collect` removes a scope once its last
+  // process is gone, so a unit left active here is a unit with something in it.
+  if (run.unit) void stopUnit(run.unit).catch(() => {});
   if (killRunGroup(run.pgid)) {
     pushProgress(run, RUNNER_STEP.endedLeftovers);
   }
   run.pgid = null;
+  run.unit = null;
 }
 
 /**
@@ -4134,12 +4531,16 @@ export function killRunLeftovers(id: string): CodingRun {
   if (isHeld(run.status)) {
     throw new CodingAgentError("invalid", "That run is paused, not finished. Resume it, or stop it first.");
   }
+  // The scope takes the whole cgroup with it, which is what reaches a server the
+  // run forked into a process group of its own. The signal follows regardless.
+  if (run.unit) void stopUnit(run.unit).catch(() => {});
   if (killRunGroup(run.pgid)) pushProgress(run, RUNNER_STEP.ownerEndedLeftovers);
   run.leftover = false;
   // Signalled or already gone, the group this record named is finished with.
   // Keeping the number would leave a Kill button aimed at whatever the kernel
   // gives that pid to next.
   run.pgid = null;
+  run.unit = null;
   persist(true);
   return cloneRun(run);
 }
@@ -4718,6 +5119,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // Same session, same process: any init after the first is a
     // continuation, not a fresh start.
     pushProgress(run, state.sawInit ? RUNNER_STEP.continuing : RUNNER_STEP.started(run.model));
+    // The harness is talking to us from inside its scope, which is the only real
+    // proof that scopes work on this box — enough to retire a refusal the box
+    // learned earlier and has been reporting ever since.
+    if (!state.sawInit && state.unit) noteScopeWorked();
     state.sawInit = true;
     return;
   }
@@ -5454,6 +5859,15 @@ function watchPullRequest(runId: string): void {
  * was, with the branch named for the owner to push themselves. A paused
  * run's is left alone: the run is kept, and its resume opens it.
  */
+/** Is a review-loop fix turn for this run still going in this process? */
+function liveFixTurnFor(originId: string): boolean {
+  const list = loadRuns();
+  for (const id of live.keys()) {
+    if (list.find((r) => r.id === id)?.reviewLoopOf === originId) return true;
+  }
+  return false;
+}
+
 export function resumePullRequestWatches(): void {
   for (const run of loadRuns()) {
     // The review loop first: its phase is pending too, and it owns the pull
@@ -5464,6 +5878,12 @@ export function resumePullRequestWatches(): void {
       // failed, so nothing will ever come back to resumeReviewAfterFix for it.
       // Whatever it committed is on disk; polling again is what picks it up.
       if (run.review.state === "working") {
+        // Unless the fix turn SURVIVED the restart in its own scope and was
+        // reattached (reconcileAfterRestart, which runs before this): it is
+        // still working and will come back to resumeReviewAfterFix itself when
+        // it settles. Polling beside it would drive one loop from two places —
+        // a round opened over a fix that is still being written.
+        if (liveFixTurnFor(run.id)) continue;
         run.review = { ...run.review, state: "polling", roundStartedAt: Date.now() };
         persist(true);
       }
@@ -6154,13 +6574,13 @@ async function startCompletionAttempt(
     return;
   }
 
-  let setprivPath: string;
+  let tools: SpawnTools;
   try {
     // The same gates a start passes — the owner's switch, readiness, the
     // one-run-at-a-time slot — because this IS a start, and the owner may have
     // switched the agent off while the run worked.
     await assertCanSpawn(null);
-    setprivPath = await requireSetpriv();
+    tools = await requireSpawnTools();
     run.directory = await realDirectory(run.directory);
   } catch (err) {
     // Another attempt cannot be made now. The ending is still the honest one:
@@ -6190,7 +6610,7 @@ async function startCompletionAttempt(
     spawnOrSettle(
       run,
       run.sessionId,
-      setprivPath,
+      tools,
       { effort: run.effort, maxTurns: run.maxTurns },
       completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
       // The same record, continuing: its counters and its recorded refusals are
@@ -6361,9 +6781,27 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     } else if (state.timedOut) {
       run.status = "failed";
       run.error = `Stopped after ${Math.round(RUN_IDLE_TIMEOUT_MS / 60_000)} minutes with no sign of life. The run was not making progress.`;
+    } else if (state.lostToRestart) {
+      // Its scope was gone at boot and its log has no closing result, so the
+      // restart is what ended it. Said as itself rather than as the harness
+      // exiting without a result, which is what the branch below would report —
+      // a device fault the owner would go looking for and never find.
+      run.status = "failed";
+      run.error = LOST_TO_RESTART;
     } else {
       run.status = "failed";
       const tail = stderrTail(state.stderr);
+      // systemd turning the scope away, before the harness ever ran. Recorded
+      // for readiness — no probe can find this out by looking — and the retry
+      // below then starts the run directly, which is what the box would have
+      // done had it known. Only when nothing was heard from the harness at all:
+      // once it has spoken, its own words are the failure.
+      if (state.unit && !state.sawInit && SCOPE_REFUSED.test(state.stderr)) {
+        state.scopeRefused = true;
+        state.tools = { ...state.tools, scopePath: null };
+        noteScopeRefused(tail);
+        console.error(`[coding-agent] ${run.id}: systemd refused the run's scope; running directly from now on`);
+      }
       run.error = ULTRACODE_REFUSED.test(state.stderr)
         // The CLI refuses the flag before the first turn when dynamic
         // workflows are off for this install or the plan does not allow
@@ -6406,7 +6844,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && run.retries === 0
     && state.endRequested === null
     && !state.timedOut
-    && isTransientFailure(run.error)
+    // A scope systemd refused counts here too: the harness never started, so
+    // nothing happened that a second attempt could trip over — and this one goes
+    // without the scope, which is the whole difference.
+    && (isTransientFailure(run.error) || state.scopeRefused)
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
@@ -6430,7 +6871,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       persist(true);
       console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
       try {
-        spawnRun(run, null, state.setprivPath, state.settings);
+        spawnRun(run, null, state.tools, state.settings);
         return;
       } catch (err) {
         // The retry could not even start; fall through and report the
@@ -6555,8 +6996,155 @@ function installExitHook(): void {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
   process.on("exit", () => {
-    for (const state of live.values()) killTree(state.child, "SIGTERM");
+    for (const state of live.values()) {
+      // A run in its own scope is MEANT to outlive this process: that is the
+      // whole point of the scope, and the next web server reattaches to it
+      // (reconcileAfterRestart). Only a plain child is ended here, because an
+      // orphan of that kind has nothing left that could find it again.
+      if (state.unit) continue;
+      if (state.child) killTree(state.child, "SIGTERM");
+    }
   });
+}
+
+// ─── The stream log: a run's output, on disk rather than down a pipe ─────────
+
+/** At most this many chunks are read from one log in one tick: 10 MB, which no
+ *  real run produces in 200 ms and which bounds a pathological one. */
+const STREAM_PASSES_PER_TICK = 20;
+
+/**
+ * Open this run's stream and stderr logs for the harness to write into.
+ *
+ * Truncating, not appending: each spawn of a record is a fresh stream and the
+ * offsets restart with it. Throws, so `spawnOrSettle` settles the record with a
+ * reason rather than starting a run nothing can read.
+ */
+function openStreamLogs(runId: string): { out: number; err: number } {
+  fs.mkdirSync(STREAM_DIR, { recursive: true, mode: 0o700 });
+  const out = fs.openSync(streamLogPath(runId), "w", 0o600);
+  try {
+    return { out, err: fs.openSync(stderrLogPath(runId), "w", 0o600) };
+  } catch (err) {
+    fs.closeSync(out);
+    throw err;
+  }
+}
+
+function removeStreamLogs(runId: string): void {
+  for (const file of [streamLogPath(runId), stderrLogPath(runId)]) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      // best-effort: a log left behind costs disk, never correctness
+    }
+  }
+}
+
+/** The last words the harness printed, bounded — what a failure without a result is reported as. */
+function readStderrLog(file: string | null): string {
+  if (!file) return "";
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      const size = fs.fstatSync(fd).size;
+      const want = Math.min(size, MAX_STDERR_CHARS);
+      if (want <= 0) return "";
+      const buf = Buffer.allocUnsafe(want);
+      const read = fs.readSync(fd, buf, 0, want, size - want);
+      const text = buf.subarray(0, Math.max(read, 0)).toString("utf-8");
+      // A byte offset can land mid-line and mid-character. When the tail was cut
+      // short of the file, the first partial line goes with the cut rather than
+      // reaching the owner with a replacement character glued to its front.
+      if (want < size) {
+        const nl = text.indexOf("\n");
+        return nl >= 0 ? text.slice(nl + 1) : "";
+      }
+      return text;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+/** Whole lines out of the tail, through the same handler the pipe used to feed. */
+function consumeStreamText(run: CodingRun, state: LiveRun, text: string): void {
+  const stream = state.stream;
+  if (!stream) return;
+  stream.buffer += text;
+  let nl = stream.buffer.indexOf("\n");
+  while (nl >= 0) {
+    const line = stream.buffer.slice(0, nl).trim();
+    stream.buffer = stream.buffer.slice(nl + 1);
+    if (line && line.length <= MAX_STDOUT_LINE_CHARS && line.startsWith("{")) {
+      try {
+        handleEvent(run, state, JSON.parse(line) as StreamEvent);
+        persist();
+      } catch {
+        // not JSON — Claude Code prints the odd plain line; ignore it
+      }
+    }
+    nl = stream.buffer.indexOf("\n");
+  }
+  if (stream.buffer.length > MAX_STDOUT_LINE_CHARS) stream.buffer = "";
+}
+
+/**
+ * Read whatever the harness has written since the last look.
+ *
+ * The file is opened per pass rather than held: a run's log outlives the process
+ * that reads it, and a held descriptor would keep a deleted one alive and hide a
+ * replacement. A log that is not there yet is not an error — the harness has
+ * simply not printed its first line.
+ */
+function drainStream(run: CodingRun, state: LiveRun): void {
+  const stream = state.stream;
+  if (!stream) return;
+  for (let pass = 0; pass < STREAM_PASSES_PER_TICK; pass += 1) {
+    let chunk: Buffer;
+    try {
+      const fd = fs.openSync(stream.path, "r");
+      try {
+        const size = fs.fstatSync(fd).size;
+        if (size <= stream.offset) return;
+        const want = Math.min(size - stream.offset, STREAM_READ_CHUNK);
+        const buf = Buffer.allocUnsafe(want);
+        const read = fs.readSync(fd, buf, 0, want, stream.offset);
+        if (read <= 0) return;
+        stream.offset += read;
+        chunk = buf.subarray(0, read);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return;
+    }
+    // On the record, so the NEXT web server resumes the tail here instead of
+    // replaying the run from its first line.
+    run.streamOffset = stream.offset;
+    consumeStreamText(run, state, stream.decoder.write(chunk));
+  }
+}
+
+/** Follow this run's log from wherever it has been read to. */
+function followStream(run: CodingRun, state: LiveRun): void {
+  state.stream = { path: streamLogPath(run.id), offset: run.streamOffset, buffer: "", decoder: new StringDecoder("utf8") };
+  state.stderrPath = stderrLogPath(run.id);
+  state.streamTimer = setInterval(() => drainStream(run, state), STREAM_POLL_MS);
+  state.streamTimer.unref();
+}
+
+/**
+ * Everything the harness said that this process has not read yet, plus its
+ * stderr — called once more on the way into every settle, because the last
+ * events of a run arrive in the same instant it exits.
+ */
+function drainForSettle(run: CodingRun, state: LiveRun): void {
+  drainStream(run, state);
+  const stderr = readStderrLog(state.stderrPath);
+  if (stderr) state.stderr = stderr.slice(-MAX_STDERR_CHARS);
 }
 
 /**
@@ -6571,7 +7159,7 @@ export function buildSpawnArgv(setprivPath: string, claudeArgs: string[]): { bin
 function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
-  setprivPath: string,
+  tools: SpawnTools,
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
   /**
@@ -6593,7 +7181,7 @@ function spawnRun(
   // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
   // the pass: in each case the flash reviewer would be a second look.
   const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, run: { id: run.id, directory: run.directory, media: run.media } }));
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -6603,21 +7191,61 @@ function spawnRun(
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: no artifacts folder:`, err instanceof Error ? err.message : err);
   }
-  const child = spawn(bin, argv, {
-    cwd: run.directory,
-    // Deliberately NOT process.env: see the header. The cast is only because
-    // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
-    // no use for.
-    // The provider and the model come off the RUN, not off the settings: they
-    // were frozen when it started, and a resume must re-enter the session on
-    // the same account it was opened with.
-    env: buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, provider: run.provider, model: run.requestedModel }) as NodeJS.ProcessEnv,
-    detached: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  // The run's own cgroup, when this box can give it one. The scope is what makes
+  // the run outlive the web server; `buildSpawnArgv`'s capability drop is
+  // untouched on the far side of the `--`, because that prefix is the security
+  // boundary and this one is only a cgroup. A per-spawn suffix, so a retry is
+  // never refused the name of a scope systemd is still collecting.
+  const unit = tools.scopePath ? runScopeUnit(`${run.id}-${Date.now().toString(36)}`) : null;
+  const { bin, argv } = unit && tools.scopePath
+    ? buildScopeArgv(tools.scopePath, unit, dropped.bin, dropped.argv)
+    : dropped;
+  // Output to FILES, not pipes: a run whose parent has died would be killed by
+  // the first line it printed down a closed pipe, which would undo the scope.
+  // The web server tails the log instead — see STREAM_DIR.
+  const logs = openStreamLogs(run.id);
+  run.streamOffset = 0;
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, provider: run.provider, model: run.requestedModel });
+  let child: ChildProcess;
+  try {
+    child = spawn(bin, argv, {
+      cwd: run.directory,
+      // Deliberately NOT process.env: see the header. The cast is only because
+      // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
+      // no use for.
+      // The provider and the model come off the RUN, not off the settings: they
+      // were frozen when it started, and a resume must re-enter the session on
+      // the same account it was opened with.
+      //
+      // `scopeEnv` adds the one variable systemd-run needs from a SYSTEM service
+      // — the user runtime dir it composes the bus address from — and nothing
+      // else: the run's environment is still built from scratch, not inherited.
+      env: (unit ? scopeEnv(runEnv) : runEnv) as NodeJS.ProcessEnv,
+      detached: true,
+      // `spawn` dups these into the child before it returns, which is why the
+      // `finally` below may close this process's copies at once.
+      stdio: ["pipe", logs.out, logs.err],
+    });
+  } finally {
+    // Node has dup'd them into the child; this process has no use for them and
+    // a leaked descriptor would keep a deleted log alive for the server's life.
+    fs.closeSync(logs.out);
+    fs.closeSync(logs.err);
+  }
 
   const state: LiveRun = {
     child,
+    unit,
+    // `detached: true` makes the child its own process-group leader, and
+    // systemd-run execs the harness in its own process, so this pid is the group
+    // whichever of the two started it.
+    pgid: typeof child.pid === "number" ? child.pid : null,
+    stream: null,
+    streamTimer: null,
+    unitWatch: null,
+    stderrPath: null,
+    scopeRefused: false,
+    lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
     billedMessageIds: new Set<string>(),
     outputBilledInSegment: 0,
@@ -6626,7 +7254,7 @@ function spawnRun(
     sawWriteAttempt: false,
     sawThinking: false,
     thinkingSeen: 0,
-    setprivPath,
+    tools,
     settings,
     commandMayHaveSideEffects: false,
     // A rolling check, not a deadline: a run that keeps producing events is
@@ -6649,44 +7277,25 @@ function spawnRun(
   };
   state.timeout.unref();
   live.set(run.id, state);
-  // `detached: true` makes the child its own process-group leader, so its pid
-  // IS the group. Recorded now rather than derived at settle: by then the
-  // child object is the only thing that still knows it, and a leftover server
-  // has to be reachable after `live` has forgotten the run.
-  run.pgid = typeof child.pid === "number" ? child.pid : null;
+  // Recorded now rather than derived at settle: by then the child object is the
+  // only thing that still knows the group, and a leftover server has to be
+  // reachable after `live` has forgotten the run. The UNIT is recorded for the
+  // same reason and one more — after a restart it is the only handle on a run
+  // this server never spawned, and a recycled pid is no handle at all.
+  run.pgid = state.pgid;
+  run.unit = unit;
+  followStream(run, state);
   installExitHook();
 
   let settled = false;
   const settle = (code: number | null) => {
     if (settled) return;
     settled = true;
+    // The run's last events land in the same instant it exits, and its stderr is
+    // only ever read here.
+    drainForSettle(run, state);
     finishRun(run, state, code);
   };
-
-  let stdoutBuffer = "";
-  child.stdout?.setEncoding("utf-8");
-  child.stdout?.on("data", (chunk: string) => {
-    stdoutBuffer += chunk;
-    let nl = stdoutBuffer.indexOf("\n");
-    while (nl >= 0) {
-      const line = stdoutBuffer.slice(0, nl).trim();
-      stdoutBuffer = stdoutBuffer.slice(nl + 1);
-      if (line && line.length <= MAX_STDOUT_LINE_CHARS && line.startsWith("{")) {
-        try {
-          handleEvent(run, state, JSON.parse(line) as StreamEvent);
-          persist();
-        } catch {
-          // not JSON — Claude Code prints the odd plain line; ignore it
-        }
-      }
-      nl = stdoutBuffer.indexOf("\n");
-    }
-    if (stdoutBuffer.length > MAX_STDOUT_LINE_CHARS) stdoutBuffer = "";
-  });
-  child.stderr?.setEncoding("utf-8");
-  child.stderr?.on("data", (chunk: string) => {
-    state.stderr = (state.stderr + chunk).slice(-MAX_STDERR_CHARS);
-  });
 
   child.on("error", (err) => {
     // Typically ENOENT: the wrapper is not where install.sh puts it.
@@ -6694,12 +7303,14 @@ function spawnRun(
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err.message}`.slice(0, MAX_ERROR_CHARS);
     settle(null);
   });
-  // Settle on `exit` after a short drain rather than on `close`: a grandchild
-  // holding the pipes open would otherwise keep a finished run "running".
-  child.on("exit", (code) => {
-    setTimeout(() => settle(code), 250).unref();
-  });
-  child.on("close", (code) => settle(code));
+  // Settled a moment after the process is gone rather than the instant it is:
+  // the harness's last lines are in the log file, and a grandchild that
+  // inherited the descriptor may still be finishing them off.
+  const settleSoon = (code: number | null) => {
+    setTimeout(() => settle(code), SETTLE_DRAIN_DELAY_MS).unref();
+  };
+  child.on("exit", settleSoon);
+  child.on("close", settleSoon);
 
   try {
     child.stdin?.on("error", () => {
@@ -6746,7 +7357,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     ? input.provider
     : previous?.provider ?? await getCodingProvider();
   await assertCanSpawn(input.team ?? null, intendedProvider);
-  const setprivPath = await requireSetpriv();
+  const tools = await requireSpawnTools();
 
   if (resumeRunId) {
     if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
@@ -6876,7 +7487,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
   startProjectIcon(run);
-  spawnOrSettle(run, resumeSessionId, setprivPath, settings);
+  spawnOrSettle(run, resumeSessionId, tools, settings);
   return cloneRun(run);
 }
 
@@ -7049,6 +7660,8 @@ function newRunRecord(fields: {
     reviewPass: fields.settings.reviewPass,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
+    unit: null,
+    streamOffset: 0,
     leftover: false,
     commitError: null,
     // What it has to leave behind, and the bar frozen with it. The first
@@ -7247,7 +7860,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // quietly re-enacted somewhere else. Handed to the gate rather than checked
   // beside it, so the box's own half and the credential are one verdict.
   await assertCanSpawn(run.team ?? null, run.provider);
-  const setprivPath = await requireSetpriv();
+  const tools = await requireSpawnTools();
   // The folder must still be there. A team worker's worktree is removed when
   // its task is decided, and a run resumed into a cwd that no longer exists
   // makes Node report ENOENT against the EXECUTABLE — "spawn /usr/bin/setpriv
@@ -7312,7 +7925,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
     : missing && deliverable
       ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
       : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
-  spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
+  spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
   return cloneRun(run);
 }
 
@@ -7371,7 +7984,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // key the owner has since removed should be refused with a sentence, not
   // spawned into a wrapper that dies.
   await assertCanSpawn(run.team ?? null, run.provider);
-  const setprivPath = await requireSetpriv();
+  const tools = await requireSpawnTools();
   // The folder must still be there — it was only checked when drafted.
   run.directory = await realDirectory(run.directory);
   // Settings are read at START: a run keeps what it starts with.
@@ -7395,7 +8008,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   persist(true);
   console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
   startProjectIcon(run);
-  spawnOrSettle(run, null, setprivPath, settings);
+  spawnOrSettle(run, null, tools, settings);
   return cloneRun(run);
 }
 
@@ -7473,6 +8086,14 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
  * a run must never start without it — not even if the binary vanished a
  * moment ago.
  */
+async function requireSpawnTools(): Promise<SpawnTools> {
+  const [setprivPath, scope] = await Promise.all([requireSetpriv(), probeSystemdRun()]);
+  // A box that cannot detach a run still runs: the run is a plain child again
+  // and readiness says so (`detachedRuns`). Refusing to start over it would turn
+  // a run that dies at the next restart into a run that never happens.
+  return { setprivPath, scopePath: scope.available ? scope.path : null };
+}
+
 async function requireSetpriv(): Promise<string> {
   const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
   if (!setprivPath) {
@@ -7497,13 +8118,13 @@ async function requireSetpriv(): Promise<string> {
 function spawnOrSettle(
   run: CodingRun,
   resumeSessionId: string | null,
-  setprivPath: string,
+  tools: SpawnTools,
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
   continuingRecord = false,
 ): void {
   try {
-    spawnRun(run, resumeSessionId, setprivPath, settings, stdinText, continuingRecord);
+    spawnRun(run, resumeSessionId, tools, settings, stdinText, continuingRecord);
   } catch (err) {
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
@@ -7539,6 +8160,8 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   for (const state of live.values()) {
     clearTimeout(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
+    if (state.streamTimer) clearInterval(state.streamTimer);
+    if (state.unitWatch) clearInterval(state.unitWatch);
     // Said BEFORE the signal, like every other path that ends a run: the
     // owner's Stop and Pause and the token limit set `endRequested`, and the
     // idle timeout says the same thing with `timedOut`. Without it finishRun
@@ -7548,8 +8171,11 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
     // is exactly `=== null`: a Stop or Pause already in flight is the owner's
     // gesture and must still settle as itself.
     state.endRequested ??= "stop";
-    killTree(state.child, "SIGKILL");
-    killed.push(state.child);
+    // The scope too: a suite must not leave a detached run of its own behind,
+    // which is the one way this feature could leak a process past the test run.
+    if (state.unit) void stopUnit(state.unit).catch(() => {});
+    signalRun(state, "SIGKILL");
+    if (state.child) killed.push(state.child);
   }
   live.clear();
   waiters.clear();

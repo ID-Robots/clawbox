@@ -52,6 +52,7 @@ export type ProgressLabelKey =
   | "reviewLoopTurn"
   | "reviewRound"
   | "resuming"
+  | "reattached"
   | "startingFresh"
   | "noRepository"
   | "workingOnBranch"
@@ -188,6 +189,8 @@ export const RUNNER_STEP = {
   continuing: "Continuing after a background helper finished",
   tokenLimit: "Token limit reached",
   resuming: "Resuming the previous session",
+  // The web server restarted and this run outlived it in its own systemd scope.
+  reattached: "The web server restarted; this run kept going and was picked back up",
   noRepository:
     "Not a git repository yet: the work is committed into a new one when the run settles, and there is no pull request to open.",
   merged: "Merged into the base branch",
@@ -290,6 +293,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
   { re: /^Resuming the previous session$/, labelKey: "resuming", icon: "history" },
+  { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
   { re: /^Not a git repository yet: .*$/, labelKey: "noRepository", icon: "folder_off" },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },
