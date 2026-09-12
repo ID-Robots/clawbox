@@ -2998,14 +2998,24 @@ export function fileDenyRules(allowRules: readonly string[] = []): string[] {
     for (const entry of [...entries].sort()) {
       if (keep(entry)) continue;
       const abs = path.join(dir, entry);
-      let isDir = false;
+      let stat: fs.Stats | null = null;
       try {
-        isDir = fs.statSync(abs).isDirectory();
+        stat = fs.statSync(abs);
       } catch {
-        // listed but absent: treat as a file
+        // Listed but absent — which is the whole reason the fixed lists exist.
       }
-      if (isDir) denyTree(abs);
-      else denyFile(abs);
+      if (stat === null) {
+        // It could appear as EITHER, and these rules are computed once at
+        // spawn: a run that creates `file-history/` after that would otherwise
+        // face a rule naming the path exactly and nothing covering what is
+        // inside it. Both forms cost two argv entries and shut both outcomes.
+        denyFile(abs);
+        denyTree(abs);
+      } else if (stat.isDirectory()) {
+        denyTree(abs);
+      } else {
+        denyFile(abs);
+      }
     }
   };
   const unlocked = [...new Set(unlockedSoftPaths(allowRules, home))];
