@@ -2554,30 +2554,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
-          // The same clear the OpenClaw/dual path does further down: the
-          // coding agent runs on this SKU too, and a clear that only happened
-          // on the editions with OpenClaw would leave a Hermes box refusing
-          // runs with nothing but the clock and the button to get it out.
-          //
-          // THE SNAPSHOT IS THE WHOLE CARE HERE. `applyClawaiToHermes` takes
-          // its own before/after readiness pair and refreshes the MCP children
-          // from it — but only samples "before" ITSELF when the caller passes
-          // none (`options.codingAgentReadyBefore ?? await codingAgentReady()`).
-          // So the order has to be: read, then clear, then hand the reading
-          // over. Clearing first and letting it sample would have it read
-          // "before" as already-ready, see no change, and ask for no reload —
-          // the same absent tools as clearing too late, reached from the other
-          // side. The dual path below gets this for free because it samples
-          // long before its own writes.
-          const codingAgentReadyBefore = await codingAgentReady();
-          await forgetCodingHarnessFault();
+          // No harness-fault clear here, deliberately: on this SKU the apply
+          // below is what WRITES the credential, so it is the only place that
+          // knows the write landed, and it clears the fault itself the moment
+          // it does — inside its own before/after readiness pair, which is
+          // where the clear has to happen for the MCP refresh to notice. A
+          // clear here would fire even when the apply throws, taking the
+          // refusal away over a save that never happened. See
+          // `applyClawaiToHermes`; the OpenClaw/dual branch further down keeps
+          // its own clear because there the ROUTE writes the credential and
+          // the apply may never be called at all.
           const applied = await applyClawaiToHermes(
             clawboxAiToken,
             resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
             // The apply writes the store on this SKU, so the plan travels with
             // the badge from there. (The two batches below also carry it on any
             // save that reaches them — the same value, harmlessly.)
-            { portalPlan, codingAgentReadyBefore },
+            { portalPlan },
           );
           await forgetLocalWasDefault();
           // Reported from the apply's OWN decision rather than the one taken

@@ -399,6 +399,31 @@ export async function applyClawaiToHermes(
     if (r.code === 0 && credentialChanged && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
       await forgetClawaiCredentialRefusal();
     }
+    // And the CODING HARNESS fault, on the same event and for the same
+    // reason: a run refused because the harness could not get a model to
+    // answer makes the device refuse new runs for a while, and the message
+    // sends the owner to Settings → AI Models. A credential that has just
+    // landed is newer evidence than the fault.
+    //
+    // HERE rather than in the callers. Two things are only true at this exact
+    // point: the key has actually been WRITTEN (a `set` that throws above
+    // leaves the fault standing, which is right — nothing was fixed), and
+    // `codingReadyAfter` has not been read yet, so the clear is inside the
+    // before/after pair this function refreshes the MCP children from. A
+    // caller clearing beforehand instead would have this function read an
+    // already-ready box, see no change, and ask for no reload.
+    //
+    // NOT gated on `credentialChanged`, unlike its neighbour: re-pasting the
+    // same token is not a re-link, but the PLAN behind it can have changed
+    // upstream since — an upgrade to Max is exactly the fix the refusal
+    // message asks for, and it moves no bytes on this box.
+    if (r.code === 0 && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
+      await import("@/lib/coding-agent")
+        .then((mod) => mod.clearHarnessFault())
+        .catch((err: unknown) => {
+          console.warn("[hermes-clawai] could not clear the coding harness fault:", err instanceof Error ? err.message : err);
+        });
+    }
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
     if (r.code !== 0 && args[1] === "set") {
       // This message is rendered verbatim in the Settings save banner (the
