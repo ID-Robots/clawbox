@@ -387,6 +387,32 @@ describe("after a restart", () => {
     );
   });
 
+  it("settles a reattached run whose harness has gone, even while its scope lives on", async () => {
+    // A run that left a server listening — the pattern the orientation guide
+    // documents — keeps its cgroup alive after the harness has finished. Waiting
+    // for the cgroup would leave a settled run showing "running" until the idle
+    // timeout killed it and the server with it.
+    installSystemdRun();
+    installSystemctl("active");
+    const { spawnSync } = await import("child_process");
+    // A pid that has just been reaped: Linux hands them out in order, so it is
+    // gone and is not about to belong to something else.
+    const dead = spawnSync("/bin/true");
+    expect(dead.pid).toBeTypeOf("number");
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({ pgid: dead.pid })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    expect(lib.getRun("run-detach01")?.status).toBe("running");
+    await vi.waitFor(
+      () => expect(lib.getRun("run-detach01")?.status).toBe("failed"),
+      { timeout: 15_000, interval: 250 },
+    );
+    // Nothing in its log said it finished, so this is the honest ending.
+    expect(lib.getRun("run-detach01")?.error).toMatch(/before reporting a result|restarted/i);
+  });
+
   it("settles a run whose scope is gone as lost to the restart", async () => {
     installSystemdRun();
     installSystemctl("inactive");

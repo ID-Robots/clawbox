@@ -3335,8 +3335,19 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
   state.unitWatch = setInterval(() => {
     void (async () => {
       if (settled) return;
+      // The HARNESS's own process first, because the SCOPE is not the same
+      // question: a run that deliberately left a server listening — the pattern
+      // the orientation guide documents — keeps its cgroup alive after it has
+      // finished, and waiting for the cgroup would leave a settled run showing
+      // "running" until the idle timeout killed it and the server with it.
+      if (state.pgid !== null && !processAlive(state.pgid)) {
+        settle();
+        return;
+      }
       const active = run.unit ? await unitActive(run.unit) : false;
       if (active === true) return;
+      // "Could not be asked" is not "gone": the process group is the second
+      // opinion, so a wedged user bus cannot settle a working run as lost.
       if (active === null && groupAlive(state.pgid)) return;
       settle();
     })().catch(() => {});
@@ -4354,6 +4365,21 @@ function groupAlive(pgid: number | null): boolean {
   if (!pgid) return false;
   try {
     process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Is that ONE process still there? `groupAlive`'s narrower sibling, and the two
+ * answer different questions: the group is alive while anything the run forked
+ * is, the process is alive only while the HARNESS is.
+ */
+function processAlive(pid: number | null): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
@@ -7099,20 +7125,22 @@ function spawnRun(
   let child: ChildProcess;
   try {
     child = spawn(bin, argv, {
-    cwd: run.directory,
-    // Deliberately NOT process.env: see the header. The cast is only because
-    // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
-    // no use for.
-    // The provider and the model come off the RUN, not off the settings: they
-    // were frozen when it started, and a resume must re-enter the session on
-    // the same account it was opened with.
-    //
-    // `scopeEnv` adds the one variable systemd-run needs from a SYSTEM service
-    // — the user runtime dir it composes the bus address from — and nothing
-    // else: the run's environment is still built from scratch, not inherited.
-    env: (unit ? scopeEnv(runEnv) : runEnv) as NodeJS.ProcessEnv,
-    detached: true,
-    stdio: ["pipe", logs.out, logs.err],
+      cwd: run.directory,
+      // Deliberately NOT process.env: see the header. The cast is only because
+      // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
+      // no use for.
+      // The provider and the model come off the RUN, not off the settings: they
+      // were frozen when it started, and a resume must re-enter the session on
+      // the same account it was opened with.
+      //
+      // `scopeEnv` adds the one variable systemd-run needs from a SYSTEM service
+      // — the user runtime dir it composes the bus address from — and nothing
+      // else: the run's environment is still built from scratch, not inherited.
+      env: (unit ? scopeEnv(runEnv) : runEnv) as NodeJS.ProcessEnv,
+      detached: true,
+      // `spawn` dups these into the child before it returns, which is why the
+      // `finally` below may close this process's copies at once.
+      stdio: ["pipe", logs.out, logs.err],
     });
   } finally {
     // Node has dup'd them into the child; this process has no use for them and
