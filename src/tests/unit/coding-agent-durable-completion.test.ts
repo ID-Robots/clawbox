@@ -479,3 +479,66 @@ describe("the deliverable the auto-PR switch implies", () => {
     expect(run.attempts.some((a) => a.endedAt === null)).toBe(false);
   });
 });
+
+/**
+ * Two properties of the attempt itself, each the kind of thing a loop gets
+ * quietly wrong.
+ */
+describe("what an attempt must not destroy or invent", () => {
+  it("keeps the refusals and the turn count of the attempts before it", async () => {
+    // The per-segment counters (`numTurns`, `permissionDenials`, `deniedActions`,
+    // `denials`) are OVERWRITTEN by a result event unless the spawn says it is
+    // continuing the same record — so without that, a refusal from the first
+    // attempt, and the "Allow next time" button that answers it, vanished the
+    // moment the second ran.
+    const denial = JSON.stringify({
+      type: "result", subtype: "success", is_error: false, result: "Done.", num_turns: 2,
+      permission_denials: [{ tool_name: "Write", tool_input: { file_path: "/etc/hosts" } }],
+    });
+    installWrapper([
+      `printf '%s\\n%s\\n' "$STDIN" '${STDIN_DELIMITER}' >> "${path.join(base, "stdin.log")}"`,
+      `printf '%s\\n' '${INIT}' '${denial.replace(/'/g, "'\\''")}'`,
+      "exit 0",
+    ].join("\n"));
+    writeConfig({ coding_agent_completion_attempts: 2 });
+    const started = await lib.startRun({
+      task: "build", projectId: "site", source: "owner",
+      deliverable: { kind: "paths", paths: ["app.js"] },
+    });
+    const run = await settledForGood(started.id);
+
+    expect(run.status).toBe("gave_up");
+    expect(run.attempts).toHaveLength(2);
+    // Two attempts, each reporting one refusal and two turns: the record is the
+    // run's whole history, not its last segment's.
+    expect(run.permissionDenials).toBe(2);
+    expect(run.deniedActions).toHaveLength(2);
+    expect(run.numTurns).toBe(4);
+  });
+
+  it("does not try again when there is no session to carry on in", async () => {
+    // The loop's whole premise is that the transcript of the attempt that just
+    // ended is still in front of the harness — that is why the nudge says "do
+    // not start over". Without a session it would be a fresh one handed a note
+    // about a missing file: the task redone from nothing, charged to the owner
+    // as "one more attempt".
+    installWrapper([
+      `printf '%s\\n%s\\n' "$STDIN" '${STDIN_DELIMITER}' >> "${path.join(base, "stdin.log")}"`,
+      // No init event, so the record never learns a session id.
+      `printf '%s\\n' '${okResult()}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({
+      task: "build", projectId: "site", source: "owner",
+      deliverable: { kind: "paths", paths: ["app.js"] },
+    });
+    const run = await settledForGood(started.id);
+
+    expect(run.sessionId).toBeNull();
+    expect(run.status).toBe("gave_up");
+    expect(run.error).toContain("no session to carry on in");
+    // ONE harness turn, not three: the budget was not spent restarting the task.
+    expect(stdinLog()).toHaveLength(1);
+    expect(run.attempts).toHaveLength(1);
+  });
+});

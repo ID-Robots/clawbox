@@ -6091,6 +6091,17 @@ async function startCompletionAttempt(
   missing: string,
   attempt: number,
 ): Promise<void> {
+  // No session means there is nothing to CARRY ON from, and this loop's whole
+  // premise is that there is: the nudge says "do not start over" because the
+  // transcript of the attempt that just ended is still in front of the harness.
+  // Spawned without one it would be a fresh session handed a note about a
+  // missing file — the task redone from nothing, charged to the owner under the
+  // name of "one more attempt". So the honest ending is recorded instead.
+  if (!run.sessionId) {
+    giveUp(run, `${missing} There is no session to carry on in, so the box did not try again.`, run.attempts.length);
+    return;
+  }
+
   let setprivPath: string;
   try {
     // The same gates a start passes — the owner's switch, readiness, the
@@ -6130,6 +6141,9 @@ async function startCompletionAttempt(
       setprivPath,
       { effort: run.effort, maxTurns: run.maxTurns },
       completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
+      // The same record, continuing: its counters and its recorded refusals are
+      // the run's whole history, not the last attempt's.
+      true,
     );
   } catch {
     // `spawnOrSettle` has already settled the record as failed and said why, and
@@ -6508,6 +6522,19 @@ function spawnRun(
   setprivPath: string,
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
+  /**
+   * This spawn CONTINUES a record that has already had a result event, so the
+   * per-segment counters add up instead of starting over.
+   *
+   * `state.sawResult` is what `handleEvent` reads to decide that, and a fresh
+   * `LiveRun` has it false — correct for every other spawn, because a resume
+   * with `resumeRunId` makes a NEW record whose counters genuinely start at
+   * zero. A completion attempt is the one spawn that re-enters the SAME record:
+   * without this its result event overwrote `numTurns`, `permissionDenials`,
+   * `deniedActions` and `denials`, so a refusal from the first attempt — and the
+   * "Allow next time" button that answers it — vanished when the second ran.
+   */
+  continuingRecord = false,
 ): void {
   // Whose review is this run's diff getting? The owner's automatic pass (as
   // the switch stood when the run started — run.reviewPass), a team's
@@ -6563,7 +6590,7 @@ function spawnRun(
     allowanceRefusal: null,
     pauseReason: null,
     timedOut: false,
-    sawResult: false,
+    sawResult: continuingRecord,
     sawInit: false,
     outcome: null,
     stderr: "",
@@ -7417,9 +7444,10 @@ function spawnOrSettle(
   setprivPath: string,
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
+  continuingRecord = false,
 ): void {
   try {
-    spawnRun(run, resumeSessionId, setprivPath, settings, stdinText);
+    spawnRun(run, resumeSessionId, setprivPath, settings, stdinText, continuingRecord);
   } catch (err) {
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
