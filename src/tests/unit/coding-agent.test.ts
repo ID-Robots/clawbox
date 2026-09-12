@@ -776,8 +776,10 @@ describe("a run", () => {
       expect(run.commit).toBe(g("rev-parse", "--short", run.worktree!.branch));
       expect(run.commitError).toBeNull();
       expect(run.progress.join("\n")).toMatch(/Committed by the run itself as /);
+      // The merge lands first and the copy is taken away just after it, so
+      // both are waited for rather than one being read off the other.
       await vi.waitFor(() => { expect(g("log", "--oneline")).toMatch(/the run commits/); }, { timeout: 10_000 });
-      expect(lib.getRun(done.id)?.worktree?.removed).toBe(true);
+      await vi.waitFor(() => { expect(lib.getRun(done.id)?.worktree?.removed).toBe(true); }, { timeout: 10_000 });
     });
 
     it("does nothing while the owner's review switch is off", async () => {
