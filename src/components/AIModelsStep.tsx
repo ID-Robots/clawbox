@@ -2140,6 +2140,7 @@ export default function AIModelsStep({
   const shouldShowMoreProviders = providerListCollapsed;
   const resolvedTitle = title ?? t("ai.title");
   const resolvedDescription = description ?? t("ai.description");
+  const Title = embedded ? "h2" : "h1";
   const embeddedConnectLabel = t("settings.connect");
 
   // Edition resolves asynchronously (see the /harness/active effect above).
@@ -2224,9 +2225,12 @@ export default function AIModelsStep({
         )}
         {/* Hide form content when configuring overlay is shown */}
         <div className={configuringState ? "invisible h-0 overflow-hidden" : ""}>
-        <h1 className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">
+        {/* Embedded in Settings this card is one panel among several and the
+            window around it owns the page's h1, so the title drops a level
+            rather than making the document claim two titles. */}
+        <Title className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">
           {resolvedTitle}
-        </h1>
+        </Title>
         <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)] mb-6">
           {resolvedDescription}
         </p>

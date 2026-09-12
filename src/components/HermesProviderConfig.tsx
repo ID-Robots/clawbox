@@ -966,6 +966,7 @@ export default function HermesProviderConfig({
   // the next step reads as a deliberate confirmation. Settings never advances,
   // so it never shows this. `--cyan-bright` is the product's DONE colour.
   const showConnectedAffirmation = !embedded && configured;
+  const Title = embedded ? "h2" : "h1";
 
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
@@ -1012,7 +1013,9 @@ export default function HermesProviderConfig({
             </div>
           </>
         )}
-        <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">{t("hermesProvider.title")}</h1>
+        {/* Embedded in Settings the window already owns the page's h1; one
+            document with two of them claims two titles. */}
+        <Title className="text-xl sm:text-2xl font-bold font-display mb-1">{t("hermesProvider.title")}</Title>
         <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
           {t("hermesProvider.intro")}
         </p>

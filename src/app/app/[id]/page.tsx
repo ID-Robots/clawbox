@@ -501,7 +501,10 @@ export default function StandaloneAppPage() {
       case "settings":
         return (
           <div className="h-full overflow-y-auto">
-            <SettingsApp ui={appearance.ui} />
+            {/* Here Settings IS the page, so it owns the document's `h1`
+                and `main` — on the desktop it is one window among several and
+                claims neither. */}
+            <SettingsApp ui={appearance.ui} asPage />
             {/* The Upload tile clicks this, exactly as the desktop's does. */}
             <input
               ref={appearance.uploadRef}
