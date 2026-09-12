@@ -6351,8 +6351,23 @@ function watchDeployment(runId: string): void {
   if (deployWatchers.has(runId)) return;
   deployWatchers.add(runId);
 
+  /**
+   * One poll, with nothing able to escape it.
+   *
+   * A rejected promise from a `setTimeout` callback is an unhandled rejection,
+   * which on Node ends the process — and this process is the box's web server.
+   * Every fault inside `tick` is already a result rather than a throw; this is
+   * for the ones that are not (a disk that will not take `persist`).
+   */
+  const poll = () => {
+    void tick().catch((err) => {
+      console.error(`[coding-agent] deployment poll for ${runId}:`, err instanceof Error ? err.message : err);
+      deployWatchers.delete(runId);
+    });
+  };
+
   const schedule = () => {
-    const timer = setTimeout(() => { void tick(); }, VERCEL_POLL_INTERVAL_MS);
+    const timer = setTimeout(poll, VERCEL_POLL_INTERVAL_MS);
     // Never hold the process open for a build on somebody else's servers.
     timer.unref?.();
   };
@@ -6400,7 +6415,11 @@ function watchDeployment(runId: string): void {
     if (verdict.phase === "failed") void handOffFailedDeploy(runId);
   };
 
-  schedule();
+  // The first look is taken NOW rather than one interval from now, the way the
+  // review loop's is: this is armed both by a push that has just happened and
+  // by the boot sweep after a restart, and in the second case a record that has
+  // been pending since before the reboot should be re-read at once.
+  poll();
 }
 
 /** What the poll just learned about the deployment, onto the record. */

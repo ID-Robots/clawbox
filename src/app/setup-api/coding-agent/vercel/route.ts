@@ -64,11 +64,14 @@ async function guard(request: Request, write: boolean): Promise<NextResponse | n
  * under something invented: a link has to be findable again by the run that
  * needs it, and a run's project is resolved by that same function.
  */
-async function scopeFor(input: { projectId: string | null; directory: string | null }) {
+type Scope = { ok: true; scope: string } | { ok: false; refusal: NextResponse };
+
+async function scopeFor(input: { projectId: string | null; directory: string | null }): Promise<Scope> {
   const scope = await resolveProjectScope(input);
   if (!scope) {
     return {
-      error: refuse(
+      ok: false,
+      refusal: refuse(
         400,
         "no_project",
         "That folder is not one of this ClawBox's projects, so there is nothing to attach a Vercel project to.",
@@ -76,7 +79,7 @@ async function scopeFor(input: { projectId: string | null; directory: string | n
       ),
     };
   }
-  return { scope };
+  return { ok: true, scope };
 }
 
 function failed(err: unknown) {
@@ -110,7 +113,7 @@ function declaredTooLong(request: Request): boolean {
   return Number.isFinite(declared) && declared > MAX_BODY_BYTES;
 }
 
-export async function GET(request: Request) {
+export async function GET(request: Request): Promise<NextResponse> {
   const denied = await guard(request, false);
   if (denied) return denied;
   const url = new URL(request.url);
@@ -119,7 +122,7 @@ export async function GET(request: Request) {
       projectId: url.searchParams.get("projectId"),
       directory: url.searchParams.get("directory"),
     });
-    if ("error" in resolved) return resolved.error;
+    if (!resolved.ok) return resolved.refusal;
     const link = await readVercelLink(resolved.scope);
     if (!url.searchParams.has("check")) {
       return NextResponse.json({ scope: resolved.scope, link, readiness: null });
@@ -134,7 +137,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: Request): Promise<NextResponse> {
   const denied = await guard(request, true);
   if (denied) return denied;
   if (declaredTooLong(request)) {
@@ -155,7 +158,7 @@ export async function POST(request: Request) {
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
     });
-    if ("error" in resolved) return resolved.error;
+    if (!resolved.ok) return resolved.refusal;
     const link = await setVercelLink({
       scope: resolved.scope,
       // `vercelProjectId`, deliberately not `projectId`: this route's
@@ -179,7 +182,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+export async function DELETE(request: Request): Promise<NextResponse> {
   const denied = await guard(request, true);
   if (denied) return denied;
   const url = new URL(request.url);
@@ -188,7 +191,7 @@ export async function DELETE(request: Request) {
       projectId: url.searchParams.get("projectId"),
       directory: url.searchParams.get("directory"),
     });
-    if ("error" in resolved) return resolved.error;
+    if (!resolved.ok) return resolved.refusal;
     const removed = await deleteVercelLink(resolved.scope);
     // The stored TOKEN is deliberately left alone: it is the owner's secret,
     // it may be box-wide or used by another project, and a detach that deleted
