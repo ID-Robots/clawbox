@@ -85,8 +85,11 @@ describe("Hermes ClawBox AI chat model", () => {
     }));
 
     const textarea = await mountHermesChat(box);
-    const label = await screen.findByText("Flash 4.1");
-    expect(label.closest("button")).toBeNull();
+    // The header names the provider and nothing more: no model picker for
+    // ClawBox AI, and no read-only chip naming the model either. What the box
+    // actually RUNS is asserted on the wire below, which is where it matters.
+    await screen.findByLabelText(/^Chat provider:/);
+    expect(screen.queryByText("Flash 4.1")).toBeNull();
     expect(screen.queryByLabelText(/^Hermes model:/)).toBeNull();
     expect(screen.queryByText("Max Tier")).toBeNull();
 

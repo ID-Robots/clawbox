@@ -153,12 +153,16 @@ afterEach(() => {
 });
 
 describe("the chat composer's ClawBox AI model chip on a German desktop", () => {
-  it.each([ON_PRO, ON_FLASH])("shows Flash 4.1 without a tier picker for %s", async (model) => {
+  it.each([ON_PRO, ON_FLASH])("names no model at all, and no tier, for %s", async (model) => {
     const calls = installFetch(ENTITLED_STATUS, model);
     render(<ChatPopup isOpen onClose={() => {}} />);
 
-    const label = await screen.findByText("Flash 4.1");
-    expect(label.closest("button")).toBeNull();
+    // The provider pill is the header's last word for ClawBox AI. The model
+    // name used to sit beside it as a chip nobody could click; it is gone, and
+    // everything this test already guarded — no picker, no tier vocabulary, no
+    // catalogue fetch, one model write — still holds.
+    await screen.findByRole("button", { name: /ClawBox/ });
+    expect(screen.queryByText("Flash 4.1")).toBeNull();
     expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(calls.filter((call) => call.url.includes("/setup-api/ai-models/catalog"))).toHaveLength(0);
@@ -202,12 +206,14 @@ describe("the provider-switch overlay on a German desktop", () => {
 });
 
 describe("the automatic switch to Flash on a German desktop", () => {
-  it("shows the current model without a Max subscription upsell", async () => {
+  it("switches quietly, with no model chip and no Max subscription upsell", async () => {
     vi.stubGlobal("WebSocket", RefusedSocket);
     const calls = installFetch(REFUSED_STATUS);
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(modelWrites(calls)).toBe(1));
-    await screen.findByText("Flash 4.1");
+    // The write above is the synchronisation point the model name used to be.
+    await screen.findByRole("button", { name: /ClawBox/ });
+    expect(screen.queryByText("Flash 4.1")).toBeNull();
     const write = calls.find((call) => call.init?.method === "POST" && call.url.includes("/setup-api/chat/model"));
     expect(JSON.parse(String(write?.init?.body))).toEqual({ model: ON_FLASH, automatic: true });
     expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();
