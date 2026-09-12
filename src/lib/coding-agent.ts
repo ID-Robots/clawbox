@@ -71,7 +71,16 @@ import path from "path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
-import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/coding-agent-status";
+import {
+  type CodingPauseMeter,
+  type CodingPauseReason,
+  type CodingRunStatus,
+  MAX_PAUSE_MESSAGE_CHARS,
+  isCodingRunStatus,
+  isHeld,
+  isLive,
+  parsePauseReason,
+} from "@/lib/coding-agent-status";
 // The runner writes its fixed lines from this table so the surfaces that draw
 // them can recognise each one and say it in the owner's language.
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
@@ -815,6 +824,23 @@ export interface CodingRun {
    * failed identically. A resume is then not a retry, it is a re-enactment.
    */
   resumable: boolean;
+  /**
+   * WHY this run is paused — persisted, because the answer outlives the
+   * process that knew it.
+   *
+   * `status: "paused"` alone cannot answer the question the owner actually
+   * has. A pause someone asked for needs nothing explained. A pause that
+   * followed a refused allowance is the opposite: nobody chose it, and
+   * Resume is only the fix once the allowance is back — which is a fact
+   * about the far side that the record has to carry, because by the time the
+   * owner looks the refusal itself is long gone.
+   *
+   * Null for a run that was never paused, and for a record written before
+   * this field existed. Cleared on resume and on the stop that closes a
+   * paused run out, so a stale reason can never describe the pause before
+   * last. See CodingPauseReason.
+   */
+  pauseReason: CodingPauseReason | null;
   progress: string[];
   /** When each progress line was recorded (ms since the epoch), one for one with `progress`. */
   progressAt: number[];
@@ -1934,6 +1960,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
+    // Only a reason this code could have written counts: anything else on a
+    // hand-edited record is no reason at all, not a new kind of pause.
+    pauseReason: parsePauseReason(raw.pauseReason),
     reviewOf: typeof raw.reviewOf === "string" ? raw.reviewOf : null,
     team: normalizeTeam(raw.team),
     readOnly: raw.readOnly === true,
@@ -2011,6 +2040,29 @@ interface LiveRun {
    * Stop overrides an earlier Pause — see requestEnd.
    */
   endRequested: "stop" | "pause" | null;
+  /**
+   * The last time one of this box's meters refused THIS run, as the far side
+   * worded it — the evidence a later pause is read against.
+   *
+   * It lives here, on the live process, rather than on the record: the routes
+   * that learn of a refusal (the media routes) know the run and the code, and
+   * `pauseRun` — whose only caller is the pause route — knows neither. Nothing
+   * else can write it, so nothing else can claim a pause it did not cause.
+   *
+   * Consumed by the first pause inside PAUSE_AFTER_REFUSAL_MS and cleared the
+   * moment the same meter produces a file, so a spent-then-recovered meter
+   * cannot explain a pause it is no longer the reason for.
+   */
+  allowanceRefusal: { meter: CodingPauseMeter; resetsAt: string | null; message: string; at: number } | null;
+  /**
+   * Why this run was asked to pause, decided when the pause was ASKED for
+   * rather than when the process finally exits.
+   *
+   * The gap between the two is a graceful shutdown — seconds of it — and the
+   * refusal that explains the pause is only fresh at the near end of that gap.
+   * Null until a pause is requested; see requestEnd and finishRun.
+   */
+  pauseReason: CodingPauseReason | null;
   timedOut: boolean;
   sawResult: boolean;
   /** The first init has been seen; any later one is the CLI continuing. */
@@ -2195,6 +2247,7 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested, so it needs its own copy: a shared object here would let a route
     // holding a clone see the watcher's later writes — and mutate them.
     pr: run.pr ? { ...run.pr, checks: { ...run.pr.checks } } : null,
+    pauseReason: run.pauseReason ? { ...run.pauseReason } : null,
   };
 }
 
@@ -3181,14 +3234,75 @@ export function releaseRunMedia(runId: string, kind: keyof RunMedia): void {
  * the live run: a write that lands after the run settled — the audio route can
  * wait seconds in withSpeechQueue — must not edit a finished record.
  */
-export function noteRunMedia(runId: string, file: string | null): void {
+export function noteRunMedia(runId: string, file: string | null, meter?: CodingPauseMeter): void {
   const run = loadRuns().find((r) => r.id === runId);
   if (!run || !isLive(run.status)) return;
+  // A meter that just produced a file is not the meter that is spent, so an
+  // earlier refusal of it stops being an account of anything. Without this a
+  // run refused once at 10:00 and served happily at 10:01 could still have a
+  // 10:02 pause blamed on an allowance it plainly has.
+  const state = live.get(runId);
+  if (state?.allowanceRefusal && (meter === undefined || state.allowanceRefusal.meter === meter)) {
+    state.allowanceRefusal = null;
+  }
   // Evidence is listed with the run in its own right, and counting it as work
   // made a review pass that changed nothing report a changed file and arm a
   // review of no work — the same reason the stream parser skips it.
   if (file && !isEvidencePath(run, file)) noteFile(run, relativeToRun(run, file));
   persist(true);
+}
+
+/**
+ * How long a refusal may explain a pause that follows it.
+ *
+ * A run refused for allowance is told not to retry, tidies up and settles
+ * within a turn; two minutes covers that with room for a slow final turn
+ * without stretching to cover an unrelated pause an hour later.
+ */
+export const PAUSE_AFTER_REFUSAL_MS = 120_000;
+
+/**
+ * Record that one of this box's meters refused THIS run, so a pause that
+ * follows can say so. Silent unless the run is live — a settled record has
+ * nothing left to pause.
+ *
+ * Called from the routes that hold the refusal (the media routes): by the
+ * time `pauseRun` runs, the refusal is long gone and the pause route knows
+ * only a run id.
+ */
+export function noteAllowanceRefusal(
+  runId: string,
+  meter: CodingPauseMeter,
+  detail: { resetsAt: string | null; message: string },
+): void {
+  const state = live.get(runId);
+  if (!state) return;
+  state.allowanceRefusal = {
+    meter,
+    resetsAt: detail.resetsAt,
+    message: detail.message.slice(0, MAX_PAUSE_MESSAGE_CHARS),
+    at: Date.now(),
+  };
+}
+
+/**
+ * WHY this run is being asked to pause: an allowance the box was refused
+ * moments ago, or — the default, and what every ordinary pause gets — the
+ * owner.
+ *
+ * The refusal is CONSUMED whether or not it qualifies, so it can explain at
+ * most the one pause that directly followed it. Everything else about the
+ * attribution is deliberately narrow: only a media route can record a
+ * refusal, only for the run it refused, only while that run is live, and only
+ * for as long as PAUSE_AFTER_REFUSAL_MS. Anything outside that is
+ * `{ kind: "owner" }`, because an unexplained pause has to read as the
+ * ordinary one rather than borrow a reason.
+ */
+function takePauseReason(state: LiveRun): CodingPauseReason {
+  const refusal = state.allowanceRefusal;
+  state.allowanceRefusal = null;
+  if (!refusal || Date.now() - refusal.at > PAUSE_AFTER_REFUSAL_MS) return { kind: "owner" };
+  return { kind: "allowance", meter: refusal.meter, resetsAt: refusal.resetsAt, message: refusal.message };
 }
 
 /** What a media route needs to know before it spends anything. Null when no run is live. */
@@ -4419,6 +4533,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.status = "paused";
       run.resumable = true;
       run.error = null;
+      // Why, recorded at the gesture — see requestEnd. `?? owner` covers a
+      // pause signalled by a path that never went through requestEnd.
+      run.pauseReason = state.pauseReason ?? { kind: "owner" };
     } else if (state.endRequested === "stop") {
       run.status = "stopped";
       run.error = run.error ?? "Stopped before it finished.";
@@ -4437,6 +4554,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
     }
   }
+  // Only a paused run has a pause to explain. A pause that raced the final
+  // message and settled as "completed" instead must not keep a reason for a
+  // pause that never happened.
+  if (run.status !== "paused") run.pauseReason = null;
   // A stop that raced the final message keeps "completed": the work is done.
   run.exitCode = exitCode;
   run.completedAt = Date.now();
@@ -4613,6 +4734,8 @@ function spawnRun(
     }, IDLE_CHECK_MS),
     killTimer: null,
     endRequested: null,
+    allowanceRefusal: null,
+    pauseReason: null,
     timedOut: false,
     sawResult: false,
     sawInit: false,
@@ -4885,6 +5008,8 @@ function newRunRecord(fields: {
     lastActivityAt: now,
     retries: 0,
     resumable: false,
+    // Nothing has paused it, so there is nothing to explain yet.
+    pauseReason: null,
     reviewOf: fields.reviewOf ?? null,
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
@@ -4953,6 +5078,10 @@ function findLastFinished(list: CodingRun[]): number {
 function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): void {
   if (state.endRequested === kind || (kind === "pause" && state.endRequested !== null)) return;
   state.endRequested = kind;
+  // Decided HERE, at the gesture, not at the exit: the refusal that explains
+  // a pause is fresh now and stale by the time the process has finished
+  // shutting down. finishRun applies it if the pause is what actually lands.
+  if (kind === "pause") state.pauseReason = takePauseReason(state);
   pushProgress(run, kind === "stop" ? RUNNER_STEP.stopRequested : RUNNER_STEP.pauseRequested);
   endProcess(state);
   persist();
@@ -4968,6 +5097,8 @@ export function stopRun(id: string): CodingRun {
     run.status = "stopped";
     run.error = "Stopped.";
     run.completedAt = run.completedAt ?? Date.now();
+    // The book is closed on the pause, so its reason describes nothing now.
+    run.pauseReason = null;
     // A pause left the group alone (a paused run may be resumed into the same
     // folder, and anything it started is still wanted); closing the book on it
     // is where that stops being true.
@@ -5014,6 +5145,10 @@ export function pauseRun(id: string): CodingRun {
     // session to come back to; otherwise it is simply lost.
     run.status = run.sessionId ? "paused" : "failed";
     run.resumable = run.sessionId !== null;
+    // No live process, so no refusal was ever recorded against it: this is
+    // the ordinary pause, and it says so rather than leaving the field null
+    // for a reader to guess at.
+    run.pauseReason = run.sessionId ? { kind: "owner" } : null;
     if (!run.sessionId) run.error = "The run was lost before it could be paused.";
     run.completedAt = Date.now();
     persist(true);
@@ -5081,6 +5216,9 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   run.completedAt = null;
   run.error = null;
   run.exitCode = null;
+  // The pause is over, so its reason is history. Left in place it would sit
+  // on a running record and, worse, survive into the run's next settle.
+  run.pauseReason = null;
   run.lastActivityAt = Date.now();
   pushProgress(run, RUNNER_STEP.resumedByOwner);
   persist(true);

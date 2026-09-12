@@ -449,6 +449,20 @@ function messageForStatus(status: number): [number, string] {
 }
 
 /**
+ * When a spent picture allowance comes back, as an ISO 8601 instant.
+ *
+ * Derived rather than read off the wire: the cap is per UTC day and the
+ * proxy's own counter is what enforces it, which is the same fact
+ * messageForStatus already states in words. Exported so a caller that has to
+ * show the owner a TIME — the coding agent's pause banner — says the one this
+ * module's own sentence promises, instead of inventing a second answer.
+ */
+export function imageAllowanceResetsAt(now: number = Date.now()): string {
+  const at = new Date(now);
+  return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate() + 1)).toISOString();
+}
+
+/**
  * The response body, cut off past the cap.
  *
  * Counted as it arrives rather than trusted from Content-Length: a chunked

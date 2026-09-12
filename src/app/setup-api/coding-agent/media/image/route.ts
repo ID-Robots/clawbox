@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { ClawaiImageError, generateClawaiImageBytes } from "@/lib/harness/clawai-images";
+import { ClawaiImageError, generateClawaiImageBytes, imageAllowanceResetsAt } from "@/lib/harness/clawai-images";
+import { noteAllowanceRefusal } from "@/lib/coding-agent";
 import { GenerationSlotBusy, withGenerationSlot } from "@/lib/webapp-icon";
 import {
   mediaError,
@@ -109,7 +110,19 @@ export async function POST(request: Request) {
       if (err instanceof ClawaiImageError) {
         // The image module already decided which status a customer should see
         // and wrote the sentence for it; the code is what the tool branches on.
-        return mediaError(err.message, reasonFor(err.status), err.status);
+        const code = reasonFor(err.status);
+        // A spent allowance is the one refusal here that ends the run rather
+        // than the call: the tool tells the model not to retry, and the pause
+        // that follows would otherwise reach the owner as a bare "Paused"
+        // with nothing to act on. Recorded against the run HERE, the only
+        // place that knows both which run asked and what it was told.
+        if (code === "allowance") {
+          noteAllowanceRefusal(target.runId, "images", {
+            resetsAt: imageAllowanceResetsAt(),
+            message: err.message,
+          });
+        }
+        return mediaError(err.message, code, err.status);
       }
       console.warn("[coding-agent/media/image] failed:", err instanceof Error ? err.message : err);
       return mediaError("The picture could not be generated.", "write_failed", 502);
