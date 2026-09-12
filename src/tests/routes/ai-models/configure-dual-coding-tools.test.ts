@@ -423,6 +423,7 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // a handle captured at file scope is a different vi.fn() by now.
     const oc = await import("@/lib/openclaw-config");
     vi.mocked(oc.openclawIsAbsent).mockReturnValue(true);
+    applyClawaiToHermesMock.mockResolvedValue({});
     const order: string[] = [];
     vi.mocked(clearHarnessFault).mockImplementation(async () => { order.push("clear"); });
     applyClawaiToHermesMock.mockImplementation(async () => { order.push("hermes"); return {}; });
@@ -430,6 +431,29 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
     expect(res.status).toBe(200);
     expect(order).toEqual(["clear", "hermes"]);
+  });
+
+  it("hands the HERMES-ONLY apply a readiness snapshot taken BEFORE the clear", async () => {
+    // The trap on the other side of the same ordering. `applyClawaiToHermes`
+    // samples "before" itself when the caller passes none, so clearing first
+    // and letting it sample would have it read an already-ready box, see no
+    // change and ask for no reload — the same absent tools as clearing too
+    // late, reached from the other direction. So the route reads first, then
+    // clears, then hands the reading over.
+    const oc = await import("@/lib/openclaw-config");
+    vi.mocked(oc.openclawIsAbsent).mockReturnValue(true);
+    // Unready while the fault stands; ready once it is gone.
+    vi.mocked(getCodingAgentStatus)
+      .mockResolvedValueOnce({ ready: false } as never)
+      .mockResolvedValue({ ready: true } as never);
+    applyClawaiToHermesMock.mockResolvedValue({});
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    const [, , options] = applyClawaiToHermesMock.mock.calls[0];
+    // false — the box as it was BEFORE the clear. Passing true (or nothing,
+    // and letting the apply sample post-clear) is what costs the reload.
+    expect(options).toMatchObject({ codingAgentReadyBefore: false });
   });
 
   it("hands the credential to HERMES, which is the agent answering on this box", async () => {

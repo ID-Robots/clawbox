@@ -2554,14 +2554,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
-          // The same clear the OpenClaw/dual path does further down, and for
-          // the same two reasons: this save is the owner doing what a harness
-          // fault told them to do, and `applyClawaiToHermes` takes its own
-          // before/after readiness pair — a fault still standing when it reads
-          // "after" keeps readiness false and costs the MCP refresh. The
-          // coding agent runs on this SKU too, so a clear that only happened
-          // on the editions with OpenClaw would leave the Hermes box refusing
+          // The same clear the OpenClaw/dual path does further down: the
+          // coding agent runs on this SKU too, and a clear that only happened
+          // on the editions with OpenClaw would leave a Hermes box refusing
           // runs with nothing but the clock and the button to get it out.
+          //
+          // THE SNAPSHOT IS THE WHOLE CARE HERE. `applyClawaiToHermes` takes
+          // its own before/after readiness pair and refreshes the MCP children
+          // from it — but only samples "before" ITSELF when the caller passes
+          // none (`options.codingAgentReadyBefore ?? await codingAgentReady()`).
+          // So the order has to be: read, then clear, then hand the reading
+          // over. Clearing first and letting it sample would have it read
+          // "before" as already-ready, see no change, and ask for no reload —
+          // the same absent tools as clearing too late, reached from the other
+          // side. The dual path below gets this for free because it samples
+          // long before its own writes.
+          const codingAgentReadyBefore = await codingAgentReady();
           await forgetCodingHarnessFault();
           const applied = await applyClawaiToHermes(
             clawboxAiToken,
@@ -2569,7 +2577,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             // The apply writes the store on this SKU, so the plan travels with
             // the badge from there. (The two batches below also carry it on any
             // save that reaches them — the same value, harmlessly.)
-            { portalPlan },
+            { portalPlan, codingAgentReadyBefore },
           );
           await forgetLocalWasDefault();
           // Reported from the apply's OWN decision rather than the one taken
