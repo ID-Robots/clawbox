@@ -282,7 +282,7 @@ describe("what may be stored", () => {
     await expect(store.setSecret({ name: "OK_NAME", value: "x".repeat(store.MAX_SECRET_VALUE_CHARS + 1) }))
       .rejects.toMatchObject({ code: "value_too_long" });
     // A NUL would truncate the variable where the kernel copies it.
-    await expect(store.setSecret({ name: "OK_NAME", value: `abc def` })).rejects.toMatchObject({ code: "invalid_value" });
+    await expect(store.setSecret({ name: "OK_NAME", value: "abc\u0000def" })).rejects.toMatchObject({ code: "invalid_value" });
   });
 
   it("keeps the newlines a PEM key is made of, and trims the one a paste adds", async () => {
