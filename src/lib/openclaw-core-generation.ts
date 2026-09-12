@@ -83,3 +83,24 @@ export async function installedOpenclawCoreGeneration(): Promise<OpenclawCoreGen
   const month = Number(match[2]);
   return year > V2_YEAR || (year === V2_YEAR && month >= V2_MONTH) ? "v2" : "v1";
 }
+
+/**
+ * The installed core's version STRING, or null when it cannot be read.
+ *
+ * Exported from here rather than read a fourth time elsewhere: this module
+ * already owns `coreManifestPath()` and the reason for reading the manifest
+ * instead of spawning `openclaw --version` (~53 ms against ~8 s on a shipped
+ * Orin). The Improvement Program puts this in every issue it files, so a
+ * report says which core the box was on.
+ *
+ * Never throws: a box with no OpenClaw at all — the hermes SKU — answers null,
+ * which is an answer.
+ */
+export async function installedOpenclawCoreVersion(): Promise<string | null> {
+  try {
+    const version: unknown = JSON.parse(await readFile(coreManifestPath(), "utf-8"))?.version;
+    return typeof version === "string" && version.trim() ? version.trim() : null;
+  } catch {
+    return null;
+  }
+}
