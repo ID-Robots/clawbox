@@ -27,6 +27,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import ChatApp from "@/components/ChatApp";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { waitForChatSession } from "@/tests/helpers/chat-connected";
 
 const SUMMARY = "Jane sent the Wednesday plan, and Accounts sent an invoice.";
 const REPLY = `${SUMMARY}\nEMAIL:4471\nEMAIL:4468`;
@@ -128,6 +129,20 @@ const instances: FakeGatewayWs[] = [];
 async function socket() {
   await waitFor(() => expect(instances.length).toBeGreaterThan(0));
   return instances[instances.length - 1];
+}
+
+/**
+ * The socket, once the surface has finished its handshake.
+ *
+ * The cases that replay a turn from history wait for that turn to appear and
+ * are covered by it; the mascot ones below deliberately empty the history, so
+ * they had nothing to wait on and pushed as soon as the socket object existed.
+ * See `waitForChatSession` for what that dropped and when.
+ */
+async function connectedSocket() {
+  const ws = await socket();
+  await waitForChatSession();
+  return ws;
 }
 
 /** What the device answers a card that is actually opened with. */
@@ -340,8 +355,7 @@ describe("the mascot chat, which had the same hole one step further in", () => {
     // surfaces agree about what survives an interrupt.
     history = [];
     render(<ChatPopup isOpen onClose={() => {}} />);
-    await waitFor(() => expect(instances.length).toBeGreaterThan(0));
-    const ws = instances[instances.length - 1];
+    const ws = await connectedSocket();
 
     await act(async () => {
       ws.pushChat("delta", { role: "assistant", content: [{ type: "text", text: REPLY }] });
@@ -368,8 +382,7 @@ describe("the mascot chat, which had the same hole one step further in", () => {
     // the half-written one was stored here too.
     history = [];
     render(<ChatPopup isOpen onClose={() => {}} />);
-    await waitFor(() => expect(instances.length).toBeGreaterThan(0));
-    const ws = instances[instances.length - 1];
+    const ws = await connectedSocket();
 
     await act(async () => {
       ws.pushChat("delta", { role: "assistant", content: [{ type: "text", text: `${SUMMARY}\nEMAIL:` }] });

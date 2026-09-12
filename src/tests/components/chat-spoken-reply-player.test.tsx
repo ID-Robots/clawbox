@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
+import { waitForChatSession } from "@/tests/helpers/chat-connected";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { resetSpokenReplyPeakCache } from "@/components/SpokenReplyPlayer";
 
@@ -253,9 +254,18 @@ async function renderReplyWithAudio() {
   history = [assistantMessage(SPOKEN_TEXT, 1787291821899)];
   const view = render(<ChatPopup isOpen onClose={() => {}} />);
   await waitFor(() => expect(socket()).not.toBeNull());
+  await waitForChatSession();
   await screen.findByRole("textbox");
-  deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
+  // Wait for the STORED copy before pushing the live one. Both carry the same
+  // timestamp and the surface folds them into one turn — but only when the
+  // history has already landed. Pushed first, the live turn went in on its own
+  // and the history reply was appended beside it, so `findByText` failed with
+  // "found multiple elements" (measured on beta, 2026-09-12: only ever in a
+  // full-suite run, where the history response's `setTimeout(0)` had not run
+  // by the time the composer rendered).
   await screen.findByText(SPOKEN_TEXT);
+  deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
+  await waitFor(() => expect(screen.getAllByText(SPOKEN_TEXT)).toHaveLength(1));
   deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
   await screen.findByTestId("spoken-reply-player");
   return view;
@@ -481,6 +491,7 @@ describe("the ClawBox player for a spoken reply", () => {
   it("gives a silent reply no player at all", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     await screen.findByRole("textbox");
     deliver(assistantMessage("No sound here.", 1787291821899));
     await screen.findByText("No sound here.");

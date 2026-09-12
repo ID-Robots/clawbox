@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
+import { waitForChatSession } from "@/tests/helpers/chat-connected";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 // The popup this suite mounts grew a session-tab strip and the OpenClaw 2
@@ -219,6 +220,7 @@ describe("spoken replies in the mascot chat", () => {
   it("renders the audio the harness attached as ClawBox's own player", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     await screen.findByRole("textbox");
 
     deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
@@ -249,6 +251,7 @@ describe("spoken replies in the mascot chat", () => {
     const MARKDOWN = 'Sent — *"Seventeen copper bells."*\n\nSee [the docs](https://clawbox.com/docs/tts) or run `openclaw health`.';
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     await screen.findByRole("textbox");
 
     deliver(assistantMessage(MARKDOWN, 1787291821899));
@@ -269,6 +272,7 @@ describe("spoken replies in the mascot chat", () => {
   it("does not show the answer twice when its spoken half arrives", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     await screen.findByRole("textbox");
 
     deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
@@ -288,6 +292,7 @@ describe("spoken replies in the mascot chat", () => {
     history = [assistantMessage(SPOKEN_TEXT, 1787291821899)];
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     await screen.findByText(SPOKEN_TEXT);
 
     deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
@@ -407,6 +412,7 @@ describe("spoken replies in the mascot chat", () => {
   it("does not render audio carried by an internal routing envelope", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     deliverSessionMessage({
       role: "user",
       provenance: { kind: "inter_session", sourceTool: "sessions_send" },
@@ -446,6 +452,7 @@ describe("spoken replies in the mascot chat", () => {
   it("does not text-match a live audio-only event to a caption-free image", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     deliver(assistantMessage(`MEDIA:${IMAGE}`, 100));
     const image = await screen.findByAltText("chat.generatedImage");
 
@@ -462,6 +469,7 @@ describe("spoken replies in the mascot chat", () => {
   it("does not text-match an audio-only final to a caption-free image", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     deliver(assistantMessage(`MEDIA:${IMAGE}`, 100));
     const image = await screen.findByAltText("chat.generatedImage");
     deliver(assistantMessage("", 200, VOICE));
@@ -481,6 +489,7 @@ describe("spoken replies in the mascot chat", () => {
     history = [assistantMessage("Bounded live reply", 250)];
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
 
     deliver(assistantMessageWithAudio("Bounded live reply", 250, sources));
 
@@ -552,6 +561,7 @@ EMAIL:4471`;
 
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
+    await waitForChatSession();
     await screen.findByRole("textbox");
 
     deliver(assistantMessage(withRefs, 1787291821899));

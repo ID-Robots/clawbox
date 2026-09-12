@@ -99,10 +99,20 @@ function installFetchStub(): void {
   }));
 }
 
+let sourceParent: string;
 let source: string;
 
 beforeEach(async () => {
-  source = fs.mkdtempSync(path.join(os.tmpdir(), "memory-index-src-"));
+  // The source folder gets a temp PARENT of its own rather than sitting
+  // directly under the OS tmpdir: one test below removes `<source>` from the
+  // list and registers `path.dirname(source)`, and with that dirname being
+  // /tmp the pass walked every stray Markdown file another process had left
+  // there. The stub embedder gives two texts that share a marker word the
+  // same vector, so a leftover /tmp/*.md containing "deposit" tied with — and
+  // beat — the file the test wrote (observed on beta, 2026-09-12).
+  sourceParent = fs.mkdtempSync(path.join(os.tmpdir(), "memory-index-parent-"));
+  source = path.join(sourceParent, "memory-index-src");
+  fs.mkdirSync(source, { recursive: true });
   embedCalls.texts = [];
   embedCalls.types = [];
   embedFail.status = 0;
@@ -115,7 +125,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  fs.rmSync(source, { recursive: true, force: true });
+  fs.rmSync(sourceParent, { recursive: true, force: true });
 });
 
 afterAll(() => {

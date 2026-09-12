@@ -91,6 +91,25 @@ export default defineConfig({
           include: ["src/tests/components/**/*.test.tsx"],
           exclude: ["**/node_modules/**", "**/.next/**"],
           setupFiles: ["src/tests/setup.ts"],
+          // Two budgets, deliberately far apart.
+          //
+          // `src/tests/setup.ts` gives Testing Library's waitFor/findBy 5 s,
+          // and vitest's own default for a test is also 5 s — so a wait that
+          // used its whole budget killed the TEST first and reported "Test
+          // timed out in 5000ms" instead of the "Unable to find an element by
+          // [data-testid=…]" that says which element and shows the DOM. Every
+          // one of the races fixed in this suite hid behind that message.
+          //
+          // The number: with the 215 component files running fully parallel on
+          // a 12-core machine, the slowest PASSING test measured 4,558 ms
+          // (chat-clawbox-ai-model-pill, "is absent — no picker and no
+          // read-only tier label", 2026-09-12) — 442 ms of headroom under the
+          // default. A jsdom mount of ChatPopup costs seconds under that much
+          // contention, and several tests mount it twice. 20 s leaves room for
+          // that and still sits well above the 5 s a failing wait needs to
+          // report itself properly.
+          testTimeout: 20_000,
+          hookTimeout: 20_000,
         },
       },
     ],

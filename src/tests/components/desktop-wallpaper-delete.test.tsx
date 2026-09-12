@@ -46,8 +46,29 @@ let savedWallpaperId = "custom-2";
 let activeHarness = "openclaw";
 /** Whether the device could actually RESOLVE its harness, or `active` is its own default. */
 let activeKnown = true;
-/** Milliseconds the harness probe takes to answer, so a case can run inside the window where it has not. */
-let harnessDelayMs = 0;
+/**
+ * While this is set, the harness probe does not answer — so a case can run
+ * inside the window where the box does not yet know its edition, and decide
+ * itself when that window closes.
+ *
+ * It used to be a millisecond DELAY, which made every such case a race between
+ * a real timer and the test's own progress: under a full parallel run the test
+ * took longer than the 3 s delay, the probe landed early, and an assertion
+ * about what the desktop does BEFORE it lands was made after it had (measured
+ * on beta, 2026-09-12 — the only failure in the file, and only in a full run).
+ */
+let harnessHold: Promise<void> | null = null;
+let releaseHarnessProbe: () => void = () => {};
+
+/** Hold the probe until `releaseHarnessProbe()`, or until the case ends. */
+function holdHarnessProbe(): void {
+  harnessHold = new Promise<void>((resolve) => {
+    releaseHarnessProbe = () => {
+      harnessHold = null;
+      resolve();
+    };
+  });
+}
 /** Every preference body the desktop POSTed, in order. */
 const saved: Record<string, unknown>[] = [];
 
@@ -70,7 +91,7 @@ function installFetch() {
     }
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) {
-      if (harnessDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, harnessDelayMs));
+      if (harnessHold) await harnessHold;
       return answer({ active: activeHarness, edition: activeHarness, activeKnown });
     }
     if (url.includes("/setup-api/preferences?all=1")) {
@@ -148,7 +169,8 @@ beforeEach(() => {
   savedWallpaperId = "custom-2";
   activeHarness = "openclaw";
   activeKnown = true;
-  harnessDelayMs = 0;
+  harnessHold = null;
+  releaseHarnessProbe = () => {};
   saved.length = 0;
   resetHarnessCache();
   // jsdom does not implement it at all, so `vi.spyOn` cannot be used and
@@ -315,7 +337,7 @@ describe("deleting a custom wallpaper", () => {
     // which product it is; on the Hermes box that is a competitor's picture
     // flickering across the customer's screen on every load.
     activeHarness = "hermes";
-    harnessDelayMs = 900;
+    holdHarnessProbe();
     window.localStorage.removeItem("clawbox-custom-wallpapers");
     savedWallpaperId = "custom-2";
 
@@ -327,6 +349,7 @@ describe("deleting a custom wallpaper", () => {
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
 
     // And once it does answer, the paint follows the edition.
+    releaseHarnessProbe();
     await waitFor(() => expect(wallpaperUrls().some((u) => u.includes("hermes-wallpaper"))).toBe(true));
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
@@ -341,7 +364,7 @@ describe("deleting a custom wallpaper", () => {
     // slow — or has failed for good, after three attempts — persisted
     // "clawbox" box-wide. Permanent, and nothing to do with the edition.
     activeHarness = "hermes";
-    harnessDelayMs = 3_000;
+    holdHarnessProbe();
     savedWallpaperId = "custom-2";
 
     render(<ChromeDesktop />);
@@ -358,10 +381,11 @@ describe("deleting a custom wallpaper", () => {
       expect(JSON.parse(window.localStorage.getItem("clawbox-custom-wallpapers") || "[]"))
         .toEqual([WP[0], WP[1]]);
     });
-    // Well past the 500 ms debounce, still inside the probe delay.
+    // Well past the 500 ms debounce, and the probe is still held.
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(saved.some((body) => "wp_id" in body && body.wp_id === "clawbox")).toBe(false);
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+    releaseHarnessProbe();
   });
 
   it("does not offer a phantom slot for a picture this browser does not have", async () => {
