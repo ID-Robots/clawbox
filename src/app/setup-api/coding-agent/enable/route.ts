@@ -8,6 +8,7 @@ import {
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
   setCodingAgentEnabled,
+  setCodingProvider,
   setDefaultDirectory,
   setEffort,
   setMaxTurns,
@@ -51,6 +52,11 @@ function forbidden() {
  * absolute path; a bare name is answered 400, since it is only ever a
  * shorthand for a folder INSIDE this one.
  * POST { effort: "low"|"medium"|"high"|"xhigh"|"max"|"ultracode" } → how hard a run thinks.
+ * POST { provider: "clawbox-ai" | "anthropic" } → which account pays for a run
+ * the caller does not name one for: the box's own ClawBox AI plan, or the
+ * owner's Anthropic access (src/lib/coding-provider.ts). Storing it does not
+ * require that provider to be connected — the owner may pick it before pasting
+ * the key — but STARTING a run against it does.
  * POST { maxTurns: number } → how many steps a run gets.
  * POST { tokenLimit: number | null } → token ceiling, or null for none.
  * POST { generateImages: boolean } → may a run draw pictures with ClawBox AI,
@@ -131,6 +137,7 @@ export async function POST(request: Request) {
     realBrowser?: unknown;
     setupComplete?: unknown;
     clearHarnessFault?: unknown;
+    provider?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -145,6 +152,7 @@ export async function POST(request: Request) {
   // mean "record a fault", and nothing outside the runner may do that.
   const clearsFault = fields.clearHarnessFault === true;
   const hasEffort = typeof fields.effort === "string";
+  const hasProvider = typeof fields.provider === "string";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
   const hasTokens = "tokenLimit" in fields
@@ -153,12 +161,12 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string }, { maxTurns: number }, "
+          + "{ effort: string }, { provider: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
           + "{ realBrowser: boolean }, { reviewRounds: number }, "
@@ -191,7 +199,11 @@ export async function POST(request: Request) {
     // running MCP child still has none of the three coding_agent_* tools.
     // Without it the owner presses Try again, the panel says ready, and the
     // agent cannot start a run until something unrelated respawns the child.
-    const readyBefore = hasEnabled || clearsFault ? (await getCodingAgentStatus()).ready : null;
+    // The PROVIDER moves it for the third time over: `ready` is the box's
+    // tools plus the DEFAULT provider's credential, so switching to an account
+    // nobody has connected takes the family away exactly as switching the
+    // agent off does.
+    const readyBefore = hasEnabled || clearsFault || hasProvider ? (await getCodingAgentStatus()).ready : null;
     if (hasDirectory) {
       const saved = await setDefaultDirectory(fields.defaultDirectory as string | null);
       console.error(`[coding-agent] default folder ${saved ? "set" : "cleared"} by the owner`);
@@ -199,6 +211,10 @@ export async function POST(request: Request) {
     if (hasEffort) {
       const saved = await setEffort(fields.effort as string);
       console.error(`[coding-agent] effort set to ${saved} by the owner`);
+    }
+    if (hasProvider) {
+      const saved = await setCodingProvider(fields.provider as string);
+      console.error(`[coding-agent] runs will be paid for by ${saved}, by the owner's choice`);
     }
     if (hasTurns) {
       const saved = await setMaxTurns(fields.maxTurns);

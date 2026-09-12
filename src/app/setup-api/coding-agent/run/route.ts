@@ -6,7 +6,16 @@ import { CodingAgentError, MAX_TASK_CHARS, httpStatusForCodingError, startRun } 
 export const dynamic = "force-dynamic";
 
 /**
- * POST { task, projectId? | directory?, resumeRunId? } → start a coding run.
+ * POST { task, projectId? | directory?, resumeRunId?, provider?, model? } →
+ * start a coding run.
+ *
+ * `provider` and `model` are the per-run override of the owner's default
+ * account (Settings → Coding Agent). They are validated together, by the one
+ * resolver the MCP tool also uses (src/lib/coding-provider.ts), so a model the
+ * box would refuse is refused in the same words wherever it arrives — 400,
+ * naming what may be used instead. A run against a provider with no credential
+ * is 409 `not_ready`, the same answer a missing harness gives, because both
+ * are a sentence for the owner rather than something to retry.
  *
  * Answers 202 immediately with the run record; the work continues in the
  * background and is polled through GET /setup-api/coding-agent/runs. The MCP
@@ -24,7 +33,7 @@ export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
-  let body: { task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown };
+  let body: { task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown; provider?: unknown; model?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -54,6 +63,10 @@ export async function POST(request: Request) {
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
       resumeRunId: typeof body.resumeRunId === "string" ? body.resumeRunId : null,
+      // Passed through untouched: startRun validates the pair, so this route
+      // cannot accept a combination the MCP tool would refuse, or the reverse.
+      provider: body.provider,
+      model: body.model,
       source,
     });
     return NextResponse.json({ started: true, run }, { status: 202 });

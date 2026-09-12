@@ -94,6 +94,18 @@ import {
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
+import {
+  CODING_AGENT_PROVIDER_CONFIG_KEY,
+  CODING_PROVIDERS,
+  DEFAULT_CODING_PROVIDER,
+  codingProviderFrom,
+  defaultModelForProvider,
+  isCodingProvider,
+  modelsForProvider,
+  resolveRunProvider,
+  type CodingProvider,
+} from "@/lib/coding-provider";
+import { getAnthropicConnection, type AnthropicSource } from "@/lib/coding-anthropic";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
@@ -701,6 +713,32 @@ export const SUBAGENT_DEFINITIONS = {
 export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
 
 /**
+ * The model a helper runs on, per provider.
+ *
+ * The definitions above name `deepseek-v4-flash` because that is the cheap
+ * tier of the plan they were written for — and it is a model name Anthropic
+ * has never heard of. An `anthropic` run with those definitions would have
+ * every helper fail on its first call, which is exactly the failure mode
+ * this selector must not introduce. `haiku` is Claude Code's own alias for
+ * the cheap tier of the account it is signed into, so the split the comment
+ * on SUBAGENT_DEFINITIONS describes — readers cheap, writing on the main
+ * model — holds on both providers.
+ */
+export const HELPER_MODEL: Readonly<Record<CodingProvider, string>> = {
+  "clawbox-ai": "deepseek-v4-flash",
+  anthropic: "haiku",
+};
+
+/** The `--agents` payload for a run on this provider. */
+export function subagentDefinitionsFor(provider: CodingProvider): Record<string, unknown> {
+  const model = HELPER_MODEL[provider] ?? HELPER_MODEL[DEFAULT_CODING_PROVIDER];
+  if (model === HELPER_MODEL["clawbox-ai"]) return SUBAGENT_DEFINITIONS;
+  return Object.fromEntries(
+    Object.entries(SUBAGENT_DEFINITIONS).map(([name, def]) => [name, { ...def, model }]),
+  );
+}
+
+/**
  * Claude Code's dynamic-workflow tool — the orchestration half of ultracode.
  *
  * Ultracode is xhigh effort plus a standing opt-in to orchestrate the work
@@ -852,6 +890,19 @@ export interface CodingRun {
   /** Claude Code session id — what `resume_run_id` continues from. */
   sessionId: string | null;
   model: string | null;
+  /**
+   * Which account paid for this run, frozen at the moment it STARTED — like
+   * `effort`, `maxTurns` and the media switches, and for the same reason: a
+   * resume must re-enter the session on the credential and the model it was
+   * opened with, not on whatever the owner's default has since become.
+   */
+  provider: CodingProvider;
+  /**
+   * The model the run was STARTED with — what the caller asked for, which is
+   * not `model` above (that is the model the CLI reported once it answered,
+   * and on ClawBox AI the plan chooses it). Null where the provider decides.
+   */
+  requestedModel: string | null;
   /** The run's final message: what changed, how to verify, what is left. */
   summary: string | null;
   /** Full final result for machine consumers; never parse the clipped display summary. */
@@ -1148,11 +1199,35 @@ export interface CodingDenial {
 /** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
 export const SUBAGENT_HISTORY_KEPT = 40;
 
+/** One provider's own half of readiness — its credential, not the box's tools. */
+export interface CodingProviderReadiness {
+  id: CodingProvider;
+  /** Could a run be started against this provider right now? */
+  ready: boolean;
+  /** The models a caller may name for it; empty where the plan decides. */
+  models: readonly string[];
+  /** What a run gets when the caller names none. */
+  defaultModel: string | null;
+  /** Owner-facing sentences, one per missing piece. Empty when ready. */
+  problems: string[];
+}
+
 export interface CodingHarnessReadiness {
+  /**
+   * The box AND the owner's DEFAULT provider. This is the field the MCP
+   * server's probe reads to decide whether the coding_agent_* tools exist at
+   * all, so it has to mean "a run started right now would work" — a box whose
+   * default is Anthropic and which has no Anthropic credential is not ready,
+   * however healthy its ClawBox AI plan is.
+   */
   ready: boolean;
   wrapperInstalled: boolean;
   claudeInstalled: boolean;
   clawaiConnected: boolean;
+  /** Has the owner's own Anthropic access — a saved key or a `claude` login? */
+  anthropicConnected: boolean;
+  /** Which of the two a run would use, or null when there is neither. Never the credential. */
+  anthropicSource: AnthropicSource | null;
   /**
    * Whether `setpriv` is here to strip the web server's inherited network
    * capabilities off the run. False means no run may start: see the header.
@@ -1170,6 +1245,11 @@ export interface CodingHarnessReadiness {
   harnessHealthy: boolean;
   /** Owner-facing sentences, one per missing piece. Empty when ready. */
   problems: string[];
+  /**
+   * Per provider, so a panel can offer the one that works and say why the
+   * other does not — rather than one flat "not ready" that names neither.
+   */
+  providers: CodingProviderReadiness[];
 }
 
 export interface CodingAgentStatus {
@@ -1206,6 +1286,10 @@ export interface CodingAgentStatus {
   maxAllowRules: number;
   harnessCommand: string;
   maxTaskChars: number;
+  /** Which account pays for a run the caller does not name one for. */
+  provider: CodingProvider;
+  /** The providers this build knows, for the picker. */
+  providers: readonly CodingProvider[];
   /** How hard a run thinks per turn. */
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
@@ -1244,6 +1328,10 @@ export interface StartRunInput {
   readOnly?: boolean;
   /** Internal: appended to the headless brief — the role the team gave this run. */
   extraBrief?: string | null;
+  /** Which account pays, when the caller wants something other than the owner's default. */
+  provider?: unknown;
+  /** Which model, for a provider that lets one be named. Validated together with `provider`. */
+  model?: unknown;
 }
 
 /** A run's place in a coding team. */
@@ -2200,36 +2288,53 @@ export async function clearHarnessFault(): Promise<void> {
 
 export async function checkReadiness(): Promise<CodingHarnessReadiness> {
   const config = await configGetAll();
-  return readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY]);
+  return readinessWith(
+    config.clawai_token,
+    config[HARNESS_FAULT_CONFIG_KEY],
+    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+  );
 }
 
+/** Why an `anthropic` run cannot start, in the owner's words. */
+const ANTHROPIC_MISSING =
+  "Your Anthropic account is not connected. Open the Coding Agent app → Settings and save an Anthropic API key, or run `claude` in the Terminal app and sign in.";
+
+const CLAWAI_MISSING =
+  "ClawBox AI is not connected. Open Settings → AI Models and sign in to ClawBox AI first.";
+
 /**
- * The readiness probe proper, given the two config values the caller already
- * read. Both are REQUIRED, including the fault: optional, a caller that forgot
+ * The readiness probe proper, given the config values the caller already read.
+ *
+ * All three are REQUIRED, including the fault: optional, a caller that forgot
  * it would silently report a box as healthy, which is the one wrong answer
- * this whole field exists to stop.
+ * that field exists to stop.
+ *
+ * TWO LAYERS, because they have different remedies. The BOX's half — Claude
+ * Code, the wrapper, setpriv, and a remembered harness fault — is wrong for
+ * everyone, whichever account a run would be paid from. A PROVIDER's half is
+ * one credential, and a box can be perfectly healthy on one provider and
+ * unconnected on the other. `ready` is the box's half plus the DEFAULT
+ * provider's, because that is the run a caller who names nothing gets.
  */
-async function readinessWith(token: unknown, faultRaw: unknown): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath] = await Promise.all([
+async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
+  const [wrapperInstalled, claudePath, setprivPath, anthropic] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
+    getAnthropicConnection(),
   ]);
   const claudeInstalled = claudePath !== null;
   const capabilityDropAvailable = setprivPath !== null;
   const clawaiConnected = typeof token === "string" && token.trim() !== "";
-  const problems: string[] = [];
+  const shared: string[] = [];
   if (!claudeInstalled) {
-    problems.push("Claude Code is not installed on this ClawBox. Run: sudo bash install.sh --step coding_harness");
+    shared.push("Claude Code is not installed on this ClawBox. Run: sudo bash install.sh --step coding_harness");
   }
   if (!wrapperInstalled) {
-    problems.push(`The ${CODING_HARNESS_COMMAND} wrapper is missing from ~/${CODING_HARNESS_WRAPPER_PATH}. Run: sudo bash install.sh --step coding_harness`);
-  }
-  if (!clawaiConnected) {
-    problems.push("ClawBox AI is not connected. Open Settings → AI Models and sign in to ClawBox AI first.");
+    shared.push(`The ${CODING_HARNESS_COMMAND} wrapper is missing from ~/${CODING_HARNESS_WRAPPER_PATH}. Run: sudo bash install.sh --step coding_harness`);
   }
   if (!capabilityDropAvailable) {
-    problems.push(`${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`);
+    shared.push(`${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`);
   }
   // The pieces above are all "is it installed" — answerable by looking at the
   // disk. This one is not: whether the plan covers the model the harness asks
@@ -2239,18 +2344,92 @@ async function readinessWith(token: unknown, faultRaw: unknown): Promise<CodingH
   // Either copy refuses. Both go through the same parser, so one TTL rule
   // governs them and an expired in-memory fault ages out exactly as the
   // persisted one does.
+  //
+  // In the SHARED half, not a provider's: a harness that could not get a model
+  // to answer is not a fact about which account was going to pay, and a box in
+  // that state cannot run on either.
   const fault: HarnessFault | null = parseHarnessFault(faultRaw) ?? parseHarnessFault(liveHarnessFault);
   const harnessHealthy = fault === null;
-  if (fault) problems.push(harnessFaultProblem(fault));
+  if (fault) shared.push(harnessFaultProblem(fault));
+  const credentialProblem = (id: CodingProvider): string[] => {
+    if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
+    return clawaiConnected ? [] : [CLAWAI_MISSING];
+  };
+  const providers: CodingProviderReadiness[] = CODING_PROVIDERS.map((id) => {
+    const problems = credentialProblem(id);
+    return {
+      id,
+      ready: shared.length === 0 && problems.length === 0,
+      models: modelsForProvider(id),
+      defaultModel: defaultModelForProvider(id),
+      problems,
+    };
+  });
+  const forDefault = providers.find((p) => p.id === defaultProvider) ?? providers[0];
   return {
-    ready: problems.length === 0,
+    ready: forDefault.ready,
     wrapperInstalled,
     claudeInstalled,
     clawaiConnected,
+    anthropicConnected: anthropic.connected,
+    anthropicSource: anthropic.source,
     capabilityDropAvailable,
     harnessHealthy,
-    problems,
+    // The default provider's own missing credential belongs in the flat list
+    // the panels already render, or a box whose default cannot run would show
+    // "not ready" with an empty checklist.
+    problems: [...shared, ...forDefault.problems],
+    providers,
   };
+}
+
+/** The owner's default provider. Anything unrecognised reads as ClawBox AI. */
+export async function getCodingProvider(): Promise<CodingProvider> {
+  return codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
+}
+
+/**
+ * Store the owner's default provider.
+ *
+ * Deliberately NOT gated on that provider being connected: the owner may
+ * reasonably choose Anthropic first and paste the key second, and a picker
+ * that refused the first half of that would be unusable. What is gated is
+ * STARTING a run — see assertProviderReady.
+ */
+export async function setCodingProvider(provider: string): Promise<CodingProvider> {
+  if (!isCodingProvider(provider)) {
+    throw new CodingAgentError("invalid", `Provider must be one of: ${CODING_PROVIDERS.join(", ")}.`);
+  }
+  await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, provider);
+  return provider;
+}
+
+/** A stored or inherited model, checked against the provider it belongs to. */
+function normalizeRequestedModel(provider: unknown, raw: unknown): string | null {
+  const resolved = codingProviderFrom(provider);
+  const allowed = modelsForProvider(resolved);
+  if (typeof raw === "string" && allowed.includes(raw)) return raw;
+  return defaultModelForProvider(resolved);
+}
+
+/**
+ * Refuse a run whose provider has no credential, before anything spawns.
+ *
+ * Fails the same way the harness check does — a `not_ready` CodingAgentError,
+ * which the route maps to 409 and the MCP layer to CONFLICT/do-not-retry —
+ * because "you have not connected that account" is the same kind of answer as
+ * "Claude Code is not installed": a sentence for the owner, not a retry.
+ */
+async function assertProviderReady(provider: CodingProvider): Promise<void> {
+  if (provider === "anthropic") {
+    const anthropic = await getAnthropicConnection();
+    if (!anthropic.connected) throw new CodingAgentError("not_ready", ANTHROPIC_MISSING);
+    return;
+  }
+  const token = await configGet("clawai_token");
+  if (typeof token !== "string" || token.trim() === "") {
+    throw new CodingAgentError("not_ready", CLAWAI_MISSING);
+  }
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
@@ -2260,8 +2439,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   const enabled = config[CODING_AGENT_CONFIG_KEY] === true;
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
+  const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
   const [readiness, projectFolders] = await Promise.all([
-    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY]),
+    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
     defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
   ]);
   return {
@@ -2290,6 +2470,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     maxAllowRules: MAX_ALLOW_RULES,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
+    provider,
+    providers: CODING_PROVIDERS,
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with
@@ -2399,6 +2581,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
     completedAt: typeof raw.completedAt === "number" ? raw.completedAt : null,
     sessionId: typeof raw.sessionId === "string" ? raw.sessionId : null,
     model: typeof raw.model === "string" ? raw.model : null,
+    // A record written before the selector existed ran on ClawBox AI, which
+    // is what the default answers — there was nothing else to run on.
+    provider: codingProviderFrom(raw.provider),
+    requestedModel: normalizeRequestedModel(raw.provider, raw.requestedModel),
     summary: typeof raw.summary === "string" ? raw.summary : null,
     resultText: typeof raw.resultText === "string" ? raw.resultText : null,
     error: typeof raw.error === "string" ? raw.error : null,
@@ -3482,7 +3668,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -3533,7 +3719,10 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   // which is why the task travels on stdin and these come last.
   args.push("--tools", opts.readOnly ? READ_ONLY_TOOLS : toolsFor(true, opts.effort));
   // The Agent tool with nothing to delegate to is a tool that never fires.
-  args.push("--agents", JSON.stringify(SUBAGENT_DEFINITIONS));
+  // Per provider: the helper models named in the definitions are the cheap
+  // tier of the account that answers, and the two accounts do not share a
+  // model name between them (see HELPER_MODEL).
+  args.push("--agents", JSON.stringify(subagentDefinitionsFor(opts.provider ?? DEFAULT_CODING_PROVIDER)));
   {
     // "Bash(*)" — allow EVERY command — rather than withholding the lists.
     // Withholding grants nothing: in headless -p mode the allow-list is what
@@ -3578,8 +3767,18 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   return args;
 }
 
-/** The environment a run gets — and nothing else. Exported for the contract test. */
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string } = {}): Record<string, string> {
+/**
+ * The environment a run gets — and nothing else. Exported for the contract test.
+ *
+ * The PROVIDER travels here and the credential does not: the wrapper reads
+ * whichever secret its provider needs out of the box's own 0600 config, so
+ * neither the ClawBox AI portal token nor the owner's Anthropic key is ever in
+ * this object, in the web server's `spawn` call, or in the child's argv. What
+ * the two providers must not share is handled on the other side of the fence
+ * (scripts/claude-ds unsets the whole of the other wiring); this side's job is
+ * to name one of them and to pass no stale override that could contradict it.
+ */
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; provider?: CodingProvider; model?: string | null } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -3603,6 +3802,18 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // The owner's setting wins over anything inherited: this is the knob the
   // Coding Agent app writes, and a stale shell variable must not override it.
   if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
+  // Which account pays. Always written, never left to whatever the web
+  // server's own environment happens to carry: an inherited CLAUDE_DS_PROVIDER
+  // would decide who is billed for a run nobody asked to move.
+  const provider = opts.provider ?? DEFAULT_CODING_PROVIDER;
+  env.CLAUDE_DS_PROVIDER = provider;
+  // The run's model, frozen on its record. It overrides the loop above for the
+  // same reason the effort does — and on a provider that chooses its own model
+  // the inherited override is DROPPED rather than passed through, because a
+  // CLAUDE_DS_MODEL left in the environment for one provider is a model name
+  // the other does not serve.
+  if (opts.model) env.CLAUDE_DS_MODEL = opts.model;
+  else if (modelsForProvider(provider).length > 0) delete env.CLAUDE_DS_MODEL;
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
@@ -5781,7 +5992,7 @@ function spawnRun(
   // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
   // the pass: in each case the flash reviewer would be a second look.
   const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, run: { id: run.id, directory: run.directory, media: run.media } }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -5796,7 +6007,10 @@ function spawnRun(
     // Deliberately NOT process.env: see the header. The cast is only because
     // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
     // no use for.
-    env: buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir }) as NodeJS.ProcessEnv,
+    // The provider and the model come off the RUN, not off the settings: they
+    // were frozen when it started, and a resume must re-enter the session on
+    // the same account it was opened with.
+    env: buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, provider: run.provider, model: run.requestedModel }) as NodeJS.ProcessEnv,
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -5912,6 +6126,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let resumeSessionId: string | null = null;
   let directory: string;
   let projectId: string | null;
+  /**
+   * A resume carries the earlier run's account forward unless the caller says
+   * otherwise: the session it re-enters was opened on that credential and with
+   * that model, and moving it to whatever the owner's default has since become
+   * would continue somebody else's conversation on a stranger's bill.
+   */
+  let inherited: { provider: CodingProvider; model: string | null } | null = null;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
   if (resumeRunId) {
@@ -5940,13 +6161,15 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // into a follow-up ("fix these review findings", the automatic review
     // pass). A stopped run, or a failure that is not a ceiling, starts fresh.
     resumeSessionId = previous.resumable || previous.status === "completed" ? previous.sessionId : null;
+    inherited = { provider: previous.provider, model: previous.requestedModel };
   } else {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
 
   // Read once, here: a run keeps the settings it started with even if the
   // owner changes them while it works.
-  const settings = await readRunSettings();
+  const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+  await assertProviderReady(settings.provider);
   const run = newRunRecord({
     task,
     directory,
@@ -6040,6 +6263,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
 
 /** The settings a run is spawned with, and the ceiling the device enforces itself. */
 interface RunSettings {
+  /** Which account pays — the owner's default, unless the caller named one. */
+  provider: CodingProvider;
+  /** The model for that provider, or null where the provider decides. */
+  model: string | null;
   effort: CodingEffort;
   maxTurns: number;
   tokenLimit: number | null;
@@ -6053,14 +6280,55 @@ interface RunSettings {
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
-    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
+  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+    getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
     getAllowRules(allowRuleContext()),
   ]);
-  return { effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules };
+  return {
+    provider,
+    model: defaultModelForProvider(provider),
+    effort,
+    maxTurns,
+    tokenLimit,
+    generateImages,
+    generateAudio,
+    reviewPass,
+    allowRules,
+  };
+}
+
+/**
+ * The caller's `{ provider, model }` folded into the settings a run starts
+ * with, or a refusal in the words both surfaces share.
+ *
+ * @param settings the owner's stored defaults, already read
+ * @param input the start request, whose provider/model are still untrusted
+ * @param inherited what a resume carries forward, when the caller named nothing
+ * @throws CodingAgentError("invalid") naming what a caller may use instead
+ */
+async function applyProviderChoice(
+  settings: RunSettings,
+  input: Pick<StartRunInput, "provider" | "model">,
+  inherited: { provider: CodingProvider; model: string | null } | null,
+): Promise<RunSettings> {
+  const named = input.provider !== undefined && input.provider !== null && input.provider !== "";
+  // The caller's choice, else the run being resumed, else the owner's default.
+  const fallback = !named && inherited ? inherited.provider : settings.provider;
+  const resolved = resolveRunProvider(input.provider, input.model, fallback);
+  if (!resolved.ok) throw new CodingAgentError("invalid", resolved.error);
+  const keepsInheritedModel =
+    inherited !== null
+    && !named
+    && input.model === undefined
+    && resolved.provider === inherited.provider;
+  return {
+    ...settings,
+    provider: resolved.provider,
+    model: keepsInheritedModel ? inherited.model : resolved.model,
+  };
 }
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
@@ -6089,6 +6357,8 @@ function newRunRecord(fields: {
     completedAt: null,
     sessionId: null,
     model: null,
+    provider: fields.settings.provider,
+    requestedModel: fields.settings.model,
     summary: null,
     error: null,
     numTurns: 0,
@@ -6374,7 +6644,11 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
   const { directory, projectId } = await resolveWorkingDirectory(input);
   // Snapshot of today's settings for the card; re-read at start, because the
   // run keeps the settings it STARTS with, not the ones it was drafted under.
-  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "draft", settings: await readRunSettings() });
+  // A draft freezes its account the way a run does: the owner may change their
+  // default between drafting and starting, and the card that was written said
+  // which one it would use.
+  const settings = await applyProviderChoice(await readRunSettings(), input, null);
+  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "draft", settings });
   pushProgress(run, RUNNER_STEP.drafted);
   insertRun(loadRuns(), run);
   persist(true);

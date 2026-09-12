@@ -7,15 +7,19 @@ import { runLifecycleRoute } from "@/lib/coding-agent-route";
 export const dynamic = "force-dynamic";
 
 /**
- * POST { task, projectId? | directory? } → create a run to start LATER.
- * The record is validated the way a start is, but nothing spawns — it sits
- * in the list as "draft" until /start runs it or DELETE discards it.
+ * POST { task, projectId? | directory?, provider?, model? } → create a run to
+ * start LATER. The record is validated the way a start is, but nothing spawns
+ * — it sits in the list as "draft" until /start runs it or DELETE discards it.
+ *
+ * The account is frozen here rather than at /start, like the effort and the
+ * ceilings: the owner may change their default in between, and the draft on
+ * the list already says which one it will use.
  */
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
-  let body: { task?: unknown; projectId?: unknown; directory?: unknown };
+  let body: { task?: unknown; projectId?: unknown; directory?: unknown; provider?: unknown; model?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -37,6 +41,8 @@ export async function POST(request: Request) {
       task,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
+      provider: body.provider,
+      model: body.model,
       source,
     });
     return NextResponse.json({ run }, { status: 201 });
