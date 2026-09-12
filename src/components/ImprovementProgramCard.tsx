@@ -111,13 +111,20 @@ function toRow(value: unknown): IncidentRow | null {
   const v = value as Record<string, unknown>;
   if (typeof v.id !== "string" || !v.id) return null;
   if (typeof v.source !== "string" || typeof v.message !== "string") return null;
+  const count = typeof v.count === "number" && Number.isFinite(v.count) ? v.count : 0;
   return {
     id: v.id,
     source: v.source,
     message: v.message,
-    count: typeof v.count === "number" && Number.isFinite(v.count) ? v.count : 0,
+    // Never below zero: "seen -3×" is not a fact about anything.
+    count: Math.max(0, count),
     lastSeen: typeof v.lastSeen === "number" && Number.isFinite(v.lastSeen) ? v.lastSeen : 0,
-    issueNumber: typeof v.issueNumber === "number" && Number.isInteger(v.issueNumber) ? v.issueNumber : null,
+    // POSITIVE integers only. `0` and `-1` are not issue numbers, and reading
+    // one as "already reported" would hide the Report button on a fault that
+    // has never been sent — the worst direction for this field to fail in.
+    issueNumber: typeof v.issueNumber === "number" && Number.isSafeInteger(v.issueNumber) && v.issueNumber > 0
+      ? v.issueNumber
+      : null,
   };
 }
 

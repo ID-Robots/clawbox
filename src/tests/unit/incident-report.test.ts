@@ -346,6 +346,65 @@ describe("the rate limit", () => {
   });
 });
 
+describe("the allowance holds across DIFFERENT faults reported at once", () => {
+  /**
+   * `autoReportIfEnabled` single-flights by fingerprint, so distinct faults
+   * reach the create path concurrently. A read-then-create-then-charge sequence
+   * let each of six read the same "under the limit" and file — six issues past
+   * a limit of five. The slot is claimed before `gh` runs.
+   */
+  it("files at most MAX_ISSUES_PER_DAY even when every report is in flight together", async () => {
+    const day = Date.parse("2026-09-12T08:00:00Z");
+    const incidents = [];
+    for (let i = 0; i < report.MAX_ISSUES_PER_DAY + 3; i++) {
+      incidents.push(await anIncident(`simultaneous fault ${"s".repeat(i)}`));
+    }
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    let created = 0;
+    // Every create parks until they are ALL past the allowance check, which is
+    // the interleaving a sequential test can never produce.
+    const slow = async (args: string[]): Promise<ChildResult> => {
+      const base = { code: 0, stdout: "", stderr: "", signal: null, timedOut: false, startFailed: false, startError: null };
+      if (args[1] === "list") return { ...base, stdout: "[]" };
+      await held;
+      created += 1;
+      return { ...base, stdout: `https://github.com/ID-Robots/clawbox/issues/${created}` };
+    };
+    const outcomes = incidents.map((inc) =>
+      report.reportIncident(inc.id, { gh: slow, githubConnected: connected, mode: async () => "auto", now: () => day }));
+    release();
+    const settled = await Promise.all(outcomes);
+    expect(settled.filter((o) => o.ok)).toHaveLength(report.MAX_ISSUES_PER_DAY);
+    expect(settled.filter((o) => !o.ok && o.code === "rate_limited")).toHaveLength(3);
+    expect(created, "gh was asked to create no more issues than the limit").toBe(report.MAX_ISSUES_PER_DAY);
+  });
+
+  it("gives the slot back when the create failed, so the day is not spent on nothing", async () => {
+    const day = Date.parse("2026-09-12T08:00:00Z");
+    const inc = await anIncident();
+    const gh = fakeGh([NO_MATCH, { code: 1, stderr: "GraphQL: something" }]);
+    await report.reportIncident(inc.id, { gh: gh.run, githubConnected: connected, mode: async () => "auto", now: () => day });
+    expect(store.remainingIssuesToday(report.MAX_ISSUES_PER_DAY, day)).toBe(report.MAX_ISSUES_PER_DAY);
+  });
+
+  it("keeps the slot when gh exited 0 without a URL — something was probably filed with it", async () => {
+    const day = Date.parse("2026-09-12T08:00:00Z");
+    const inc = await anIncident();
+    const gh = fakeGh([NO_MATCH, ok("")]);
+    await report.reportIncident(inc.id, { gh: gh.run, githubConnected: connected, mode: async () => "auto", now: () => day });
+    expect(store.remainingIssuesToday(report.MAX_ISSUES_PER_DAY, day)).toBe(report.MAX_ISSUES_PER_DAY - 1);
+  });
+
+  it("does not charge the day for a comment on an issue that already exists", async () => {
+    const day = Date.parse("2026-09-12T08:00:00Z");
+    const inc = await anIncident();
+    const gh = fakeGh([ok('[{"number":404}]'), ok("")]);
+    await report.reportIncident(inc.id, { gh: gh.run, githubConnected: connected, mode: async () => "auto", now: () => day });
+    expect(store.remainingIssuesToday(report.MAX_ISSUES_PER_DAY, day)).toBe(report.MAX_ISSUES_PER_DAY);
+  });
+});
+
 describe("failures gh can have", () => {
   it("reports a missing gh as a refusal with a sentence, never a stack", async () => {
     const inc = await anIncident();

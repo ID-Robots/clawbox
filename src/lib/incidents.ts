@@ -155,6 +155,21 @@ export function utcDay(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10);
 }
 
+/**
+ * Whether a row read back off disk is an incident.
+ *
+ * `context` and `stack` are checked as strictly as the scalars, and that is not
+ * belt-and-braces: `issueBodyFor` calls `.replace()` on every context value to
+ * neutralise stray markers, so a file carrying `context: { note: 1 }` — a hand
+ * edit, a half-written file, a record from a future shape — made the report
+ * route throw a TypeError instead of filing. The store is what guarantees the
+ * record's shape to everything downstream, so this is where it is guaranteed.
+ */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.entries(value).every(([k, v]) => typeof k === "string" && typeof v === "string");
+}
+
 function isIncident(value: unknown): value is Incident {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -163,6 +178,8 @@ function isIncident(value: unknown): value is Incident {
     && typeof v.fingerprint === "string"
     && isIncidentSource(v.source)
     && typeof v.message === "string"
+    && (v.stack === null || v.stack === undefined || typeof v.stack === "string")
+    && (v.context === undefined || isStringRecord(v.context))
     && typeof v.firstSeen === "number"
     && typeof v.lastSeen === "number"
     && typeof v.count === "number"
@@ -175,7 +192,11 @@ function readFile(): IncidentFile {
     const parsed: unknown = JSON.parse(fs.readFileSync(incidentsPath(), "utf-8"));
     if (typeof parsed !== "object" || parsed === null) return { ...EMPTY, incidents: [] };
     const v = parsed as Partial<IncidentFile>;
-    const incidents = Array.isArray(v.incidents) ? v.incidents.filter(isIncident) : [];
+    // `context` is optional in the guard (a record written before the field
+    // existed is still a valid incident) and REQUIRED by every reader, so it is
+    // filled in here rather than guarded against at each use.
+    const incidents = (Array.isArray(v.incidents) ? v.incidents.filter(isIncident) : [])
+      .map((i) => ({ ...i, stack: i.stack ?? null, context: i.context ?? {} }));
     const filed = v.filed && typeof v.filed.day === "string" && typeof v.filed.count === "number"
       ? { day: v.filed.day, count: v.filed.count }
       : { day: "", count: 0 };
@@ -432,9 +453,47 @@ export function remainingIssuesToday(max: number, now = Date.now()): number {
 }
 
 /**
+ * CLAIM one of today's issue slots, atomically.
+ *
+ * Read-check-charge in ONE synchronous load-modify-store, because checking the
+ * allowance and charging it separately is not a limit: `autoReportIfEnabled`
+ * single-flights by fingerprint, so N DIFFERENT faults could each read
+ * "4 left" and then each create an issue — six reports passing a limit of five.
+ * The slot is taken BEFORE `gh issue create` runs and handed back by
+ * `releaseIssueToday` when it fails, so a refusal costs the box nothing and a
+ * crash between the two costs it one slot until midnight UTC, which is the
+ * safe direction.
+ *
+ * Returns false when today's allowance is spent.
+ */
+export function reserveIssueToday(max: number, now = Date.now()): boolean {
+  const file = readFile();
+  const day = utcDay(now);
+  const count = file.filed.day === day ? file.filed.count : 0;
+  if (count >= max) return false;
+  file.filed = { day, count: count + 1 };
+  writeFile(file);
+  return true;
+}
+
+/** Hand back a slot `reserveIssueToday` granted for a creation that failed. */
+export function releaseIssueToday(now = Date.now()): void {
+  const file = readFile();
+  const day = utcDay(now);
+  if (file.filed.day !== day || file.filed.count <= 0) return;
+  file.filed = { day, count: file.filed.count - 1 };
+  writeFile(file);
+}
+
+/**
  * Record that an incident became issue #n, and charge one against today's
  * allowance. Both in one write, so a crash between them cannot produce a box
  * that filed an issue and did not count it.
+ *
+ * The reporter passes `charge: false` and reserves the slot up front instead
+ * (see `reserveIssueToday`); the option stays because "mark this as filed"
+ * and "spend a slot" are two different facts and a caller that learns an issue
+ * already existed must record the first without the second.
  */
 export function markReported(id: string, issueNumber: number, opts: { charge: boolean; now?: number } = { charge: true }): void {
   const now = opts.now ?? Date.now();

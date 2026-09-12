@@ -157,13 +157,119 @@ describe("concurrent captures", () => {
     expect(all[0].count).toBe(12);
   });
 
-  it("does not lose a report mark to a capture that started before it", async () => {
-    const inc = (await store.recordIncident({ source: "update", message: "one" }))!;
-    const capture = store.recordIncident({ source: "clawbox", message: "another fault entirely" });
-    store.markReported(inc.id, 42);
+  /**
+   * The deterministic form of the test above, and the reason it is worth a
+   * fixture: the first two cases interleave by luck of the scheduler, while
+   * this one PARKS a capture at the one await it still has and writes to the
+   * store underneath it.
+   *
+   * With the read hoisted above the load-modify-store, the capture has not yet
+   * read the file when the other write lands, so it sees it. With the await
+   * back between the read and the write, it read first and overwrites.
+   */
+  it("does not overwrite a write that lands while it is waiting on the version read", async () => {
+    let release: () => void = () => {};
+    let entered: () => void = () => {};
+    const parked = new Promise<void>((r) => { release = r; });
+    const reached = new Promise<void>((r) => { entered = r; });
+    vi.doMock("@/lib/openclaw-core-generation", () => ({
+      installedOpenclawCoreVersion: async () => { entered(); await parked; return "2026.8.1"; },
+    }));
+    vi.resetModules();
+    const fresh = await import("@/lib/incidents");
+
+    const capture = fresh.recordIncident({ source: "clawbox", message: "the captured fault" });
+    await reached;
+
+    // Another writer, while the capture is parked: a record already on disk
+    // that this capture must not erase.
+    fs.writeFileSync(incidentsPath(), JSON.stringify({
+      version: 1,
+      filed: { day: "", count: 0 },
+      incidents: [{
+        id: "inc-other", fingerprint: "f".repeat(16), source: "update", message: "written by somebody else",
+        stack: null, context: {}, firstSeen: 1, lastSeen: 1, count: 1, edition: "openclaw",
+        appVersion: "v1", coreVersion: null, issueNumber: 42, reportedAt: 1, lastCommentDay: null,
+      }],
+    }), { mode: 0o600 });
+
+    release();
     await capture;
-    expect(store.getIncident(inc.id)?.issueNumber).toBe(42);
-    expect(store.listIncidents()).toHaveLength(2);
+
+    const ids = fresh.listIncidents().map((i) => i.id);
+    expect(ids, "the other writer's record survived the capture").toContain("inc-other");
+    expect(fresh.getIncident("inc-other")?.issueNumber).toBe(42);
+    expect(ids).toHaveLength(2);
+    vi.doUnmock("@/lib/openclaw-core-generation");
+  });
+});
+
+describe("the daily allowance is CLAIMED, not merely checked", () => {
+  const t0 = Date.parse("2026-09-12T10:00:00Z");
+
+  it("hands out exactly `max` slots, whoever asks", () => {
+    const granted = Array.from({ length: 8 }, () => store.reserveIssueToday(5, t0));
+    expect(granted.filter(Boolean)).toHaveLength(5);
+    expect(store.remainingIssuesToday(5, t0)).toBe(0);
+  });
+
+  it("gives a slot back when the creation it was taken for failed", () => {
+    expect(store.reserveIssueToday(5, t0)).toBe(true);
+    expect(store.remainingIssuesToday(5, t0)).toBe(4);
+    store.releaseIssueToday(t0);
+    expect(store.remainingIssuesToday(5, t0)).toBe(5);
+  });
+
+  it("never hands back more than was taken, or across a day boundary", () => {
+    store.releaseIssueToday(t0);
+    expect(store.remainingIssuesToday(5, t0)).toBe(5);
+    store.reserveIssueToday(5, t0);
+    store.releaseIssueToday(t0 + 24 * 3_600_000);
+    expect(store.remainingIssuesToday(5, t0)).toBe(4);
+  });
+
+  it("starts fresh the next UTC day", () => {
+    for (let i = 0; i < 5; i++) store.reserveIssueToday(5, t0);
+    expect(store.reserveIssueToday(5, t0)).toBe(false);
+    expect(store.reserveIssueToday(5, t0 + 24 * 3_600_000)).toBe(true);
+  });
+});
+
+describe("a record read back off disk", () => {
+  function writeRaw(incident: Record<string, unknown>): void {
+    fs.writeFileSync(incidentsPath(), JSON.stringify({
+      version: 1, filed: { day: "", count: 0 }, incidents: [incident],
+    }), { mode: 0o600 });
+  }
+
+  const BASE = {
+    id: "inc-x", fingerprint: "a".repeat(16), source: "update", message: "m",
+    stack: null, context: {}, firstSeen: 1, lastSeen: 1, count: 1, edition: "openclaw",
+    appVersion: "v1", coreVersion: null, issueNumber: null, lastCommentDay: null,
+  };
+
+  it("is refused when its context is not all strings", () => {
+    // `issueBodyFor` calls .replace() on every context value; a number there
+    // made the report route throw instead of filing.
+    writeRaw({ ...BASE, context: { note: 1 } });
+    expect(store.listIncidents()).toEqual([]);
+  });
+
+  it("is refused when its context is an array or its stack is not text", () => {
+    writeRaw({ ...BASE, context: ["a"] });
+    expect(store.listIncidents()).toEqual([]);
+    writeRaw({ ...BASE, stack: { frames: [] } });
+    expect(store.listIncidents()).toEqual([]);
+  });
+
+  it("is kept, with an empty context, when the field predates it", () => {
+    const noContext: Record<string, unknown> = { ...BASE };
+    delete noContext.context;
+    writeRaw(noContext);
+    const [read] = store.listIncidents();
+    expect(read.id).toBe("inc-x");
+    expect(read.context).toEqual({});
+    expect(read.stack).toBeNull();
   });
 });
 

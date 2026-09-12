@@ -353,6 +353,29 @@ describe("a payload the card did not expect", () => {
     expect(screen.getByTestId(`improvement-report-${INCIDENT.id}`)).toBeTruthy();
   });
 
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2])(
+    "reads %s as 'not reported' rather than hiding the Report button",
+    async (issueNumber) => {
+      mockFetch([() => json(state({ mode: "ask", incidents: [{ ...INCIDENT, issueNumber }] }))]);
+      render(<ImprovementProgramCard />);
+      // A fault that has never been sent must not look sent: that is the one
+      // direction this field failing would cost the owner something.
+      expect(await screen.findByTestId(`improvement-report-${INCIDENT.id}`)).toBeTruthy();
+      // The issue label itself, not the bare digits: "2026" in the date
+      // contains the "0" this case is about.
+      expect(screen.getByTestId("improvement-recent").textContent)
+        .not.toContain(t("improvement.issue", { n: issueNumber }));
+    },
+  );
+
+  it("never shows a negative count", async () => {
+    mockFetch([() => json(state({ mode: "ask", incidents: [{ ...INCIDENT, count: -3 }] }))]);
+    render(<ImprovementProgramCard />);
+    const list = await screen.findByTestId("improvement-recent");
+    expect(list.textContent).toContain(t("improvement.seen", { n: 0 }));
+    expect(list.textContent).not.toContain("-3");
+  });
+
   it("falls back to OFF for a mode it does not recognise — never to a sending one", async () => {
     mockFetch([() => json(state({ mode: "everything" }))]);
     render(<ImprovementProgramCard />);

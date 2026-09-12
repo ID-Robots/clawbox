@@ -36,7 +36,8 @@ import {
   recordIncident,
   markCommented,
   markReported,
-  remainingIssuesToday,
+  releaseIssueToday,
+  reserveIssueToday,
   utcDay,
   type Incident,
   type ImprovementMode,
@@ -295,7 +296,13 @@ export async function reportIncident(id: string, deps: ReportDeps = {}): Promise
   // Only a NEW issue is charged against the daily allowance. A comment is one
   // line on an issue that already exists; capping it would silence the count
   // that tells a maintainer how widespread a fault is.
-  if (remainingIssuesToday(MAX_ISSUES_PER_DAY, now) <= 0) {
+  //
+  // RESERVED, not merely checked. `autoReportIfEnabled` single-flights by
+  // fingerprint, so two DIFFERENT faults reach this line concurrently — and a
+  // read-then-create-then-charge sequence lets each of them read the same
+  // "4 left". The claim is one synchronous load-modify-store in the store, and
+  // the slot goes back if `gh` never files anything.
+  if (!reserveIssueToday(MAX_ISSUES_PER_DAY, now)) {
     return {
       ok: false,
       code: "rate_limited",
@@ -303,6 +310,7 @@ export async function reportIncident(id: string, deps: ReportDeps = {}): Promise
     };
   }
 
+  // Everything from here to `markReported` holds a slot: every exit gives it back.
   const created = await run([
     "issue", "create",
     "--repo", REPORT_REPO,
@@ -311,6 +319,7 @@ export async function reportIncident(id: string, deps: ReportDeps = {}): Promise
     ...REPORT_LABELS.flatMap((label) => ["--label", label]),
   ]);
   if (created.startFailed || wasKilled(created) || created.code !== 0) {
+    releaseIssueToday(now);
     return { ok: false, code: "gh_failed", detail: ghDetail(created, "filing the report") };
   }
   const url = created.stdout.split("\n").map((l) => l.trim()).find((l) => l.includes("/issues/")) ?? "";
@@ -318,10 +327,12 @@ export async function reportIncident(id: string, deps: ReportDeps = {}): Promise
   if (number === null) {
     // gh exited 0 without printing a URL. The issue very likely EXISTS, so the
     // honest answer is a failure that does not re-create it: the next
-    // occurrence finds it by its marker and comments instead.
+    // occurrence finds it by its marker and comments instead. The slot is NOT
+    // handed back — something was very probably filed with it.
     return { ok: false, code: "gh_failed", detail: "GitHub accepted the report but did not say which issue it became." };
   }
-  markReported(incident.id, number, { charge: true, now });
+  // Already charged by the reservation above.
+  markReported(incident.id, number, { charge: false, now });
   return { ok: true, action: "created", issueNumber: number, url };
 }
 
