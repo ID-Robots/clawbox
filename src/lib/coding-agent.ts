@@ -1410,9 +1410,18 @@ export function allowRuleContext(): AllowRuleContext {
   };
 }
 
-/** The owner's saved permission rules, re-validated on the way out. */
-export async function getAllowRules(): Promise<string[]> {
-  return normalizeAllowRules(await configGet(CODING_AGENT_ALLOW_RULES_CONFIG_KEY));
+/**
+ * The owner's saved permission rules, re-validated on the way out.
+ *
+ * `context` is what makes that re-validation complete: without it a stored rule
+ * clears the textual floor alone, with it the rule is judged against what this
+ * box denies RIGHT NOW. Optional because it costs two directory walks
+ * (`allowRuleContext`) and the status route is polled every few seconds, where
+ * a rule that has gone inert is only ever displayed. Every path that puts rules
+ * on a run's command line passes one.
+ */
+export async function getAllowRules(context?: AllowRuleContext): Promise<string[]> {
+  return normalizeAllowRules(await configGet(CODING_AGENT_ALLOW_RULES_CONFIG_KEY), context);
 }
 
 /**
@@ -1429,8 +1438,12 @@ export async function getAllowRules(): Promise<string[]> {
  * @throws AllowRuleError carrying the rule-level code on anything refused
  */
 export async function addAllowRule(raw: unknown): Promise<string[]> {
-  const rules = await getAllowRules();
-  const verdict = validateAllowRule(raw, rules, allowRuleContext());
+  // One context for both halves: the list on disk is re-judged against the same
+  // box the new rule is judged against, so a rule cannot be refused as a
+  // duplicate of one that would itself no longer be accepted.
+  const context = allowRuleContext();
+  const rules = await getAllowRules(context);
+  const verdict = validateAllowRule(raw, rules, context);
   if (!verdict.ok) throw new AllowRuleError(verdict.code, verdict.message);
   const next = [...rules, verdict.rule];
   await configSet(CODING_AGENT_ALLOW_RULES_CONFIG_KEY, next);
@@ -5219,7 +5232,11 @@ interface RunSettings {
 
 async function readRunSettings(): Promise<RunSettings> {
   const [effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
-    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(), getAllowRules(),
+    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
+    // With the device's own context: these rules are about to be frozen on the
+    // record and handed to the CLI, which is exactly where a rule that has gone
+    // inert must not travel.
+    getAllowRules(allowRuleContext()),
   ]);
   return { effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules };
 }
@@ -5473,7 +5490,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // the run back the refusal the owner just answered, and the button would be a
   // lie. Narrowing works the same way: a rule removed before the resume is gone
   // from the resumed run too.
-  run.allowRules = await getAllowRules();
+  run.allowRules = await getAllowRules(allowRuleContext());
   // The pause gap is not working time: shift the start forward by it, so the
   // elapsed clock and the ETA speak of effort, not of the night in between.
   if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);

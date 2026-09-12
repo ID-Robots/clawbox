@@ -298,8 +298,8 @@ export function softProjectDir(absolutePath: string): string | null {
 const RULE_SHAPE = /^([A-Za-z][A-Za-z0-9_]*)\((.+)\)$/;
 
 /** Control characters, which never appear in a real rule. Written as escapes
- *  rather than as the characters themselves, so the source stays readable text. */
-// eslint-disable-next-line no-control-regex
+ *  rather than as the characters themselves, so the source stays readable text —
+ *  which is also why `no-control-regex` has nothing to say about it. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 /**
