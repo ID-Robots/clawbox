@@ -1969,6 +1969,7 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                   {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+                  {run.reviewLoopOf && runChip(run.reviewLoopOf, t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
                   {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                   {project && (
                     <button

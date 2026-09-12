@@ -58,6 +58,8 @@ function stubFetch(
     generateImages?: boolean;
     generateAudio?: boolean;
     realBrowser?: boolean;
+    reviewRounds?: number;
+    autoMerge?: boolean;
   },
   opts: {
     resolveTo?: string;
@@ -70,6 +72,11 @@ function stubFetch(
     /** A server from before the browser switch existed: it answers with no
      *  such field at all, which is the state the panel's `?? true` is for. */
     noRealBrowser?: boolean;
+    /** A server from before the review loop: it answers with no rounds field,
+     *  and the card must then show no control rather than invent a value. */
+    noReviewLoop?: boolean;
+    /** The route's own range refusal, in its own words. */
+    rejectRounds?: boolean;
   } = {},
 ) {
   posts = [];
@@ -82,6 +89,8 @@ function stubFetch(
   let generateImages = status.generateImages ?? true;
   let generateAudio = status.generateAudio ?? true;
   let realBrowser = status.realBrowser ?? true;
+  let reviewRounds = status.reviewRounds ?? 3;
+  let autoMerge = status.autoMerge ?? false;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -102,6 +111,7 @@ function stubFetch(
     generateImages,
     generateAudio,
     ...(opts.noRealBrowser ? {} : { realBrowser }),
+    ...(opts.noReviewLoop ? {} : { reviewRounds, minReviewRounds: 0, maxReviewRounds: 6, autoMerge }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -146,6 +156,13 @@ function stubFetch(
       if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
       if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
       if (typeof body.realBrowser === "boolean") realBrowser = body.realBrowser;
+      if (typeof body.reviewRounds === "number") {
+        if (opts.rejectRounds) {
+          return json({ error: "The number of review rounds must be between 0 and 6.", kind: "invalid" }, 400);
+        }
+        reviewRounds = body.reviewRounds;
+      }
+      if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
       return json(payload());
     }
     return json({ error: "unexpected" }, 404);
@@ -725,5 +742,72 @@ describe("motion", () => {
     const waitSpinner = screen.getByTestId("coding-agent-github-device-code-spinner");
     expect(waitSpinner.className.split(/\s+/)).toContain("motion-safe:animate-spin");
     expect(waitSpinner.className.split(/\s+/)).not.toContain("animate-spin");
+  });
+});
+
+/**
+ * The review loop's two controls.
+ *
+ * Both are about what the box does on its OWN after a run has finished, which
+ * is why the merge one is a consent and defaults off while the rounds are a
+ * budget and default to three. A server that predates the loop answers with
+ * neither, and a card that invented values there would offer a setting the box
+ * has no route for.
+ */
+describe("the review loop", () => {
+  const ROUNDS = translations.en["codingAgent.reviewRoundsLabel"];
+  const MERGE = translations.en["codingAgent.autoMergeLabel"];
+
+  it("shows the rounds the device answered with, and saves a new one", async () => {
+    stubFetch({ enabled: true, readiness: READY, reviewRounds: 3 });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByTestId("coding-agent-review-rounds") as HTMLSelectElement;
+    expect(select.value).toBe("3");
+
+    fireEvent.change(select, { target: { value: "5" } });
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { reviewRounds: 5 } }); });
+    await waitFor(() => { expect((screen.getByTestId("coding-agent-review-rounds") as HTMLSelectElement).value).toBe("5"); });
+  });
+
+  it("offers 0 as a real choice, worded as off rather than as a number", async () => {
+    stubFetch({ enabled: true, readiness: READY, reviewRounds: 0 });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByTestId("coding-agent-review-rounds") as HTMLSelectElement;
+    expect(select.value).toBe("0");
+    expect(screen.getByRole("option", { name: translations.en["codingAgent.reviewRoundsOff"] })).toBeTruthy();
+    // The whole range the device named, and nothing outside it.
+    expect(select.querySelectorAll("option")).toHaveLength(7);
+  });
+
+  it("renders the route's range refusal beside the control", async () => {
+    stubFetch({ enabled: true, readiness: READY, reviewRounds: 3 }, { rejectRounds: true });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByTestId("coding-agent-review-rounds") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "6" } });
+    expect(await screen.findByText(/must be between 0 and 6/)).toBeTruthy();
+    // …and the control still shows what the device actually holds.
+    expect((screen.getByTestId("coding-agent-review-rounds") as HTMLSelectElement).value).toBe("3");
+  });
+
+  it("renders the merge switch OFF when the device has never stored it", async () => {
+    // The one switch on this card that is a consent: absent means no.
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: MERGE });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(toggle);
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { autoMerge: true } }); });
+    await waitFor(() => { expect(screen.getByRole("switch", { name: MERGE }).getAttribute("aria-checked")).toBe("true"); });
+  });
+
+  it("shows neither control on a server that predates the loop", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { noReviewLoop: true });
+    render(<CodingAgentSettingsPanel />);
+    // The card is up…
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(screen.queryByTestId("coding-agent-review-rounds")).toBeNull();
+    expect(screen.queryByRole("switch", { name: MERGE })).toBeNull();
+    expect(screen.queryByText(ROUNDS)).toBeNull();
   });
 });

@@ -2079,6 +2079,118 @@ describe("CodingAgentApp — the run page's honesty", () => {
     expect(screen.queryByTestId(`coding-agent-pr-detail-${RUN.id}`)).toBeNull();
   });
 
+  /**
+   * The review loop on the run's page.
+   *
+   * The chip alone cannot carry it: "needs you" is the same three words for a
+   * pull request nobody looked at and for one three rounds could not clear,
+   * and the difference is the whole point of the cap.
+   */
+  describe("the review loop", () => {
+    const reviewing = (over: Record<string, unknown> = {}) => ({
+      ...RUN,
+      pr: {
+        phase: "review", number: 12, url: "https://github.com/yalexx/site/pull/12", branch: "clawbox/run-1", base: "beta",
+        checks: { total: 0, passed: 0, failed: 0, pending: 0 }, detail: null, startedAt: started, endedAt: null, reviewOk: true,
+      },
+      review: {
+        prNumber: 12,
+        url: "https://github.com/yalexx/site/pull/12",
+        base: "beta",
+        round: 1,
+        maxRounds: 3,
+        state: "polling",
+        checks: [
+          { name: "tests", state: "pass", url: null },
+          { name: "build", state: "fail", url: null },
+        ],
+        unresolvedThreads: 2,
+        reviewDecision: "CHANGES_REQUESTED",
+        lastPolledAt: started + 1000,
+        roundStartedAt: started,
+        detail: null,
+        fixRunId: null,
+        ...over,
+      },
+    });
+
+    async function openReviewedRun(run: unknown) {
+      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      await screen.findByTestId("coding-agent-run-page");
+    }
+
+    it("says which round it is on, what the checks say and how much is unanswered", async () => {
+      await openReviewedRun(reviewing());
+      const card = screen.getByTestId("coding-agent-review");
+      expect(card).toHaveAttribute("data-state", "polling");
+      expect(within(card).getByTestId("coding-agent-review-round").textContent).toBe("Round 1 of 3");
+      expect(within(card).getByTestId("coding-agent-review-checks").textContent).toContain("1 passed, 1 failed, 0 pending");
+      expect(within(card).getByTestId("coding-agent-review-threads").textContent).toContain("2 unresolved comments");
+      expect(within(card).getByTestId("coding-agent-review-changes")).toBeInTheDocument();
+      // …and the chip counts the rounds rather than the checks while the loop
+      // owns the pull request.
+      expect(screen.getByTestId(`coding-agent-pr-${RUN.id}`).textContent).toContain("Review 1/3");
+    });
+
+    it("says plainly that three rounds did not clear it, rather than only 'needs you'", async () => {
+      const detail = "3 review rounds did not clear it. Still open: 1 failing check (build). The pull request is waiting for you.";
+      await openReviewedRun({
+        ...reviewing({ state: "needs_owner", round: 3, detail }),
+        pr: { ...reviewing().pr, phase: "blocked", detail, endedAt: started + 5000 },
+      });
+      const card = screen.getByTestId("coding-agent-review");
+      expect(card).toHaveAttribute("data-state", "needs_owner");
+      expect(within(card).getByTestId("coding-agent-review-detail").textContent).toBe(detail);
+      expect(card.textContent).toContain(translations.en["codingAgent.reviewState.needsOwner"]);
+    });
+
+    it("shows a pull request the loop cleared as green and ready, not as a problem", async () => {
+      const detail = "Everything is green and nothing is unresolved. Merge it when you are ready.";
+      await openReviewedRun({
+        ...reviewing({ state: "clean", detail, checks: [{ name: "tests", state: "pass", url: null }], unresolvedThreads: 0, reviewDecision: null }),
+        pr: { ...reviewing().pr, phase: "blocked", detail, endedAt: started + 5000 },
+      });
+      const chip = screen.getByTestId(`coding-agent-pr-${RUN.id}`);
+      expect(chip.textContent).toContain(translations.en["codingAgent.prClean"]);
+      // Green, not the amber every other "blocked" pull request wears.
+      expect(chip.className).toContain("emerald");
+      expect(chip.className).not.toContain("amber");
+    });
+
+    it("points at the round that is working, and names the run a round belongs to", async () => {
+      const fix = {
+        ...RUN,
+        id: "run-fix00001",
+        reviewLoopOf: RUN.id,
+        task: "Your pull request #12 is open and it is not ready to merge.",
+        pr: null,
+        review: null,
+      };
+      stubFetch(
+        { enabled: true, readiness: READY },
+        [fix, { ...reviewing({ state: "working", fixRunId: "run-fix00001" }) }],
+        { projects: [SITE_PROJECT] },
+      );
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      await screen.findByTestId("coding-agent-run-page");
+      // From the origin's card to the round that is fixing it…
+      fireEvent.click(screen.getByTestId("coding-agent-review-fix-run"));
+      expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-fix00001");
+      // …and the round says whose pull request it is answering.
+      expect(screen.getByTestId("coding-agent-review-loop-of").textContent).toContain(RUN.id);
+    });
+
+    it("draws no review card at all for a run that never had a loop", async () => {
+      await openReviewedRun({ ...RUN, pr: null, review: null });
+      expect(screen.queryByTestId("coding-agent-review")).toBeNull();
+    });
+  });
+
   it("navigates to the app on the standalone page, where nothing listens for the open-app event", async () => {
     const assign = vi.fn();
     vi.stubGlobal("location", { ...window.location, pathname: "/app/coding", assign });
