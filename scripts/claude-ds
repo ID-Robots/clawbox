@@ -243,41 +243,43 @@ if [ "$PROVIDER" = "anthropic" ]; then
   mkdir -p "$HARNESS_STATE_DIR"
   chmod 700 "$HARNESS_STATE_DIR" 2>/dev/null || true
 else
+  # THE CLAWBOX AI BRANCH — the box's own plan, and what every run got
+  # before the selector existed.
 
-MODEL="${CLAUDE_DS_MODEL:-$TIER_MODEL}"
-SMALL_MODEL="${CLAUDE_DS_SMALL_MODEL:-deepseek-v4-flash}"
+  MODEL="${CLAUDE_DS_MODEL:-$TIER_MODEL}"
+  SMALL_MODEL="${CLAUDE_DS_SMALL_MODEL:-deepseek-v4-flash}"
 
-export CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}"
-export ANTHROPIC_BASE_URL="${PROXY_URL%/}/anthropic"
-# ANTHROPIC_BASE_URL only moves the messages API. Claude Code keeps a SECOND
-# base for its non-inference calls — the account/entitlement surface behind
-# api.anthropic.com/api/oauth/claude_cli/* and /api/web/domain_info — and that
-# one is not covered by the variable above. On a box whose plan is ClawBox AI
-# those calls can only fail, and a failure there is reported to the owner as
-# "Failed to authenticate", which reads like the token is wrong when it is not.
-#
-# So point it at the same proxy. This is the wrapper's whole stated job: Claude
-# Code aimed at this box's plan instead of at Anthropic. It was only doing half
-# of it.
-#
-# HONESTY NOTE: this was NOT proven to fix the intermittent Cloudflare
-# challenge seen on 2026-08-26. During a healthy run nothing reaches this base
-# at all — a loopback logger pointed at it recorded zero requests — so the
-# fallback could not be observed directly, only read out of the binary's own
-# strings. Treat this as closing a door, not as a diagnosis.
-export CLAUDE_CODE_API_BASE_URL="${CLAUDE_DS_API_BASE_URL:-${PROXY_URL%/}/anthropic}"
-export ANTHROPIC_AUTH_TOKEN="$SECRET"
-export ANTHROPIC_MODEL="$MODEL"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
+  export CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}"
+  export ANTHROPIC_BASE_URL="${PROXY_URL%/}/anthropic"
+  # ANTHROPIC_BASE_URL only moves the messages API. Claude Code keeps a SECOND
+  # base for its non-inference calls — the account/entitlement surface behind
+  # api.anthropic.com/api/oauth/claude_cli/* and /api/web/domain_info — and that
+  # one is not covered by the variable above. On a box whose plan is ClawBox AI
+  # those calls can only fail, and a failure there is reported to the owner as
+  # "Failed to authenticate", which reads like the token is wrong when it is not.
+  #
+  # So point it at the same proxy. This is the wrapper's whole stated job: Claude
+  # Code aimed at this box's plan instead of at Anthropic. It was only doing half
+  # of it.
+  #
+  # HONESTY NOTE: this was NOT proven to fix the intermittent Cloudflare
+  # challenge seen on 2026-08-26. During a healthy run nothing reaches this base
+  # at all — a loopback logger pointed at it recorded zero requests — so the
+  # fallback could not be observed directly, only read out of the binary's own
+  # strings. Treat this as closing a door, not as a diagnosis.
+  export CLAUDE_CODE_API_BASE_URL="${CLAUDE_DS_API_BASE_URL:-${PROXY_URL%/}/anthropic}"
+  export ANTHROPIC_AUTH_TOKEN="$SECRET"
+  export ANTHROPIC_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
 
-HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
-HARNESS_STATE_DIR="$CLAUDE_CONFIG_DIR"
-SEED_ONBOARDING=1
-PROVIDER_LABEL="ClawBox AI"
-mkdir -p "$CLAUDE_CONFIG_DIR"
-chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
+  HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
+  HARNESS_STATE_DIR="$CLAUDE_CONFIG_DIR"
+  SEED_ONBOARDING=1
+  PROVIDER_LABEL="ClawBox AI"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 fi
 # NOT set by default, deliberately. CLAUDE_CODE_SUBAGENT_MODEL outranks a
 # per-agent `model:`, so setting it forces every sub-agent onto one model and
