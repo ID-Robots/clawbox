@@ -351,6 +351,48 @@ describe("the Anthropic card", () => {
     expect(screen.queryByTestId("coding-agent-anthropic-remove")).toBeNull();
   });
 
+  it("does not let the first read undo a key saved while it was in flight", async () => {
+    // The card is on screen from mount and the owner may paste a key into it
+    // straight away. A first GET that is ANSWERED after the POST describes the
+    // account as it was BEFORE the save — and, winning simply by finishing
+    // later, it put "not connected" back over a key the box had accepted,
+    // until something remounted the card.
+    let releaseRead: (() => void) | null = null;
+    let firstRead = true;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/status")) return json(basePayload("clawbox-ai"));
+      if (url.startsWith("/setup-api/coding-agent/permissions")) return json({ allowRules: [], maxAllowRules: 32 });
+      if (url.startsWith("/setup-api/coding-agent/git")) return json({ installed: false, connected: false, login: null, loginCommand: "gh auth login" });
+      if (url.startsWith("/setup-api/coding-agent/anthropic")) {
+        if (init?.method === "POST") return json({ ...VIA_KEY, verified: true });
+        if (firstRead) {
+          firstRead = false;
+          // Held open until after the save has landed.
+          await new Promise<void>((resolve) => { releaseRead = resolve; });
+        }
+        return json(NOTHING);
+      }
+      return json({ error: "unexpected" }, 404);
+    }));
+
+    render(<CodingAgentSettingsPanel />);
+    const field = await screen.findByTestId("coding-agent-anthropic-key") as HTMLInputElement;
+    await waitFor(() => expect(releaseRead).not.toBeNull());
+
+    fireEvent.change(field, { target: { value: "sk-ant-api03-abcdefghijklmnopqrstuvwxyz" } });
+    fireEvent.click(screen.getByTestId("coding-agent-anthropic-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("coding-agent-anthropic-state").textContent).toBe(t("codingAgent.anthropicViaKey"));
+    });
+
+    // Now the stale read answers "no account".
+    releaseRead!();
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByTestId("coding-agent-anthropic-state").textContent).toBe(t("codingAgent.anthropicViaKey"));
+  });
+
   it("will not save an empty field", async () => {
     stubDevice({ providers: ["clawbox-ai", "anthropic"] });
     render(<CodingAgentSettingsPanel />);

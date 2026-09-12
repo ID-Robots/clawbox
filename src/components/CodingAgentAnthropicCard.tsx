@@ -73,11 +73,27 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
   };
   useEffect(() => () => { if (confirmTimer.current) clearTimeout(confirmTimer.current); }, []);
 
+  /**
+   * How many credential writes have STARTED. A read carries the count it was
+   * issued under and drops its answer if that has moved on: the first GET and
+   * a save or a remove can be in flight together (the card is on screen from
+   * mount, and the owner may paste a key into it straight away), and a read
+   * answered from before the write describes an account that no longer
+   * exists. It used to win simply by finishing later, and the card then
+   * claimed "not connected" over a key that had just been accepted, until
+   * something remounted it.
+   */
+  const writes = useRef(0);
+
   const load = useCallback(async () => {
+    const issuedAt = writes.current;
     try {
       const res = await fetch("/setup-api/coding-agent/anthropic", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setState(await res.json() as AnthropicState);
+      const next = await res.json() as AnthropicState;
+      // A write began while this was on the wire; its own answer is the truth.
+      if (writes.current !== issuedAt) return;
+      setState(next);
       setRead(true);
     } catch {
       // Not new information about the account: the card keeps what it last
@@ -101,6 +117,7 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
   const save = async () => {
     const apiKey = draft.trim();
     if (!apiKey) return;
+    writes.current += 1;
     setBusy("save");
     setError(null);
     setNote(null);
@@ -128,6 +145,7 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
   };
 
   const remove = async () => {
+    writes.current += 1;
     setBusy("remove");
     setError(null);
     setNote(null);

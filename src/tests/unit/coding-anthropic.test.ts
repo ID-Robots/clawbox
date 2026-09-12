@@ -100,8 +100,32 @@ describe("finding a `claude` login", () => {
     // The verdict is cached to keep a five-second status poll off a whole-file
     // read, keyed on the file's size and mtime — so a login the owner has just
     // made must show up at the next poll, not after a timer.
+    //
+    // The first read has to go through the CACHED path, which means the file
+    // must already exist: with no config at all the stat throws and nothing is
+    // cached, so this case would pass whatever the cache key did.
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true, projects: {} }));
     expect(hasAnthropicLogin()).toBe(false);
     fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "o@e.com" } }));
+    expect(hasAnthropicLogin()).toBe(true);
+  });
+
+  it("notices one that left the file exactly as long as it was", () => {
+    // The other half of the key. The case above changes the file's LENGTH, so
+    // it would pass on size alone; a config rewritten to the same length is
+    // caught only by the mtime. Set explicitly rather than left to the clock:
+    // two writes in one millisecond are not a defect this test should fail on.
+    const file = path.join(home, ".claude.json");
+    fs.writeFileSync(file, JSON.stringify({ oauthAccountX: { emailAddress: "o@e.com" } }));
+    const before = fs.statSync(file);
+    expect(hasAnthropicLogin()).toBe(false);
+
+    fs.writeFileSync(file, JSON.stringify({ oauthAccount: { emailAddress: "oo@e.com" } }));
+    const after = fs.statSync(file);
+    expect(after.size).toBe(before.size);
+    const moved = new Date(before.mtimeMs + 1_000);
+    fs.utimesSync(file, moved, moved);
+
     expect(hasAnthropicLogin()).toBe(true);
   });
 

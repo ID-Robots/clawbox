@@ -599,10 +599,16 @@ to a restart is settled as failed at the next boot rather than reported as
 running forever.
 
 **Registered only when `GET /setup-api/coding-agent/status` answers
-`enabled && ready` at startup** (`mcp/lib/context.ts`): the owner's switch in
-the Coding Agent desktop app is on AND Claude Code, the wrapper and the
-credential of the owner's DEFAULT provider (the ClawBox AI token, or their own
-Anthropic access) are all present. Same gate as `email_list`, for the same
+`enabled` and a usable account at startup** (`mcp/lib/context.ts`): the owner's
+switch in the Coding Agent desktop app is on AND Claude Code, the wrapper and
+the credential of AT LEAST ONE provider (the ClawBox AI token, or the owner's
+own Anthropic access) are present — `readiness.anyProviderReady`, falling back
+to `ready` on a device that predates the selector. Deliberately not the
+DEFAULT provider's verdict, which is what `ready` alone answers: an owner whose
+default account has no credential while the other one works can still run, so
+withholding the tools from that box would be wrong. Whether the provider a
+single run NAMES is connected is settled by the run route, which answers 409
+`not_ready`. Same gate as `email_list`, for the same
 circuit-breaker reason — but not the same timing: this one is asked at startup
 and never again, so a switch flipped under a running server reaches the agent
 when that server is next spawned. The run route enforces the switch again — 409, which
