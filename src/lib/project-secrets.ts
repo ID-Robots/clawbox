@@ -247,6 +247,9 @@ export function requireSecretScope(scope: unknown): string {
  * file carries a trailing newline the owner cannot see and a token with one is
  * a token that does not work.
  */
+/** C0 controls and DEL, less tab, newline and carriage return. */
+const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+
 function requireSecretValue(value: unknown): string {
   if (typeof value !== "string") {
     throw new SecretStoreError("invalid_value", "A secret's value must be text.");
@@ -264,9 +267,6 @@ function requireSecretValue(value: unknown): string {
   }
   return trimmed;
 }
-
-/** C0 controls and DEL, less tab, newline and carriage return. */
-const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 // ── the file ────────────────────────────────────────────────────────────────
 
