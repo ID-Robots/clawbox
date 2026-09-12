@@ -132,6 +132,11 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   env: {
     NEXT_PUBLIC_APP_VERSION: APP_VERSION,
+    // The appliance root is not always /home/clawbox/clawbox (a dev box runs the
+    // app from another user's home). Baked at build time because the coding-agent
+    // run page builds its terminal command in the browser, where a runtime
+    // process.env read is not available.
+    NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
   },
   async rewrites() {
     return {
