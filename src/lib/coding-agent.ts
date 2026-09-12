@@ -1763,25 +1763,25 @@ export async function findExecutableOnPath(binary: string, pathValue: string = r
  * that fails costs the refusal and nothing else, which is why nothing here
  * throws upward.
  */
-async function rememberHarnessFault(error: string): Promise<void> {
-  await configSet(HARNESS_FAULT_CONFIG_KEY, { at: Date.now(), error: error.slice(0, MAX_ERROR_CHARS) });
-}
-
-/** Drop a remembered fault — a run has completed, so the harness plainly works. */
-async function forgetHarnessFault(): Promise<void> {
-  if (parseHarnessFault(await configGet(HARNESS_FAULT_CONFIG_KEY)) === null) return;
-  await configSet(HARNESS_FAULT_CONFIG_KEY, null);
+async function rememberHarnessFault(): Promise<void> {
+  await configSet(HARNESS_FAULT_CONFIG_KEY, { at: Date.now() });
 }
 
 /**
- * Forget a recorded harness fault on the owner's say-so.
+ * Forget a recorded harness fault.
  *
- * The TTL and a completed run are the two ordinary ways out; this is the
- * third, for an owner who has just fixed the thing the message named (signed
- * in again, changed plan) and should not have to wait out a clock to prove it.
+ * Three callers, and they are the three ways a box gets out of refusing runs:
+ * a run that COMPLETED (the only proof that matters), the owner saying so
+ * through the enable route, and — without coming through here at all — the
+ * fault simply ageing past its TTL.
+ *
+ * The key is DELETED rather than set to a falsy value: `parseHarnessFault`
+ * would read either as "no fault", but a config file that accumulates dead
+ * keys is one more thing for the next reader of it to wonder about.
  */
 export async function clearHarnessFault(): Promise<void> {
-  await forgetHarnessFault();
+  if ((await configGet(HARNESS_FAULT_CONFIG_KEY)) === undefined) return;
+  await configSet(HARNESS_FAULT_CONFIG_KEY, undefined);
 }
 
 export async function checkReadiness(): Promise<CodingHarnessReadiness> {
@@ -4600,12 +4600,12 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     run.failureKind = "harness_not_ready";
     run.error = harnessFaultMessage(run.error);
     run.resumable = false;
-    void rememberHarnessFault(run.error).catch(() => {});
+    void rememberHarnessFault().catch(() => {});
   } else if (run.status === "completed") {
     // The only proof that matters. A box that was refusing runs because of a
     // fault is plainly working now, so the fault goes rather than waiting out
     // its clock.
-    void forgetHarnessFault().catch(() => {});
+    void clearHarnessFault().catch(() => {});
   }
 
   // The closing message becomes report.md beside the run's screenshots — for

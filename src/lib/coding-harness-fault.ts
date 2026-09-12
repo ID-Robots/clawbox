@@ -99,11 +99,19 @@ export const HARNESS_FAULT_CONFIG_KEY = "coding_agent_harness_fault";
  */
 export const HARNESS_FAULT_TTL_MS = 15 * 60_000;
 
+/**
+ * A remembered fault is a TIME and nothing else.
+ *
+ * There was a `error` field here holding the failure as the harness reported
+ * it, and nothing read it: the readiness sentence deliberately does not quote
+ * a bracketed error code full of JSON (that is the thing this whole change
+ * took OFF the owner's screen), and the run's own record already carries the
+ * full message for anyone who needs it. A field stored for a reader that does
+ * not exist is a promise the code does not keep.
+ */
 export interface HarnessFault {
   /** When the fault was recorded (ms since the epoch). */
   at: number;
-  /** The failure as the harness reported it, already trimmed. */
-  error: string;
 }
 
 /**
@@ -120,11 +128,11 @@ export function parseHarnessFault(value: unknown, now: number = Date.now()): Har
   const raw = value as Record<string, unknown>;
   if (typeof raw.at !== "number" || !Number.isFinite(raw.at)) return null;
   if (raw.at > now || now - raw.at > HARNESS_FAULT_TTL_MS) return null;
-  return { at: raw.at, error: typeof raw.error === "string" ? raw.error.slice(0, HARNESS_FAULT_DETAIL_CHARS) : "" };
+  return { at: raw.at };
 }
 
 /** What the readiness probe says about a remembered fault. One sentence, like its siblings. */
-export function harnessFaultProblem(fault: HarnessFault): string {
-  const minutes = Math.max(1, Math.round((HARNESS_FAULT_TTL_MS - (Date.now() - fault.at)) / 60_000));
+export function harnessFaultProblem(fault: HarnessFault, now: number = Date.now()): string {
+  const minutes = Math.max(1, Math.round((HARNESS_FAULT_TTL_MS - (now - fault.at)) / 60_000));
   return `${HARNESS_NOT_READY_SENTENCE} A run has just failed this way, so new runs are refused for about ${minutes} more minute${minutes === 1 ? "" : "s"} rather than failing the same way.`;
 }

@@ -208,18 +208,25 @@ describe("the message the owner is left with", () => {
 
 describe("reading a remembered fault", () => {
   it("keeps one inside its window", () => {
-    const fault = parseHarnessFault({ at: Date.now() - 1_000, error: "x" });
-    expect(fault).toMatchObject({ error: "x" });
+    const at = Date.now() - 1_000;
+    expect(parseHarnessFault({ at })).toEqual({ at });
   });
 
   it("drops one that has expired, so a box is never pinned shut", () => {
-    expect(parseHarnessFault({ at: Date.now() - HARNESS_FAULT_TTL_MS - 1, error: "x" })).toBeNull();
+    expect(parseHarnessFault({ at: Date.now() - HARNESS_FAULT_TTL_MS - 1 })).toBeNull();
   });
 
   it("drops one stamped in the future", () => {
     // A clock that jumped forward and back would otherwise refuse runs for as
     // long as the jump lasted, with nothing on screen explaining it.
-    expect(parseHarnessFault({ at: Date.now() + 60_000, error: "x" })).toBeNull();
+    expect(parseHarnessFault({ at: Date.now() + 60_000 })).toBeNull();
+  });
+
+  it("carries nothing but the time", () => {
+    // Anything else stored here would be stored for a reader that does not
+    // exist: the readiness sentence deliberately quotes no error code, and
+    // the run's own record already carries the full message.
+    expect(Object.keys(parseHarnessFault({ at: Date.now(), error: "x" }) ?? {})).toEqual(["at"]);
   });
 
   it("reads anything else as no fault at all", () => {
