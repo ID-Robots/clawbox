@@ -130,6 +130,25 @@ import {
   type PrChecks,
   type PrState,
 } from "@/lib/coding-pr";
+import {
+  buildReviewFeedback,
+  clampReviewRounds,
+  decideReviewRound,
+  DEFAULT_REVIEW_ROUNDS,
+  describeProblems,
+  isReviewPending,
+  MAX_REVIEW_ROUNDS,
+  MIN_REVIEW_ROUNDS,
+  parseReviewLoop,
+  pushBranch,
+  readFailedCheckLogs,
+  readReviewSnapshot,
+  REVIEW_MAX_WAIT_MS,
+  reviewPollIntervalMs,
+  reviewProblems,
+  type ReviewLoop,
+  type ReviewSnapshot,
+} from "@/lib/coding-review";
 import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { ensureProjectIcon } from "@/lib/project-icon";
@@ -280,6 +299,39 @@ export const CODING_AGENT_REVIEW_CONFIG_KEY = "coding_agent_review_pass";
  * check passed" is trivially true of zero checks.
  */
 export const CODING_AGENT_AUTO_PR_CONFIG_KEY = "coding_agent_auto_pr";
+
+/**
+ * How many REVIEW ROUNDS a pull request gets after it is opened.
+ *
+ * A round is one follow-up turn handed to the harness — failing check logs,
+ * unresolved review comments, "rebase onto <base>" — never merely one poll.
+ * The aftermath of a pull request is an hour of work that used to be the
+ * owner's; this is how much of it the box does on its own before handing it
+ * back.
+ *
+ * Three by default rather than off, because the loop spends nothing until
+ * GitHub actually objects: a pull request that goes green on the first poll
+ * costs two `gh` calls and ends. Zero is a real setting and means the loop is
+ * off — the pull request is then watched by the older checks-only watcher
+ * (`pr.phase === "waiting"`), exactly as it was before this existed.
+ */
+export const CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY = "coding_agent_review_rounds";
+
+/**
+ * May the box MERGE a pull request its own review loop has cleared?
+ *
+ * OFF by default, and the one switch here that is a consent rather than a
+ * preference: everything else the loop does is reversible, and a squash-merge
+ * into a shared branch is not. A pull request the loop cleared without this
+ * switch ends at `review.state === "clean"` — green, no unresolved comments,
+ * open, and the owner presses the button.
+ *
+ * Note the older `coding_agent_auto_pr` watcher merges on green by itself.
+ * That is deliberate and unchanged: it is what a box that switched the review
+ * loop off has always done, and taking it away would be a behaviour change
+ * nobody asked for. The two never run over the same pull request.
+ */
+export const CODING_AGENT_AUTO_MERGE_CONFIG_KEY = "coding_agent_auto_merge";
 
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
@@ -834,6 +886,28 @@ export interface CodingRun {
    * and an older build ignores a field it does not know.
    */
   pr: PrState | null;
+  /**
+   * The REVIEW LOOP over that pull request: the rounds of CI failures, review
+   * comments and conflicts the box handed back to the harness after the pull
+   * request was opened.
+   *
+   * A field beside `pr` rather than more phases inside it, for the reason `pr`
+   * is a field and not a run status: it is forward- and backward-compatible.
+   * An older build ignores it, and normalizeRun gives a record that predates it
+   * `null` — which reads correctly as "no loop ran over this one".
+   */
+  review: ReviewLoop | null;
+  /**
+   * Set on a FOLLOW-UP run the review loop started: the id of the run whose
+   * pull request it is fixing.
+   *
+   * The sibling of `reviewOf`, and it has to be its own field rather than a
+   * reuse: `reviewOf` means "this run reviews that one", and the runner reads
+   * it to skip the branch, the project icon and a second review pass. A review
+   * loop turn needs the same three skips AND one more — its settle must go back
+   * to the loop instead of trying to open a pull request the run already has.
+   */
+  reviewLoopOf: string | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -1110,6 +1184,13 @@ export interface CodingAgentStatus {
   reviewPass: boolean;
   /** The owner's switch for branch -> pull request -> wait for checks -> merge. */
   autoPr: boolean;
+  /** How many follow-up turns a pull request's review loop gets. 0 = off. */
+  reviewRounds: number;
+  /** The range the app offers, so it does not have to guess the bounds. */
+  minReviewRounds: number;
+  maxReviewRounds: number;
+  /** May the box merge a pull request its review loop cleared? */
+  autoMerge: boolean;
   /** May a run draw pictures, and may the box draw the project's icon? */
   generateImages: boolean;
   /** May a run have this box speak a clip into its project? */
@@ -1151,6 +1232,9 @@ export interface StartRunInput {
   source: CodingRunSource;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
+  /** Internal: set only by the review loop, naming the run whose pull request
+   *  this turn is fixing. See CodingRun.reviewLoopOf. */
+  reviewLoopOf?: string | null;
   /** Internal: set only by a coding team, for its planner and its workers. */
   team?: RunTeam | null;
   /** Internal: a read-only run (the team's planner). */
@@ -1378,6 +1462,40 @@ export async function setAutoPr(on: unknown): Promise<boolean> {
     throw new CodingAgentError("invalid", "The pull-request switch must be true or false.");
   }
   await configSet(CODING_AGENT_AUTO_PR_CONFIG_KEY, on);
+  return on;
+}
+
+/** How many review rounds a pull request gets. Absent means the default. */
+export async function getReviewRounds(): Promise<number> {
+  const stored = await configGet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY);
+  return typeof stored === "number" ? clampReviewRounds(stored) : DEFAULT_REVIEW_ROUNDS;
+}
+
+export async function setReviewRounds(rounds: unknown): Promise<number> {
+  if (typeof rounds !== "number" || !Number.isFinite(rounds)) {
+    throw new CodingAgentError("invalid", "The number of review rounds must be a number.");
+  }
+  if (rounds < MIN_REVIEW_ROUNDS || rounds > MAX_REVIEW_ROUNDS) {
+    // Refused rather than clamped: a caller that asked for 20 rounds meant
+    // something this box does not offer, and silently saving 6 would answer a
+    // question it did not ask.
+    throw new CodingAgentError("invalid", `The number of review rounds must be between ${MIN_REVIEW_ROUNDS} and ${MAX_REVIEW_ROUNDS}.`);
+  }
+  const saved = clampReviewRounds(rounds);
+  await configSet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, saved);
+  return saved;
+}
+
+/** The owner's merge switch. Absent means OFF — see the config key. */
+export async function getAutoMerge(): Promise<boolean> {
+  return (await configGet(CODING_AGENT_AUTO_MERGE_CONFIG_KEY)) === true;
+}
+
+export async function setAutoMerge(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The merge switch must be true or false.");
+  }
+  await configSet(CODING_AGENT_AUTO_MERGE_CONFIG_KEY, on);
   return on;
 }
 
@@ -2149,6 +2267,14 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     running: runningCount(),
     reviewPass: config[CODING_AGENT_REVIEW_CONFIG_KEY] === true,
     autoPr: config[CODING_AGENT_AUTO_PR_CONFIG_KEY] === true,
+    // Absent means the DEFAULT here, not zero: a box that predates the loop
+    // gets it, which is the point of shipping it on.
+    reviewRounds: typeof config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY] === "number"
+      ? clampReviewRounds(config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY])
+      : DEFAULT_REVIEW_ROUNDS,
+    minReviewRounds: MIN_REVIEW_ROUNDS,
+    maxReviewRounds: MAX_REVIEW_ROUNDS,
+    autoMerge: config[CODING_AGENT_AUTO_MERGE_CONFIG_KEY] === true,
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
@@ -2342,6 +2468,13 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // object field by field, so anything omitted survives in memory and
     // disappears the next time the file is read.
     pr: normalizePr(raw.pr),
+    // Only a loop this code could have written counts; anything else on a
+    // hand-edited record is no loop at all, the way parsePauseReason treats a
+    // reason it does not recognise.
+    review: parseReviewLoop((raw as { review?: unknown }).review),
+    reviewLoopOf: typeof (raw as { reviewLoopOf?: unknown }).reviewLoopOf === "string"
+      ? (raw as { reviewLoopOf: string }).reviewLoopOf
+      : null,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     // Only a list that matches the lines one for one is a list of their times;
     // a record from before the field has none, and the timeline says nothing.
@@ -2620,6 +2753,9 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested, so it needs its own copy: a shared object here would let a route
     // holding a clone see the watcher's later writes — and mutate them.
     pr: run.pr ? { ...run.pr, checks: { ...run.pr.checks } } : null,
+    // Nested for the same reason `pr` is: a route holding a clone must not see
+    // — or be able to write — the loop's own later rounds.
+    review: run.review ? { ...run.review, checks: run.review.checks.map((c) => ({ ...c })) } : null,
     pauseReason: run.pauseReason ? { ...run.pauseReason } : null,
   };
 }
@@ -4615,7 +4751,7 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  * re-reads nothing: the run that wrote the manifest did this.
  */
 async function registerProjectApp(run: CodingRun): Promise<void> {
-  if (run.reviewOf || run.readOnly || run.team) return;
+  if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
   const id = path.basename(run.directory);
   if (!APP_ID_RE.test(id)) return;
   try {
@@ -4632,7 +4768,7 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
 }
 
 async function commitProjectAssets(run: CodingRun): Promise<void> {
-  if (!run.media.images || run.reviewOf) return;
+  if (!run.media.images || run.reviewOf || run.reviewLoopOf) return;
   try {
     const drawn = await Promise.race([
       drawProjectIcon(run),
@@ -4677,6 +4813,14 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     // taken, the harness gone), and deferring on the conditions alone left the
     // pull request waiting for a review that was never going to happen.
     if (review === "started") return;
+
+    // A review-loop turn has no pull request of its own to open: it was
+    // started to FIX one that is already open, and its settle belongs to the
+    // loop rather than to this step.
+    if (finished.reviewLoopOf !== null) {
+      await resumeReviewAfterFix(finished, ended);
+      return;
+    }
 
     const origin = finished.reviewOf === null ? finished : loadRuns().find((r) => r.id === finished.reviewOf);
     if (!origin?.pr || origin.pr.phase !== "opening") return;
@@ -4741,19 +4885,46 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     // consent to merge. A review that was due and could not start is no
     // verdict either. Written on the record — see PrState.reviewOk.
     const reviewOk = finished.reviewOf !== null ? finished.status === "completed" : review !== "refused";
+    // The owner's rounds setting, read HERE and frozen on the loop for the
+    // reason every other run setting is frozen: a loop that had its cap raised
+    // or lowered under it would be a different promise from the one the run
+    // started under.
+    const maxRounds = await getReviewRounds();
     origin.pr = {
       ...origin.pr,
-      phase: "waiting",
+      phase: maxRounds > 0 ? "review" : "waiting",
       number: opened.number,
       url: opened.url,
       startedAt: Date.now(),
       reviewOk,
     };
     pushProgress(origin, RUNNER_STEP.pullRequestOpened(opened.number, prBase));
+    if (maxRounds > 0) {
+      origin.review = {
+        prNumber: opened.number,
+        url: opened.url,
+        base: prBase,
+        round: 0,
+        maxRounds,
+        state: "polling",
+        checks: [],
+        unresolvedThreads: 0,
+        reviewDecision: null,
+        lastPolledAt: null,
+        roundStartedAt: Date.now(),
+        detail: null,
+        fixRunId: null,
+      };
+    }
     persist(true);
     console.error(`[coding-agent] ${origin.id} opened PR #${opened.number}`);
 
-    watchPullRequest(origin.id);
+    // Two watchers, never both: the review loop owns the pull request when the
+    // owner has rounds to spend, and the older checks-only watcher keeps a box
+    // that set the rounds to 0 behaving exactly as it did before the loop
+    // existed.
+    if (maxRounds > 0) watchReviewLoop(origin.id);
+    else watchPullRequest(origin.id);
   } catch (err) {
     console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
   }
@@ -4874,6 +5045,20 @@ function watchPullRequest(runId: string): void {
  */
 export function resumePullRequestWatches(): void {
   for (const run of loadRuns()) {
+    // The review loop first: its phase is pending too, and it owns the pull
+    // request when it is there.
+    if (isReviewPending(run.review) && run.review) {
+      // "working" cannot survive a restart: the round's process died with the
+      // previous server and reconcileAfterRestart has already marked that run
+      // failed, so nothing will ever come back to resumeReviewAfterFix for it.
+      // Whatever it committed is on disk; polling again is what picks it up.
+      if (run.review.state === "working") {
+        run.review = { ...run.review, state: "polling", roundStartedAt: Date.now() };
+        persist(true);
+      }
+      watchReviewLoop(run.id);
+      continue;
+    }
     if (!isPrPending(run.pr) || !run.pr) continue;
     if (run.pr.phase === "waiting") {
       watchPullRequest(run.id);
@@ -4885,6 +5070,261 @@ export function resumePullRequestWatches(): void {
       settlePr(run, "failed", `The ClawBox web server restarted before the pull request was opened. The work stays on ${run.pr.branch ?? runBranchName(run.id)}.`);
     }
   }
+}
+
+/**
+ * The review loop: what happens to a pull request AFTER it is opened.
+ *
+ * Runs whose pull request is watched by the loop right now, so a restart, a
+ * second settle or a fix run coming home cannot start two loops for one pull
+ * request. The twin of `prWatchers`, and separate from it because the two
+ * watchers are never both on one pull request.
+ */
+const reviewWatchers = new Set<string>();
+
+/** What a pull request the loop cleared but was not allowed to merge says. */
+const REVIEW_CLEAN_DETAIL =
+  "Everything is green and nothing is unresolved. Merge it when you are ready — ClawBox only merges by itself when you switch that on.";
+
+/**
+ * Record where the loop ended, and close the pull request record with it.
+ *
+ * The pull request record is what the sweeps and the desktop read as "still
+ * pending", so a loop that ended without settling `pr` would keep its run out
+ * of the history for good and keep every open desktop polling for a change
+ * that is never coming — exactly the failure mode a pull request left
+ * "opening" has.
+ */
+function settleReview(
+  run: CodingRun,
+  state: "clean" | "merged" | "needs_owner" | "failed",
+  detail: string | null,
+): void {
+  if (!run.review) return;
+  const said = detail ?? (state === "clean" ? REVIEW_CLEAN_DETAIL : null);
+  run.review = { ...run.review, state, detail: said, lastPolledAt: Date.now() };
+  if (isPrPending(run.pr)) {
+    // "blocked" is the pull request phase for BOTH endings that leave it open:
+    // green-and-waiting-for-you and out-of-rounds. The review state beside it
+    // is what tells those two apart, and it is what the card words.
+    settlePr(run, state === "merged" ? "merged" : state === "failed" ? "failed" : "blocked", said);
+  } else {
+    persist(true);
+  }
+  console.error(`[coding-agent] ${run.id} review loop ended: ${state}`);
+}
+
+/**
+ * Watch one pull request, and hand what GitHub says back to the harness.
+ *
+ * A timer in the web server like `watchPullRequest`, and held to the same
+ * rules: unref()'d so it can never hold the process open, single-instance per
+ * run, and everything it decides on is re-read from the record each tick — so
+ * a loop rebuilt after a restart decides exactly as the first one did.
+ *
+ * The poll interval is minutes rather than the checks watcher's seconds: a
+ * round costs a whole Claude Code turn, the things it waits for (a CI run, a
+ * reviewer) move on that scale, and `gh` is a subprocess spawn per call.
+ */
+function watchReviewLoop(runId: string): void {
+  if (reviewWatchers.has(runId)) return;
+  reviewWatchers.add(runId);
+
+  const stop = () => { reviewWatchers.delete(runId); };
+
+  const tick = async (): Promise<void> => {
+    const run = loadRuns().find((r) => r.id === runId);
+    // "working" is not this timer's state: a fix run is out, and its settle
+    // brings the loop back through resumeReviewAfterFix.
+    if (!run?.review || run.review.state !== "polling") { stop(); return; }
+    const review = run.review;
+    const waitedMs = Date.now() - review.roundStartedAt;
+
+    const snapshot = await readReviewSnapshot(run.directory, review.prNumber);
+    if ("error" in snapshot) {
+      // A transient read says nothing, so the round goes on — under the same
+      // ceiling a check that never completes gets. Without it a `gh` that kept
+      // failing (a sign-in that expired, a box offline for the evening) would
+      // leave the loop polling for good, and the run pending in the history.
+      if (waitedMs >= REVIEW_MAX_WAIT_MS) {
+        settleReview(run, "needs_owner", `Gave up waiting: the pull request could not be read from GitHub. It may still be open. ${snapshot.error}`);
+        stop();
+        return;
+      }
+      schedule();
+      return;
+    }
+
+    run.review = {
+      ...review,
+      checks: snapshot.checks,
+      unresolvedThreads: snapshot.threads.length,
+      reviewDecision: snapshot.reviewDecision,
+      lastPolledAt: Date.now(),
+    };
+    persist(true);
+
+    const verdict = decideReviewRound({
+      snapshot,
+      round: review.round,
+      maxRounds: review.maxRounds,
+      waitedMs,
+      // Read every tick rather than frozen with the rounds: the rounds shape
+      // what the run was promised, but the merge is a consent, and an owner
+      // who switches it off while a loop runs has said no to THIS merge.
+      autoMerge: await getAutoMerge(),
+      base: review.base,
+    });
+
+    if (verdict.action === "wait") { schedule(); return; }
+    if (verdict.action === "done") { settleReview(run, verdict.state, verdict.detail); stop(); return; }
+    if (verdict.action === "merge") {
+      const merged = await mergePullRequest(run.directory, review.prNumber);
+      settleReview(run, merged.ok ? "merged" : "needs_owner", merged.ok ? null : merged.detail);
+      stop();
+      return;
+    }
+
+    // Something to fix. The round is spent here, not on the poll that found it.
+    const spawned = await startFixRun(runId, snapshot);
+    if (spawned === "started") { stop(); return; }
+    if (spawned === "retry") {
+      // The box was busy with another run, or the harness is not ready this
+      // minute. Neither is this pull request's fault, so the round is NOT
+      // spent — the loop simply looks again, under the same wait ceiling.
+      if (waitedMs >= REVIEW_MAX_WAIT_MS) {
+        const current = loadRuns().find((r) => r.id === runId);
+        if (current) {
+          settleReview(current, "needs_owner", `${describeProblems(reviewProblems(snapshot))} The box could not start a review round in time.`);
+        }
+        stop();
+        return;
+      }
+      schedule();
+      return;
+    }
+    stop();
+  };
+
+  const schedule = () => {
+    const timer = setTimeout(() => { void tick(); }, reviewPollIntervalMs(process.env.CLAWBOX_CODING_REVIEW_POLL_MS));
+    // Never hold the process open for a pull request.
+    timer.unref?.();
+  };
+
+  // The first poll is immediate: the pull request has just been opened (or a
+  // fix run has just pushed), and a three-minute silence before the first word
+  // about it reads as nothing happening.
+  void tick();
+}
+
+/**
+ * Hand one round's findings to the harness as a follow-up turn.
+ *
+ * "started" — a run is out and the loop is now `working`. "retry" — the box
+ * could not take a run right now, and the round was NOT spent. "failed" — the
+ * loop is over and has already been settled.
+ */
+async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"started" | "retry" | "failed"> {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run?.review) return "failed";
+  const review = run.review;
+  const problems = reviewProblems(snapshot);
+  const round = review.round + 1;
+
+  // Only the failing checks' logs, and only when there are failing checks:
+  // each one is a zip download from GitHub.
+  const failedChecks = problems.failedChecks.length ? await readFailedCheckLogs(run.directory, snapshot.checks) : [];
+  const task = buildReviewFeedback({
+    prNumber: review.prNumber,
+    url: review.url,
+    branch: run.pr?.branch ?? null,
+    base: review.base,
+    round,
+    maxRounds: review.maxRounds,
+    failedChecks,
+    threads: problems.threads,
+    conflicting: problems.conflicting,
+    changesRequested: problems.changesRequested,
+  });
+
+  // Re-read: the log fetch above can take minutes, and the owner may have
+  // stopped the run or the loop may have been settled under us.
+  const live = loadRuns().find((r) => r.id === runId);
+  if (!live?.review || live.review.state !== "polling") return "failed";
+
+  try {
+    const fix = await startRun({
+      task,
+      // The freshest session, which after the first round is the previous
+      // round's own: it already remembers the fix it just pushed and what the
+      // reviewer said about it. Falling back to the origin run for round one.
+      resumeRunId: live.review.fixRunId ?? live.id,
+      source: live.source,
+      reviewLoopOf: live.id,
+    });
+    // Written only after the spawn succeeded, so a refused start leaves the
+    // loop polling with its round unspent.
+    const after = loadRuns().find((r) => r.id === runId);
+    if (after?.review) {
+      after.review = { ...after.review, state: "working", round, fixRunId: fix.id, roundStartedAt: Date.now() };
+      pushProgress(after, RUNNER_STEP.reviewRound(round, after.review.maxRounds));
+      persist(true);
+    }
+    console.error(`[coding-agent] ${fix.id} started as review round ${round} of ${runId}`);
+    return "started";
+  } catch (err) {
+    const kind = err instanceof CodingAgentError ? err.kind : null;
+    // "busy" is the one-run-at-a-time slot and "not_ready"/"disabled" are the
+    // owner's switch and the harness — all three are about the box this
+    // minute, not about this pull request, so the loop waits rather than
+    // spending the owner's last round on a start that never happened.
+    if (kind === "busy" || kind === "not_ready" || kind === "disabled") return "retry";
+    const failed = loadRuns().find((r) => r.id === runId);
+    if (failed) {
+      settleReview(failed, "needs_owner", `Could not start a review round: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return "failed";
+  }
+}
+
+/**
+ * A review round has come home: push what it committed, then look again.
+ *
+ * Called from the settle path instead of the pull-request step, because a
+ * review-loop turn has no pull request of its own to open.
+ */
+async function resumeReviewAfterFix(finished: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
+  const origin = loadRuns().find((r) => r.id === finished.reviewLoopOf);
+  if (!origin?.review || origin.review.state !== "working") return;
+
+  // A pause is not the end of the round: the run resumes in place and its
+  // settle comes back here, the way a paused run's pull request stays
+  // "opening" through it.
+  if (finished.status === "paused") return;
+  if (ended !== null) {
+    settleReview(origin, "needs_owner", `The review round was ${ended === "pause" ? "paused" : "stopped"}, so the pull request is still open.`);
+    return;
+  }
+  if (finished.status !== "completed") {
+    settleReview(origin, "needs_owner", `A review round did not finish (${finished.status}), so the pull request is still open.`);
+    return;
+  }
+
+  // Belt and braces: the round is TOLD to push, and usually does. A round that
+  // committed and stopped short would otherwise leave the loop re-reading an
+  // unchanged pull request until the rounds ran out.
+  const branch = origin.pr?.branch;
+  if (branch) {
+    const pushed = await pushBranch(origin.directory, branch);
+    if (!pushed.ok) console.error(`[coding-agent] ${origin.id} review round push: ${pushed.detail}`);
+  }
+
+  const current = loadRuns().find((r) => r.id === origin.id);
+  if (!current?.review || current.review.state !== "working") return;
+  current.review = { ...current.review, state: "polling", roundStartedAt: Date.now() };
+  persist(true);
+  watchReviewLoop(current.id);
 }
 
 /**
@@ -4926,6 +5366,10 @@ type ReviewPassOutcome = "started" | "skipped" | "refused";
 async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutcome> {
   if (finished.status !== "completed") return "skipped";
   if (finished.reviewOf !== null) return "skipped";
+  // A review-loop turn has already had its work reviewed — by GitHub's own
+  // checks and by whoever left the comments it just answered. A pass over it
+  // would spend a run to review a fix to a review.
+  if (finished.reviewLoopOf !== null) return "skipped";
   if (finished.readOnly) return "skipped";
   // A team's worker is reviewed by the team's own reviewer, on the merged work.
   if (finished.team) return "skipped";
@@ -5456,11 +5900,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     status: "running",
     settings,
     reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
+    reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
     team: input.team ?? null,
     readOnly: input.readOnly === true,
     extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
   });
   if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
+  else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf));
   else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
   else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
 
@@ -5474,7 +5920,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // A team's run is excluded too: a worker already sits on its own branch
   // in its own worktree (coding-team-worktree.ts), and a second branch
   // under it would take the commits away from the merge the team makes.
-  if (!run.reviewOf && !run.readOnly && !run.team && (await getAutoPr())) {
+  // A review-loop turn is excluded for the reason a review pass is: it resumes
+  // in the same folder, on the branch its own pull request is already open
+  // from, and a second branch under it would take the fixes away from that
+  // pull request.
+  if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
     const branched = await startRunBranch({
       directory: run.directory,
       runId: run.id,
@@ -5567,6 +6017,7 @@ function newRunRecord(fields: {
   status: "running" | "draft";
   settings: RunSettings;
   reviewOf?: string | null;
+  reviewLoopOf?: string | null;
   team?: RunTeam | null;
   readOnly?: boolean;
   extraBrief?: string | null;
@@ -5612,11 +6063,13 @@ function newRunRecord(fields: {
     // Nothing has paused it, so there is nothing to explain yet.
     pauseReason: null,
     reviewOf: fields.reviewOf ?? null,
+    reviewLoopOf: fields.reviewLoopOf ?? null,
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
-    // No pull request until the aftermath opens one.
+    // No pull request until the aftermath opens one, and no loop until it has.
     pr: null,
+    review: null,
     progress: [],
     progressAt: [],
     todos: [],

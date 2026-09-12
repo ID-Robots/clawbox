@@ -36,6 +36,15 @@ export type PrPhase =
   | "opening"
   /** PR open, waiting on checks. */
   | "waiting"
+  /**
+   * PR open, and the REVIEW LOOP owns it (src/lib/coding-review-state.ts):
+   * checks, review threads and mergeability are read every few minutes and
+   * handed back to the harness as follow-up turns. A separate phase from
+   * "waiting" because the two are different watchers with different endings —
+   * and because a box with the loop switched off (`coding_agent_review_rounds`
+   * at 0) keeps "waiting" exactly as it was.
+   */
+  | "review"
   /** Merged by us. */
   | "merged"
   /** Open, and we will not merge it — the owner decides. `detail` says why. */
@@ -46,7 +55,7 @@ export type PrPhase =
 /** Every phase a stored record may carry — the allow-list the reader of
  *  coding-agent-runs.json validates against, kept beside the type so the two
  *  cannot drift apart (the same reason RUN_STATUSES lives with its type). */
-export const PR_PHASES: readonly PrPhase[] = ["opening", "waiting", "merged", "blocked", "failed"];
+export const PR_PHASES: readonly PrPhase[] = ["opening", "waiting", "review", "merged", "blocked", "failed"];
 
 export function isPrPhase(value: unknown): value is PrPhase {
   return typeof value === "string" && (PR_PHASES as readonly string[]).includes(value);
@@ -92,7 +101,7 @@ export function emptyChecks(): PrChecks {
 
 /** True while this PR is still something the box is watching. */
 export function isPrPending(pr: PrState | null | undefined): boolean {
-  return pr != null && (pr.phase === "opening" || pr.phase === "waiting");
+  return pr != null && (pr.phase === "opening" || pr.phase === "waiting" || pr.phase === "review");
 }
 
 interface RollupNode { state?: string | null; conclusion?: string | null; status?: string | null }

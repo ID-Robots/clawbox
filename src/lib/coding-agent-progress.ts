@@ -49,6 +49,8 @@ export type ProgressLabelKey =
   | "workflowFinished"
   | "workflowRefused"
   | "reviewPass"
+  | "reviewLoopTurn"
+  | "reviewRound"
   | "resuming"
   | "startingFresh"
   | "noRepository"
@@ -198,6 +200,10 @@ export const RUNNER_STEP = {
 
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
+  /** On the FOLLOW-UP run: whose pull request it was started to fix. */
+  reviewLoopTurn: (id: string) => `Review round for ${id}`,
+  /** On the ORIGIN run: which round of the loop has just gone out. */
+  reviewRound: (round: number, max: number) => `Review round ${round} of ${max} handed to the coding agent`,
   startingFresh: (id: string) => `Starting fresh: ${id} did not fail in a way a resume can fix`,
   workingOnBranch: (branch: string, base: string) => `Working on ${branch}, for a pull request into ${base}`,
   noPullRequest: (reason: string) => `No pull request: ${reason}`,
@@ -268,6 +274,8 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Workflow finished$/, labelKey: "workflowFinished", icon: "account_tree" },
   { re: /^Workflow refused$/, labelKey: "workflowRefused", icon: "block" },
   { re: /^Automatic review pass of (\S+)$/, labelKey: "reviewPass", icon: "rate_review", params: (m) => ({ id: m[1] }) },
+  { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
+  { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
   { re: /^Resuming the previous session$/, labelKey: "resuming", icon: "history" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
   { re: /^Not a git repository yet: .*$/, labelKey: "noRepository", icon: "folder_off" },
