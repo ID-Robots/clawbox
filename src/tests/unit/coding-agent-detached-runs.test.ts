@@ -448,6 +448,46 @@ describe("after a restart", () => {
     expect(run?.summary).toContain("All done.");
   });
 
+  it("keeps a settled run's scope while it is still up, so Kill still names what it named", async () => {
+    // A pid may since have been handed to a stranger, which is why it is
+    // forgotten; a unit name is never handed to anybody, so it survives.
+    installSystemdRun();
+    installSystemctl("active");
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({
+      status: "completed",
+      completedAt: Date.now() - 1_000,
+      pgid: 424242,
+      leftover: true,
+    })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-detach01");
+    expect(run?.unit).toBe("clawbox-run-detach01-abc.scope");
+    expect(run?.leftover).toBe(true);
+    expect(run?.pgid).toBeNull();
+  });
+
+  it("forgets a settled run's scope once it has gone", async () => {
+    installSystemdRun();
+    installSystemctl("inactive");
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({
+      status: "completed",
+      completedAt: Date.now() - 1_000,
+      pgid: 424242,
+      leftover: true,
+    })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-detach01");
+    expect(run?.unit).toBeNull();
+    expect(run?.leftover).toBe(false);
+    expect(run?.pgid).toBeNull();
+  });
+
   it("treats a run from before scopes existed exactly as it always did", async () => {
     installSystemdRun();
     installSystemctl("active");

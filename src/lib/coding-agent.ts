@@ -3215,12 +3215,38 @@ export async function reconcileAfterRestart(): Promise<number> {
   const tools: SpawnTools = await reattachTools();
   for (const run of list) {
     const orphaned = run.status === "running" && !live.has(run.id);
-    if (orphaned && run.unit && (await unitActive(run.unit)) === true) {
+    // Only a run that HAS a unit is asked about, which on a settled record means
+    // only one that recorded a leftover (every other settle forgets its unit),
+    // so this is a handful of systemctl calls at boot and usually none.
+    //
+    // A `null` answer — systemd could not be asked — counts as gone HERE, and
+    // deliberately not in the reattach watch. The difference is what else can be
+    // trusted: this process has held no handle on the run, so the recorded pid
+    // may since have been given to a stranger and cannot second the answer,
+    // while a reattach has already seen the scope alive with that pid in it. A
+    // record left "running" that nothing will ever settle is the worse outcome.
+    const unitStillUp = run.unit !== null && (await unitActive(run.unit)) === true;
+    if (orphaned && unitStillUp) {
       // ALIVE. Its pgid and its unit are still the real handles on it, so
       // neither is forgotten below.
       reattach(run, tools);
       pushProgress(run, RUNNER_STEP.reattached);
       changed = true;
+      continue;
+    }
+    if (unitStillUp) {
+      // SETTLED, and its scope is still up — so something it left is still in
+      // that cgroup. A unit name, unlike a pid, is never handed to anybody else,
+      // so the Kill button still names exactly what it named before the restart:
+      // the unit is kept and only the pid is forgotten.
+      if (run.pgid !== null) {
+        run.pgid = null;
+        changed = true;
+      }
+      if (!run.leftover) {
+        run.leftover = true;
+        changed = true;
+      }
       continue;
     }
     // A recorded process group belonged to a cgroup this restart replaced, so
