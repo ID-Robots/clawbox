@@ -795,7 +795,7 @@ export const zh: Record<string, string> = {
   "codingAgent.statusGaveUp": "已放弃",
   "codingAgent.chatPaused": "编码代理已暂停",
   "codingAgent.chatDraft": "已保存为运行草稿",
-  "codingAgent.chatGaveUp": "编码助手已放弃",
+  "codingAgent.chatGaveUp": "编程助手已放弃",
   "codingAgent.timeLeft": "剩余",
   "codingAgent.openResume": "在终端中打开",
   "codingAgent.showDetails": "显示详情",

@@ -5946,12 +5946,25 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
  * settled as "blocked" — which is what "Nothing was committed, so there is no
  * pull request to open" writes — would never get another go: the next attempt
  * would commit the work and no pull request would follow it, leaving the one
- * deliverable that can then never be met. Only a pull request that was never
- * OPENED is reopened this way; a real one has a number and IS the thing being
- * checked for.
+ * deliverable that can then never be met.
+ *
+ * `"failed"` is reopened for the same reason, and the case is sharper. The
+ * IMPLIED bar steps aside on that phase (`deliverableFor`), so no attempt is
+ * started for it at all — but an EXPLICIT `{ kind: "pr" }` is honoured as the
+ * caller stated it, whatever the phase, so without this an attempt after a
+ * failed pull-request flow (`gh` not logged in, the push refused, auto-PR
+ * switched off mid-run) could never meet the bar no matter what the harness did:
+ * every attempt spent on something unreachable, ending `gave_up` over work that
+ * was done. Reopening gives the next one a real chance — a transient `gh`
+ * failure, a remote added since, a run that pushes for itself — and where the
+ * cause persists the ending is the same, just honestly earned.
+ *
+ * Only a pull request that was never OPENED is reopened either way; a real one
+ * has a number and IS the thing being checked for.
  */
 function reopenPullRequestStep(run: CodingRun): void {
-  if (run.pr && run.pr.phase === "blocked" && run.pr.number === null) {
+  const reopenable = run.pr?.phase === "blocked" || run.pr?.phase === "failed";
+  if (run.pr && reopenable && run.pr.number === null) {
     run.pr = { ...run.pr, phase: "opening", detail: null, endedAt: null };
   }
 }

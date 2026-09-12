@@ -785,7 +785,7 @@ export const nl: Record<string, string> = {
   "codingAgent.statusGaveUp": "Heeft het opgegeven",
   "codingAgent.chatPaused": "Codeeragent gepauzeerd",
   "codingAgent.chatDraft": "Run opgeslagen als concept",
-  "codingAgent.chatGaveUp": "Coding-agent heeft het opgegeven",
+  "codingAgent.chatGaveUp": "Codeeragent heeft het opgegeven",
   "codingAgent.timeLeft": "resterend",
   "codingAgent.openResume": "In terminal openen",
   "codingAgent.showDetails": "Details tonen",

@@ -25,6 +25,10 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+// The ceiling `openAttempt` actually reads. A literal 6 here would stop
+// reaching the "declines at the ceiling" branch the moment the constant moved,
+// and both tests below would keep passing without exercising it.
+import { MAX_COMPLETION_ATTEMPTS } from "@/lib/coding-deliverable";
 
 // A real child process per attempt, and a settle chain after each.
 vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
@@ -725,6 +729,40 @@ describe("an attempt that delivers the pull request", () => {
   });
 });
 
+describe("an EXPLICIT pull-request deliverable after the flow failed", () => {
+  it("gets the step reopened, so the attempt is not spent on something unreachable", async () => {
+    // The implied bar steps aside on `phase: "failed"`, so nothing is attempted
+    // for it. An explicit `{ kind: "pr" }` is honoured as the caller stated it,
+    // whatever the phase — so unless the step is reopened, `maybeOpenPullRequest`
+    // (which opens only from "opening") can never run again and every attempt is
+    // spent on a bar that cannot be met, ending `gave_up` over work that was done.
+    installHarnessThatNeverDelivers();
+    initGitRepo(projectDir);
+    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 2 });
+    // The first settle's pull-request flow FAILS (not "blocked"): it has a commit
+    // to open one from, and the GitHub call refuses.
+    newestCommitSince.mockReset();
+    newestCommitSince.mockResolvedValue("abc1234");
+    openPullRequest.mockReset();
+    openPullRequest
+      .mockResolvedValueOnce({ ok: false, detail: "gh is not logged in" })
+      .mockResolvedValue({ ok: true, number: 9, url: "https://github.com/o/r/pull/9" });
+
+    const started = await lib.startRun({
+      task: "build", projectId: "site", source: "owner",
+      deliverable: { kind: "pr" },
+    });
+    const run = await settledForGood(started.id);
+
+    // The second attempt got a real go at it, and took it.
+    expect(openPullRequest).toHaveBeenCalledTimes(2);
+    expect(run.pr?.number).toBe(9);
+    expect(run.status).toBe("completed");
+    expect(run.deliverableCheck).toMatchObject({ ok: true });
+    expect(run.attempts).toHaveLength(2);
+  });
+});
+
 describe("the held notice reaches the owner on every path", () => {
   it("is sent once for a run resumed at the attempt ceiling", async () => {
     // An owner Resume at the ceiling opens no new attempt (`openAttempt`
@@ -745,13 +783,16 @@ describe("the held notice reaches the owner on every path", () => {
     // Fill the attempt list to the module-wide ceiling, so the next Resume's
     // `openAttempt` declines — the state the proxy got wrong.
     const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8")) as Record<string, unknown>[];
-    onDisk[0].attempts = Array.from({ length: 6 }, (_, i) => ({ startedAt: i + 1, endedAt: i + 2, reason: "app.js was not created." }));
+    onDisk[0].attempts = Array.from({ length: MAX_COMPLETION_ATTEMPTS }, (_, i) => ({ startedAt: i + 1, endedAt: i + 2, reason: "app.js was not created." }));
     fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify(onDisk));
     await lib._resetCodingAgentStateForTests();
 
     await lib.resumeRun(started.id);
     const run = await settledForGood(started.id);
 
+    // The ceiling branch was the one taken: `openAttempt` declined and
+    // `closeAttempt` recorded nothing, so the list did not grow.
+    expect(run.attempts).toHaveLength(MAX_COMPLETION_ATTEMPTS);
     // However it ended, the owner was told exactly once.
     expect(run.status).toBe("gave_up");
     expect(announceCodingAgent).toHaveBeenCalledTimes(1);
@@ -784,7 +825,7 @@ describe("the held notice reaches the owner on every path", () => {
     // `openAttempt` declines and no attempt is open at the next settle.
     const runsFile = path.join(root, "data", "coding-agent-runs.json");
     const onDisk = JSON.parse(fs.readFileSync(runsFile, "utf-8")) as Record<string, unknown>[];
-    onDisk[0].attempts = Array.from({ length: 6 }, (_, i) => ({ startedAt: i + 1, endedAt: i + 2, reason: "no pull request" }));
+    onDisk[0].attempts = Array.from({ length: MAX_COMPLETION_ATTEMPTS }, (_, i) => ({ startedAt: i + 1, endedAt: i + 2, reason: "no pull request" }));
     fs.writeFileSync(runsFile, JSON.stringify(onDisk));
     await lib._resetCodingAgentStateForTests();
 
@@ -800,6 +841,8 @@ describe("the held notice reaches the owner on every path", () => {
     expect(run.pr?.phase).toBe("failed");
     expect(run.status).toBe("completed");
     expect(run.attempts.some((a) => a.endedAt === null)).toBe(false);
+    // The ceiling branch, again asserted rather than assumed.
+    expect(run.attempts).toHaveLength(MAX_COMPLETION_ATTEMPTS);
     // …and the notice `finishRun` held was sent exactly once. Without `wasGated`
     // this is 0.
     expect(announceCodingAgent).toHaveBeenCalledTimes(1);
