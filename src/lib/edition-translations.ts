@@ -6,6 +6,7 @@ import { localModelsEn } from "./edition-translations/en-local-models";
 import { systemProfileEn } from "./edition-translations/en-system-profile";
 import { codingAgentEn } from "./edition-translations/en-coding-agent";
 import { shellScanEn } from "./edition-translations/en-shell-scan";
+import { improvementEn } from "./edition-translations/en-improvement";
 import { bg } from "./edition-translations/bg";
 import { de } from "./edition-translations/de";
 import { es } from "./edition-translations/es";
@@ -55,6 +56,7 @@ export const editionEn: Record<string, string> = {
   ...systemProfileEn,
   ...codingAgentEn,
   ...shellScanEn,
+  ...improvementEn,
 };
 
 const overrides: Record<Exclude<Locale, "en">, Record<string, string>> = {
