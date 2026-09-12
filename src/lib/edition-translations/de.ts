@@ -949,6 +949,12 @@ export const de: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "Versuche für das Ergebnis eines Laufs",
   "codingAgent.completionAttemptsHint": "Ein Lauf gilt erst als fertig, wenn das Ergebnis wirklich da ist — die Dateien, die Ihr Assistent genannt hat, oder ein Pull Request, wenn Pull Requests an sind. Fehlt es, setzt ClawBox den Lauf in seiner eigenen Sitzung fort und sagt dabei, was fehlt. Der erste Anlauf des Laufs zählt als ein Versuch.",
   "codingAgent.completionAttemptsFailed": "Die Anzahl der Versuche konnte nicht geändert werden.",
+  "codingAgent.maxParallelRunsLabel": "Gleichzeitige Läufe",
+  "codingAgent.maxParallelRunsHint": "Jeder Lauf arbeitet in einer eigenen Kopie des Projekts auf einem eigenen Branch, sodass Läufe sich nicht mehr gegenseitig halbfertige Dateien überschreiben. Wie viele sinnvoll sind, ist eine Frage des Arbeitsspeichers dieser ClawBox: zwei sind bequem, vier sind auf einem kleinen Board viel.",
+  "codingAgent.maxParallelRunsFailed": "Die Anzahl gleichzeitiger Läufe konnte nicht geändert werden.",
+  "codingAgent.worktreeKept": "Die eigene Kopie dieses Laufs liegt noch auf der Festplatte. Seine Arbeit liegt auf dem Branch {branch} — beim Entfernen der Kopie geht sie also nicht verloren.",
+  "codingAgent.worktreeRemove": "Kopie entfernen",
+  "codingAgent.worktreeRemoveFailed": "Die Kopie des Projekts konnte nicht entfernt werden.",
 
   "codingAgent.wizardTitle": "Coding-Agent einrichten",
   "codingAgent.wizardIntro": "Mit dem Coding-Agenten übergibt Ihr Assistent eine ganze Aufgabe an Claude Code auf dieser Box: Er liest und schreibt Dateien in einem Ordner, führt dort Befehle aus und meldet sich zurück. Die Einrichtung dauert vier Schritte.",

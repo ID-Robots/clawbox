@@ -946,6 +946,12 @@ export const sv: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "Försök med en körnings leverans",
   "codingAgent.completionAttemptsHint": "En körning räknas som klar först när det den skulle leverera verkligen finns — filerna din assistent namngav, eller en pull request när pull requests är på. Om det saknas fortsätter ClawBox körningen i dess egen session med en notis om vad som fattas. Körningens eget första försök räknas som ett.",
   "codingAgent.completionAttemptsFailed": "Antalet försök kunde inte ändras.",
+  "codingAgent.maxParallelRunsLabel": "Körningar samtidigt",
+  "codingAgent.maxParallelRunsHint": "Varje körning arbetar i en egen kopia av projektet på en egen gren, så körningar kan inte längre skriva över varandras halvfärdiga filer. Hur många som är rimligt är en fråga om den här ClawBoxens minne: två går bra, fyra är mycket på ett litet kort.",
+  "codingAgent.maxParallelRunsFailed": "Det gick inte att ändra hur många körningar som får gå samtidigt.",
+  "codingAgent.worktreeKept": "Den här körningens egen kopia ligger kvar på disken. Arbetet finns på grenen {branch}, så att ta bort kopian förlorar det inte.",
+  "codingAgent.worktreeRemove": "Ta bort kopian",
+  "codingAgent.worktreeRemoveFailed": "Det gick inte att ta bort körningens kopia av projektet.",
 
   "codingAgent.wizardTitle": "Ställ in kodagenten",
   "codingAgent.wizardIntro": "Med kodagenten lämnar din assistent över en hel uppgift till Claude Code på den här boxen: den läser och skriver filer i en mapp, kör kommandon där och rapporterar tillbaka. Det tar fyra steg att ställa in.",

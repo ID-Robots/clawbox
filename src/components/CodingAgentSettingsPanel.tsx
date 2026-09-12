@@ -100,6 +100,12 @@ export interface AgentStatus {
   completionAttempts?: number;
   minCompletionAttempts?: number;
   maxCompletionAttempts?: number;
+  /** How many runs may be going at once. Optional, for the reason
+   *  `completionAttempts` is: an older server answers with none and the
+   *  control is then not drawn at all. */
+  maxParallelRuns?: number;
+  minMaxParallelRuns?: number;
+  maxMaxParallelRuns?: number;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
   suggestedDirectory?: string;
@@ -157,12 +163,12 @@ const CONFIRM_MS = 5_000;
  * message sat below the GitHub card, a screen away from a Steps field that
  * still held the refused number.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "settings" | "github";
+type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns"]);
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -978,6 +984,44 @@ export default function CodingAgentSettingsPanel({
               </select>
             </div>
             {errorIn("completionAttempts")}
+          </>
+        )}
+
+        {/* How many runs at once. Each one works in a copy of the project on
+            a branch of its own, so this is a question about the box's memory
+            rather than about the filesystem — which is why it is a number the
+            owner may raise and not a switch. Hidden on a server that answers
+            with no field, like the two above. */}
+        {typeof status?.maxParallelRuns === "number" && (
+          <>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="min-w-0 flex items-center gap-1.5">
+                <label htmlFor="coding-agent-max-parallel-runs" className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.maxParallelRunsLabel")}
+                </label>
+                <HelpTip
+                  text={t("codingAgent.maxParallelRunsHint")}
+                  label={t("codingAgent.maxParallelRunsLabel")}
+                  testId="coding-agent-max-parallel-runs-help"
+                />
+              </div>
+              <select
+                id="coding-agent-max-parallel-runs"
+                value={String(status.maxParallelRuns)}
+                disabled={saving}
+                data-testid="coding-agent-max-parallel-runs"
+                onChange={(e) => void saveSetting({ maxParallelRuns: Number(e.target.value) }, "maxParallelRuns", t("codingAgent.maxParallelRunsFailed"))}
+                className={`text-base sm:text-xs ${FIELD} w-28`}
+              >
+                {Array.from(
+                  { length: (status.maxMaxParallelRuns ?? 4) - (status.minMaxParallelRuns ?? 1) + 1 },
+                  (_, i) => (status.minMaxParallelRuns ?? 1) + i,
+                ).map((n) => (
+                  <option key={n} value={n}>{String(n)}</option>
+                ))}
+              </select>
+            </div>
+            {errorIn("maxParallelRuns")}
           </>
         )}
 

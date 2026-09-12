@@ -217,6 +217,13 @@ interface RunPayload {
   filesTouched: string[];
   commandsRun: number;
   permissionDenials: number;
+  /**
+   * The run's own copy of the project — a git worktree and a branch of its
+   * own — or null/absent when it works in the project folder itself. `path`
+   * is the same string as `directory`; `project` is the folder the owner
+   * knows the project by.
+   */
+  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean } | null;
   /** Set on the automatic review pass, naming the run it reviewed. */
   reviewOf?: string | null;
   /** Set on a review-loop turn, naming the run whose pull request it is fixing. */
@@ -359,6 +366,16 @@ function describeRun(run: RunPayload, tail: number): string {
   if (run.reviewLoopOf) parts.push(`Review round on the pull request of run ${run.reviewLoopOf}`);
   parts.push(`Task: ${firstLine(run.task)}`);
   parts.push(`Folder: ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}`);
+  // A run with a copy of its own works OFF the project's branch, so a reader
+  // that went looking in the project folder would find none of its work. Say
+  // where it actually is — and, once the copy is gone, that the branch is
+  // where the work remains.
+  if (run.worktree) {
+    parts.push(
+      `This run works in its own copy of ${run.worktree.project} on branch ${run.worktree.branch} (forked from ${run.worktree.base})`
+      + (run.worktree.removed ? `; the copy has been removed and its work is on the branch.` : "."),
+    );
+  }
   const facts = [
     // Which account paid is said whenever it is not the box's own plan: the
     // owner asked for that run to go somewhere else and is entitled to see it
@@ -598,6 +615,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       }
       return text(
         `Started coding run "${run.id}" in ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}. `
+        // Where the work will actually be. A run gets a copy of the project
+        // on a branch of its own, which is what lets another run work in the
+        // same project at the same time — and which means the project folder
+        // itself will not change until the run's branch is merged home.
+        + (run.worktree
+          ? `That folder is this run's own copy of ${run.worktree.project}, on branch ${run.worktree.branch}. `
+          : "")
         + (paths.length ? `It is not counted as finished until ${paths.join(", ")} exist and are not empty. ` : "")
         + "It works in the background on the ClawBox and may take several minutes. "
         + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,

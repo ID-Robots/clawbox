@@ -15,6 +15,7 @@ import {
   setAutoMerge,
   setAutoPr,
   setCompletionAttempts,
+  setMaxParallelRuns,
   setGenerateAudio,
   setGenerateImages,
   setRealBrowser,
@@ -79,6 +80,10 @@ function forbidden() {
  * POST { autoMerge: boolean } → may the box squash-merge a pull request its
  * own review loop cleared? Off by default, and never into `main`. See
  * @/lib/coding-review-state for the decision.
+ * POST { maxParallelRuns: number } → how many coding runs may be going at
+ * once. Each run works in a git worktree of its own, so the limit is a
+ * question about the box's memory rather than about the filesystem; the range
+ * is refused rather than clamped, like the review rounds.
  * POST { completionAttempts: number } → how many goes a run with a deliverable
  * gets at it, its own first turn counted as one. Only ever spent by a run that
  * HAS a deliverable — one the caller named, or the pull request the auto-PR
@@ -148,6 +153,7 @@ export async function POST(request: Request) {
     reviewRounds?: unknown;
     autoMerge?: unknown;
     completionAttempts?: unknown;
+    maxParallelRuns?: unknown;
     generateImages?: unknown;
     generateAudio?: unknown;
     realBrowser?: unknown;
@@ -162,6 +168,7 @@ export async function POST(request: Request) {
   const hasReviewRounds = typeof fields.reviewRounds === "number";
   const hasAutoMerge = typeof fields.autoMerge === "boolean";
   const hasCompletionAttempts = typeof fields.completionAttempts === "number";
+  const hasMaxParallelRuns = typeof fields.maxParallelRuns === "number";
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
@@ -178,7 +185,7 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -188,6 +195,7 @@ export async function POST(request: Request) {
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
           + "{ realBrowser: boolean }, { reviewRounds: number }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
+          + "{ maxParallelRuns: number }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -256,6 +264,10 @@ export async function POST(request: Request) {
     if (hasCompletionAttempts) {
       const saved = await setCompletionAttempts(fields.completionAttempts);
       console.error(`[coding-agent] attempts at a run's deliverable set to ${saved} by the owner`);
+    }
+    if (hasMaxParallelRuns) {
+      const saved = await setMaxParallelRuns(fields.maxParallelRuns);
+      console.error(`[coding-agent] up to ${saved} run(s) at once, by the owner's choice`);
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);
