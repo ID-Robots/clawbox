@@ -102,6 +102,16 @@ export function parsePauseReason(value: unknown): CodingPauseReason | null {
   if (raw.kind === "owner") return { kind: "owner" };
   if (raw.kind !== "allowance") return null;
   if (!isCodingPauseMeter(raw.meter)) return null;
+  // Required, unlike `resetsAt`, and the asymmetry is the point: every writer
+  // of an allowance reason has the refusal in hand and records it, so a record
+  // WITHOUT one was not written by this code. `resetsAt` is different — a null
+  // there is a writer saying honestly that the far side named no hour, which
+  // is a fact the app renders rather than a gap. A missing message was being
+  // filled in with "" and the reason let through, which is exactly the
+  // "degrade to a reason nothing here can vouch for" this parser exists to
+  // prevent. A writer that genuinely has nothing to quote can still say so
+  // with an empty string.
+  if (typeof raw.message !== "string") return null;
   return {
     kind: "allowance",
     meter: raw.meter,
@@ -110,7 +120,7 @@ export function parsePauseReason(value: unknown): CodingPauseReason | null {
     resetsAt: typeof raw.resetsAt === "string" && !Number.isNaN(Date.parse(raw.resetsAt))
       ? raw.resetsAt
       : null,
-    message: typeof raw.message === "string" ? raw.message.slice(0, MAX_PAUSE_MESSAGE_CHARS) : "",
+    message: raw.message.slice(0, MAX_PAUSE_MESSAGE_CHARS),
   };
 }
 

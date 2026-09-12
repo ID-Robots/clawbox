@@ -145,9 +145,24 @@ describe("reading a pause reason off a record", () => {
       // pause, so neither is a pause reason this box can word.
       { kind: "allowance", meter: "tokens" },
       { kind: "allowance", meter: "audio" },
+      // No refusal quoted. Every writer has one in hand, so a record without
+      // one was not written by this code — and unlike a null `resetsAt`,
+      // which is a writer saying honestly that the far side named no hour,
+      // an absent message is a gap rather than a fact.
+      { kind: "allowance", meter: "images", resetsAt: null },
+      { kind: "allowance", meter: "images", resetsAt: null, message: null },
+      { kind: "allowance", meter: "images", resetsAt: null, message: 42 },
+      { kind: "allowance", meter: "images", resetsAt: null, message: { text: "spent" } },
     ]) {
       expect(parsePauseReason(bad), JSON.stringify(bad)).toBeNull();
     }
+  });
+
+  it("accepts a writer that honestly had nothing to quote", () => {
+    // "" is a statement — the refusal carried no words — and is not the same
+    // as the field being absent, which is a record this code did not write.
+    expect(parsePauseReason({ kind: "allowance", meter: "images", resetsAt: null, message: "" }))
+      .toEqual({ kind: "allowance", meter: "images", resetsAt: null, message: "" });
   });
 
   it("drops a reset time it cannot read instead of passing it on", () => {
