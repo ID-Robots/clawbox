@@ -921,6 +921,65 @@ describe("CodingAgentApp", () => {
       }
     });
 
+    /**
+     * WHY a run is paused, on the one screen that offers to un-pause it.
+     *
+     * A run refused because this box's daily picture allowance was spent
+     * settles exactly like a pause the owner asked for, and the card said the
+     * same eight words either way. Resume was then the owner's only move, and
+     * it bought the same refusal.
+     */
+    describe("a paused run's reason", () => {
+      const pausedRun = (pauseReason: unknown) => ({
+        ...RUN, id: "run-paused03", status: "paused", completedAt: 900, sessionId: "sess-1", pauseReason,
+      });
+
+      async function openPaused(pauseReason: unknown) {
+        stubFetch({ enabled: true, readiness: READY }, [pausedRun(pauseReason)], { projects: [SITE_PROJECT] });
+        render(<CodingAgentApp />);
+        await openRuns();
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-paused03"));
+        return screen.findByTestId("coding-agent-run-page");
+      }
+
+      it("says which allowance ran out and when it comes back, beside the Resume it qualifies", async () => {
+        const page = await openPaused({
+          kind: "allowance",
+          meter: "images",
+          resetsAt: "2026-09-13T00:00:00.000Z",
+          message: "You have used up today's ClawBox AI pictures.",
+        });
+        const banner = within(page).getByTestId("coding-agent-pause-reason");
+        expect(banner).toHaveTextContent("the daily image allowance is used up");
+        // The hour, in UTC — the zone the allowance is actually counted in.
+        expect(banner).toHaveTextContent("00:00 UTC");
+        // Resume stays exactly where it was: the allowance does come back,
+        // and this explains when rather than taking the way out away.
+        expect(within(page).getByTestId("coding-agent-resume-run-paused03")).toBeInTheDocument();
+      });
+
+      it("offers no hour when the far side never named one", async () => {
+        const page = await openPaused({ kind: "allowance", meter: "speech", resetsAt: null, message: "out" });
+        const banner = within(page).getByTestId("coding-agent-pause-reason");
+        expect(banner).toHaveTextContent("the speech allowance is used up");
+        expect(banner).toHaveTextContent("Resume it once the allowance is back");
+        // An invented hour is worse than none: the owner would plan around it.
+        expect(banner.textContent).not.toMatch(/UTC/);
+      });
+
+      it("explains nothing when the owner paused it themselves", async () => {
+        // They know why. The card keeps the wording it has always had.
+        const page = await openPaused({ kind: "owner" });
+        expect(within(page).queryByTestId("coding-agent-pause-reason")).toBeNull();
+        expect(within(page).getByTestId("coding-agent-resume-run-paused03")).toBeInTheDocument();
+      });
+
+      it("explains nothing for a record written before the reason was kept", async () => {
+        const page = await openPaused(undefined);
+        expect(within(page).queryByTestId("coding-agent-pause-reason")).toBeNull();
+      });
+    });
+
     it("embeds the live terminal on a running run's page in place of the activity log, and keeps the log once it settled", async () => {
       const live = { ...RUN, status: "running", completedAt: null, summary: null, transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl", progress: ["$ npm test"] };
       stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });

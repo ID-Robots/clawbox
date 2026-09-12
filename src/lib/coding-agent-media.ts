@@ -44,6 +44,7 @@ import {
   type RunMedia,
 } from "@/lib/coding-agent";
 import { artifactsDir } from "@/lib/coding-agent-artifacts";
+import type { CodingPauseMeter } from "@/lib/coding-agent-status";
 
 /** The longest path a caller may name. Matches the tools' own `path` cap. */
 export const MAX_MEDIA_PATH_CHARS = 512;
@@ -216,6 +217,16 @@ export function releaseMediaTarget(target: MediaTarget): void {
   releaseRunMedia(target.runId, target.kind);
 }
 
+/**
+ * The METER a media kind spends, which is not the same thing as the per-run
+ * cap it spends: `audio` is this route's own counter, while what runs out
+ * upstream is the box's speech. One place to say so, so the image route and
+ * the audio route cannot name the same meter two ways.
+ */
+export function meterFor(kind: keyof RunMedia): CodingPauseMeter {
+  return kind === "images" ? "images" : "speech";
+}
+
 function capReached(kind: keyof RunMedia, used: number, cap: number): NextResponse {
   return mediaError(
     `This run has already had its ${cap} ${kind === "images" ? "pictures" : "clips"}.`,
@@ -275,7 +286,9 @@ export async function writeMediaFile(
     console.warn("[coding-agent-media] write failed:", err instanceof Error ? err.message : err);
     return { ok: false, response: mediaError("The file could not be written.", "write_failed", 500) };
   }
-  noteRunMedia(target.runId, target.file);
+  // The meter travels with the file so one that has just delivered can clear
+  // its own earlier refusal — see noteRunMedia.
+  noteRunMedia(target.runId, target.file, meterFor(target.kind));
   return { ok: true, used: target.used };
 }
 
