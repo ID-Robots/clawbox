@@ -557,14 +557,15 @@ export const ja: Record<string, string> = {
   // 実行の費用をどのアカウントが払うか: この ClawBox 自身のプランか、オーナー
   // 自身の Anthropic アカウントか。2 つのプロバイダー名は製品名なのでそのまま。
   "codingAgent.providerLabel": "実行に使うアカウント",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "実行の費用はこの ClawBox のプランが負担し、モデルもプランが選びます。",
   "codingAgent.providerHintAnthropic": "実行の費用はご自身の Anthropic アカウントが負担し、Claude のモデルを使います。",
   "codingAgent.providerNotConnected": "Anthropic アカウントがまだ接続されていないため、実行を開始できません。下でキーを追加するか、ターミナルアプリで `claude` を実行してサインインしてください。",
   "codingAgent.providerFailed": "実行の費用を負担するアカウントを変更できませんでした。",
   "codingAgent.anthropicTitle": "Anthropic アカウント",
   "codingAgent.anthropicOff": "未接続",
+  "codingAgent.anthropicUnknown": "確認中…",
   "codingAgent.anthropicViaKey": "API キーで接続済み",
   "codingAgent.anthropicViaLogin": "Claude Code でサインイン済み",
   "codingAgent.anthropicHint": "Anthropic に設定した実行で使う、ご自身の Anthropic アクセスです。API キーを貼り付けるか、ターミナルアプリで `claude` を実行してサインインしてください。キーはこの ClawBox に保存され、二度と表示されません。",

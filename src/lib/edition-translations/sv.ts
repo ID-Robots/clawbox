@@ -552,14 +552,15 @@ export const sv: Record<string, string> = {
   // ägarens egen Anthropic-åtkomst. De två leverantörsnamnen är produktnamn och
   // står kvar som de är.
   "codingAgent.providerLabel": "Körs på",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "Körningar betalas av den här ClawBoxens plan, och planen väljer modellen.",
   "codingAgent.providerHintAnthropic": "Körningar betalas av ditt eget Anthropic-konto, med Claudes modeller.",
   "codingAgent.providerNotConnected": "Ditt Anthropic-konto är inte anslutet än, så inga körningar kan starta. Lägg till en nyckel nedan, eller logga in med `claude` i Terminal-appen.",
   "codingAgent.providerFailed": "Kunde inte byta vilket konto som betalar körningarna.",
   "codingAgent.anthropicTitle": "Anthropic-konto",
   "codingAgent.anthropicOff": "inte anslutet",
+  "codingAgent.anthropicUnknown": "kontrollerar…",
   "codingAgent.anthropicViaKey": "anslutet med en API-nyckel",
   "codingAgent.anthropicViaLogin": "inloggad med Claude Code",
   "codingAgent.anthropicHint": "Din egen Anthropic-åtkomst, för körningar som är satta till Anthropic. Klistra in en API-nyckel, eller logga in genom att köra `claude` i Terminal-appen. Nyckeln stannar på den här ClawBoxen och visas aldrig igen.",

@@ -75,20 +75,32 @@ case "$PROVIDER" in
   *) die "unknown CLAUDE_DS_PROVIDER: $PROVIDER (use clawbox-ai or anthropic)" ;;
 esac
 
-# The portal token is about to be handed to whatever this URL names, so refuse
+# The portal token is about to be handed to whatever these URLs name, so refuse
 # to speak plaintext to anything but the loopback. Without this an
 # CLAWBOX_AI_PROXY_URL of http://... would put a live credential on the wire in
 # the clear, and the wrapper would look like it was working.
 #
+# BOTH bases, because both carry the token: ANTHROPIC_BASE_URL moves the
+# messages API and CLAUDE_CODE_API_BASE_URL the account surface, and the run
+# exports ANTHROPIC_AUTH_TOKEN for whichever it is talking to. Checking only
+# the proxy left CLAUDE_DS_API_BASE_URL as an unguarded way to the same
+# outcome.
+#
 # Only for the branch that actually sends it: an Anthropic run never reads the
 # portal token at all, and refusing it over the shape of a proxy URL it does
 # not use would be a refusal about nothing.
-if [ "$PROVIDER" = "clawbox-ai" ]; then
-  case "$PROXY_URL" in
+require_private_url() {
+  case "$2" in
     https://*) ;;
     http://127.0.0.1[:/]*|http://127.0.0.1|http://localhost[:/]*|http://localhost) ;;
-    *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $PROXY_URL" ;;
+    *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $1=$2" ;;
   esac
+}
+if [ "$PROVIDER" = "clawbox-ai" ]; then
+  require_private_url CLAWBOX_AI_PROXY_URL "$PROXY_URL"
+  if [ -n "${CLAUDE_DS_API_BASE_URL:-}" ]; then
+    require_private_url CLAUDE_DS_API_BASE_URL "$CLAUDE_DS_API_BASE_URL"
+  fi
 fi
 
 if ! command -v claude >/dev/null 2>&1; then

@@ -80,14 +80,18 @@ export const codingAgentEn: Record<string, string> = {
   // owner's Anthropic access. The two provider names are product names and
   // stay as they are in every locale; everything around them is translated.
   "codingAgent.providerLabel": "Runs on",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "Runs are paid for by this ClawBox's own plan, and the plan chooses the model.",
   "codingAgent.providerHintAnthropic": "Runs are paid for by your own Anthropic account, using Claude's models.",
   "codingAgent.providerNotConnected": "Your Anthropic account is not connected yet, so runs cannot start. Add a key below, or sign in with `claude` in the Terminal app.",
   "codingAgent.providerFailed": "Could not change which account runs are paid for by.",
   "codingAgent.anthropicTitle": "Anthropic account",
   "codingAgent.anthropicOff": "not connected",
+  // While the first read is in flight, or after one that failed. NOT "not
+  // connected": that would be a claim about the owner's account the card is
+  // in no position to make.
+  "codingAgent.anthropicUnknown": "checking…",
   "codingAgent.anthropicViaKey": "connected with an API key",
   "codingAgent.anthropicViaLogin": "signed in with Claude Code",
   "codingAgent.anthropicHint": "Your own Anthropic access, for runs set to Anthropic. Paste an API key, or sign in by running `claude` in the Terminal app. The key is kept on this ClawBox and is never shown again.",

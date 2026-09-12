@@ -391,17 +391,23 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // resolver: the enum above cannot express "a model belongs to one
       // provider and not the other", and a model named for ClawBox AI would
       // otherwise travel to the device only to come back as a 400 the model
-      // then has to be told how to read. The owner's stored default is not
-      // known to this process, so an unnamed provider is resolved against the
-      // shipped default purely to check the MODEL — what actually gets used is
-      // the owner's, decided on the device.
-      const pair = resolveRunProvider(provider, model, DEFAULT_CODING_PROVIDER);
-      if (!pair.ok) {
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          pair.error,
-          "Fix the provider/model pair and call again, or omit both to use the owner's default.",
-        );
+      // then has to be told how to read.
+      //
+      // ONLY when the caller NAMED a provider. With none named the OWNER's
+      // stored default decides, and this process does not know it — checked
+      // against the shipped default, `{ model: "claude-opus-5" }` on a box
+      // whose default is already `anthropic` was refused, and refused with
+      // advice to pass the very provider that was in force. An unnamed
+      // provider is the device's to resolve, exactly as the working folder is.
+      if (provider) {
+        const pair = resolveRunProvider(provider, model, DEFAULT_CODING_PROVIDER);
+        if (!pair.ok) {
+          throw new ToolError(
+            "BAD_ARGUMENT",
+            pair.error,
+            "Fix the provider/model pair and call again, or omit both to use the owner's default.",
+          );
+        }
       }
       const body: Record<string, unknown> = { task };
       if (project_id) body.projectId = project_id;

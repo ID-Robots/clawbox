@@ -48,6 +48,7 @@ import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import { taskTitle } from "@/lib/task-title";
 import type { AgentStatus, CodingProviderId, Effort, GitHubState } from "./CodingAgentSettingsPanel";
+import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.
@@ -2008,7 +2009,7 @@ export default function CodingAgentApp() {
                       as much news as the other way round. */}
                   {run.provider && (
                     <span data-testid="coding-agent-run-provider">
-                      · {t("codingAgent.runProvider", { provider: t(`codingAgent.provider.${run.provider}`) })}
+                      · {t("codingAgent.runProvider", { provider: t(CODING_PROVIDER_NAME_KEY[run.provider]) })}
                     </span>
                   )}
                   {run.lastActivityAt && <span>· {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}</span>}

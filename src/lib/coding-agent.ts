@@ -429,6 +429,14 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
+  // The account a run is paid from is a SETTING, so "start over" puts it back
+  // to the box's own plan. Without this a reset left `anthropic` selected, and
+  // on a box with no Anthropic credential the wizard it reopened reported the
+  // agent as not ready with an Anthropic sentence — over a perfectly connected
+  // ClawBox AI plan. The KEY itself is deliberately not here: it is a saved
+  // credential, and a reset of the coding agent's settings is not a reason to
+  // throw away something the owner pasted (ANTHROPIC_API_KEY_CONFIG_KEY).
+  CODING_AGENT_PROVIDER_CONFIG_KEY,
   CODING_AGENT_SETUP_CONFIG_KEY,
   CODING_AGENT_CONFIG_KEY,
 ] as const;
@@ -1250,6 +1258,18 @@ export interface CodingHarnessReadiness {
    * other does not — rather than one flat "not ready" that names neither.
    */
   providers: CodingProviderReadiness[];
+  /**
+   * Could a run be started against ANY provider — not just the default one?
+   *
+   * A separate fact from `ready`, because the two answer different questions
+   * and one field cannot do both. `ready` is "a run started with nothing named
+   * would work", which is what a panel shows the owner. This is "the box can
+   * run at all", which is what decides whether the coding_agent_* tools exist:
+   * a box whose default is an account nobody has connected can still run
+   * perfectly well on the other one, and gating registration on `ready` took
+   * the tools away from a caller that would have named it.
+   */
+  anyProviderReady: boolean;
 }
 
 export interface CodingAgentStatus {
@@ -2366,6 +2386,7 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     };
   });
   const forDefault = providers.find((p) => p.id === defaultProvider) ?? providers[0];
+  const anyProviderReady = providers.some((p) => p.ready);
   return {
     ready: forDefault.ready,
     wrapperInstalled,
@@ -2380,6 +2401,7 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     // "not ready" with an empty checklist.
     problems: [...shared, ...forDefault.problems],
     providers,
+    anyProviderReady,
   };
 }
 
@@ -2404,11 +2426,31 @@ export async function setCodingProvider(provider: string): Promise<CodingProvide
   return provider;
 }
 
-/** A stored or inherited model, checked against the provider it belongs to. */
+/**
+ * The shape a stored model id may have. Not the OFFERED list — see below —
+ * but a floor, because this value is handed to the CLI through an environment
+ * variable and the file it comes from is the only thing vouching for it.
+ */
+const STORED_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._[\]-]{0,63}$/;
+
+/**
+ * A stored model as the record gets it back.
+ *
+ * A model the OFFERED list no longer carries is KEPT, not replaced. The list
+ * is what a caller may ASK for; the record is what a run was started with, and
+ * a resume re-enters a session opened on that exact model. Substituting the
+ * current default here would have the run answer on a different model than the
+ * one it is recorded as having used, silently — and a resume onto a model the
+ * account has since lost should fail saying so, which is what the wrapper and
+ * Anthropic between them do.
+ *
+ * Only the provider half is authoritative: a `clawbox-ai` run has no model of
+ * its own (the plan chooses), so anything stored against it is dropped.
+ */
 function normalizeRequestedModel(provider: unknown, raw: unknown): string | null {
   const resolved = codingProviderFrom(provider);
-  const allowed = modelsForProvider(resolved);
-  if (typeof raw === "string" && allowed.includes(raw)) return raw;
+  if (modelsForProvider(resolved).length === 0) return defaultModelForProvider(resolved);
+  if (typeof raw === "string" && STORED_MODEL_RE.test(raw)) return raw;
   return defaultModelForProvider(resolved);
 }
 
@@ -6120,8 +6162,6 @@ function spawnRun(
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task);
-  await assertCanSpawn(input.team ?? null);
-  const setprivPath = await requireSetpriv();
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -6135,8 +6175,21 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let inherited: { provider: CodingProvider; model: string | null } | null = null;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
+  const previous = resumeRunId ? loadRuns().find((r) => r.id === resumeRunId) ?? null : null;
+
+  // WHICH ACCOUNT THIS RUN WILL USE, worked out before the spawn gate rather
+  // than after it. The gate judges a provider's credential, and judging the
+  // owner's DEFAULT would refuse a run that explicitly named the account that
+  // works — with a sentence about the account it never asked for. The caller's
+  // choice, else the run being resumed, else the owner's default; the same
+  // order applyProviderChoice applies below, which has the last word.
+  const intendedProvider = isCodingProvider(input.provider)
+    ? input.provider
+    : previous?.provider ?? await getCodingProvider();
+  await assertCanSpawn(input.team ?? null, intendedProvider);
+  const setprivPath = await requireSetpriv();
+
   if (resumeRunId) {
-    const previous = loadRuns().find((r) => r.id === resumeRunId);
     if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
     if (previous.status === "running") throw new CodingAgentError("busy", "That run is still in progress; wait for it to finish before resuming it.");
     if (!previous.sessionId) throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
@@ -6319,10 +6372,17 @@ async function applyProviderChoice(
   const fallback = !named && inherited ? inherited.provider : settings.provider;
   const resolved = resolveRunProvider(input.provider, input.model, fallback);
   if (!resolved.ok) throw new CodingAgentError("invalid", resolved.error);
+  // The SAME "the caller named nothing" test the provider half uses, and for
+  // the same reason: a client that always serialises the field sends
+  // `"model": null`, which resolveRunProvider reads as unnamed. Tested only
+  // for `undefined`, that request replaced the inherited model with the
+  // provider default — breaking the one invariant this function exists to
+  // keep, that a resume re-enters the session on the model it was opened with.
+  const namedModel = input.model !== undefined && input.model !== null && input.model !== "";
   const keepsInheritedModel =
     inherited !== null
     && !named
-    && input.model === undefined
+    && !namedModel
     && resolved.provider === inherited.provider;
   return {
     ...settings,
@@ -6579,11 +6639,11 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   if (run.status !== "paused") {
     throw new CodingAgentError("invalid", "Only a paused run can be resumed in place. Start a new run instead.");
   }
-  await assertCanSpawn(run.team ?? null);
   // The account the session was OPENED on — a resume cannot move to another
   // one, so if that credential is gone the resume is refused rather than
-  // quietly re-enacted somewhere else.
-  await assertProviderReady(run.provider);
+  // quietly re-enacted somewhere else. Handed to the gate rather than checked
+  // beside it, so the box's own half and the credential are one verdict.
+  await assertCanSpawn(run.team ?? null, run.provider);
   const setprivPath = await requireSetpriv();
   // The folder must still be there. A team worker's worktree is removed when
   // its task is decided, and a run resumed into a cwd that no longer exists
@@ -6672,12 +6732,11 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
   if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
-  await assertCanSpawn(run.team ?? null);
   // The account this draft named, not whatever the default is now. Checked
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
   // spawned into a wrapper that dies.
-  await assertProviderReady(run.provider);
+  await assertCanSpawn(run.team ?? null, run.provider);
   const setprivPath = await requireSetpriv();
   // The folder must still be there — it was only checked when drafted.
   run.directory = await realDirectory(run.directory);
@@ -6717,12 +6776,36 @@ export function deleteDraftRun(id: string): void {
 }
 
 /** The gates every spawn passes: the owner's switch, readiness, the slot. */
-async function assertCanSpawn(team: RunTeam | null = null): Promise<void> {
+async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider): Promise<void> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
   const readiness = await checkReadiness();
-  if (!readiness.ready) {
+  // The provider THIS run will use, when the caller knows it — not the owner's
+  // default. `readiness.ready` is the default provider's verdict, and
+  // `setCodingProvider` deliberately accepts an account before its key is
+  // pasted, so a box can sit with an unconnected default while the other
+  // provider works perfectly. Judged on `ready` alone, a run that explicitly
+  // named the working account was refused, and the sentence it was refused
+  // with named the account it had never asked for.
+  //
+  // No provider named — the team paths and the tests that predate this — falls
+  // back to `ready`, which is the old behaviour exactly.
+  const verdict = provider
+    ? readiness.providers.find((p) => p.id === provider)
+    : null;
+  let refusal: string | null = null;
+  if (verdict) {
+    // The shared half still applies: those problems are in every provider's
+    // way. `CodingProviderReadiness.ready` already folds them in.
+    if (!verdict.ready) {
+      const shared = readiness.problems.filter((m) => !readiness.providers.some((p) => p.problems.includes(m)));
+      refusal = [...shared, ...verdict.problems].join(" ");
+    }
+  } else if (!readiness.ready) {
+    refusal = readiness.problems.join(" ");
+  }
+  if (refusal) {
     // A harness fault recorded where it actually BIT — at the moment work was
     // attempted — rather than on the status poll, which asks the same question
     // several times a minute on an open Coding Agent window. Throttled on top
@@ -6730,10 +6813,10 @@ async function assertCanSpawn(team: RunTeam | null = null): Promise<void> {
     // a count on it rather than a thousand disk writes.
     void captureIncident({
       source: "coding-harness",
-      message: readiness.problems.join(" "),
+      message: refusal,
       throttleMs: 30 * 60_000,
     });
-    throw new CodingAgentError("not_ready", readiness.problems.join(" "));
+    throw new CodingAgentError("not_ready", refusal);
   }
   if (team) {
     // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory guard.

@@ -278,6 +278,19 @@ interface CodingAgentStatusPayload {
   enabled?: boolean;
   /** enabled AND installed AND connected — the device's own verdict. */
   ready?: boolean;
+  readiness?: {
+    /**
+     * Could a run start against ANY account, not just the owner's default?
+     *
+     * `ready` is the DEFAULT provider's verdict, which is the right answer for
+     * a panel and the wrong one here: a box whose default is an account nobody
+     * has connected still runs perfectly on the other, and gating registration
+     * on `ready` took the tools away from a caller that would have named it.
+     * Absent on a server that predates the selector, where `ready` is the
+     * whole truth.
+     */
+    anyProviderReady?: boolean;
+  };
 }
 
 /**
@@ -286,7 +299,12 @@ interface CodingAgentStatusPayload {
  */
 async function probeCodingAgent(): Promise<boolean> {
   const status = await apiTry<CodingAgentStatusPayload>("/setup-api/coding-agent/status", { timeoutMs: 3_000 });
-  return status?.enabled === true && status.ready === true;
+  if (status?.enabled !== true) return false;
+  // The switch is the owner's consent and is checked first. What follows is
+  // "can this box run at all" — ANY provider where the device answers that,
+  // the default's verdict on a server that does not.
+  const any = status.readiness?.anyProviderReady;
+  return typeof any === "boolean" ? any : status.ready === true;
 }
 
 interface ChatCapabilitiesBody {

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
+import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
@@ -652,10 +653,19 @@ export default function CodingAgentSettingsPanel({
             run route is what actually holds the line. */}
         {(status?.providers?.length ?? 0) > 1 && (
           <div className="mt-4">
-            <label className="text-xs font-medium text-[var(--text-secondary)]">
+            {/* A span with an id, not a <label>: a label names ONE control
+                and this names a group of buttons, so a screen reader was told
+                nothing. role="group" + aria-labelledby is the pairing that
+                actually announces "Runs on" before the options. */}
+            <span id="coding-agent-provider-label" className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.providerLabel")}
-            </label>
-            <div className={`${SEGMENTED_TRACK} mt-1.5`} data-testid="coding-agent-provider">
+            </span>
+            <div
+              className={`${SEGMENTED_TRACK} mt-1.5`}
+              data-testid="coding-agent-provider"
+              role="group"
+              aria-labelledby="coding-agent-provider-label"
+            >
               {(status?.providers ?? []).map((id) => {
                 const active = status?.provider === id;
                 return (
@@ -668,7 +678,7 @@ export default function CodingAgentSettingsPanel({
                     data-testid={`coding-agent-provider-${id}`}
                     className={active ? SEGMENT_ON : SEGMENT_OFF}
                   >
-                    {t(`codingAgent.provider.${id}`)}
+                    {t(CODING_PROVIDER_NAME_KEY[id])}
                   </button>
                 );
               })}

@@ -44,6 +44,11 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
 }) {
   const { t } = useT();
   const [state, setState] = useState<AnthropicState | null>(null);
+  /** True once a read has ACTUALLY answered. `state === null` cannot stand in
+   *  for it: that is also what the card holds before the first read, and
+   *  before this the render path drew "not connected" over a request that had
+   *  simply failed — a false statement about the owner's account. */
+  const [read, setRead] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState<"save" | "remove" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,9 +78,11 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
       const res = await fetch("/setup-api/coding-agent/anthropic", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setState(await res.json() as AnthropicState);
+      setRead(true);
     } catch {
       // Not new information about the account: the card keeps what it last
-      // knew rather than claiming the owner has been disconnected.
+      // knew rather than claiming the owner has been disconnected — and while
+      // it has never known anything, it says nothing at all.
     }
   }, []);
 
@@ -106,6 +113,7 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.anthropicSaveFailed")));
       const next = await res.json() as AnthropicState;
       setState(next);
+      setRead(true);
       // Out of the DOM the moment it has landed.
       setDraft("");
       // Said only when the check did NOT happen: claiming "saved" is the
@@ -127,6 +135,7 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
       const res = await fetch("/setup-api/coding-agent/anthropic", { method: "DELETE" });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.anthropicRemoveFailed")));
       setState(await res.json() as AnthropicState);
+      setRead(true);
       onChangedRef.current?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.anthropicRemoveFailed"));
@@ -141,7 +150,14 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
         <div className="flex items-center gap-2 min-w-0">
           <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">key</span>
           <span className="text-xs text-[var(--text-secondary)]">{t("codingAgent.anthropicTitle")}</span>
-          {state?.source === "key" ? (
+          {!read ? (
+            // Nothing is known yet — the first read is in flight, or it
+            // failed. Either way "not connected" would be a claim about the
+            // owner's account that this card is in no position to make.
+            <span className="text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-anthropic-state">
+              {t("codingAgent.anthropicUnknown")}
+            </span>
+          ) : state?.source === "key" ? (
             <span className="text-[11px] text-emerald-400" data-testid="coding-agent-anthropic-state">
               {t("codingAgent.anthropicViaKey")}
             </span>
@@ -157,7 +173,7 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
         </div>
         {/* Only for the key — a login this card did not make is not this
             card's to end. */}
-        {state?.hasKey && (
+        {read && state?.hasKey && (
           <button
             type="button"
             onClick={() => { if (confirmRemove) { disarm(); void remove(); } else arm(); }}
@@ -207,7 +223,7 @@ export default function CodingAgentAnthropicCard({ onChanged }: {
       {/* The login the owner made themselves, when there is no key: said so
           they know where the access is coming from, and that removing a key
           here would not have ended it. */}
-      {state?.hasLogin && !state.hasKey && (
+      {read && state?.hasLogin && !state.hasKey && (
         <p className="mt-2 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-anthropic-login-note">
           {t("codingAgent.anthropicLoginNote")}
         </p>

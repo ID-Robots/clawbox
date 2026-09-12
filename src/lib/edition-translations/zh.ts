@@ -566,14 +566,15 @@ export const zh: Record<string, string> = {
   // 由哪个账户支付一次运行：本 ClawBox 自己的套餐，还是机主自己的 Anthropic
   // 访问权限。两个提供方名称是产品名，保持原样。
   "codingAgent.providerLabel": "运行于",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "运行由本 ClawBox 自己的套餐支付，模型也由套餐决定。",
   "codingAgent.providerHintAnthropic": "运行由你自己的 Anthropic 账户支付，使用 Claude 的模型。",
   "codingAgent.providerNotConnected": "你的 Anthropic 账户尚未连接，因此无法开始运行。请在下方添加密钥，或在终端应用中运行 `claude` 登录。",
   "codingAgent.providerFailed": "无法更改支付运行费用的账户。",
   "codingAgent.anthropicTitle": "Anthropic 账户",
   "codingAgent.anthropicOff": "未连接",
+  "codingAgent.anthropicUnknown": "正在检查…",
   "codingAgent.anthropicViaKey": "已用 API 密钥连接",
   "codingAgent.anthropicViaLogin": "已通过 Claude Code 登录",
   "codingAgent.anthropicHint": "你自己的 Anthropic 访问权限，用于设为 Anthropic 的运行。粘贴一个 API 密钥，或在终端应用中运行 `claude` 登录。密钥保存在本 ClawBox 上，不会再次显示。",

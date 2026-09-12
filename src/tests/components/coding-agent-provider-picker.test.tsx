@@ -55,6 +55,8 @@ function stubDevice(opts: {
   anthropic?: AnthropicAnswer;
   /** What POSTing a key answers with. */
   saveAnswer?: { body: unknown; status: number };
+  /** The GET falls over — a box the card cannot ask about. */
+  anthropicReadFails?: boolean;
 } = {}) {
   posts = [];
   deletes = [];
@@ -86,6 +88,9 @@ function stubDevice(opts: {
     if (url.startsWith("/setup-api/coding-agent/permissions")) return json({ allowRules: [], maxAllowRules: 32 });
     if (url.startsWith("/setup-api/coding-agent/git")) return json({ installed: false, connected: false, login: null, loginCommand: "gh auth login" });
     if (url.startsWith("/setup-api/coding-agent/anthropic")) {
+      if (opts.anthropicReadFails && (init?.method ?? "GET") === "GET") {
+        throw new TypeError("Failed to fetch");
+      }
       if (init?.method === "POST") {
         posts.push({ url, body: JSON.parse(String(init.body)) });
         if (opts.saveAnswer) return json(opts.saveAnswer.body, opts.saveAnswer.status);
@@ -169,6 +174,17 @@ describe("the provider picker", () => {
 });
 
 describe("the Anthropic card", () => {
+  it("does not call an account 'not connected' when the read FAILED", async () => {
+    // `state === null` is also what the card holds before the first read, so
+    // rendering it as "not connected" made a claim about the owner's account
+    // over a request that had simply fallen over.
+    stubDevice({ providers: ["clawbox-ai", "anthropic"], anthropicReadFails: true });
+    render(<CodingAgentSettingsPanel />);
+    const badge = await screen.findByTestId("coding-agent-anthropic-state");
+    expect(badge.textContent).toBe(t("codingAgent.anthropicUnknown"));
+    expect(badge.textContent).not.toBe(t("codingAgent.anthropicOff"));
+  });
+
   it("reports an unconnected account and offers no Remove", async () => {
     stubDevice({ providers: ["clawbox-ai", "anthropic"] });
     render(<CodingAgentSettingsPanel />);

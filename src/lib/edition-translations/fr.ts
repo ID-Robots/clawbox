@@ -556,14 +556,15 @@ export const fr: Record<string, string> = {
   // Anthropic du propriétaire. Les deux noms de fournisseur sont des noms de
   // produit et restent tels quels.
   "codingAgent.providerLabel": "Tourne sur",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "Les exécutions sont payées par le forfait de cette ClawBox, et le forfait choisit le modèle.",
   "codingAgent.providerHintAnthropic": "Les exécutions sont payées par votre propre compte Anthropic, avec les modèles de Claude.",
   "codingAgent.providerNotConnected": "Votre compte Anthropic n'est pas encore connecté, aucune exécution ne peut donc démarrer. Ajoutez une clé ci-dessous, ou connectez-vous avec `claude` dans l'app Terminal.",
   "codingAgent.providerFailed": "Impossible de changer le compte qui paie les exécutions.",
   "codingAgent.anthropicTitle": "Compte Anthropic",
   "codingAgent.anthropicOff": "non connecté",
+  "codingAgent.anthropicUnknown": "vérification…",
   "codingAgent.anthropicViaKey": "connecté avec une clé d'API",
   "codingAgent.anthropicViaLogin": "connecté via Claude Code",
   "codingAgent.anthropicHint": "Votre propre accès Anthropic, pour les exécutions réglées sur Anthropic. Collez une clé d'API, ou connectez-vous en lançant `claude` dans l'app Terminal. La clé reste sur cette ClawBox et n'est plus jamais affichée.",

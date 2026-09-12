@@ -542,14 +542,15 @@ export const bg: Record<string, string> = {
   // Коя сметка плаща за изпълнение: планът на самия ClawBox, или акаунтът на
   // собственика в Anthropic. Двете имена на доставчици са продуктови и остават непреведени.
   "codingAgent.providerLabel": "Работи чрез",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "Изпълненията се плащат от плана на този ClawBox, а планът избира модела.",
   "codingAgent.providerHintAnthropic": "Изпълненията се плащат от вашия собствен акаунт в Anthropic, с моделите на Claude.",
   "codingAgent.providerNotConnected": "Вашият акаунт в Anthropic още не е свързан, затова изпълнения не могат да започнат. Добавете ключ по-долу или влезте с `claude` в Терминала.",
   "codingAgent.providerFailed": "Сметката за изпълненията не можа да бъде променена.",
   "codingAgent.anthropicTitle": "Акаунт в Anthropic",
   "codingAgent.anthropicOff": "не е свързан",
+  "codingAgent.anthropicUnknown": "проверява се…",
   "codingAgent.anthropicViaKey": "свързан с API ключ",
   "codingAgent.anthropicViaLogin": "влезли сте чрез Claude Code",
   "codingAgent.anthropicHint": "Вашият собствен достъп до Anthropic, за изпълнения, зададени на Anthropic. Поставете API ключ или влезте, като изпълните `claude` в Терминала. Ключът се пази на този ClawBox и повече не се показва.",

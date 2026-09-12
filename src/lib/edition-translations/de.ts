@@ -555,14 +555,15 @@ export const de: Record<string, string> = {
   // Anthropic-Zugang des Besitzers. Die beiden Anbieternamen sind Produktnamen
   // und bleiben unübersetzt.
   "codingAgent.providerLabel": "Läuft über",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "Läufe werden vom Plan dieser ClawBox bezahlt, und der Plan wählt das Modell.",
   "codingAgent.providerHintAnthropic": "Läufe werden von Ihrem eigenen Anthropic-Konto bezahlt, mit den Modellen von Claude.",
   "codingAgent.providerNotConnected": "Ihr Anthropic-Konto ist noch nicht verbunden, deshalb können keine Läufe starten. Fügen Sie unten einen Schlüssel hinzu oder melden Sie sich mit `claude` in der Terminal-App an.",
   "codingAgent.providerFailed": "Das Konto für die Läufe konnte nicht geändert werden.",
   "codingAgent.anthropicTitle": "Anthropic-Konto",
   "codingAgent.anthropicOff": "nicht verbunden",
+  "codingAgent.anthropicUnknown": "wird geprüft…",
   "codingAgent.anthropicViaKey": "mit API-Schlüssel verbunden",
   "codingAgent.anthropicViaLogin": "über Claude Code angemeldet",
   "codingAgent.anthropicHint": "Ihr eigener Anthropic-Zugang, für Läufe, die auf Anthropic stehen. Fügen Sie einen API-Schlüssel ein oder melden Sie sich an, indem Sie `claude` in der Terminal-App ausführen. Der Schlüssel bleibt auf dieser ClawBox und wird nie wieder angezeigt.",

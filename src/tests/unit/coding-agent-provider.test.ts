@@ -46,6 +46,7 @@ vi.mock("@/lib/coding-anthropic", async (importOriginal) => ({
 import {
   ANTHROPIC_MODELS,
   CODING_AGENT_PROVIDER_CONFIG_KEY,
+  CODING_PROVIDER_NAME_KEY,
   CODING_PROVIDERS,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_CODING_PROVIDER,
@@ -87,6 +88,22 @@ describe("the vocabulary", () => {
     expect(codingProviderFrom("openai")).toBe("clawbox-ai");
     expect(codingProviderFrom(7)).toBe("clawbox-ai");
     expect(codingProviderFrom("anthropic")).toBe("anthropic");
+  });
+
+  it("has a catalogue key per provider, and none of them is built by interpolation", () => {
+    // `codingAgent.provider.${id}` put a HYPHEN in a translation key —
+    // `clawbox-ai` — which the catalogue convention forbids
+    // (translations.test.ts) and which nothing but the whole-catalogue test
+    // caught, well after the UI rendered fine. The table is checked against
+    // the same rule here, at the source, so the next provider cannot repeat it.
+    const DOTTED_CAMEL = /^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z0-9][a-zA-Z0-9]*)*$/;
+    for (const id of CODING_PROVIDERS) {
+      const key = CODING_PROVIDER_NAME_KEY[id];
+      expect(key, `${id} has no name key`).toBeTruthy();
+      expect(key, `${key} breaks the catalogue's key convention`).toMatch(DOTTED_CAMEL);
+    }
+    // Distinct keys: one label for both providers would name the wrong account.
+    expect(new Set(Object.values(CODING_PROVIDER_NAME_KEY)).size).toBe(CODING_PROVIDERS.length);
   });
 
   it("names models for Anthropic only — the ClawBox AI plan chooses its own", () => {
@@ -160,6 +177,24 @@ describe("the owner's default", () => {
     // a run is what is gated.
     getAnthropicConnection.mockResolvedValue(DISCONNECTED);
     await expect(setCodingProvider("anthropic")).resolves.toBe("anthropic");
+  });
+});
+
+describe("what a reset does and does not take away", () => {
+  it("puts the account back to the box's own plan", async () => {
+    // Left behind, an `anthropic` default made the wizard a reset reopened
+    // report the agent as not ready — with an Anthropic sentence, over a
+    // perfectly connected ClawBox AI plan.
+    const lib = await import("@/lib/coding-agent");
+    expect([...lib.CODING_AGENT_RESET_KEYS]).toContain(CODING_AGENT_PROVIDER_CONFIG_KEY);
+  });
+
+  it("keeps the saved Anthropic key", async () => {
+    // A reset of the coding agent's SETTINGS is not a reason to throw away a
+    // credential the owner pasted.
+    const lib = await import("@/lib/coding-agent");
+    const { ANTHROPIC_API_KEY_CONFIG_KEY } = await import("@/lib/coding-provider");
+    expect([...lib.CODING_AGENT_RESET_KEYS]).not.toContain(ANTHROPIC_API_KEY_CONFIG_KEY);
   });
 });
 
@@ -257,6 +292,31 @@ describe("readiness, per provider", () => {
     const out = await readiness({ clawai_token: "claw_secret_token", [CODING_AGENT_PROVIDER_CONFIG_KEY]: "anthropic" });
     expect(JSON.stringify(out)).not.toContain("claw_secret_token");
     expect(JSON.stringify(out)).not.toContain("sk-ant-");
+  });
+
+  it("answers two different questions with two fields, not one", async () => {
+    // `ready` is what a PANEL shows the owner: "a run started with nothing
+    // named would work", so it follows the DEFAULT provider. `anyProviderReady`
+    // is "can this box run at all", so it follows the OR — and that is the one
+    // the MCP probe reads, because a box whose default is an account nobody
+    // connected still runs perfectly on the other, and gating tool
+    // registration on `ready` took the tools away from a caller that would
+    // have named it.
+    //
+    // Asserted as a DERIVATION rather than as two booleans: whether the box's
+    // own half (Claude Code, the wrapper, setpriv) is in place depends on the
+    // machine running this, and a test that assumed it would pass here and
+    // fail on a runner with no `claude` installed.
+    const out = await readiness({ clawai_token: "tok", [CODING_AGENT_PROVIDER_CONFIG_KEY]: "anthropic" });
+    const byId = Object.fromEntries(out.providers.map((p) => [p.id, p]));
+    expect(out.ready).toBe(byId.anthropic.ready);
+    expect(out.anyProviderReady).toBe(out.providers.some((p) => p.ready));
+    // The credential half is the part this test controls, and the two
+    // providers genuinely disagree about it here.
+    expect(byId.anthropic.problems.length).toBeGreaterThan(0);
+    expect(byId["clawbox-ai"].problems).toEqual([]);
+    // So `ready` can never be the more generous of the two.
+    expect(out.ready && !out.anyProviderReady).toBe(false);
   });
 
   it("puts the DEFAULT provider's own missing credential in the flat problem list", async () => {

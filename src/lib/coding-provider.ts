@@ -62,6 +62,22 @@ export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 /** The model an `anthropic` run gets when the caller named none. */
 export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5";
 
+/**
+ * The catalogue key that names a provider in the owner's language.
+ *
+ * A TABLE, not `codingAgent.provider.${id}`. Two reasons, and the first is a
+ * rule this repository enforces: translation keys are dot-notation camelCase
+ * (`translations.test.ts`), and `clawbox-ai` has a hyphen in it — built by
+ * interpolation the key was `codingAgent.provider.clawbox-ai`, which the
+ * catalogue convention forbids and which only the whole-catalogue test caught.
+ * The second is that a key assembled from a value cannot be grepped, so a
+ * renamed provider would leave a dead lookup no search would find.
+ */
+export const CODING_PROVIDER_NAME_KEY: Readonly<Record<CodingProvider, string>> = {
+  "clawbox-ai": "codingAgent.providerName.clawboxAi",
+  anthropic: "codingAgent.providerName.anthropic",
+};
+
 export function isCodingProvider(value: unknown): value is CodingProvider {
   return typeof value === "string" && (CODING_PROVIDERS as readonly string[]).includes(value);
 }

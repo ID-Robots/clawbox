@@ -412,6 +412,17 @@ describe("coding_agent_run — provider and model", () => {
     expect(apiPost.mock.calls[0][1]).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5" });
   });
 
+  it("lets a model-only request through — the owner's default decides, not this process", async () => {
+    // This process does not know the owner's stored default. Checked against
+    // the shipped one, `{ model: "claude-opus-5" }` on a box whose default is
+    // already `anthropic` was refused — and the refusal told the agent to pass
+    // the very provider that was in force.
+    apiPost.mockResolvedValue({ started: true, run: RUN });
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", model: "claude-opus-5" });
+    expect(out.isError).toBe(false);
+    expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", model: "claude-opus-5" });
+  });
+
   it("refuses a model named for ClawBox AI without calling the device", async () => {
     const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "clawbox-ai", model: "claude-opus-5" });
     expect(out.isError).toBe(true);

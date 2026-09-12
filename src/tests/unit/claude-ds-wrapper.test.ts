@@ -697,4 +697,28 @@ describe("the provider split", () => {
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/non-HTTPS/);
   });
+
+  it("refuses a plaintext SECOND base URL too — it carries the same token", () => {
+    // CLAUDE_CODE_API_BASE_URL is the account surface and the run exports
+    // ANTHROPIC_AUTH_TOKEN for it as well, so guarding only the proxy left an
+    // unchecked way to put a live credential on the wire in the clear.
+    const res = runWrapper({ CLAUDE_DS_API_BASE_URL: "http://example.invalid/anthropic" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/non-HTTPS/);
+    expect(res.stderr).toMatch(/CLAUDE_DS_API_BASE_URL/);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("accepts a loopback second base, the way it accepts a loopback proxy", () => {
+    const res = runWrapper({ CLAUDE_DS_API_BASE_URL: "http://127.0.0.1:8080/anthropic" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBe("http://127.0.0.1:8080/anthropic");
+  });
+
+  it("does not check the second base on an anthropic run, which never sets it", () => {
+    writeNativeLogin();
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_API_BASE_URL: "http://example.invalid/x" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBeUndefined();
+  });
 });

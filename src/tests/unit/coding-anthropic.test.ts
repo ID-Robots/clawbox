@@ -32,6 +32,8 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 import {
+  MAX_ANTHROPIC_KEY_CHARS,
+  _resetAnthropicLoginCache,
   clearAnthropicKey,
   getAnthropicConnection,
   getAnthropicKey,
@@ -51,6 +53,8 @@ beforeEach(() => {
   process.env.CLAWBOX_TEST_HOME = home;
   configGet.mockReset().mockResolvedValue(undefined);
   configSet.mockReset().mockResolvedValue(undefined);
+  // Each case gets its own home; the cache must not answer for the last one's.
+  _resetAnthropicLoginCache();
 });
 
 afterEach(() => {
@@ -92,6 +96,15 @@ describe("finding a `claude` login", () => {
     expect(hasAnthropicLogin()).toBe(false);
   });
 
+  it("notices a sign-in made after an earlier read said there was none", () => {
+    // The verdict is cached to keep a five-second status poll off a whole-file
+    // read, keyed on the file's size and mtime — so a login the owner has just
+    // made must show up at the next poll, not after a timer.
+    expect(hasAnthropicLogin()).toBe(false);
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "o@e.com" } }));
+    expect(hasAnthropicLogin()).toBe(true);
+  });
+
   it("does not throw on a config that is not JSON at all", () => {
     fs.writeFileSync(path.join(home, ".claude.json"), "{{{ not json");
     expect(hasAnthropicLogin()).toBe(false);
@@ -105,6 +118,19 @@ describe("the stored key", () => {
     expect(looksLikeAnthropicKey("sk-ant-short")).toBe(false);
     // Whitespace would break the header it ends up in.
     expect(looksLikeAnthropicKey(`sk-ant-api03 ${"x".repeat(40)}`)).toBe(false);
+  });
+
+  it("refuses a key past the cap — the helper's own bound, not the route's", async () => {
+    // The route rejects an oversized body before `setAnthropicKey` is reached,
+    // so its boundary test would still pass if this bound were lost. Checked
+    // here, where the helper is the only thing standing between the value and
+    // `configSet`.
+    const atCap = `sk-ant-${"x".repeat(MAX_ANTHROPIC_KEY_CHARS - "sk-ant-".length)}`;
+    expect(atCap.length).toBe(MAX_ANTHROPIC_KEY_CHARS);
+    expect(looksLikeAnthropicKey(atCap)).toBe(true);
+    expect(looksLikeAnthropicKey(`${atCap}x`)).toBe(false);
+    await expect(setAnthropicKey(`${atCap}x`)).rejects.toThrow();
+    expect(configSet).not.toHaveBeenCalled();
   });
 
   it("stores a trimmed key and refuses one that is not a key", async () => {

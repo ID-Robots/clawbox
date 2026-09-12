@@ -129,6 +129,62 @@ function readableNonEmptyFile(file: string): boolean {
 }
 
 /**
+ * The last verdict about `~/.claude.json`, keyed on what would change it.
+ *
+ * The Coding Agent app polls the status route every five seconds while a run
+ * or a pull request is in flight, and each poll reached the branch below: a
+ * SYNCHRONOUS whole-file read plus a `JSON.parse`, on the web server's event
+ * loop. That file is Claude Code's own and grows a `projects` entry for every
+ * folder the owner has ever opened, so on a box in daily use it is not small.
+ *
+ * Keyed on size and mtime rather than a timer alone: the answer changes only
+ * when the file does, and a sign-in the owner has just made must show up at
+ * the next poll rather than after a TTL. The TTL is the other half — it
+ * bounds a clock that went backwards and an mtime granularity coarser than
+ * the poll — so the worst case is one stale answer, and the stale answer is
+ * never used to REFUSE anything: a run's own gate re-reads (assertCanSpawn),
+ * and the wrapper reads the file itself immediately before exec.
+ */
+let configLoginCache: { key: string; at: number; answer: boolean } | null = null;
+
+/** How long a cached verdict may stand even if nothing about the file changed. */
+const LOGIN_CACHE_TTL_MS = 5_000;
+
+/** The whole-file read, cached. Returns false for anything it cannot read. */
+function configHasAccount(): boolean {
+  let key: string;
+  try {
+    const stat = fs.statSync(claudeConfigPath());
+    key = `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    // No config at all is a stable, cheap answer — and not one worth caching,
+    // since a stat is all it cost.
+    return false;
+  }
+  const now = Date.now();
+  if (configLoginCache && configLoginCache.key === key && now - configLoginCache.at < LOGIN_CACHE_TTL_MS) {
+    return configLoginCache.answer;
+  }
+  let answer = false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(claudeConfigPath(), "utf8")) as unknown;
+    if (typeof parsed === "object" && parsed !== null) {
+      const account = (parsed as { oauthAccount?: unknown }).oauthAccount;
+      answer = typeof account === "object" && account !== null;
+    }
+  } catch {
+    answer = false;
+  }
+  configLoginCache = { key, at: now, answer };
+  return answer;
+}
+
+/** Test seam: forget what was read, so a case can rewrite the file under it. */
+export function _resetAnthropicLoginCache(): void {
+  configLoginCache = null;
+}
+
+/**
  * Has the owner signed `claude` in on this box?
  *
  * Asked of the files rather than by running `claude`: the CLI has no
@@ -136,18 +192,13 @@ function readableNonEmptyFile(file: string): boolean {
  * on every status poll. Two places count, because which one holds the answer
  * depends on the CLI's version — the credential file it writes on Linux, and
  * the account block in its top-level config.
+ *
+ * The credential file is checked FIRST and is a `stat`, so the common case —
+ * a box where the owner has signed in — never opens the larger config at all.
  */
 export function hasAnthropicLogin(): boolean {
   if (readableNonEmptyFile(credentialsPath())) return true;
-  try {
-    const raw = fs.readFileSync(claudeConfigPath(), "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null) return false;
-    const account = (parsed as { oauthAccount?: unknown }).oauthAccount;
-    return typeof account === "object" && account !== null;
-  } catch {
-    return false;
-  }
+  return configHasAccount();
 }
 
 /** The whole connection state, for the status payload and for readiness. */

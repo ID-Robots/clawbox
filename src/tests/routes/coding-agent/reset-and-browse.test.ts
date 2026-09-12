@@ -252,8 +252,18 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // rather than leaving a run started after the wizard with permissions
       // granted before it.
       "coding_agent_allow_rules",
+      // WHICH ACCOUNT PAYS is a setting, not a credential: "start over" puts
+      // it back to the box's own plan. Left behind, an `anthropic` default
+      // made the wizard the reset reopened report the agent as not ready —
+      // with an Anthropic sentence, over a perfectly connected ClawBox AI
+      // plan. The KEY itself is deliberately absent from this list, and the
+      // assertion below is what keeps it that way.
+      "coding_agent_provider",
       "coding_agent_setup_complete",
       "coding_agent_enabled",
     ]);
+    // A reset of the coding agent's SETTINGS is not a reason to throw away a
+    // credential the owner pasted, so the Anthropic key survives it.
+    expect([...CODING_AGENT_RESET_KEYS]).not.toContain("anthropic_api_key");
   });
 });

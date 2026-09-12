@@ -556,14 +556,15 @@ export const nl: Record<string, string> = {
   // Anthropic-toegang van de eigenaar. De twee providernamen zijn productnamen
   // en blijven ongewijzigd.
   "codingAgent.providerLabel": "Draait op",
-  "codingAgent.provider.clawbox-ai": "ClawBox AI",
-  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
   "codingAgent.providerHintClawbox": "Runs worden betaald door het abonnement van deze ClawBox, en het abonnement kiest het model.",
   "codingAgent.providerHintAnthropic": "Runs worden betaald door je eigen Anthropic-account, met de modellen van Claude.",
   "codingAgent.providerNotConnected": "Je Anthropic-account is nog niet verbonden, dus er kunnen geen runs starten. Voeg hieronder een sleutel toe, of meld je aan met `claude` in de Terminal-app.",
   "codingAgent.providerFailed": "Kon het account dat de runs betaalt niet wijzigen.",
   "codingAgent.anthropicTitle": "Anthropic-account",
   "codingAgent.anthropicOff": "niet verbonden",
+  "codingAgent.anthropicUnknown": "controleren…",
   "codingAgent.anthropicViaKey": "verbonden met een API-sleutel",
   "codingAgent.anthropicViaLogin": "aangemeld met Claude Code",
   "codingAgent.anthropicHint": "Je eigen Anthropic-toegang, voor runs die op Anthropic staan. Plak een API-sleutel, of meld je aan door `claude` uit te voeren in de Terminal-app. De sleutel blijft op deze ClawBox en wordt nooit meer getoond.",
