@@ -5289,6 +5289,20 @@ async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"st
 }
 
 /**
+ * End the loop a settled ROUND belonged to, when nothing else will.
+ *
+ * `resumeReviewAfterFix` is the ordinary way back, and it is reached from the
+ * settle path. The paths that never reach it — Stop on a paused round — come
+ * here instead, or the loop waits for a run that is never coming back.
+ */
+function endReviewLoopFor(finished: CodingRun, detail: string): void {
+  if (!finished.reviewLoopOf) return;
+  const origin = loadRuns().find((r) => r.id === finished.reviewLoopOf);
+  if (!origin?.review || origin.review.state !== "working") return;
+  settleReview(origin, "needs_owner", detail);
+}
+
+/**
  * A review round has come home: push what it committed, then look again.
  *
  * Called from the settle path instead of the pull-request step, because a
@@ -6163,6 +6177,10 @@ export function stopRun(id: string): CodingRun {
     if (isPrPending(run.pr)) {
       settlePr(run, "failed", `Stopped before a pull request was opened. The work stays on ${run.pr?.branch ?? runBranchName(run.id)}.`);
     }
+    // A paused REVIEW ROUND stopped here never reaches finishRun either, so
+    // the loop that is waiting for it would sit in "working" until the next
+    // restart — pending in every sweep, and polled again at boot.
+    endReviewLoopFor(run, "The review round was stopped while it was paused, so the pull request is still open.");
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
