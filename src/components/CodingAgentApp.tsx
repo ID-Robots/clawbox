@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
 import { isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
+import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
@@ -122,6 +123,12 @@ interface Run {
   transcriptPath?: string | null;
   /** The run this one is the automatic review pass of, when it is one. */
   reviewOf?: string | null;
+  /** The run whose pull request this one is a REVIEW ROUND of, when it is one. */
+  reviewLoopOf?: string | null;
+  /** The review loop over this run's pull request — the rounds of CI failures,
+   *  review comments and conflicts the box handed back to the harness after the
+   *  pull request was opened. Absent on a run recorded before the loop. */
+  review?: ReviewLoop | null;
   /** Set on a run a coding team spawned: which team, in which role, for which task. */
   team?: { id: string; role: "planner" | "worker" | "reviewer"; taskId: string | null } | null;
   /** The pull request this run's work went into, while the auto-PR switch is
@@ -996,25 +1003,34 @@ export default function CodingAgentApp() {
   const prChip = (run: Run) => {
     const pr = run.pr;
     if (!pr || pr.phase === "failed") return null;
+    // A pull request the loop cleared but was not allowed to merge is GREEN,
+    // not amber: "needs you" over a suite that passed and a queue of comments
+    // that is empty says the opposite of what happened.
+    const cleared = run.review?.state === "clean";
     const className = `text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 no-underline inline-flex items-center gap-1 ${
-      pr.phase === "merged"
+      pr.phase === "merged" || cleared
         ? "text-emerald-400 border-emerald-400/40"
         : pr.phase === "blocked"
           ? "text-amber-400 border-amber-400/40"
           : "text-sky-300 border-sky-400/40"
     }`;
+    const pending = pr.phase === "waiting" || pr.phase === "review";
     const body = (
       <>
-        {pr.phase === "waiting" && (
+        {pending && (
           <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />
         )}
-        {pr.phase === "waiting"
-          ? t("codingAgent.prWaiting", { done: pr.checks.passed + pr.checks.failed, total: pr.checks.total })
-          : pr.phase === "merged"
-            ? t("codingAgent.prMerged")
-            : pr.phase === "blocked"
-              ? t("codingAgent.prBlocked")
-              : t("codingAgent.prOpening")}
+        {pr.phase === "review" && run.review
+          ? t("codingAgent.prReviewRound", { round: run.review.round, max: run.review.maxRounds })
+          : pr.phase === "waiting"
+            ? t("codingAgent.prWaiting", { done: pr.checks.passed + pr.checks.failed, total: pr.checks.total })
+            : pr.phase === "merged"
+              ? t("codingAgent.prMerged")
+              : cleared
+                ? t("codingAgent.prClean")
+                : pr.phase === "blocked"
+                  ? t("codingAgent.prBlocked")
+                  : t("codingAgent.prOpening")}
       </>
     );
     // No URL means nothing to follow, and an `<a>` without `href` is not a
@@ -1038,6 +1054,54 @@ export default function CodingAgentApp() {
       <span data-testid={`coding-agent-pr-${run.id}`} title={pr.detail ?? undefined} className={className}>
         {body}
       </span>
+    );
+  };
+
+  /**
+   * The review loop as a card on the run's page: which round it is on, what
+   * the checks say, how many review comments are still unanswered, and where
+   * it ended.
+   *
+   * Drawn for a settled loop as well as a live one — "3 rounds did not clear
+   * it" is the fact the owner has to act on, and it is gone from the chip the
+   * moment the phase settles.
+   */
+  const reviewCard = (run: Run) => {
+    const review = run.review;
+    if (!review) return null;
+    const checks = foldReviewChecks(review.checks);
+    const working = review.state === "polling" || review.state === "working";
+    // The key is camelCase while the STATE is the API's own snake_case
+    // `needs_owner`: the catalogue's key convention forbids an underscore
+    // (translations.test.ts pins it), and the wire format is not this card's
+    // to rename.
+    const stateLabel = t(`codingAgent.reviewState.${review.state === "needs_owner" ? "needsOwner" : review.state}`);
+    return (
+      <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-review" data-state={review.state}>
+        <p className={SECTION_LABEL}>
+          {t("codingAgent.reviewTitle")}
+          <span className="normal-case tracking-normal font-normal text-[var(--text-secondary)]"> · {stateLabel}</span>
+        </p>
+        <p className="mt-1.5 text-xs text-[var(--text-secondary)] flex items-center gap-1.5 flex-wrap">
+          {working && <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />}
+          <span data-testid="coding-agent-review-round">{t("codingAgent.reviewRound", { round: review.round, max: review.maxRounds })}</span>
+          <span data-testid="coding-agent-review-checks">
+            · {checks.total === 0
+              ? t("codingAgent.reviewNoChecks")
+              : t("codingAgent.reviewChecks", { passed: checks.passed, failed: checks.failed, pending: checks.pending })}
+          </span>
+          <span data-testid="coding-agent-review-threads">· {t("codingAgent.reviewThreads", { n: review.unresolvedThreads })}</span>
+          {review.reviewDecision === "CHANGES_REQUESTED" && (
+            <span className="text-amber-300" data-testid="coding-agent-review-changes">· {t("codingAgent.reviewChangesRequested")}</span>
+          )}
+        </p>
+        {review.detail && (
+          <p className={`mt-1.5 text-[11px] break-words ${review.state === "merged" || review.state === "clean" ? "text-emerald-300/90" : "text-amber-300/90"}`} data-testid="coding-agent-review-detail">
+            {review.detail}
+          </p>
+        )}
+        {review.fixRunId && runChip(review.fixRunId, t("codingAgent.reviewFixRun", { id: review.fixRunId }), "coding-agent-review-fix-run")}
+      </div>
     );
   };
 
@@ -1233,6 +1297,7 @@ export default function CodingAgentApp() {
                         {/* A review pass names the run it reviewed, and that
                             run names its reviewer. */}
                         {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+                  {run.reviewLoopOf && runChip(run.reviewLoopOf, t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
                         {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                         {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
                         <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
@@ -2114,6 +2179,8 @@ export default function CodingAgentApp() {
                 );
               })()}
               {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} />}
+
+              {reviewCard(run)}
 
               {/* The summary is the run's closing message, and that is
                   markdown. Drawn through the chat's renderer, which builds

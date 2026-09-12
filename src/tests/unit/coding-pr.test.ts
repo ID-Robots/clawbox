@@ -221,7 +221,7 @@ describe("run branches", () => {
     // The reader of coding-agent-runs.json validates against this list; a
     // phase written but not listed would drop the pull request on the next
     // read (the same trap RUN_STATUSES exists to close).
-    expect([...PR_PHASES].sort()).toEqual(["blocked", "failed", "merged", "opening", "waiting"]);
+    expect([...PR_PHASES].sort()).toEqual(["blocked", "failed", "merged", "opening", "review", "waiting"]);
     for (const phase of PR_PHASES) expect(isPrPhase(phase)).toBe(true);
     expect(isPrPhase("open")).toBe(false);
     expect(isPrPhase(undefined)).toBe(false);
@@ -294,7 +294,11 @@ describe("the pull request across the owner's gestures", () => {
     fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
     fs.writeFileSync(
       path.join(root, "data", "config.json"),
-      JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_generate_images: false, coding_agent_auto_pr: true }),
+      // `coding_agent_review_rounds: 0` on purpose: this file is about the
+      // older checks-only watcher (pr.phase "waiting"), which is exactly what
+      // a box with the review loop switched off keeps. The loop's own decisions
+      // are pinned in coding-review.test.ts.
+      JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_generate_images: false, coding_agent_auto_pr: true, coding_agent_review_rounds: 0 }),
     );
     const project = path.join(root, "data", "code-projects", "site");
     fs.mkdirSync(project, { recursive: true });

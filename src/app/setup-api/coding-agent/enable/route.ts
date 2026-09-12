@@ -11,11 +11,13 @@ import {
   setDefaultDirectory,
   setEffort,
   setMaxTurns,
+  setAutoMerge,
   setAutoPr,
   setGenerateAudio,
   setGenerateImages,
   setRealBrowser,
   setReviewPass,
+  setReviewRounds,
   setSetupComplete,
   setTokenLimit,
 } from "@/lib/coding-agent";
@@ -62,6 +64,14 @@ function forbidden() {
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
+ * POST { reviewRounds: number } → how many follow-up turns the review loop may
+ * hand the harness after the pull request is opened (failing check logs,
+ * unresolved review comments, "rebase onto <base>"). 0 switches the loop off
+ * and leaves the older checks-only watcher in charge; the range is refused
+ * rather than clamped, so a caller learns what this box offers.
+ * POST { autoMerge: boolean } → may the box squash-merge a pull request its
+ * own review loop cleared? Off by default, and never into `main`. See
+ * @/lib/coding-review-state for the decision.
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
  * shows the wizard instead of its home page until this is true; the reset
  * route is what puts it back to false).
@@ -114,6 +124,8 @@ export async function POST(request: Request) {
     tokenLimit?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
+    reviewRounds?: unknown;
+    autoMerge?: unknown;
     generateImages?: unknown;
     generateAudio?: unknown;
     realBrowser?: unknown;
@@ -124,6 +136,8 @@ export async function POST(request: Request) {
   const hasReviewPass = typeof fields.reviewPass === "boolean";
   const hasSetupComplete = typeof fields.setupComplete === "boolean";
   const hasAutoPr = typeof fields.autoPr === "boolean";
+  const hasReviewRounds = typeof fields.reviewRounds === "number";
+  const hasAutoMerge = typeof fields.autoMerge === "boolean";
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
@@ -139,7 +153,7 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -147,7 +161,8 @@ export async function POST(request: Request) {
           + "{ effort: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
-          + "{ realBrowser: boolean }, "
+          + "{ realBrowser: boolean }, { reviewRounds: number }, "
+          + "{ autoMerge: boolean }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -196,6 +211,14 @@ export async function POST(request: Request) {
     if (hasAutoPr) {
       const saved = await setAutoPr(fields.autoPr);
       console.error(`[coding-agent] auto pull requests switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasReviewRounds) {
+      const saved = await setReviewRounds(fields.reviewRounds);
+      console.error(`[coding-agent] review rounds set to ${saved} by the owner`);
+    }
+    if (hasAutoMerge) {
+      const saved = await setAutoMerge(fields.autoMerge);
+      console.error(`[coding-agent] merging a cleared pull request switched ${saved ? "on" : "off"} by the owner`);
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);

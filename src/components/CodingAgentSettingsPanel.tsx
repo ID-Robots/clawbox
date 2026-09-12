@@ -72,6 +72,15 @@ export interface AgentStatus {
   /** The owner's switch for branch -> pull request -> wait for checks ->
    *  merge. Optional: an older server does not answer with it. */
   autoPr?: boolean;
+  /** How many follow-up turns the review loop may hand the harness after the
+   *  pull request is opened. 0 is off. Optional: an older server answers with
+   *  none, and the card then shows no control rather than inventing a value. */
+  reviewRounds?: number;
+  minReviewRounds?: number;
+  maxReviewRounds?: number;
+  /** May the box merge a pull request its own review loop cleared? Optional,
+   *  and OFF when absent — it is a consent, not a preference. */
+  autoMerge?: boolean;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
   suggestedDirectory?: string;
@@ -124,8 +133,12 @@ const CONFIRM_MS = 5_000;
  * message sat below the GitHub card, a screen away from a Steps field that
  * still held the refused number.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "settings" | "github";
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens"]);
+type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "settings" | "github";
+// The slots that draw their refusal BESIDE the field rather than at the foot of
+// the card. The rounds select is one of them: the route refuses a number
+// outside its range rather than clamping it, and that sentence belongs next to
+// the control that asked for it.
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds"]);
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -813,6 +826,71 @@ export default function CodingAgentSettingsPanel({
             onChange={(next) => void saveSetting({ autoPr: next }, "autoPr", t("codingAgent.autoPrFailed"))}
           />
         </div>
+
+        {/* What happens to that pull request AFTER it is opened: CI going red,
+            review comments, a conflict with a sibling merge. Each round is one
+            follow-up turn in the run's own session, so the number is a budget
+            and not a timer. Hidden altogether on a server that does not answer
+            with the field — a control over a setting the box has no route for
+            would save nothing. */}
+        {typeof status?.reviewRounds === "number" && (
+          <>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="min-w-0 flex items-center gap-1.5">
+                <label htmlFor="coding-agent-review-rounds" className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.reviewRoundsLabel")}
+                </label>
+                <HelpTip
+                  text={t("codingAgent.reviewRoundsHint")}
+                  label={t("codingAgent.reviewRoundsLabel")}
+                  testId="coding-agent-review-rounds-help"
+                />
+              </div>
+              {/* A select rather than a number field: the range is six values,
+                  so there is no draft to hold, nothing to save on blur, and
+                  nothing the owner can type that the route would refuse. */}
+              <select
+                id="coding-agent-review-rounds"
+                value={String(status.reviewRounds)}
+                disabled={saving}
+                data-testid="coding-agent-review-rounds"
+                onChange={(e) => void saveSetting({ reviewRounds: Number(e.target.value) }, "reviewRounds", t("codingAgent.reviewRoundsFailed"))}
+                className={`text-base sm:text-xs ${FIELD} w-28`}
+              >
+                {Array.from(
+                  { length: (status.maxReviewRounds ?? 6) - (status.minReviewRounds ?? 0) + 1 },
+                  (_, i) => (status.minReviewRounds ?? 0) + i,
+                ).map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? t("codingAgent.reviewRoundsOff") : String(n)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {errorIn("reviewRounds")}
+
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="min-w-0 flex items-center gap-1.5">
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.autoMergeLabel")}
+                </span>
+                <HelpTip
+                  text={t("codingAgent.autoMergeHint")}
+                  label={t("codingAgent.autoMergeLabel")}
+                  testId="coding-agent-auto-merge-help"
+                />
+              </div>
+              <Switch
+                checked={status?.autoMerge ?? false}
+                busy={busy === "autoMerge"}
+                disabled={!status || saving}
+                label={t("codingAgent.autoMergeLabel")}
+                testId="coding-agent-auto-merge"
+                onChange={(next) => void saveSetting({ autoMerge: next }, "autoMerge", t("codingAgent.autoMergeFailed"))}
+              />
+            </div>
+          </>
+        )}
 
         {errorIn("settings")}
       </div>
