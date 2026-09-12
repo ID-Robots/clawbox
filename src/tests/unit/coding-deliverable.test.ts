@@ -257,3 +257,32 @@ describe("the words the harness and the owner are given", () => {
     expect(reason).toMatch(/Resume/);
   });
 });
+
+describe("what the box may delete without being asked", () => {
+  it("keeps a run that gave up out of every retention sweep, without making it 'held'", async () => {
+    // `gave_up` has to be two things at once, which is why it needs its own
+    // predicate rather than a place in `isHeld`: SETTLED, so the history list,
+    // `runOutcome` and the gate all read it as an ending — and a holder of a
+    // resumable session, so neither the trim that makes room for a new run nor
+    // the owner's Clear history may take it and its evidence folder away.
+    const { holdsResumableSession, isHeld, isSettled, isGaveUp, isLive } =
+      await import("@/lib/coding-agent-status");
+
+    expect(isGaveUp("gave_up")).toBe(true);
+    expect(holdsResumableSession("gave_up")).toBe(true);
+    // …and still settled, which is the half a place in `isHeld` would have lost.
+    expect(isSettled("gave_up")).toBe(true);
+    expect(isHeld("gave_up")).toBe(false);
+    expect(isLive("gave_up")).toBe(false);
+
+    // The three that were already held are covered by the same predicate, so the
+    // retention sweeps need read only this one.
+    for (const status of ["running", "paused", "draft"] as const) {
+      expect(holdsResumableSession(status), status).toBe(true);
+    }
+    // And the endings with nothing to resume are not.
+    for (const status of ["completed", "failed", "stopped"] as const) {
+      expect(holdsResumableSession(status), status).toBe(false);
+    }
+  });
+});

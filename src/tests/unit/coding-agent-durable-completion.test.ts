@@ -39,8 +39,11 @@ vi.mock("@/lib/project-icon", async (importOriginal) => ({
   ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
 }));
 // The settle path's git: a fake harness writes files, and committing them is
-// neither the subject here nor something a temp folder should pay for.
-const commitRunWork = vi.hoisted(() => vi.fn(async () => ({ ok: false as const, reason: "not a repository" })));
+// neither the subject here nor something a temp folder should pay for. The
+// outcome is the real `GitOutcome` no-change shape — `{ committed: false,
+// reason: GitSkipReason }` — so `recordRunWork` reads it as "nothing to record"
+// rather than filing a `commitError` off a shape the device never produces.
+const commitRunWork = vi.hoisted(() => vi.fn(async () => ({ committed: false as const, reason: "no_changes" as const })));
 vi.mock("@/lib/coding-git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-git")>()),
   commitRunWork,
@@ -141,17 +144,28 @@ function makeProject(id: string): string {
  * Wait until the record is settled for good.
  *
  * `waitForRun` answers the FIRST settle, which for a run with a deliverable is
- * not the end of it — the gate may put it straight back to work. So the poll is
- * on a settled status that is also no longer mid-attempt.
+ * not the end of it — the gate may put it straight back to work. Nor is "settled
+ * status and no open attempt" enough: between the gate closing one attempt and
+ * `startCompletionAttempt` flipping the record back to `running`, the record is
+ * briefly `completed` with no attempt open, and a poll that caught that window
+ * ran its assertions in the MIDDLE of the loop (seen under a parallel sweep:
+ * "attempt 3 of 3" in the log beside a zero announce count).
+ *
+ * So the signal is the gate's own VERDICT, which is the one thing that happens
+ * exactly once per run however it ends: the finish notice. Every terminal path
+ * sends it — `completed` with the deliverable met, `gave_up`, the owner's Stop,
+ * a run that never had a bar — and no intermediate state does.
  */
 async function settledForGood(id: string): Promise<NonNullable<ReturnType<Lib["getRun"]>>> {
   await vi.waitFor(() => {
     const run = lib.getRun(id);
     expect(run).not.toBeNull();
     expect(run!.status === "running").toBe(false);
-    // A run going back in for another attempt has an OPEN attempt entry; one
-    // that is really over has none.
     expect(run!.attempts.some((a) => a.endedAt === null)).toBe(false);
+    // Told about exactly once, and that is what says the box has finished
+    // deciding. Asserting the COUNT stays meaningful in the tests that do it:
+    // this waits for the first notice, they check there was only one.
+    expect(announceCodingAgent.mock.calls.length).toBeGreaterThan(0);
   }, { timeout: 25_000, interval: 50 });
   return lib.getRun(id)!;
 }
@@ -540,5 +554,89 @@ describe("what an attempt must not destroy or invent", () => {
     // ONE harness turn, not three: the budget was not spent restarting the task.
     expect(stdinLog()).toHaveLength(1);
     expect(run.attempts).toHaveLength(1);
+  });
+});
+
+/**
+ * A run that gave up is SETTLED and still resumable, and both halves have to
+ * hold at once — which is the whole reason `holdsResumableSession` exists beside
+ * `isHeld` rather than inside it.
+ */
+describe("a run that gave up is not the box's to throw away", () => {
+  async function giveUpOne(task: string): Promise<string> {
+    const started = await lib.startRun({
+      task, projectId: "site", source: "owner",
+      deliverable: { kind: "paths", paths: ["app.js"] },
+    });
+    const run = await settledForGood(started.id);
+    expect(run.status).toBe("gave_up");
+    return started.id;
+  }
+
+  it("survives the owner's Clear history, like a paused run does", async () => {
+    // The reason written on `clearFinishedRuns`: a run holding a resumable
+    // session is not "finished". Clearing it would take the session and the
+    // evidence folder the owner is being asked to resume into.
+    installHarnessThatNeverDelivers();
+    writeConfig({ coding_agent_completion_attempts: 1 });
+    const id = await giveUpOne("build the app");
+
+    expect(lib.clearFinishedRuns()).toBe(0);
+    expect(lib.getRun(id)?.status).toBe("gave_up");
+  });
+
+  it("IS cleared once its folder is gone, because then it cannot be resumed", async () => {
+    // The same exception paused runs and drafts get: `resumeRun` refuses a run
+    // whose folder has been deleted, so kept it would be immortal.
+    installHarnessThatNeverDelivers();
+    writeConfig({ coding_agent_completion_attempts: 1 });
+    const id = await giveUpOne("build the app");
+
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    expect(lib.clearFinishedRuns()).toBe(1);
+    expect(lib.getRun(id)).toBeNull();
+  });
+});
+
+describe("the held notice reaches the owner on every path", () => {
+  it("is sent even when the bar vanishes and no attempt is open", async () => {
+    // The hole an "is an attempt still open?" proxy left. An owner Resume at the
+    // attempt CEILING opens no new attempt (`openAttempt` declines), so if the
+    // implied pull-request bar then steps aside in the same settle chain, the
+    // notice `finishRun` held would have been swallowed and the run reported
+    // nowhere. `wasGated` is what answers the question `finishRun` actually
+    // asked, and it is true for this record whatever its attempt list says.
+    installHarnessThatNeverDelivers();
+    writeConfig({ coding_agent_completion_attempts: 1 });
+    const started = await lib.startRun({
+      task: "build", projectId: "site", source: "owner",
+      deliverable: { kind: "paths", paths: ["app.js"] },
+    });
+    await settledForGood(started.id);
+    announceCodingAgent.mockClear();
+
+    // Fill the attempt list to the module-wide ceiling, so the next Resume's
+    // `openAttempt` declines — the state the proxy got wrong.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8")) as Record<string, unknown>[];
+    onDisk[0].attempts = Array.from({ length: 6 }, (_, i) => ({ startedAt: i + 1, endedAt: i + 2, reason: "app.js was not created." }));
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify(onDisk));
+    await lib._resetCodingAgentStateForTests();
+
+    await lib.resumeRun(started.id);
+    const run = await settledForGood(started.id);
+
+    // However it ended, the owner was told exactly once.
+    expect(run.status).toBe("gave_up");
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("is NOT sent twice for a run that never had a bar", async () => {
+    // The other side of the same discriminator: a run with no deliverable is
+    // announced by `finishRun` itself, and the gate must not add a second notice
+    // when it walks the same branch.
+    installHarnessThatNeverDelivers();
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    await settledForGood(started.id);
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
   });
 });

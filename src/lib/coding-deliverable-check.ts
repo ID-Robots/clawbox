@@ -213,6 +213,12 @@ async function checkCommand(
       stdio: ["ignore", "pipe", "pipe"] as const,
       detached: true,
     });
+    // Decoded as UTF-8 by the STREAM, not per chunk: `String(chunk)` on each
+    // Buffer turns a multi-byte character split across a chunk boundary into
+    // replacement characters, and that tail is what the owner reads and the
+    // harness nudge quotes.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     const keep = (chunk: Buffer | string): void => {
       // The TAIL, kept by trimming as it arrives: a command that prints a
       // megabyte must not put a megabyte in this closure on its way to a
@@ -222,21 +228,35 @@ async function checkCommand(
     child.stdout?.on("data", keep);
     child.stderr?.on("data", keep);
 
+    /**
+     * End the process GROUP the command was spawned into.
+     *
+     * On every settle path, not only the timeout: a command that starts a
+     * descendant and exits — a test runner that leaves a dev server up, `npm
+     * test &` — settles through `close` with that descendant still in the
+     * detached group, and nothing later reaps it. The run's own group is
+     * deliberately left alone when it finishes (the guide tells a run to leave
+     * its app's server listening), but this is a CHECK, nobody is told about it,
+     * and repeated checks would leak processes and hold ports.
+     */
+    const endGroup = (): void => {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // No group left, or the leader is already reaped and took it with it.
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      }
+    };
     const done = (result: DeliverableVerdict): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // After the exit code is in hand — `done` is called FROM the close
+      // handler — so this can never race the verdict it is reporting.
+      endGroup();
       resolve(result);
     };
     const timer = setTimeout(() => {
-      // The whole group: a test runner that started a server would otherwise
-      // leave it listening, and this command is not the run's own documented
-      // "leave your server up" pattern — it is a check that overran.
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
-      }
       done(verdict(false, `The deliverable command did not finish within ${Math.round(DELIVERABLE_COMMAND_TIMEOUT_MS / 60_000)} minutes.`));
     }, DELIVERABLE_COMMAND_TIMEOUT_MS);
     // The timer must never hold the web server open: this is the one

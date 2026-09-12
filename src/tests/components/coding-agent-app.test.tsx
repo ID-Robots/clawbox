@@ -2337,6 +2337,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
         .toHaveTextContent(translations.en["codingAgent.statusGaveUp"]);
       // The one thing that helps.
       expect(within(page).getByTestId(`coding-agent-resume-${gaveUp.id}`)).toBeInTheDocument();
+      // And NOT Stop: the run is already settled, so `stopRun` returns it
+      // unchanged — a control that does nothing, beside the one that works.
+      expect(within(page).queryByTestId(`coding-agent-stop-${gaveUp.id}`)).toBeNull();
     });
 
     it("resumes it in place when that button is pressed", async () => {

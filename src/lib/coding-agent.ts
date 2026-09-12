@@ -76,6 +76,7 @@ import {
   type CodingPauseReason,
   type CodingRunStatus,
   MAX_PAUSE_MESSAGE_CHARS,
+  holdsResumableSession,
   isCodingRunStatus,
   isHeld,
   isLive,
@@ -3173,7 +3174,11 @@ export function clearFinishedRuns(): number {
   // no sweep touched it — the review pass paused in a folder the owner had
   // since deleted, 2026-09-06. A LIVE run is kept whatever its folder says:
   // the record is the only handle on the process.
-  const heldOn = (r: CodingRun) => isHeld(r.status) && (isLive(r.status) || folderPresent(r.directory));
+  // `holdsResumableSession` covers `gave_up` as well as the held three, for the
+  // reason written above: it holds a resumable session, so it is not "finished"
+  // either. The folder exception applies to it unchanged — `resumeRun` refuses a
+  // run whose folder is gone, so such a record can neither go on nor finish.
+  const heldOn = (r: CodingRun) => holdsResumableSession(r.status) && (isLive(r.status) || folderPresent(r.directory));
   // ONE decision per run, used for both the record and its evidence folder:
   // judged twice, a folder that came or went between the two looks would
   // drop a record and keep its artifacts, or the other way round.
@@ -5866,6 +5871,25 @@ function deliverableGateApplies(run: CodingRun): boolean {
   return deliverableFor(run) !== null;
 }
 
+/**
+ * Was this run EVER held to a deliverable — whatever the answer is now?
+ *
+ * The question `finishRun` really asked when it held the finish notice back, and
+ * the one the gate has to ask to know whether it owes that notice. It cannot
+ * simply re-read `deliverableFor`, because the implied pull-request bar can step
+ * aside between the two (see the branch that uses this), and it must not assume
+ * an attempt is still open, because an owner Resume at the attempt ceiling opens
+ * none.
+ *
+ * Exact, not a heuristic: a named deliverable is frozen on the record and never
+ * removed, and a run that got the implied one always had `openAttempt` push an
+ * entry at its start — so "no deliverable and no attempt" is precisely a run
+ * that was never gated, which `finishRun` announced itself.
+ */
+function wasGated(run: CodingRun): boolean {
+  return run.deliverable !== null || run.attempts.length > 0;
+}
+
 /** Open an attempt entry, for a run that has a deliverable to clear. */
 function openAttempt(run: CodingRun): void {
   if (deliverableFor(run) === null) return;
@@ -5995,9 +6019,15 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     //
     // `finishRun` held this run's finish notice on the strength of the bar that
     // existed then, so it is sent HERE. A run nobody is ever told about is the
-    // worse of the two failures, and "held the notice" is exactly what the open
-    // attempt entry records.
-    if (origin.attempts.some((a) => a.endedAt === null)) {
+    // worse of the two failures.
+    //
+    // `wasGated` and not "an attempt is still open": the two agree almost
+    // always, and the case where they do not is an owner Resume at the attempt
+    // ceiling, where `openAttempt` declines and the notice would have been
+    // swallowed. Nor is it announced unconditionally — a run that never had a
+    // bar at all reaches this branch too, and `finishRun` announced that one
+    // itself, so a second notice here would be a duplicate.
+    if (wasGated(origin)) {
       closeAttempt(origin, null);
       persist(true);
       announceGatedRun(origin);
@@ -7054,7 +7084,11 @@ function folderPresent(directory: string): boolean {
  *  isPrPending for the run that has settled but is still being watched. */
 function findLastFinished(list: CodingRun[]): number {
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (!isHeld(list[i].status) && !isPrPending(list[i].pr)) return i;
+    // `holdsResumableSession`, not `isHeld`: a run that GAVE UP is settled, but
+    // its session is intact and its card offers Resume, so trimming it to make
+    // room for a new run would take that session and its evidence folder with
+    // it — unasked, and past the rail's newest dozen, invisibly.
+    if (!holdsResumableSession(list[i].status) && !isPrPending(list[i].pr)) return i;
   }
   return -1;
 }

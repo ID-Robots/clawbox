@@ -931,7 +931,7 @@ export const es: Record<string, string> = {
   "codingAgent.reviewedBy": "revisada por {id}",
   "codingAgent.reviewPassTitle": "Revisión automática de {id}",
   "codingAgent.deliverableTitle": "Lo que tenía que entregar",
-  "codingAgent.deliverablePr": "Una solicitud de cambios para su rama",
+  "codingAgent.deliverablePr": "Una pull request para su rama",
   "codingAgent.deliverablePaths": "Estos archivos, no vacíos: {files}",
   "codingAgent.deliverableCommand": "Este comando, terminando sin errores: {command}",
   "codingAgent.deliverableMet": "Está ahí.",

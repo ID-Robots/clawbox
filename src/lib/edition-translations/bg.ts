@@ -922,7 +922,7 @@ export const bg: Record<string, string> = {
   "codingAgent.reviewedBy": "прегледано от {id}",
   "codingAgent.reviewPassTitle": "Автоматичен преглед на {id}",
   "codingAgent.deliverableTitle": "Какво трябваше да достави",
-  "codingAgent.deliverablePr": "Заявка за сливане за клона на изпълнението",
+  "codingAgent.deliverablePr": "Pull request за клона на изпълнението",
   "codingAgent.deliverablePaths": "Тези файлове, непразни: {files}",
   "codingAgent.deliverableCommand": "Тази команда, завършила без грешка: {command}",
   "codingAgent.deliverableMet": "Налице е.",

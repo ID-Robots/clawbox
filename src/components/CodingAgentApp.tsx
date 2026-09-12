@@ -1219,7 +1219,12 @@ export default function CodingAgentApp() {
             {t(action.label)}
           </button>
         )}
-        {action && (run.status === "draft" ? (
+        {/* Stop belongs to a run that can still TRANSITION: a live one it ends, a
+            paused one it closes the book on, a draft offers Discard instead. A
+            run that gave up is already settled — `stopRun` returns it unchanged
+            — so a Stop button there is a control that does nothing, next to the
+            Resume that is the actual way on. */}
+        {action && isHeld(run.status) && (run.status === "draft" ? (
           <button
             type="button"
             onClick={() => runAction(run.id, "draft", t("codingAgent.discardFailed"), { method: "DELETE" })}

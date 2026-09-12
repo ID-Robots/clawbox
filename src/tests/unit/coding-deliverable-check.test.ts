@@ -67,6 +67,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
@@ -173,8 +174,10 @@ describe("the command deliverable", () => {
 
   it("runs with the environment it was handed and nothing else", async () => {
     // An explicit environment, like the run's own: no session secret, no device
-    // bearer. `SESSION_SECRET` is set on this process and must not be inherited.
-    process.env.SESSION_SECRET = "the-web-servers-secret";
+    // bearer. `SESSION_SECRET` is set on this process and must not be inherited
+    // — stubbed rather than assigned, so the worker this file shares with other
+    // suites does not keep the value after the test.
+    vi.stubEnv("SESSION_SECRET", "the-web-servers-secret");
     const verdict = await checkDeliverable(
       { directory: dir, pr: null },
       { kind: "command", command: 'test -z "$SESSION_SECRET"' },

@@ -186,3 +186,24 @@ export function isHeld(status: CodingRunStatus): boolean {
 export function isSettled(status: CodingRunStatus): boolean {
   return !isHeld(status);
 }
+
+/**
+ * Holds a session the owner can still carry on in.
+ *
+ * NOT the same question as `isHeld`, and that is why it is its own predicate. A
+ * `gave_up` run is SETTLED — it belongs in the history list, it is drawn as an
+ * ending, the review pass and the gate are done with it — and at the same time
+ * `resumeRun` accepts it and its card offers Resume, because its Claude Code
+ * session is intact and its work is on disk. Folding it into `isHeld` would
+ * flip `isSettled` and with it every reader of "is this run over".
+ *
+ * What this answers is the RETENTION question: may the box delete this record,
+ * and its evidence folder, without being asked? For a run the owner is expected
+ * to resume, no — the trim that makes room for a new run would take the session
+ * with it, which is the bug `isHeld` was given its own comment about for paused
+ * runs and drafts. The owner's own Clear history reads it too, for the reason
+ * written there: a run that holds a resumable session is not "finished".
+ */
+export function holdsResumableSession(status: CodingRunStatus): boolean {
+  return isHeld(status) || isGaveUp(status);
+}
