@@ -98,6 +98,13 @@ export const NOT_TAINT_BY_DECISION = new Map([
   ["email_send", "outbound only — it carries nothing back into the turn"],
   ["update_check", "our own release metadata, a version string from ClawBox's own endpoint"],
   ["generate_image", "the box's own image model drawing to a file; no third party writes the prompt"],
+  // The Improvement Program's submit tool. Outbound like email_send, and with
+  // less latitude than it: the caller names a STORED incident by id and cannot
+  // compose a word of the issue — the body is a fixed template over text the
+  // device sanitized when it captured it — so nothing a web page wrote can
+  // ride out on it, and nothing rides back in. Its own consent gate is the
+  // owner's mode, which a tool cannot change.
+  ["clawbox_incident_report", "outbound only, over a stored and sanitized record the caller cannot compose"],
 ]);
 
 /**

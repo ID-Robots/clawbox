@@ -44,7 +44,19 @@ import {
   type SanitizeOptions,
 } from "@/lib/incident-sanitize";
 
-const INCIDENTS_PATH = path.join(DATA_DIR, "incidents.json");
+/**
+ * Resolved on every call rather than once at import.
+ *
+ * Not a style choice: `recordIncident` is reached from `updater.ts` and
+ * `coding-agent.ts`, and a module-scope `path.join(DATA_DIR, …)` made merely
+ * IMPORTING either of those throw in every suite that mocks `config-store`
+ * with a partial object (six updater suites did). A reporter that cannot be
+ * imported without a complete config-store is a reporter that breaks the code
+ * it reports on.
+ */
+function incidentsPath(): string {
+  return path.join(DATA_DIR, "incidents.json");
+}
 
 /** The config key the owner's switch lives under. */
 export const IMPROVEMENT_MODE_KEY = "clawbox_improvement_program";
@@ -159,8 +171,8 @@ function isIncident(value: unknown): value is Incident {
 
 function readFile(): IncidentFile {
   try {
-    if (!fs.existsSync(INCIDENTS_PATH)) return { ...EMPTY, incidents: [] };
-    const parsed: unknown = JSON.parse(fs.readFileSync(INCIDENTS_PATH, "utf-8"));
+    if (!fs.existsSync(incidentsPath())) return { ...EMPTY, incidents: [] };
+    const parsed: unknown = JSON.parse(fs.readFileSync(incidentsPath(), "utf-8"));
     if (typeof parsed !== "object" || parsed === null) return { ...EMPTY, incidents: [] };
     const v = parsed as Partial<IncidentFile>;
     const incidents = Array.isArray(v.incidents) ? v.incidents.filter(isIncident) : [];
@@ -177,14 +189,14 @@ function readFile(): IncidentFile {
 
 function writeFile(file: IncidentFile): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${INCIDENTS_PATH}.tmp`;
+  const tmp = `${incidentsPath()}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(file, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);
   } catch {
     // best-effort; a failed chmod must not lose the record
   }
-  fs.renameSync(tmp, INCIDENTS_PATH);
+  fs.renameSync(tmp, incidentsPath());
 }
 
 /**
@@ -421,7 +433,7 @@ export function markCommented(id: string, now = Date.now()): void {
 /** Test seam: forget everything on disk. Never called on a box. */
 export function _resetIncidentsForTests(): void {
   try {
-    fs.rmSync(INCIDENTS_PATH, { force: true });
+    fs.rmSync(incidentsPath(), { force: true });
   } catch {
     // nothing to forget
   }

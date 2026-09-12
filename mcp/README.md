@@ -83,6 +83,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
+| Improvement Program (`clawbox_incidents_list`, `clawbox_incident_report`) | yes | yes |
 | Everything else | yes | yes |
 
 ## Tools
@@ -692,6 +693,41 @@ as an alias from its launch shape). The summary it returns is model-authored and
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
 to the approved senders (`src/lib/coding-agent-notify.ts`).
+
+### ClawBox Improvement Program (both editions)
+
+`clawbox_incidents_list` · `clawbox_incident_report`
+
+What broke in **ClawBox's own software** on this box — a failed coding run, a
+harness that is not usable, a failed update step, a route that threw — kept in
+`data/incidents.json` and, only if the owner opted in, filed on
+`ID-Robots/clawbox` as an issue labelled `improvement-program` / `auto-report`.
+
+The owner's switch (Settings → System) has three values and is the whole
+design:
+
+| | what the box does | what these tools do |
+|---|---|---|
+| `off` (default) | records locally, sends nothing | `list` says so and tells the agent not to offer; `report` is refused 409 |
+| `ask` | sends nothing by itself | the agent may offer, and files on the user's yes — this is what the pair exists for |
+| `auto` | files on capture, inside the daily limit | nothing to offer; `report` still works if the user asks |
+
+**There is deliberately no tool for the switch.** `POST /setup-api/improvement-program`
+refuses this server's bearer (403 `owner_only`) and any other origin: opting a
+box into publishing its diagnostics is a consent, and a tool that could grant it
+would make the owner's answer temporary — the same rule as `coding-agent/enable`
+and `coding-agent/permissions`.
+
+**Nothing here composes a report.** `clawbox_incident_report` names a STORED
+incident by id; the body is a fixed template over text the device sanitized when
+it captured it (credentials by shape and by the box's own config values, emails,
+IP addresses, hostnames that are not localhost, home paths, query strings), and
+no transcript, prompt, file content or environment value is ever captured in the
+first place. Dedupe searches the body marker `<!-- cbip:<fingerprint> -->` and
+comments once a day instead of opening a second issue; a search that FAILED
+refuses the send rather than risking a duplicate. At most 5 new issues per box
+per UTC day. The recorded message is labelled to the model as information, not
+instructions, like every other text a subsystem wrote.
 
 ## Safety rules every tool follows
 
