@@ -273,29 +273,11 @@ const ALSO_REQUIRED = [
   // it before the mascot and the chat popup were mocked out of the mount.
   "src/tests/components/desktop-wallpaper-delete.test.tsx",
   "src/tests/components/hermes-oauth-inline.test.tsx",
-  "src/tests/components/chat-spoken-reply.test.tsx",
-  // Same family, same mount, same reason: it drives the chat popup through a
-  // fake gateway and waits on a spoken reply landing in a bubble.
-  "src/tests/components/chat-spoken-reply-player.test.tsx",
-  // The rest of that family, added 2026-09-12 after the three of them were the
-  // only component files reporting "Test timed out in 5000ms" in a full
-  // parallel run of all 215. Each mounts `ChatPopup` and then waits on several
-  // sub-5 s `waitFor`s in series; the slowest PASSING case among them measured
-  // 4,558 ms, i.e. 442 ms of headroom under the default. (The races those
-  // timeouts were hiding are fixed separately — the point of the ceiling is
-  // that the next one reports the element it could not find instead.)
-  "src/tests/components/chat-email-refs-surfaces.test.tsx",
-  "src/tests/components/chat-clawbox-ai-model-pill.test.tsx",
-  "src/tests/components/chat-popup-dismiss-and-geometry.test.tsx",
-  // The rest of the chat/provider mount family, added 2026-09-12 from measured
-  // worst cases in a clean full parallel run of all 216 component files: each
-  // of these five has under 2 s of headroom below the 5 s default
-  // (3,456 / 3,199 / 3,175 / 3,106 / 3,031 ms), and the first two timed out
-  // when the machine was loaded further. Each file states its own number.
-  "src/tests/components/chat-header-seed-race.test.tsx",
-  "src/tests/components/chat-voice-recording.test.tsx",
+  // The two component suites in the chat/provider mount family that do NOT
+  // mount `ChatPopup`, so the rule below cannot detect them. Measured
+  // 2026-09-12 in a clean full parallel run of all 216 component files:
+  // 3,175 ms and 3,031 ms, i.e. under 2 s of headroom below the default.
   "src/tests/components/chat-hermes-stale-catalogue.test.tsx",
-  "src/tests/components/chat-header-chatgpt-row.test.tsx",
   "src/tests/components/ai-provider-list.test.tsx",
   // Starts no process either: it drives the Files route 3 000 times over a
   // generated corpus, with real fs behind it, inside ONE case. 4,562 ms on an
@@ -502,6 +484,40 @@ describe("test-timeout hygiene", () => {
     });
 
     expect(offenders).toEqual([]);
+  });
+
+  it("gives every suite that mounts the chat popup both ceilings", () => {
+    // A DETECTED family rather than a list, because the list was growing one
+    // CI failure at a time and every entry named the same component.
+    //
+    // A jsdom mount of `ChatPopup` is the most expensive render in this app —
+    // the fake gateway handshake, the model seed, the transcript — and a case
+    // does it once and then waits on several sub-5 s `waitFor`s in series,
+    // which is exactly what `testTimeout` governs. Measured 2026-09-12 with
+    // all 216 component files running fully parallel on a 12-core machine, the
+    // slowest PASSING case in this family was 4,558 ms — 442 ms of headroom —
+    // and twelve distinct files in it were seen reporting "Test timed out in
+    // 5000ms" once the machine was loaded further. 5 s is not a hang guard
+    // here; it is a source of failures on files nobody touched, and of
+    // CASCADES, since an aborted case leaves its component draining a queue
+    // into the next one's collector (chat-queue-starvation, same day).
+    //
+    // 30 s still fails a test that has genuinely hung, and the test job's
+    // `timeout-minutes: 30` below is what bounds the cost of one.
+    const offenders = files
+      .filter((f) => f.rel.startsWith("src/tests/components/"))
+      .filter((f) => f.code.includes("<ChatPopup"))
+      .filter(
+        (f) =>
+          (declared(f.code, "testTimeout") ?? 0) < MIN_TIMEOUT_MS
+          || (declared(f.code, "hookTimeout") ?? 0) < MIN_TIMEOUT_MS,
+      )
+      .map((f) => f.rel);
+
+    expect(offenders).toEqual([]);
+    // …and the family is really there, so a renamed component cannot make this
+    // assertion vacuous the way an empty selector would.
+    expect(files.filter((f) => f.code.includes("<ChatPopup")).length).toBeGreaterThan(20);
   });
 
   it("keeps the inline-budget exemptions honest", () => {

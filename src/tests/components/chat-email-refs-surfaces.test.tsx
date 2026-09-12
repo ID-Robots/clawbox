@@ -29,15 +29,12 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { waitForChatSession } from "@/tests/helpers/chat-connected";
 
-// A jsdom mount of `ChatPopup` is the expensive thing here — the fake gateway
-// handshake, the model seed, the transcript — and a case does it once and then
-// waits on several sub-5 s `waitFor`s in series. That is exactly what
-// `testTimeout` governs, and what `test-timeout-hygiene.test.ts` documents.
-// Measured on beta, 2026-09-12, with all 215 component files running fully
-// parallel on a 12-core machine: the slowest passing case in this family was
-// 4,558 ms — 442 ms under vitest's default, which is why these three suites
-// were the ones reporting "Test timed out in 5000ms" over races that had
-// nothing to do with the budget.
+// A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
+// the transcript — costs seconds under a full parallel run, and a case does it
+// once and then waits on several sub-5 s `waitFor`s in series. Every component
+// suite that mounts it declares both ceilings; `test-timeout-hygiene.test.ts`
+// is the rule, and says there why 5 s is the wrong budget here and 30 s still
+// fails a test that has genuinely hung.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 

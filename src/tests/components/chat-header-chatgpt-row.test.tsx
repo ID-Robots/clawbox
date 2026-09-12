@@ -5,13 +5,12 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
 
-// Mounts the chat/provider surface and then waits on several sub-5 s
-// `waitFor`s in series — the family `test-timeout-hygiene.test.ts` keeps a
-// list of, for the reason it gives there. Measured 2026-09-12 with all 216
-// component files running fully parallel on a 12-core machine: the slowest
-// case here ("still offers the model dropdown when the active model is openai/…")
-// took 3,106 ms, i.e. under 2 s of headroom below vitest's 5 s default. It
-// duly timed out when the machine was loaded further.
+// A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
+// the transcript — costs seconds under a full parallel run, and a case does it
+// once and then waits on several sub-5 s `waitFor`s in series. Every component
+// suite that mounts it declares both ceilings; `test-timeout-hygiene.test.ts`
+// is the rule, and says there why 5 s is the wrong budget here and 30 s still
+// fails a test that has genuinely hung.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 
