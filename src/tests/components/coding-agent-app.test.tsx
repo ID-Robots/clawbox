@@ -2264,4 +2264,134 @@ describe("CodingAgentApp — the run page's honesty", () => {
     expect(main).toHaveAttribute("data-outcome", "completed");
     expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("check_circle");
   });
+
+  /**
+   * A run is done when the deliverable exists.
+   *
+   * The card is the only thing on the page that says WHAT a run that gave up
+   * was missing — its status chip says "Gave up" and its error repeats the
+   * reason, but neither names the bar. And the Resume button has to be there:
+   * a `gave_up` run's session is intact, so carrying on in it is the one thing
+   * that helps, and without the button the only way on was a fresh run that
+   * would start the task over.
+   */
+  describe("the deliverable", () => {
+    const HELD_TO_FILES = {
+      ...RUN,
+      id: "run-deliv001",
+      deliverable: { kind: "paths", paths: ["app.js", "index.html"] },
+      completionAttempts: 3,
+    };
+
+    async function openRun(id: string) {
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId(`coding-agent-details-${id}`));
+      return screen.findByTestId("coding-agent-run-page");
+    }
+
+    it("says what the run had to leave behind, and that it is there", async () => {
+      const met = {
+        ...HELD_TO_FILES,
+        deliverableCheck: { ok: true, missing: null, checkedAt: Date.now() },
+        attempts: [{ startedAt: 1, endedAt: 2, reason: null }],
+      };
+      stubFetch({ enabled: true, readiness: READY }, [met], { projects: [SITE_PROJECT] });
+      const page = await openRun(met.id);
+      const card = within(page).getByTestId("coding-agent-deliverable");
+      expect(card).toHaveAttribute("data-state", "met");
+      expect(within(card).getByTestId("coding-agent-deliverable-what"))
+        .toHaveTextContent("app.js, index.html");
+      expect(within(card).getByTestId("coding-agent-deliverable-verdict"))
+        .toHaveTextContent(translations.en["codingAgent.deliverableMet"]);
+    });
+
+    it("names what is MISSING on a run that gave up, and offers Resume", async () => {
+      const gaveUp = {
+        ...HELD_TO_FILES,
+        id: "run-deliv002",
+        status: "gave_up",
+        resumable: true,
+        deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
+        attempts: [
+          { startedAt: 1, endedAt: 2, reason: "app.js was not created." },
+          { startedAt: 3, endedAt: 4, reason: "app.js was not created." },
+          { startedAt: 5, endedAt: 6, reason: "app.js was not created." },
+        ],
+        error: "app.js was not created. After 3 attempts the deliverable is still not there, so this is not finished. Resume it to carry on in the same session.",
+      };
+      stubFetch({ enabled: true, readiness: READY }, [gaveUp], { projects: [SITE_PROJECT] });
+      const page = await openRun(gaveUp.id);
+
+      const card = within(page).getByTestId("coding-agent-deliverable");
+      expect(card).toHaveAttribute("data-state", "missing");
+      expect(within(card).getByTestId("coding-agent-deliverable-verdict"))
+        .toHaveTextContent("app.js was not created.");
+      // How much of the budget went on it — the fact that tells the owner
+      // whether another go is worth asking for.
+      expect(within(card).getByTestId("coding-agent-deliverable-attempts"))
+        .toHaveTextContent(t("codingAgent.deliverableAttempts", { n: 3, max: 3 }));
+      // Its own word, not "Did not finish" (which reads as a broken box) and not
+      // "Stopped" (which is the owner's own gesture).
+      expect(within(page).getByTestId("coding-agent-run-status"))
+        .toHaveTextContent(translations.en["codingAgent.statusGaveUp"]);
+      // The one thing that helps.
+      expect(within(page).getByTestId(`coding-agent-resume-${gaveUp.id}`)).toBeInTheDocument();
+    });
+
+    it("resumes it in place when that button is pressed", async () => {
+      const gaveUp = {
+        ...HELD_TO_FILES,
+        id: "run-deliv003",
+        status: "gave_up",
+        resumable: true,
+        deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
+        attempts: [{ startedAt: 1, endedAt: 2, reason: "app.js was not created." }],
+      };
+      stubFetch({ enabled: true, readiness: READY }, [gaveUp], { projects: [SITE_PROJECT] });
+      const real = globalThis.fetch as typeof fetch;
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+        if (input.toString() === "/setup-api/coding-agent/resume") {
+          posts.push({ url: "/setup-api/coding-agent/resume", body: JSON.parse(String(init?.body)) });
+          return json({ run: { ...gaveUp, status: "running", completedAt: null } });
+        }
+        return real(input, init);
+      }));
+      const page = await openRun(gaveUp.id);
+      fireEvent.click(within(page).getByTestId(`coding-agent-resume-${gaveUp.id}`));
+      await waitFor(() => {
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/resume")).toBe(true);
+      });
+      expect(posts.find((p) => p.url === "/setup-api/coding-agent/resume")?.body)
+        .toMatchObject({ runId: gaveUp.id });
+    });
+
+    it("says it has not been checked rather than claiming a verdict it does not have", async () => {
+      // A live run, or one from a server that predates the check: the bar is a
+      // fact about the run from the moment it starts, the verdict is not.
+      const live = { ...HELD_TO_FILES, id: "run-deliv004", status: "running", completedAt: null, deliverableCheck: null, attempts: [{ startedAt: 1, endedAt: null, reason: null }] };
+      stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });
+      const page = await openRun(live.id);
+      const card = within(page).getByTestId("coding-agent-deliverable");
+      expect(card).toHaveAttribute("data-state", "pending");
+      expect(within(card).getByTestId("coding-agent-deliverable-verdict"))
+        .toHaveTextContent(translations.en["codingAgent.deliverablePending"]);
+    });
+
+    it("draws no card at all for a run nobody held to anything", async () => {
+      // Which is most runs. A card saying "nothing was required" would be noise
+      // on every page.
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+      const page = await openRun(RUN.id);
+      expect(within(page).queryByTestId("coding-agent-deliverable")).toBeNull();
+    });
+
+    it("names a pull request and a command in the owner's words, not the wire's", async () => {
+      const byPr = { ...RUN, id: "run-deliv005", deliverable: { kind: "pr" }, completionAttempts: 3 };
+      stubFetch({ enabled: true, readiness: READY }, [byPr], { projects: [SITE_PROJECT] });
+      const page = await openRun(byPr.id);
+      expect(within(page).getByTestId("coding-agent-deliverable-what"))
+        .toHaveTextContent(translations.en["codingAgent.deliverablePr"]);
+    });
+  });
 });

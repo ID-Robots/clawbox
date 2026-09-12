@@ -124,13 +124,28 @@ function checkPr(pr: PrState | null): DeliverableVerdict {
 async function checkPaths(directory: string, paths: readonly string[]): Promise<DeliverableVerdict> {
   const root = await realOrSelf(directory);
   for (const relative of paths) {
-    const absolute = path.resolve(root, relative);
-    // `path.resolve` has already normalised away any `.` segment; this catches
-    // a folder symlink under the working folder, and anything the path rule
-    // let through that resolve collapses differently than expected.
-    if (absolute !== root && !absolute.startsWith(root + path.sep)) {
-      return verdict(false, `${relative} is not inside the run's folder.`);
+    const typed = path.resolve(root, relative);
+    // Stage one, on the path AS TYPED. `path.resolve` has already normalised
+    // away any `.` segment, so this is what catches a traversal the path rule
+    // let through and anything resolve collapses differently than expected.
+    if (!inside(root, typed)) return verdict(false, `${relative} is not inside the run's folder.`);
+
+    // Stage two, on the REALPATH'D PARENT — the same two-stage containment
+    // `coding-agent-media.ts` uses for the other direction, and for its reason:
+    // a run can plant a symlink inside its own folder. `away -> /tmp/elsewhere`
+    // makes `away/secret.txt` pass stage one lexically while naming a file the
+    // run did not write and this box may not be willing to talk about. Found by
+    // the test that pins it.
+    let parent: string;
+    try {
+      parent = await fs.realpath(path.dirname(typed));
+    } catch {
+      // The folder the file should be in is not there, so neither is the file.
+      return verdict(false, `${relative} was not created.`);
     }
+    if (!inside(root, parent)) return verdict(false, `${relative} is not inside the run's folder.`);
+    const absolute = path.join(parent, path.basename(typed));
+
     let stat: Awaited<ReturnType<typeof fs.lstat>>;
     try {
       stat = await fs.lstat(absolute);
@@ -143,6 +158,11 @@ async function checkPaths(directory: string, paths: readonly string[]): Promise<
     if (stat.size === 0) return verdict(false, `${relative} is empty.`);
   }
   return verdict(true, null);
+}
+
+/** Is `target` the root itself or something under it? */
+function inside(root: string, target: string): boolean {
+  return target === root || target.startsWith(root + path.sep);
 }
 
 async function realOrSelf(directory: string): Promise<string> {

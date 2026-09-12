@@ -211,3 +211,43 @@ describe("provider and model", () => {
     expect((await res.json()).kind).toBe("not_ready");
   });
 });
+
+/**
+ * The deliverable the caller may set.
+ *
+ * The route's whole job here is to hand the field to the ONE reader and to say
+ * WHO asked — the owner's cookie or the agent's bearer — because that is what
+ * decides whether a `command` deliverable is allowed. A route that validated
+ * the deliverable itself would be a second opinion beside the draft route's.
+ */
+describe("the deliverable", () => {
+  it("passes it through untouched, so one reader judges it", async () => {
+    await POST(req({ body: { task: "t", projectId: "site", deliverable: { kind: "paths", paths: ["app.js"] } } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({
+      deliverable: { kind: "paths", paths: ["app.js"] },
+      source: "owner",
+    }));
+  });
+
+  it("labels a BEARER caller as the agent, which is what refuses a command", async () => {
+    // `source` is derived from the owner's cookie and never from the body, so a
+    // caller cannot declare itself the owner to get a command deliverable.
+    await POST(req({ auth: "bearer", body: { task: "t", projectId: "site", deliverable: { kind: "command", command: "true" }, source: "owner" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ source: "agent" }));
+  });
+
+  it("carries the runner's own reason through as a 400 when it refuses one", async () => {
+    // The reason is the actionable half: "only the owner can set a command
+    // deliverable" and "that path is not relative" need different fixes, and a
+    // bare "the device rejected an argument" tells the caller neither.
+    startRun.mockRejectedValueOnce(new CodingAgentError("invalid", "Only the owner can set a command deliverable."));
+    const res = await POST(req({ auth: "bearer", body: { task: "t", projectId: "site", deliverable: { kind: "command", command: "true" } } }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Only the owner can set a command deliverable.", kind: "invalid" });
+  });
+
+  it("sends no deliverable at all when the body names none", async () => {
+    await POST(req({ body: { task: "t", projectId: "site" } }));
+    expect(startRun.mock.calls[0][0].deliverable).toBeUndefined();
+  });
+});

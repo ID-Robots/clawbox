@@ -493,3 +493,104 @@ describe("coding_agent_run — provider and model", () => {
     expect(out.error.message).toMatch(/the account the run would be paid from/);
   });
 });
+
+/**
+ * The deliverable, as the agent can set it and read it back.
+ *
+ * Two things matter on this surface. The LIST shape: the schema rules here
+ * forbid array and JSON-in-a-string parameters (both harnesses rewrite them
+ * differently on the way in), so the tool takes a comma-separated string and
+ * the DEVICE does the validating — a tool that judged paths itself would be a
+ * second opinion beside the route's. And the `gave_up` advice: that ending is
+ * the whole point of the feature, and the worst possible thing to say about it
+ * is "start a fresh run", which would throw away a session that still holds
+ * every bit of the work.
+ */
+describe("the deliverable", () => {
+  it("turns the comma-separated list into the device's own shape", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", {
+      task: "build the app", project_id: "site", deliverable_files: " src/app.js , index.html ,, ",
+    });
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalledWith(
+      "/setup-api/coding-agent/run",
+      { task: "build the app", projectId: "site", deliverable: { kind: "paths", paths: ["src/app.js", "index.html"] } },
+      expect.objectContaining({ timeoutMs: 20_000 }),
+    );
+    // The assistant is told the bar, so it can relay it rather than promising
+    // the user a finish the box has not agreed to yet.
+    if (out.isError) return;
+    expect(out.text).toContain("src/app.js, index.html");
+  });
+
+  it("sends no deliverable when the caller named no files", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    await harness().call("coding_agent_run", { task: "x", project_id: "site", deliverable_files: "  ,, " });
+    expect(apiPost).toHaveBeenCalledWith(
+      "/setup-api/coding-agent/run",
+      { task: "x", projectId: "site" },
+      expect.objectContaining({ timeoutMs: 20_000 }),
+    );
+  });
+
+  it("offers the agent no command deliverable at all", async () => {
+    // Not merely refused by the device: absent from the schema. A parameter that
+    // always answered "only the owner" is a refusal a small model argues with,
+    // and on Hermes a candidate for the circuit breaker.
+    const params = Object.keys(harness().get("coding_agent_run").shape);
+    expect(params).toContain("deliverable_files");
+    expect(params.some((p) => p.includes("command"))).toBe(false);
+  });
+
+  it("reports the bar and the verdict on a run that got there", async () => {
+    apiGet.mockResolvedValue({
+      run: {
+        ...RUN,
+        deliverable: { kind: "paths", paths: ["app.js"] },
+        deliverableCheck: { ok: true, missing: null, checkedAt: Date.now() },
+        attempts: [{ startedAt: 1, endedAt: 2, reason: null }],
+        completionAttempts: 3,
+      },
+    });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("[deliverable]");
+    expect(out.text).toContain("the file app.js");
+    expect(out.text).toMatch(/which is why this counts as finished/);
+  });
+
+  it("says what is missing on a run that gave up, and NOT to start a fresh one", async () => {
+    apiGet.mockResolvedValue({
+      run: {
+        ...RUN,
+        status: "gave_up",
+        resumable: true,
+        deliverable: { kind: "paths", paths: ["app.js"] },
+        deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
+        attempts: [{ startedAt: 1, endedAt: 2, reason: "app.js was not created." }, { startedAt: 3, endedAt: 4, reason: "app.js was not created." }, { startedAt: 5, endedAt: 6, reason: "app.js was not created." }],
+        completionAttempts: 3,
+      },
+    });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("app.js was not created.");
+    expect(out.text).toContain("after 3 of 3 attempts");
+    // The advice that matters: the session holds the work, so Resume is the way
+    // on and a fresh run would start the task over.
+    expect(out.text).toMatch(/Do NOT start a fresh run/);
+    expect(out.text).toMatch(/Resume/);
+    // And none of the other endings' advice has claimed it.
+    expect(out.text).not.toMatch(/Relay the summary to the user/);
+  });
+
+  it("claims nothing about a record that carries no deliverable", async () => {
+    apiGet.mockResolvedValue({ run: RUN });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).not.toContain("[deliverable]");
+  });
+});

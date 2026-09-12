@@ -60,6 +60,7 @@ function stubFetch(
     realBrowser?: boolean;
     reviewRounds?: number;
     autoMerge?: boolean;
+    completionAttempts?: number;
   },
   opts: {
     resolveTo?: string;
@@ -77,6 +78,9 @@ function stubFetch(
     noReviewLoop?: boolean;
     /** The route's own range refusal, in its own words. */
     rejectRounds?: boolean;
+    /** A server from before the deliverable gate: no attempts field, so the
+     *  control must not be drawn at all. */
+    noCompletionAttempts?: boolean;
   } = {},
 ) {
   posts = [];
@@ -91,6 +95,7 @@ function stubFetch(
   let realBrowser = status.realBrowser ?? true;
   let reviewRounds = status.reviewRounds ?? 3;
   let autoMerge = status.autoMerge ?? false;
+  let completionAttempts = status.completionAttempts ?? 3;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -112,6 +117,7 @@ function stubFetch(
     generateAudio,
     ...(opts.noRealBrowser ? {} : { realBrowser }),
     ...(opts.noReviewLoop ? {} : { reviewRounds, minReviewRounds: 0, maxReviewRounds: 6, autoMerge }),
+    ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -163,6 +169,7 @@ function stubFetch(
         reviewRounds = body.reviewRounds;
       }
       if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
+      if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
       return json(payload());
     }
     return json({ error: "unexpected" }, 404);
@@ -809,5 +816,38 @@ describe("the review loop", () => {
     expect(screen.queryByTestId("coding-agent-review-rounds")).toBeNull();
     expect(screen.queryByRole("switch", { name: MERGE })).toBeNull();
     expect(screen.queryByText(ROUNDS)).toBeNull();
+  });
+});
+
+/**
+ * How many goes a run gets at the thing it was asked to DELIVER.
+ *
+ * Beside the pull-request controls because the commonest deliverable IS the
+ * pull request those switches ask for. Hidden on a server that answers with no
+ * field, like the rounds above: a control over a setting the box has no route
+ * for would save nothing.
+ */
+describe("the attempts at a run's deliverable", () => {
+  it("shows what the device answered with, and saves a new value", async () => {
+    stubFetch({ enabled: true, readiness: READY, completionAttempts: 3 });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByTestId("coding-agent-completion-attempts") as HTMLSelectElement;
+    expect(select.value).toBe("3");
+    // The whole range the device named, and nothing outside it — 1 is the floor
+    // here, unlike the rounds, because zero attempts would mean never running.
+    expect(select.querySelectorAll("option")).toHaveLength(6);
+    expect((select.querySelectorAll("option")[0] as HTMLOptionElement).value).toBe("1");
+
+    fireEvent.change(select, { target: { value: "5" } });
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { completionAttempts: 5 } }); });
+    await waitFor(() => { expect((screen.getByTestId("coding-agent-completion-attempts") as HTMLSelectElement).value).toBe("5"); });
+  });
+
+  it("shows no control at all on a server that predates it", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { noCompletionAttempts: true });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(screen.queryByTestId("coding-agent-completion-attempts")).toBeNull();
+    expect(screen.queryByText(translations.en["codingAgent.completionAttemptsLabel"])).toBeNull();
   });
 });
