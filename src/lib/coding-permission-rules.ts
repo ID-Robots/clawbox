@@ -110,6 +110,31 @@ export function isAllowRuleRefusal(code: unknown): code is AllowRuleRefusal {
   return typeof code === "string" && (ALLOW_RULE_REFUSALS as readonly string[]).includes(code);
 }
 
+/**
+ * The sentence each refusal is shown as, by translation key.
+ *
+ * A `Record` over the code union rather than a lookup with a fallback, so the
+ * compiler refuses a new code that nobody worded: the refusals the owner meets
+ * are the whole reason the codes exist, and one that rendered as an empty
+ * string would be a refusal with no explanation at all.
+ *
+ * Here rather than in a component because BOTH surfaces read it — the rules
+ * editor in Settings words what the route refused, and the run page words why
+ * a refused action has no button.
+ */
+export const ALLOW_RULE_REFUSAL_KEYS: Record<AllowRuleRefusal, string> = {
+  empty: "codingAgent.ruleRefusedEmpty",
+  too_long: "codingAgent.ruleRefusedTooLong",
+  malformed: "codingAgent.ruleRefusedMalformed",
+  unknown_tool: "codingAgent.ruleRefusedUnknownTool",
+  bash_already_allowed: "codingAgent.ruleRefusedBash",
+  too_broad: "codingAgent.ruleRefusedTooBroad",
+  protected: "codingAgent.ruleRefusedProtected",
+  unsafe: "codingAgent.ruleRefusedUnsafe",
+  duplicate: "codingAgent.ruleRefusedDuplicate",
+  too_many: "codingAgent.ruleRefusedTooMany",
+};
+
 export interface AllowRuleOk {
   readonly ok: true;
   /** The rule as it will be stored and passed to the CLI — trimmed, never rewritten. */
