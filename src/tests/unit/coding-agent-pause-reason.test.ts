@@ -25,6 +25,7 @@ import { saveEnv } from "@/tests/helpers/env";
 import {
   MAX_PAUSE_MESSAGE_CHARS,
   PAUSE_METER_NOUN,
+  PAUSE_METERS,
   parsePauseReason,
   pauseResetClock,
 } from "@/lib/coding-agent-status";
@@ -140,6 +141,10 @@ describe("reading a pause reason off a record", () => {
       { kind: "allowance" },
       { kind: "allowance", meter: "gpu" },
       { kind: "allowance", meter: null },
+      // Metered, and genuinely exhaustible — but neither ends a run in a
+      // pause, so neither is a pause reason this box can word.
+      { kind: "allowance", meter: "tokens" },
+      { kind: "allowance", meter: "audio" },
     ]) {
       expect(parsePauseReason(bad), JSON.stringify(bad)).toBeNull();
     }
@@ -171,9 +176,21 @@ describe("reading a pause reason off a record", () => {
   });
 
   it("names every meter, so no surface can be handed one it cannot word", () => {
-    for (const meter of ["images", "audio", "speech", "tokens"] as const) {
-      expect(PAUSE_METER_NOUN[meter]).toBeTruthy();
+    // Driven off the list itself: a meter added without a noun beside it is
+    // an English sentence the agent-facing text cannot say, and the locale
+    // catalogues have a parity test of their own for the app's half.
+    expect(PAUSE_METERS.length).toBeGreaterThan(0);
+    for (const meter of PAUSE_METERS) {
+      expect(PAUSE_METER_NOUN[meter], meter).toBeTruthy();
     }
+  });
+
+  it("lists only meters something on the box can actually produce", () => {
+    // The record format is not a wish list. A run's token ceiling and its
+    // cost ceiling settle it as stopped/failed with their own sentence, and a
+    // spent per-run media cap refuses the call while the run carries on —
+    // none of them is a pause, so none of them belongs here.
+    expect([...PAUSE_METERS]).toEqual(["images", "speech"]);
   });
 });
 

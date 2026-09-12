@@ -384,9 +384,7 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
  */
 const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
   images: "codingAgent.pausedAllowanceImages",
-  audio: "codingAgent.pausedAllowanceAudio",
   speech: "codingAgent.pausedAllowanceSpeech",
-  tokens: "codingAgent.pausedAllowanceTokens",
 };
 
 export default function CodingAgentApp() {

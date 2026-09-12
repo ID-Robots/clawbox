@@ -27,12 +27,20 @@ export function isCodingRunStatus(value: unknown): value is CodingRunStatus {
 }
 
 /**
- * The METERS a run can be refused against — the things this box spends on a
- * run's behalf and can run out of. One list, for the same reason the statuses
- * are one list: the runner writes it, the record persists it, the app words it
- * and the MCP server relays it.
+ * The METERS a run can be PAUSED against — the things this box spends on a
+ * run's behalf, can run out of, and gets back. One list, for the same reason
+ * the statuses are one list: the routes write it, the record persists it, the
+ * app words it and the MCP server relays it.
+ *
+ * Two, and deliberately only the two that have a writer. The other metered
+ * things a run can exhaust do not end it in a pause and so are not pause
+ * reasons: the owner's token ceiling and the per-run cost ceiling settle a run
+ * as `stopped`/`failed` with a sentence of their own naming the number and the
+ * way out, and the per-run picture and clip caps refuse the CALL (code `cap`)
+ * while the run carries on. A meter listed here with nothing able to produce
+ * it would be a sentence in ten languages that no box can ever show.
  */
-export const PAUSE_METERS = ["images", "audio", "speech", "tokens"] as const;
+export const PAUSE_METERS = ["images", "speech"] as const;
 
 export type CodingPauseMeter = (typeof PAUSE_METERS)[number];
 
@@ -113,9 +121,7 @@ export function parsePauseReason(value: unknown): CodingPauseReason | null {
  */
 export const PAUSE_METER_NOUN: Record<CodingPauseMeter, string> = {
   images: "daily image allowance",
-  audio: "daily audio allowance",
   speech: "speech allowance",
-  tokens: "token allowance",
 };
 
 /**

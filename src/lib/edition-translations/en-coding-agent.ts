@@ -389,9 +389,7 @@ export const codingAgentEn: Record<string, string> = {
   // the only move the card offers, Resume, buys the same refusal until the
   // allowance is actually back.
   "codingAgent.pausedAllowanceImages": "Paused: the daily image allowance is used up.",
-  "codingAgent.pausedAllowanceAudio": "Paused: the daily audio allowance is used up.",
   "codingAgent.pausedAllowanceSpeech": "Paused: the speech allowance is used up.",
-  "codingAgent.pausedAllowanceTokens": "Paused: the token allowance is used up.",
   "codingAgent.pausedAllowanceResets": "It resets at {time} UTC.",
   "codingAgent.pausedAllowanceResetsUnknown": "Resume it once the allowance is back.",
   "codingAgent.prOpening": "Opening PR",
