@@ -20,6 +20,7 @@
  * runner.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -130,6 +131,18 @@ function writeConfig(cfg: Record<string, unknown>): void {
     coding_agent_enabled: true,
     ...cfg,
   }), "utf-8");
+}
+
+/**
+ * A real repository in the project folder, so `startRunBranch` succeeds and the
+ * auto-PR switch actually implies a deliverable. Two tests need one.
+ */
+function initGitRepo(dir: string): void {
+  for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]]) {
+    execFileSync("git", args, { cwd: dir });
+  }
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "first"], { cwd: dir });
 }
 
 function makeProject(id: string): string {
@@ -599,13 +612,13 @@ describe("a run that gave up is not the box's to throw away", () => {
 });
 
 describe("the held notice reaches the owner on every path", () => {
-  it("is sent even when the bar vanishes and no attempt is open", async () => {
-    // The hole an "is an attempt still open?" proxy left. An owner Resume at the
-    // attempt CEILING opens no new attempt (`openAttempt` declines), so if the
-    // implied pull-request bar then steps aside in the same settle chain, the
-    // notice `finishRun` held would have been swallowed and the run reported
-    // nowhere. `wasGated` is what answers the question `finishRun` actually
-    // asked, and it is true for this record whatever its attempt list says.
+  it("is sent once for a run resumed at the attempt ceiling", async () => {
+    // An owner Resume at the ceiling opens no new attempt (`openAttempt`
+    // declines) and `closeAttempt` records none either, so the list does not
+    // grow and the cap is already met: the gate gives up again. The notice comes
+    // from `giveUp` on this path — NOT from the bar-vanished branch, because an
+    // explicit deliverable is returned by `deliverableFor` before `run.pr` is
+    // ever looked at. The test below is the one that reaches that branch.
     installHarnessThatNeverDelivers();
     writeConfig({ coding_agent_completion_attempts: 1 });
     const started = await lib.startRun({
@@ -627,6 +640,54 @@ describe("the held notice reaches the owner on every path", () => {
 
     // However it ended, the owner was told exactly once.
     expect(run.status).toBe("gave_up");
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("is sent when the IMPLIED bar vanishes and no attempt is open", async () => {
+    // The branch `wasGated` exists for, reached the only way it can be: no
+    // explicit deliverable (or `deliverableFor` would answer with it and never
+    // look at `run.pr`), the bar IMPLIED by auto-PR, and a settle in which
+    // `maybeOpenPullRequest` records `phase: "failed"` — so `deliverableFor`
+    // answers null at the gate although it answered the pull request at
+    // `finishRun`, which is therefore holding the notice.
+    //
+    // Plus the attempt list at the module ceiling, so `openAttempt` declines and
+    // NO attempt is open. That is the combination the old "is an attempt open?"
+    // proxy got wrong: it would have sent nothing at all, and the run would have
+    // been reported nowhere.
+    installHarnessThatNeverDelivers();
+    initGitRepo(projectDir);
+    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 1 });
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const first = await settledForGood(started.id);
+    // The implied bar was real: a branch was made and an attempt recorded.
+    expect(first.pr?.branch).toBeTruthy();
+    expect(first.deliverable).toBeNull();
+    expect(first.attempts.length).toBeGreaterThan(0);
+    announceCodingAgent.mockClear();
+
+    // Fill the attempt list to the module-wide ceiling, so the Resume's
+    // `openAttempt` declines and no attempt is open at the next settle.
+    const runsFile = path.join(root, "data", "coding-agent-runs.json");
+    const onDisk = JSON.parse(fs.readFileSync(runsFile, "utf-8")) as Record<string, unknown>[];
+    onDisk[0].attempts = Array.from({ length: 6 }, (_, i) => ({ startedAt: i + 1, endedAt: i + 2, reason: "no pull request" }));
+    fs.writeFileSync(runsFile, JSON.stringify(onDisk));
+    await lib._resetCodingAgentStateForTests();
+
+    // Switched off while the run was away: this is what makes
+    // `maybeOpenPullRequest` record "failed" rather than "blocked", which is
+    // what takes the implied bar away mid-settle.
+    writeConfig({ coding_agent_auto_pr: false, coding_agent_completion_attempts: 1 });
+
+    await lib.resumeRun(started.id);
+    const run = await settledForGood(started.id);
+
+    // The bar stepped aside, so the harness's own verdict stands…
+    expect(run.pr?.phase).toBe("failed");
+    expect(run.status).toBe("completed");
+    expect(run.attempts.some((a) => a.endedAt === null)).toBe(false);
+    // …and the notice `finishRun` held was sent exactly once. Without `wasGated`
+    // this is 0.
     expect(announceCodingAgent).toHaveBeenCalledTimes(1);
   });
 
