@@ -3354,6 +3354,14 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
  * or a bus hiccup would settle a working run as lost.
  */
 function reattach(run: CodingRun, tools: SpawnTools): void {
+  // The idle clock starts HERE, not at whatever the previous server last saw.
+  // `detachedState` arms the watchdog against `lastActivityAt`, and a run that
+  // outlived a restart longer than RUN_IDLE_TIMEOUT_MS would be judged idle on
+  // its first check — killed about a minute after boot, with "no sign of life"
+  // on the record — while it was working perfectly well. This process saw
+  // nothing during the gap, so it may not hold the run to that silence; the
+  // tail (`followStream`) is what moves the clock from now on.
+  run.lastActivityAt = Date.now();
   const state = detachedState(run, tools, false);
   live.set(run.id, state);
   followStream(run, state);

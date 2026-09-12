@@ -52,6 +52,7 @@ export type ProgressLabelKey =
   | "reviewLoopTurn"
   | "reviewRound"
   | "resuming"
+  | "reattached"
   | "startingFresh"
   | "noRepository"
   | "workingOnBranch"
@@ -292,6 +293,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
   { re: /^Resuming the previous session$/, labelKey: "resuming", icon: "history" },
+  { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
   { re: /^Not a git repository yet: .*$/, labelKey: "noRepository", icon: "folder_off" },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },

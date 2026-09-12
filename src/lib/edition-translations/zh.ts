@@ -940,6 +940,7 @@ export const zh: Record<string, string> = {
   "codingAgent.autoMergeLabel": "合并评审轮次已放行的拉取请求",
   "codingAgent.autoMergeHint": "当所有检查都通过、没有评审评论未被回复、也没有人要求修改时，ClawBox 会以压缩方式合并该拉取请求并删除其分支。默认关闭，并且无论拉取请求指向哪里，都绝不会合并进 main。",
   "codingAgent.autoMergeFailed": "无法修改合并设置。",
+  "codingAgent.stepReattached": "Web 服务器已重启；此运行仍在继续，并已重新接管",
   "codingAgent.stepReviewLoopTurn": "{id} 的评审轮次",
   "codingAgent.stepReviewRound": "已把第 {round}/{max} 轮评审交给编码代理",
   "codingAgent.reviewOf": "审查 {id}",

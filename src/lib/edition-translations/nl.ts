@@ -930,6 +930,7 @@ export const nl: Record<string, string> = {
   "codingAgent.autoMergeLabel": "Een pull request samenvoegen die de reviewrondes hebben goedgekeurd",
   "codingAgent.autoMergeHint": "Als elke controle geslaagd is, geen reviewopmerking onbeantwoord is en niemand om wijzigingen heeft gevraagd, voegt ClawBox de pull request samen met squash en verwijdert de branch. Standaard uit, en nooit naar main, waar de pull request ook op gericht is.",
   "codingAgent.autoMergeFailed": "Kon de samenvoeginstelling niet wijzigen.",
+  "codingAgent.stepReattached": "De webserver is herstart; deze run liep door en is weer opgepakt",
   "codingAgent.stepReviewLoopTurn": "Reviewronde voor {id}",
   "codingAgent.stepReviewRound": "Reviewronde {round} van {max} doorgegeven aan de coding agent",
   "codingAgent.reviewOf": "controle van {id}",

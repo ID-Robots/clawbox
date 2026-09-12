@@ -926,6 +926,7 @@ export const sv: Record<string, string> = {
   "codingAgent.autoMergeLabel": "Slå samman en pull request som granskningsrundorna godkänt",
   "codingAgent.autoMergeHint": "När alla kontroller är godkända, ingen granskningskommentar är obesvarad och ingen har begärt ändringar slår ClawBox samman pull requesten med squash och tar bort dess gren. Av som standard, och aldrig in i main oavsett vad pull requesten riktar sig mot.",
   "codingAgent.autoMergeFailed": "Kunde inte ändra sammanslagningsinställningen.",
+  "codingAgent.stepReattached": "Webbservern startades om; körningen fortsatte och togs upp igen",
   "codingAgent.stepReviewLoopTurn": "Granskningsrunda för {id}",
   "codingAgent.stepReviewRound": "Granskningsrunda {round} av {max} lämnad till kodagenten",
   "codingAgent.reviewOf": "granskning av {id}",

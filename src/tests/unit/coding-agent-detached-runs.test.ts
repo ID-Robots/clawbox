@@ -14,6 +14,7 @@
  * without needing a user manager on the machine running the suite.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "child_process";
 import fs from "fs";
 import net from "net";
 import os from "os";
@@ -145,6 +146,28 @@ function installSystemctl(state: "active" | "inactive" | "failed"): void {
       `printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog())}`,
       'for a in "$@"; do',
       `  if [ "$a" = "is-active" ]; then cat ${JSON.stringify(activeState())}; exit 0; fi`,
+      "done",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+/**
+ * A `systemctl` whose `stop` FAILS, so the fallback can be watched. Everything
+ * else answers as usual, because `is-active` is what keeps a reattached run
+ * from settling under the test.
+ */
+function installSystemctlThatCannotStop(state: "active" | "inactive"): void {
+  fs.writeFileSync(activeState(), state, "utf-8");
+  fs.writeFileSync(
+    path.join(shimDir, "systemctl"),
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(systemctlLog())}`,
+      'for a in "$@"; do',
+      `  if [ "$a" = "is-active" ]; then cat ${JSON.stringify(activeState())}; exit 0; fi`,
+      '  if [ "$a" = "stop" ]; then echo "Failed to stop unit: Access denied" >&2; exit 1; fi',
       "done",
       "exit 0",
     ].join("\n"),
@@ -448,6 +471,26 @@ describe("after a restart", () => {
     expect(shimCalls(systemctlLog()).join("\n")).toContain("--user is-active clawbox-run-detach01-abc.scope");
   });
 
+  it("starts the idle clock at the reattach, not at what the last server saw", async () => {
+    // The watchdog is armed against `lastActivityAt`. Judged on the PREVIOUS
+    // server's last event, a run that outlived a restart longer than the idle
+    // timeout would be killed on its first check — about a minute after boot,
+    // with "no sign of life" on the record — while working perfectly well. This
+    // process saw nothing during the gap and may not hold the run to it.
+    installSystemdRun();
+    installSystemctl("active");
+    const longAgo = Date.now() - 6 * 60 * 60_000;
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({ lastActivityAt: longAgo, startedAt: longAgo })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    const before = Date.now();
+    expect(await lib.reconcileAfterRestart()).toBe(0);
+    const run = lib.getRun("run-detach01");
+    expect(run?.status).toBe("running");
+    expect(run?.lastActivityAt).toBeGreaterThanOrEqual(before);
+  });
+
   it("keeps following the log of a reattached run from where the last server stopped", async () => {
     installSystemdRun();
     installSystemctl("active");
@@ -638,38 +681,100 @@ describe("the review loop across a restart", () => {
 });
 
 describe("ending a run", () => {
-  it("stops the scope, not only the process group", async () => {
+  /**
+   * The signals, with the process group of a live `sleep` standing in for a run's.
+   *
+   * A spy rather than a real kill of a fixture number: the pgid on a record read
+   * off disk may name whatever the machine has since given that pid to, which is
+   * why the production code forgets it across a restart — and a test must not be
+   * the one thing that signals it.
+   */
+  function watchSignals(): { calls: Array<{ pid: number; signal: unknown }>; restoreKill: () => void } {
+    const calls: Array<{ pid: number; signal: unknown }> = [];
+    const real = process.kill.bind(process);
+    const spy = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: unknown) => {
+      // Signal 0 only ASKS whether a group is there; the production code uses it
+      // for exactly that and must keep getting a real answer.
+      if (signal === 0) return real(pid, 0 as never);
+      calls.push({ pid, signal });
+      return true;
+    }) as typeof process.kill);
+    return { calls, restoreKill: () => spy.mockRestore() };
+  }
+
+  it("asks systemd to stop the scope AND still signals the group when that fails", async () => {
     installSystemdRun();
-    installSystemctl("active");
-    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord()]));
+    // A stop that systemd refuses: the scope is not what ends this run, so the
+    // signal has to. Without the fallback the run would be left going.
+    installSystemctlThatCannotStop("active");
+    // A real live process group to aim at, so the ordering is observed against
+    // something that genuinely exists.
+    const sleeper = spawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
+    sleeper.unref();
+    const pgid = sleeper.pid as number;
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({ pgid })]));
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
     await lib.reconcileAfterRestart();
 
-    lib.stopRun("run-detach01");
-    await vi.waitFor(
-      () => expect(shimCalls(systemctlLog()).join("\n")).toContain("--user stop clawbox-run-detach01-abc.scope"),
-      { timeout: 5_000 },
-    );
+    const { calls, restoreKill } = watchSignals();
+    try {
+      lib.stopRun("run-detach01");
+      // BOTH, and deliberately no assertion about which lands first: the unit
+      // stop is issued first but is NOT awaited, because making the signal wait
+      // on a bus round trip would delay ending every run. What matters is that
+      // the scope is asked (it reaches a grandchild in its own process group)
+      // and that a refused stop does not leave the run going.
+      await vi.waitFor(
+        () => expect(shimCalls(systemctlLog()).join("\n")).toContain("--user stop clawbox-run-detach01-abc.scope"),
+        { timeout: 5_000 },
+      );
+      await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0), { timeout: 5_000 });
+      // The whole group, never one pid.
+      expect(calls[0]).toEqual({ pid: -pgid, signal: "SIGTERM" });
+    } finally {
+      restoreKill();
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
   });
 
-  it("stops the scope when the owner ends what a finished run left behind", async () => {
+  it("stops the scope and signals the group when the owner ends what a finished run left behind", async () => {
     installSystemdRun();
-    installSystemctl("active");
+    installSystemctlThatCannotStop("active");
+    const sleeper = spawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
+    sleeper.unref();
+    const pgid = sleeper.pid as number;
     fs.writeFileSync(runsFile(), JSON.stringify([liveRecord({
       status: "completed",
       completedAt: Date.now() - 1_000,
+      pgid,
       leftover: true,
     })]));
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
 
-    const killed = lib.killRunLeftovers("run-detach01");
-    expect(killed.leftover).toBe(false);
-    expect(killed.unit).toBeNull();
-    await vi.waitFor(
-      () => expect(shimCalls(systemctlLog()).join("\n")).toContain("--user stop clawbox-run-detach01-abc.scope"),
-      { timeout: 5_000 },
-    );
+    const { calls, restoreKill } = watchSignals();
+    try {
+      const killed = lib.killRunLeftovers("run-detach01");
+      expect(killed.leftover).toBe(false);
+      expect(killed.unit).toBeNull();
+      await vi.waitFor(
+        () => expect(shimCalls(systemctlLog()).join("\n")).toContain("--user stop clawbox-run-detach01-abc.scope"),
+        { timeout: 5_000 },
+      );
+      await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0), { timeout: 5_000 });
+      expect(calls[0]).toEqual({ pid: -pgid, signal: "SIGTERM" });
+    } finally {
+      restoreKill();
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
   });
 });

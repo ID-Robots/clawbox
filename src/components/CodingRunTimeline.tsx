@@ -56,6 +56,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   reviewLoopTurn: "codingAgent.stepReviewLoopTurn",
   reviewRound: "codingAgent.stepReviewRound",
   resuming: "codingAgent.stepResuming",
+  reattached: "codingAgent.stepReattached",
   startingFresh: "codingAgent.stepStartingFresh",
   noRepository: "codingAgent.stepNoRepository",
   workingOnBranch: "codingAgent.stepWorkingOnBranch",
