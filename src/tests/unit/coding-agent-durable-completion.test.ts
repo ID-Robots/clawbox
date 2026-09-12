@@ -421,3 +421,61 @@ describe("resuming a run that gave up", () => {
     await expect(lib.resumeRun(started.id)).rejects.toThrow(/paused run, or one that gave up/);
   });
 });
+
+/**
+ * The implied pull-request deliverable.
+ *
+ * With auto-PR on, the owner has already said the point of a run is a pull
+ * request, so there is nothing to type — but the implication has to step aside
+ * where a pull request was never POSSIBLE, or every attempt goes on the one
+ * thing the harness cannot fix. And when it steps aside AFTER `finishRun` held
+ * the finish notice on the strength of it, the notice still has to be sent: a
+ * run nobody is ever told about is the worse failure of the two.
+ */
+describe("the deliverable the auto-PR switch implies", () => {
+  it("is not implied at all in a folder that is not a repository yet", async () => {
+    // `startRunBranch` answers `no_repository` and the record gets no `pr`, so
+    // there is no bar — which is the existing "a fresh folder with auto-PR on is
+    // not a failed pull request" rule, unchanged.
+    installHarnessThatNeverDelivers();
+    writeConfig({ coding_agent_auto_pr: true });
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const run = await settledForGood(started.id);
+
+    expect(run.pr).toBeNull();
+    expect(run.status).toBe("completed");
+    expect(run.attempts).toEqual([]);
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
+    // One harness turn: nothing nudged it for a pull request this folder could
+    // never have had.
+    expect(stdinLog()).toHaveLength(1);
+  });
+
+  it("still tells the owner when the bar goes away after the run settled", async () => {
+    // A git repository, so the run DOES get a branch and an implied pull-request
+    // deliverable — and then `maybeOpenPullRequest` fails on its own (no remote,
+    // no `gh`), which records `pr.phase: "failed"`. The implied bar steps aside,
+    // and the notice `finishRun` held must still arrive.
+    installHarnessThatNeverDelivers();
+    writeConfig({ coding_agent_auto_pr: true });
+    const { execFileSync } = await import("child_process");
+    for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]]) {
+      execFileSync("git", args, { cwd: projectDir });
+    }
+    execFileSync("git", ["add", "-A"], { cwd: projectDir });
+    execFileSync("git", ["commit", "-qm", "first"], { cwd: projectDir });
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const run = await settledForGood(started.id);
+
+    // It had a branch, so the bar was real while it worked…
+    expect(run.pr?.branch).toBeTruthy();
+    // …and the box's own flow is what could not deliver it.
+    expect(run.pr?.phase).not.toBe("review");
+    // Whatever the flow decided, the owner is told exactly once.
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
+    // And no attempt is left hanging open, which would read as a turn still
+    // being made and would block a later Resume from opening one.
+    expect(run.attempts.some((a) => a.endedAt === null)).toBe(false);
+  });
+});

@@ -5977,9 +5977,33 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
   const originId = finished.reviewOf ?? finished.id;
   const origin = loadRuns().find((r) => r.id === originId);
   if (!origin) return;
-  if (!deliverableGateApplies(origin)) return;
+  // The same conditions `deliverableGateApplies` reads, taken apart — because
+  // the LAST of them can have changed since `finishRun` held the notice, and
+  // that case needs a different answer from "this was never gated".
+  if (origin.status !== "completed") return;
+  if (origin.reviewOf !== null || origin.reviewLoopOf !== null) return;
+  if (origin.readOnly || origin.team) return;
+
   const deliverable = deliverableFor(origin);
-  if (!deliverable) return;
+  if (!deliverable) {
+    // The bar is GONE since the run settled. One way in: the deliverable was
+    // the one the auto-PR switch implied, and `maybeOpenPullRequest` has just
+    // recorded `pr.phase === "failed"` — the box's own flow could not run (no
+    // remote, `gh` not logged in, the push refused), which the harness cannot
+    // fix, so the implied deliverable steps aside rather than burn every
+    // attempt on it.
+    //
+    // `finishRun` held this run's finish notice on the strength of the bar that
+    // existed then, so it is sent HERE. A run nobody is ever told about is the
+    // worse of the two failures, and "held the notice" is exactly what the open
+    // attempt entry records.
+    if (origin.attempts.some((a) => a.endedAt === null)) {
+      closeAttempt(origin, null);
+      persist(true);
+      announceGatedRun(origin);
+    }
+    return;
+  }
 
   try {
     // The owner's own gesture ends this, not the deliverable. Judging it now
@@ -6108,9 +6132,16 @@ async function startCompletionAttempt(
       completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
     );
   } catch {
-    // spawnOrSettle has already settled the record as failed and said why; it
-    // rethrows for the benefit of a route's caller, and there is none here.
-    // Swallowed rather than logged again for that reason.
+    // `spawnOrSettle` has already settled the record as failed and said why, and
+    // it rethrows for the benefit of a route's caller — of which there is none
+    // here, so the throw itself is not news. What IS left to do is the two
+    // things that path does not do: close the attempt this call opened (left
+    // open it would read as a turn still being made, and would stop any later
+    // Resume from opening one), and send the finish notice `finishRun` held for
+    // a gate that has now ended the run on its own.
+    closeAttempt(run, missing);
+    persist(true);
+    announceGatedRun(run);
   }
 }
 
