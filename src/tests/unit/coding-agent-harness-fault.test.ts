@@ -356,6 +356,63 @@ describe("the pre-flight check", () => {
     await settled(again.id);
   });
 
+  it("refuses even when the fault never reached the disk", async () => {
+    // finishRun cannot await, so the write is fired and forgotten; a full disk
+    // or a permissions change loses it silently. The process keeps its own
+    // copy for exactly that, and for the window between the call and the file
+    // landing — the agent starting a follow-up the moment the first run
+    // settles used to read a config that said nothing was wrong.
+    installFailingWrapper();
+    enableAgent();
+    makeProject("site");
+    await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    // The durable copy, taken away underneath the process.
+    const cfg = readConfig();
+    delete cfg[HARNESS_FAULT_CONFIG_KEY];
+    writeConfig(cfg);
+    expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeUndefined();
+
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(false);
+    await expect(lib.startRun({ task: "build again", projectId: "site", source: "owner" }))
+      .rejects.toThrow(/not ready/i);
+  });
+
+  it("clears the copy the disk never had, so Try again is not a no-op", async () => {
+    installFailingWrapper();
+    enableAgent();
+    makeProject("site");
+    await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+    const cfg = readConfig();
+    delete cfg[HARNESS_FAULT_CONFIG_KEY];
+    writeConfig(cfg);
+
+    // An early return over the absent config key would have left the copy
+    // that is doing the refusing exactly where it was.
+    await lib.clearHarnessFault();
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(true);
+  });
+
+  it("ages the process's own copy out on the same clock as the disk's", async () => {
+    installFailingWrapper();
+    enableAgent();
+    makeProject("site");
+    await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+    const cfg = readConfig();
+    delete cfg[HARNESS_FAULT_CONFIG_KEY];
+    writeConfig(cfg);
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(false);
+
+    // One TTL rule for both copies — a second one would be a second thing to
+    // get wrong, and a box pinned shut by a fault nothing can see.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + HARNESS_FAULT_TTL_MS + 1_000 });
+    try {
+      expect((await lib.checkReadiness()).harnessHealthy).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("says nothing about the harness on a box that has never seen a fault", async () => {
     enableAgent();
     const readiness = await lib.checkReadiness();

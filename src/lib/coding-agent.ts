@@ -1756,15 +1756,39 @@ export async function findExecutableOnPath(binary: string, pathValue: string = r
 }
 
 /**
+ * The fault THIS PROCESS knows about, beside the persisted one.
+ *
+ * Two copies of one fact, and both are needed, for two reasons that have
+ * nothing to do with each other:
+ *
+ *  - finishRun cannot await, so the write is fired and forgotten. Between the
+ *    call and the file landing there is a real window in which a second run —
+ *    the agent starting a follow-up the moment the first settles — reads a
+ *    config that says nothing is wrong and spawns straight into the same wall.
+ *    This is set SYNCHRONOUSLY, before the first await, so that window is
+ *    closed.
+ *  - a write that rejects (a full disk, a permissions change) would otherwise
+ *    lose the fault silently and take the whole pre-flight with it.
+ *
+ * The persisted copy is the durable one and outlives a restart; this one does
+ * not, which is right — a web server that has just come up has seen nothing.
+ * Both are read through `parseHarnessFault`, so the TTL is one rule rather
+ * than two, and `clearHarnessFault` drops both.
+ */
+let liveHarnessFault: HarnessFault | null = null;
+
+/**
  * Remember that the harness could not get a model to answer, so the next run
  * is refused before it spawns instead of dying the same way.
  *
- * Written from finishRun, which cannot await: the caller voids it. A write
- * that fails costs the refusal and nothing else, which is why nothing here
- * throws upward.
+ * Written from finishRun, which cannot await: the caller voids it. Nothing
+ * here throws upward — a failed write costs the durable copy and nothing
+ * else, because the in-memory one above is already set by then.
  */
 async function rememberHarnessFault(): Promise<void> {
-  await configSet(HARNESS_FAULT_CONFIG_KEY, { at: Date.now() });
+  // Synchronous, ahead of the await: see liveHarnessFault.
+  liveHarnessFault = { at: Date.now() };
+  await configSet(HARNESS_FAULT_CONFIG_KEY, { at: liveHarnessFault.at });
 }
 
 /**
@@ -1780,6 +1804,9 @@ async function rememberHarnessFault(): Promise<void> {
  * keys is one more thing for the next reader of it to wonder about.
  */
 export async function clearHarnessFault(): Promise<void> {
+  // First, and unconditionally: this is the copy that can refuse a run on its
+  // own, so an early return over an absent config key must not leave it set.
+  liveHarnessFault = null;
   if ((await configGet(HARNESS_FAULT_CONFIG_KEY)) === undefined) return;
   await configSet(HARNESS_FAULT_CONFIG_KEY, undefined);
 }
@@ -1822,7 +1849,10 @@ async function readinessWith(token: unknown, faultRaw: unknown): Promise<CodingH
   // for is upstream's to say, and the only honest way to know is that a run
   // has just been told no. So the probe reports what the box has SEEN, which
   // is what turns a column of identical dead runs into one clear refusal.
-  const fault: HarnessFault | null = parseHarnessFault(faultRaw);
+  // Either copy refuses. Both go through the same parser, so one TTL rule
+  // governs them and an expired in-memory fault ages out exactly as the
+  // persisted one does.
+  const fault: HarnessFault | null = parseHarnessFault(faultRaw) ?? parseHarnessFault(liveHarnessFault);
   const harnessHealthy = fault === null;
   if (fault) problems.push(harnessFaultProblem(fault));
   return {
@@ -4605,7 +4635,12 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     run.failureKind = "harness_not_ready";
     run.error = harnessFaultMessage(run.error);
     run.resumable = false;
-    void rememberHarnessFault().catch(() => {});
+    void rememberHarnessFault().catch((err: unknown) => {
+      // Said, not swallowed: the durable copy is gone and only this process
+      // will refuse the next run, which is exactly the kind of degraded state
+      // that should be in the log rather than inferred from behaviour.
+      console.warn("[coding-agent] could not persist the harness fault:", err instanceof Error ? err.message : err);
+    });
   } else if (run.status === "completed") {
     // The only proof that matters. A box that was refusing runs because of a
     // fault is plainly working now, so the fault goes rather than waiting out
@@ -5387,5 +5422,8 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   }
   dirty = false;
   runs = null;
+  // Module state like the rest: left set, it would refuse the next test file's
+  // runs from a fault the box under test never had.
+  liveHarnessFault = null;
   return settleWork(killed, SETTLE_DRAIN_BUDGET_MS);
 }
