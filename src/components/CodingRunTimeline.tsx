@@ -53,6 +53,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   // The run page, the sidebar and the breadcrumb already name a review pass
   // with this key; a second string for the same sentence would drift.
   reviewPass: "codingAgent.reviewPassTitle",
+  reviewLoopTurn: "codingAgent.stepReviewLoopTurn",
+  reviewRound: "codingAgent.stepReviewRound",
   resuming: "codingAgent.stepResuming",
   startingFresh: "codingAgent.stepStartingFresh",
   noRepository: "codingAgent.stepNoRepository",

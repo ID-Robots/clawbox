@@ -25,6 +25,7 @@ const setGenerateImages = vi.hoisted(() => vi.fn());
 const setGenerateAudio = vi.hoisted(() => vi.fn());
 const setRealBrowser = vi.hoisted(() => vi.fn());
 const clearHarnessFault = vi.hoisted(() => vi.fn());
+const setAutoMerge = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   setCodingAgentEnabled: setEnabled,
@@ -34,6 +35,9 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   setGenerateAudio,
   setRealBrowser,
   clearHarnessFault,
+  // setReviewRounds is deliberately left REAL: its range refusal is the thing
+  // under test below, and a mock would pin the route's plumbing instead.
+  setAutoMerge,
 }));
 
 // The reload is mocked at its own seam rather than at the refresh helper's, so
@@ -161,6 +165,52 @@ describe("the body", () => {
 
     const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
     expect((await empty.json()).error as string).toContain("{ realBrowser: boolean }");
+  });
+
+  it("takes the review-loop settings, and names them in the refusal too", async () => {
+    const rounds = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: 5 } }));
+    expect(rounds.status).toBe(200);
+    const merge = await POST(request({ cookie: ownerCookie(), body: { autoMerge: true } }));
+    expect(merge.status).toBe(200);
+    expect(setAutoMerge).toHaveBeenCalledWith(true);
+
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    const message = (await empty.json()).error as string;
+    expect(message).toContain("{ reviewRounds: number }");
+    expect(message).toContain("{ autoMerge: boolean }");
+  });
+
+  it("takes 0 rounds — the loop switched off is a setting, not an empty body", async () => {
+    // `!fields.reviewRounds` would read 0 as "this request is not about the
+    // rounds" and answer 400 for the one value that switches the loop off.
+    const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: 0 } }));
+    expect(res.status).toBe(200);
+  });
+
+  it("REFUSES a round count outside the range rather than clamping it", async () => {
+    // A caller that asked for 20 meant something this box does not offer, and
+    // silently saving 6 would answer a question it did not ask.
+    for (const bad of [-1, 7, 100]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: bad } }));
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error as string).toContain("between 0 and 6");
+    }
+  });
+
+  it("REFUSES a fractional round count rather than rounding it into one", async () => {
+    // `clampReviewRounds` rounds, so 1.5 would have been SAVED as 2 — an
+    // answer to a question the caller did not ask.
+    for (const bad of [1.5, 0.5, 2.0001]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: bad } }));
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error as string).toContain("whole number");
+    }
+  });
+
+  it("refuses the agent the merge switch — a consent it must not give itself", async () => {
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { autoMerge: true } }));
+    expect(res.status).toBe(403);
+    expect(setAutoMerge).not.toHaveBeenCalled();
   });
 
   it("refuses the agent this switch like every other", async () => {

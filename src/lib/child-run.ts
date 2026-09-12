@@ -54,6 +54,21 @@ export interface RunChildOptions {
   env: Record<string, string>;
   /** What stderr reads when the binary never started. */
   notStarted?: string;
+  /**
+   * Keep only the last N characters of stdout.
+   *
+   * Absent, stdout is accumulated whole — which is right for every caller that
+   * reads a JSON answer or a sha, and wrong for the one that asks GitHub for a
+   * workflow log: `gh run view --log-failed` on a failing matrix prints
+   * megabytes, and slicing the tail off AFTER the child resolves bounds what is
+   * kept without ever bounding what was held. This box is a Jetson with one
+   * long-lived web server on it.
+   *
+   * Characters rather than bytes because that is what is accumulated: the
+   * chunks are decoded on arrival, so a byte cap here would be a cap on
+   * something this function never holds.
+   */
+  maxStdoutChars?: number;
   /** Written to the child's stdin, which is then closed. Absent = stdin closed
    *  from the start, exactly as before this option existed. The one consumer
    *  is `gh auth login --with-token`, which reads the credential from stdin so
@@ -85,7 +100,14 @@ export function runChild(bin: string, args: string[], opts: RunChildOptions): Pr
     timer.unref();
     // `?.` only because the computed stdio tuple widens the type — slots 1
     // and 2 are always "pipe", so the streams are always there.
-    child.stdout?.on("data", (c) => { stdout += String(c); });
+    // The tail, when a cap is asked for: an error is at the END of a log, and
+    // the slice happens only on the chunks that cross the cap, so a caller
+    // with no cap and a caller with a generous one both pay nothing extra.
+    const cap = opts.maxStdoutChars;
+    child.stdout?.on("data", (c) => {
+      stdout += String(c);
+      if (cap !== undefined && stdout.length > cap) stdout = stdout.slice(-cap);
+    });
     child.stderr?.on("data", (c) => { stderr += String(c); });
     // `error` is not proof the binary is missing. It also fires on a child that
     // spawned perfectly well and whose kill() could not deliver its signal — so
