@@ -6,8 +6,8 @@ import { CodingAgentError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCod
 export const dynamic = "force-dynamic";
 
 /**
- * POST { task, projectId? | directory?, resumeRunId?, provider?, model? } →
- * start a coding run.
+ * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
+ * deliverable? } → start a coding run.
  *
  * `provider` and `model` are the per-run override of the owner's default
  * account (Settings → Coding Agent). They are validated together, by the one
@@ -33,7 +33,10 @@ export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
-  let body: { task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown; provider?: unknown; model?: unknown };
+  let body: {
+    task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
+    provider?: unknown; model?: unknown; deliverable?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -68,6 +71,13 @@ export async function POST(request: Request) {
       provider: body.provider,
       model: body.model,
       source,
+      // Passed through unvalidated ON PURPOSE: `startRun` reads it through the
+      // one reader (`readDeliverableInput`), which is also what the draft route
+      // uses, and throws `invalid` with the reason — so the two routes cannot
+      // disagree about what this box accepts. `source` is what decides whether a
+      // `command` deliverable is allowed; it is derived above from the owner's
+      // cookie, never from the body.
+      deliverable: body.deliverable,
     });
     return NextResponse.json({ started: true, run }, { status: 202 });
   } catch (err) {

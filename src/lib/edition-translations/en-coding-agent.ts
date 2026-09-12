@@ -337,8 +337,13 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.discardFailed": "The draft could not be discarded.",
   "codingAgent.statusPaused": "Paused",
   "codingAgent.statusDraft": "Draft",
+  // The run worked, reported itself done, and what it had to leave behind is
+  // not there. Its own word because the alternatives both mislead: "Did not
+  // finish" reads as a broken box, and "Stopped" is the owner's own gesture.
+  "codingAgent.statusGaveUp": "Gave up",
   "codingAgent.chatPaused": "Coding agent paused",
   "codingAgent.chatDraft": "Coding run drafted",
+  "codingAgent.chatGaveUp": "Coding agent gave up",
   // Follows "≈ 12 min" under a live run's progress bar.
   "codingAgent.timeLeft": "left",
   "codingAgent.openResume": "Open in terminal",
@@ -513,6 +518,27 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.reviewOf": "review of {id}",
   "codingAgent.reviewedBy": "reviewed by {id}",
   "codingAgent.reviewPassTitle": "Automatic review pass of {id}",
+
+  // ── What a run had to deliver ─────────────────────────────────────────────
+  //
+  // The card on a run's page, and the words for the three steps the gate adds
+  // to the timeline. A run that gave up is the one ending where the owner has
+  // to be told what is MISSING rather than what went wrong, so the card leads
+  // with the bar and says the verdict under it.
+  "codingAgent.deliverableTitle": "What it had to deliver",
+  "codingAgent.deliverablePr": "A pull request for its branch",
+  "codingAgent.deliverablePaths": "These files, not empty: {files}",
+  "codingAgent.deliverableCommand": "This command, exiting cleanly: {command}",
+  "codingAgent.deliverableMet": "It is there.",
+  "codingAgent.deliverableMissing": "Still missing: {reason}",
+  "codingAgent.deliverablePending": "Not checked yet.",
+  "codingAgent.deliverableAttempts": "{n} of {max} attempts used",
+  "codingAgent.stepDeliverableMet": "The deliverable is there",
+  "codingAgent.stepDeliverableMissing": "Not finished yet: {reason}",
+  "codingAgent.stepAnotherAttempt": "Attempt {attempt} of {attempts} at the deliverable",
+  "codingAgent.completionAttemptsLabel": "Attempts at a run's deliverable",
+  "codingAgent.completionAttemptsHint": "A run only counts as finished when what it had to deliver is actually there \u2014 the files your assistant named, or a pull request when pull requests are on. When it is not, ClawBox carries the run on in its own session with a note saying what is missing. The run's own first go counts as one attempt.",
+  "codingAgent.completionAttemptsFailed": "Could not change the number of attempts.",
 
   // ── First-run setup wizard ────────────────────────────────────────────────
   //

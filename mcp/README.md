@@ -674,7 +674,22 @@ shell tool, not less and not more:
   150 turns by default (10–2000), an optional token ceiling the device itself
   enforces, an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
-  project that sits under it.
+  project that sits under it;
+- **`completed` means the DELIVERABLE exists**, not that the harness said it
+  was done (`src/lib/coding-deliverable.ts`). `deliverable_files` on
+  `coding_agent_run` is a comma-separated list of relative paths that must
+  exist and be non-empty; with the owner's auto-PR switch on, a pull request
+  for the run's branch is implied and needs no argument. When the check fails
+  the device resumes the run IN ITS OWN SESSION with a nudge naming what is
+  missing, up to `coding_agent_completion_attempts` (default 3, the run's own
+  first turn counted as one), and then settles it as `gave_up` — a status of
+  its own, because the session is intact and Resume is what helps, where
+  `failed` means the harness could not finish at all. `coding_agent_status`
+  reports the bar, the verdict and the attempts, and says plainly not to start
+  a fresh run for a `gave_up` one. There is deliberately no `command`
+  deliverable on this tool surface: that kind has the box RUN something, which
+  is execution the agent does not otherwise hold on the Hermes edition, so it
+  is the owner's to set in the Coding Agent app.
 
 ### Coding team (both editions, the same switch)
 

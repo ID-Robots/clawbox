@@ -14,6 +14,7 @@ import {
   setMaxTurns,
   setAutoMerge,
   setAutoPr,
+  setCompletionAttempts,
   setGenerateAudio,
   setGenerateImages,
   setRealBrowser,
@@ -78,6 +79,11 @@ function forbidden() {
  * POST { autoMerge: boolean } → may the box squash-merge a pull request its
  * own review loop cleared? Off by default, and never into `main`. See
  * @/lib/coding-review-state for the decision.
+ * POST { completionAttempts: number } → how many goes a run with a deliverable
+ * gets at it, its own first turn counted as one. Only ever spent by a run that
+ * HAS a deliverable — one the caller named, or the pull request the auto-PR
+ * switch implies — so a box that uses neither is unaffected. The range is
+ * refused rather than clamped, like the review rounds.
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
  * shows the wizard instead of its home page until this is true; the reset
  * route is what puts it back to false).
@@ -132,6 +138,7 @@ export async function POST(request: Request) {
     autoPr?: unknown;
     reviewRounds?: unknown;
     autoMerge?: unknown;
+    completionAttempts?: unknown;
     generateImages?: unknown;
     generateAudio?: unknown;
     realBrowser?: unknown;
@@ -145,6 +152,7 @@ export async function POST(request: Request) {
   const hasAutoPr = typeof fields.autoPr === "boolean";
   const hasReviewRounds = typeof fields.reviewRounds === "number";
   const hasAutoMerge = typeof fields.autoMerge === "boolean";
+  const hasCompletionAttempts = typeof fields.completionAttempts === "number";
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
@@ -161,7 +169,7 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -170,7 +178,7 @@ export async function POST(request: Request) {
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
           + "{ realBrowser: boolean }, { reviewRounds: number }, "
-          + "{ autoMerge: boolean }, "
+          + "{ autoMerge: boolean }, { completionAttempts: number }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -235,6 +243,10 @@ export async function POST(request: Request) {
     if (hasAutoMerge) {
       const saved = await setAutoMerge(fields.autoMerge);
       console.error(`[coding-agent] merging a cleared pull request switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasCompletionAttempts) {
+      const saved = await setCompletionAttempts(fields.completionAttempts);
+      console.error(`[coding-agent] attempts at a run's deliverable set to ${saved} by the owner`);
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);

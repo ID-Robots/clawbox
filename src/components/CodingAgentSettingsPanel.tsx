@@ -91,6 +91,12 @@ export interface AgentStatus {
   /** May the box merge a pull request its own review loop cleared? Optional,
    *  and OFF when absent — it is a consent, not a preference. */
   autoMerge?: boolean;
+  /** How many goes a run with a deliverable gets at it, its own first turn
+   *  counted as one. Optional, for the reason `reviewRounds` is: an older
+   *  server answers with none and the control is then not drawn at all. */
+  completionAttempts?: number;
+  minCompletionAttempts?: number;
+  maxCompletionAttempts?: number;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
   suggestedDirectory?: string;
@@ -148,12 +154,12 @@ const CONFIRM_MS = 5_000;
  * message sat below the GitHub card, a screen away from a Steps field that
  * still held the refused number.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "settings" | "github";
+type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts"]);
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -974,6 +980,45 @@ export default function CodingAgentSettingsPanel({
                 onChange={(next) => void saveSetting({ autoMerge: next }, "autoMerge", t("codingAgent.autoMergeFailed"))}
               />
             </div>
+          </>
+        )}
+
+        {/* How many goes a run gets at the thing it was asked to DELIVER.
+            Beside the pull-request controls because the commonest deliverable
+            IS the pull request those switches ask for, and hidden on a server
+            that answers with no field, like the rounds above. */}
+        {typeof status?.completionAttempts === "number" && (
+          <>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="min-w-0 flex items-center gap-1.5">
+                <label htmlFor="coding-agent-completion-attempts" className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.completionAttemptsLabel")}
+                </label>
+                <HelpTip
+                  text={t("codingAgent.completionAttemptsHint")}
+                  label={t("codingAgent.completionAttemptsLabel")}
+                  testId="coding-agent-completion-attempts-help"
+                />
+              </div>
+              {/* A select, for the reason the rounds above are one: six values,
+                  nothing to hold as a draft, nothing typeable the route refuses. */}
+              <select
+                id="coding-agent-completion-attempts"
+                value={String(status.completionAttempts)}
+                disabled={saving}
+                data-testid="coding-agent-completion-attempts"
+                onChange={(e) => void saveSetting({ completionAttempts: Number(e.target.value) }, "completionAttempts", t("codingAgent.completionAttemptsFailed"))}
+                className={`text-base sm:text-xs ${FIELD} w-28`}
+              >
+                {Array.from(
+                  { length: (status.maxCompletionAttempts ?? 6) - (status.minCompletionAttempts ?? 1) + 1 },
+                  (_, i) => (status.minCompletionAttempts ?? 1) + i,
+                ).map((n) => (
+                  <option key={n} value={n}>{String(n)}</option>
+                ))}
+              </select>
+            </div>
+            {errorIn("completionAttempts")}
           </>
         )}
 

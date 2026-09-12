@@ -239,6 +239,9 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // merge on the strength of a decision the owner has just wiped.
       "coding_agent_review_rounds",
       "coding_agent_auto_merge",
+      // The attempt budget for a run's deliverable: spent only by a run that
+      // has one, so a reset clears it with the rest of what the owner chose.
+      "coding_agent_completion_attempts",
       // The two media switches are ON when absent, so clearing them is what
       // puts a reset box back to "yes, draw and speak for my projects".
       "coding_agent_generate_images",

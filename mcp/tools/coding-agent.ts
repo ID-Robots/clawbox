@@ -43,6 +43,15 @@ import {
   DEFAULT_CODING_PROVIDER,
   resolveRunProvider,
 } from "../../src/lib/coding-provider";
+// Pure too: what a run was held to and how to say it, so this tool cannot
+// describe a bar the server never set.
+import {
+  describeDeliverable,
+  MAX_DELIVERABLE_PATHS,
+  type Deliverable,
+  type DeliverableVerdict,
+  type RunAttempt,
+} from "../../src/lib/coding-deliverable";
 
 const MAX_TASK_CHARS = 4_000;
 const MAX_WAIT_SECONDS = 120;
@@ -195,6 +204,16 @@ interface RunPayload {
   progress: string[];
   /** The run's own TodoWrite plan; absent on a record from before it was kept. */
   todos?: { content?: unknown; status?: unknown; activeForm?: unknown }[];
+  /** What the run had to leave behind before the box would call it finished.
+   *  Absent on a record written before deliverables existed, and on a run
+   *  nobody set one for. */
+  deliverable?: Deliverable | null;
+  /** The last verdict on it. */
+  deliverableCheck?: DeliverableVerdict | null;
+  /** Every go at it, the run's own first turn included. */
+  attempts?: RunAttempt[];
+  /** The ceiling that applied. */
+  completionAttempts?: number;
 }
 
 function elapsed(run: RunPayload): string {
@@ -261,6 +280,29 @@ function describeReview(review: ReviewLoop | null | undefined): string | null {
   return `[pull request review — ${review.state}]\n${facts}. ${ending}${detail}${review.url ? ` ${review.url}` : ""}`;
 }
 
+/**
+ * What the run was held to, and whether it got there — one line the assistant
+ * can relay.
+ *
+ * Drawn from the structured fields, never from `error`: the sentence on a
+ * `gave_up` record is the owner's, and a tool that re-derived the verdict by
+ * reading it would be parsing English to answer a question the record already
+ * answers.
+ */
+function describeDeliverableState(run: RunPayload): string | null {
+  const deliverable = run.deliverable;
+  if (!deliverable) return null;
+  const attempts = Array.isArray(run.attempts) ? run.attempts.length : 0;
+  const made = attempts && run.completionAttempts ? ` after ${attempts} of ${run.completionAttempts} attempts` : "";
+  const check = run.deliverableCheck;
+  if (!check) return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)}. The device has not checked yet.`;
+  if (check.ok) return `[deliverable] It left behind ${describeDeliverable(deliverable)}${made}, which is why this counts as finished.`;
+  // `missing` is the device's own sentence — except for a command deliverable,
+  // where it ends in a bounded tail of that command's output. The envelope
+  // redacts it on the way out like every other part of this text.
+  return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)} and did not${made}: ${check.missing ?? ""}`;
+}
+
 function describeRun(run: RunPayload, tail: number): string {
   const parts: string[] = [];
   // A draft has not started: elapsed() would measure time since drafting.
@@ -290,6 +332,8 @@ function describeRun(run: RunPayload, tail: number): string {
   // capped at maxChars by the registrar, and the activity log is the long,
   // low-value part — sixty lines of it would push the one thing this tool
   // exists to deliver past the cut.
+  const deliverable = describeDeliverableState(run);
+  if (deliverable) parts.push(deliverable);
   const review = describeReview(run.review);
   if (review) parts.push(review);
   if (run.error) parts.push(`[error]\n${run.error}`);
@@ -350,6 +394,18 @@ function describeRun(run: RunPayload, tail: number): string {
         + " do not start a fresh run for the same task.",
       );
     }
+  } else if (run.status === "gave_up") {
+    // The ending this whole feature exists to make visible. It is NOT a failure
+    // and it is NOT a finish: the run worked, said it was done, and what it
+    // produced is not what was asked for. A fresh run is the wrong advice —
+    // everything already done is on disk and in the session — so the one thing
+    // said here is the one thing that helps.
+    parts.push(
+      "It stopped short: the run reported itself done, but what it had to leave behind is not there — the [deliverable] line above"
+      + " says what is missing. Its work so far is on disk and its session is intact. Do NOT start a fresh run for the same task:"
+      + " tell the user what is missing and that Resume on the run's page in the Coding Agent app carries on in the same session."
+      + " If they would rather you narrowed the task, call coding_agent_run with resume_run_id set to this id.",
+    );
   } else if (run.status === "failed" && run.failureKind === "harness_not_ready") {
     // The device, not the task. Said first so the two advice branches below
     // cannot claim this one: "start a fresh run" is the worst possible answer
@@ -396,11 +452,17 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         ANTHROPIC_MODELS,
         `Which model, for provider "anthropic" only. Omit for the default. ClawBox AI chooses its own model from the box's plan, so naming one with that provider is refused.`,
       ).optional(),
+      deliverable_files: zOptText(
+        512,
+        `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) of the files this run MUST leave behind, e.g. "src/app.js,index.html". `
+        + "The device checks they exist and are not empty before it calls the run finished, and resumes the run with a nudge when they are not. "
+        + "Name them whenever the task has a concrete output; leave this out when it does not.",
+      ),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
-      provider?: string; model?: string;
+      provider?: string; model?: string; deliverable_files?: string;
     }) => {
       // No client-side "needs a place to work" guard: the route itself falls
       // back to the owner's stored default folder when neither a project nor
@@ -439,6 +501,19 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // idea of it, and silently move a run to another account.
       if (provider) body.provider = provider;
       if (model) body.model = model;
+      // A list in a string, the `allowed_domains` shape: the schema rules here
+      // forbid array and JSON-in-a-string parameters, because both harnesses
+      // rewrite them differently on the way in. Split and trimmed here; the
+      // device is what validates each path, and answers 400 with its own
+      // sentence when one is not a relative path inside the run's folder.
+      //
+      // There is deliberately no `command` deliverable on this tool surface:
+      // that kind has the box RUN something, which is execution the agent does
+      // not otherwise hold on this edition, so it is the owner's alone. And no
+      // `pr` kind either — the auto-PR switch already implies one when it is on,
+      // and when it is off there is no branch for a pull request to exist on.
+      const paths = (deliverable_files ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+      if (paths.length) body.deliverable = { kind: "paths", paths };
       let res: { started?: boolean; run?: RunPayload };
       try {
         res = await apiPost<{ started?: boolean; run?: RunPayload }>(
@@ -478,6 +553,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       }
       return text(
         `Started coding run "${run.id}" in ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}. `
+        + (paths.length ? `It is not counted as finished until ${paths.join(", ")} exist and are not empty. ` : "")
         + "It works in the background on the ClawBox and may take several minutes. "
         + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
       );
