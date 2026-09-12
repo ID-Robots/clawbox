@@ -68,6 +68,12 @@ export async function POST(request: Request) {
     return refuse(400, "invalid_body", "That is not a promotion.");
   }
 
+  // NOT an authorization check, and deliberately AFTER the two that are: the
+  // owner's session and the origin have already decided whether this request
+  // may act at all, and neither is anything a caller can assert. This is the
+  // owner's INTENT, echoed so that the card's question and the route agree
+  // about what the gesture is — a caller that omits it is refused, and a caller
+  // that sends it has gained nothing it did not already have.
   if (body.confirm !== true) {
     return refuse(400, "not_confirmed", "A promotion has to be confirmed: it points this project's production traffic at that build.");
   }
@@ -98,7 +104,10 @@ export async function POST(request: Request) {
     if (!link) return refuse(409, "not_linked", "No Vercel project is attached to this project any more.");
     const auth = await resolveVercelAuth(link, scope);
 
-    const promoted = await promoteDeployment(auth, link.projectId, deploymentId);
+    // The RECORD's own id, never the caller's string — they were just proved
+    // equal, and what reaches Vercel should be the value this box wrote rather
+    // than the one that arrived.
+    const promoted = await promoteDeployment(auth, link.projectId, state.deploymentId);
     if (!promoted.ok) {
       // Vercel's own kind travels as the code, so the card can tell "your token
       // expired" from "the house internet is down" without reading English.
@@ -110,8 +119,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const updated = recordDeployPromotion(runId, {
-      deploymentId,
+    const updated = recordDeployPromotion(run.id, {
+      deploymentId: state.deploymentId,
       url: state.url,
       at: Date.now(),
       // The only actor this box writes: the route the MCP bearer cannot reach.
