@@ -664,6 +664,35 @@ export default function CodingAgentApp() {
     }
   };
 
+  /**
+   * Forget a recorded harness fault and re-read the box.
+   *
+   * The fault is what makes the device refuse runs after the harness proved
+   * it could not get a model to answer — see coding-harness-fault.ts. It
+   * expires on its own and a completed run drops it, but neither helps the
+   * owner who has JUST fixed what the message named (signed in again, changed
+   * plan): without this they would be told to wait out a clock for a problem
+   * that is already gone. A refusal that cannot be retried is a dead end, and
+   * the route has accepted this since it existed — nothing on screen asked.
+   */
+  const retryHarness = async () => {
+    setBusy("harness-fault");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clearHarnessFault: true }),
+      });
+      if (!res.ok) throw new Error(t("codingAgent.harnessRetryFailed"));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.harnessRetryFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   /** Open the live view once the run's transcript exists — the session id
    *  lands a few seconds after spawn, and the poll above (`load` every
    *  POLL_MS while a run is live) is already watching for it. A run that
@@ -1581,6 +1610,20 @@ export default function CodingAgentApp() {
               <p className="text-[11px] text-amber-400 mt-1.5 leading-relaxed" role="alert">
                 {readiness.problems.join(" ")}
               </p>
+            )}
+            {/* Only for the one problem the owner can clear from here. The
+                other rows name something to install or a plan to connect, and
+                a button that re-read the same disk would just say no again. */}
+            {readiness.harnessHealthy === false && (
+              <button
+                type="button"
+                onClick={() => void retryHarness()}
+                disabled={busy === "harness-fault"}
+                data-testid="coding-agent-harness-retry"
+                className="mt-2 text-[11px] rounded-lg border border-amber-400/40 text-amber-300 px-2.5 py-1 hover:bg-amber-400/10 disabled:opacity-50"
+              >
+                {busy === "harness-fault" ? t("codingAgent.harnessRetrying") : t("codingAgent.harnessRetry")}
+              </button>
             )}
           </div>
         )}

@@ -73,6 +73,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.harness": "Coding harness",
   "codingAgent.harnessNotReady": "not ready",
   "codingAgent.harnessNotReadyDetail": "The coding harness on this ClawBox could not get a model to answer. This is a problem with the device, not with your task — check in Settings → AI Models that ClawBox AI is connected and that your plan covers the model the harness asks for, then start the run again.",
+  "codingAgent.harnessRetry": "Try again",
+  "codingAgent.harnessRetrying": "Checking…",
+  "codingAgent.harnessRetryFailed": "The ClawBox could not be asked to try the harness again.",
 
   // Real Claude Code settings: --effort, and whether the Task tool is in
   // --tools at all. "Ultracode" is the CLI's own name for its xhigh-plus-

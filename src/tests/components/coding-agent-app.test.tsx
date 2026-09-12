@@ -556,6 +556,27 @@ describe("CodingAgentApp", () => {
       expect(screen.queryByText(translations.en["codingAgent.harness"])).not.toBeInTheDocument();
     });
 
+    it("offers a way out, because a refusal nobody can retry is a dead end", async () => {
+      // The fault expires on its own and a completed run drops it — neither
+      // helps the owner who has JUST signed in again or changed plan and is
+      // being told to wait out a clock for a problem that is already gone.
+      stubFetch({ enabled: true, readiness: HARNESS_BROKEN });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-harness-retry"));
+      await waitFor(() => expect(posts).toContainEqual({
+        url: "/setup-api/coding-agent/enable", body: { clearHarnessFault: true },
+      }));
+    });
+
+    it("offers it for nothing else, since no other row is clearable from here", async () => {
+      // The other rows name something to install or a plan to connect. A
+      // button that re-read the same disk would only say no again.
+      stubFetch({ enabled: true, readiness: NOT_READY });
+      render(<CodingAgentApp />);
+      await screen.findByText(translations.en["codingAgent.claudeCode"]);
+      expect(screen.queryByTestId("coding-agent-harness-retry")).toBeNull();
+    });
+
     it("says on the run's page that the device is at fault, above the line the harness printed", async () => {
       const dead = {
         ...RUN,
