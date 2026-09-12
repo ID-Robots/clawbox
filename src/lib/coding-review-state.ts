@@ -425,11 +425,20 @@ export function decideReviewRound(input: {
   return { action: "merge" };
 }
 
-/** One line naming what is still wrong, for the owner-facing `detail`. */
+/**
+ * One line counting what is still wrong, for the owner-facing `detail`.
+ *
+ * COUNTS ONLY, and deliberately not the checks' NAMES. A check name is a string
+ * GitHub hands us — anyone who can add a workflow to the repository chooses it
+ * — and `detail` is relayed by the MCP status tool, where it would sit beside
+ * the tool's own directives to the assistant. Nothing is lost by leaving them
+ * out: the names travel structured, in `ReviewLoop.checks`, which is what the
+ * run page's review card draws and what a machine consumer should read.
+ */
 export function describeProblems(problems: ReviewProblems): string {
   const parts: string[] = [];
   if (problems.failedChecks.length) {
-    parts.push(`${problems.failedChecks.length} failing ${problems.failedChecks.length === 1 ? "check" : "checks"} (${problems.failedChecks.map((c) => c.name).slice(0, 5).join(", ")})`);
+    parts.push(`${problems.failedChecks.length} failing ${problems.failedChecks.length === 1 ? "check" : "checks"}`);
   }
   if (problems.threads.length) {
     parts.push(`${problems.threads.length} unresolved review ${problems.threads.length === 1 ? "comment" : "comments"}`);

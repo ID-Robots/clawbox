@@ -17,22 +17,42 @@ import { runChild } from "@/lib/child-run";
 
 const ENV = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C" };
 
+/**
+ * The most one stdout chunk can carry, which is the slack the cap is allowed.
+ *
+ * The slice runs after each chunk is appended rather than inside the stream, so
+ * what is retained is at most `maxStdoutChars` plus whatever the last chunk
+ * added. Node's pipe chunks top out at 64 KiB.
+ */
+const MAX_CHUNK = 65_536;
+
 /** Print `n` lines of a known shape, so the tail can be identified exactly. */
 function printer(n: number): string[] {
   return ["-e", `for (let i = 0; i < ${n}; i++) process.stdout.write(\`line\${i}\\n\`);`];
 }
 
+/** What `printer(n)` writes in total, so a test can say the cap actually bit. */
+function printedLength(n: number): number {
+  let total = 0;
+  for (let i = 0; i < n; i++) total += `line${i}\n`.length;
+  return total;
+}
+
 describe("runChild's stdout cap", () => {
   it("keeps the TAIL, because that is where a failing log's error is", async () => {
-    const result = await runChild(process.execPath, printer(20_000), {
+    const cap = 200;
+    const lines = 20_000;
+    const result = await runChild(process.execPath, printer(lines), {
       timeoutMs: 30_000,
       env: ENV,
-      maxStdoutChars: 200,
+      maxStdoutChars: cap,
     });
     expect(result.code).toBe(0);
-    // Bounded — plus at most one chunk's worth, since the slice happens after
-    // the append rather than inside the stream.
-    expect(result.stdout.length).toBeLessThan(200_000);
+    // Held against the CONFIGURED cap, not against a number the child never
+    // reaches: `expect(length).toBeLessThan(200_000)` passed whether or not the
+    // cap was honoured, because 20 000 lines are only ~160 KB.
+    expect(printedLength(lines)).toBeGreaterThan(cap + MAX_CHUNK);
+    expect(result.stdout.length).toBeLessThanOrEqual(cap + MAX_CHUNK);
     expect(result.stdout).toContain("line19999");
     expect(result.stdout).not.toContain("line0\n");
   });

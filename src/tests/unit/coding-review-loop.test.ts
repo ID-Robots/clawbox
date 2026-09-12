@@ -226,7 +226,7 @@ describe("the review loop's watcher", () => {
 
     const run = lib.getRun(RUN_ID);
     expect(run?.review?.detail).toContain("3 review rounds did not clear it");
-    expect(run?.review?.detail).toContain("build");
+    expect(run?.review?.detail).toContain("1 failing check");
     expect(run?.pr?.phase).toBe("blocked");
   });
 
@@ -275,6 +275,39 @@ describe("the review loop's watcher", () => {
     const run = lib.getRun(RUN_ID);
     // The owner hears what gh said, not only that it failed.
     expect(run?.review?.detail).toContain("gh auth login");
+    expect(run?.pr?.phase).toBe("blocked");
+  });
+
+  it("does NOT spend a round the box could not start, and keeps looking", async () => {
+    // "busy", "not_ready" and "disabled" are all about the box this minute
+    // rather than about this pull request, so `startFixRun` answers "retry"
+    // before the round is counted. Spending the owner's last round on a start
+    // that never happened would be the wrong bill.
+    review.readReviewSnapshot.mockResolvedValue(snap({ checks: [{ name: "build", state: "fail", url: null }] }));
+    await boot({ coding_agent_enabled: false });
+    writeRecord({ round: 1 });
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.lastPolledAt).not.toBeNull(); });
+    // No run was started, the round stands where it was, and the loop is still
+    // watching rather than settled.
+    expect(lib.listRuns().some((r) => r.reviewLoopOf === RUN_ID)).toBe(false);
+    expect(lib.getRun(RUN_ID)?.review?.round).toBe(1);
+    expect(lib.getRun(RUN_ID)?.review?.state).toBe("polling");
+  });
+
+  it("gives the pull request back once it has been unable to start a round for an hour", async () => {
+    // The retry above is bounded by the same ceiling everything else here is,
+    // or a box left switched off would poll this pull request for ever.
+    review.readReviewSnapshot.mockResolvedValue(snap({ checks: [{ name: "build", state: "fail", url: null }] }));
+    await boot({ coding_agent_enabled: false });
+    writeRecord({ round: 1, roundStartedAt: Date.now() - 61 * 60_000 });
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("needs_owner"); });
+    const run = lib.getRun(RUN_ID);
+    expect(run?.review?.round).toBe(1);
+    expect(run?.review?.detail).toContain("could not start a review round in time");
     expect(run?.pr?.phase).toBe("blocked");
   });
 

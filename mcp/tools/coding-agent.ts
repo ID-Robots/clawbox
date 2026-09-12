@@ -214,7 +214,13 @@ function describeReview(review: ReviewLoop | null | undefined): string | null {
           : review.state === "working"
             ? "A review round is working on it now."
             : "The device is watching it.";
-  return `[pull request review — ${review.state}]\n${facts}. ${ending}${review.detail ? ` ${review.detail}` : ""}${review.url ? ` ${review.url}` : ""}`;
+  // `detail` is the device's own sentence — `describeProblems` counts rather
+  // than names the checks, precisely so no string GitHub handed us lands beside
+  // this tool's directives. Bounded anyway: the one branch that quotes anything
+  // outside this box's vocabulary is the gh read error, which carries gh's
+  // stderr.
+  const detail = review.detail ? ` ${review.detail.slice(0, 400)}` : "";
+  return `[pull request review — ${review.state}]\n${facts}. ${ending}${detail}${review.url ? ` ${review.url}` : ""}`;
 }
 
 function describeRun(run: RunPayload, tail: number): string {
