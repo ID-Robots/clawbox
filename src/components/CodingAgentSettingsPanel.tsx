@@ -7,6 +7,9 @@ import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
+import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
+// The toggle lives in its own module now — the secrets card draws one too.
+import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import HelpTip from "./HelpTip";
 import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
@@ -181,50 +184,6 @@ export function devicePollSeconds(raw: unknown): number {
 // ./coding-agent-ui. SMALL_BUTTON is kept as the local name for the secondary
 // role so the many call sites below read unchanged.
 const SMALL_BUTTON = BTN_SECONDARY;
-
-function Switch({
-  checked, busy, disabled, label, onChange, testId = "coding-agent-switch",
-}: {
-  checked: boolean;
-  busy: boolean;
-  disabled: boolean;
-  label: string;
-  onChange: (next: boolean) => void;
-  /** The main switch keeps the id it always had; the review pass has its own. */
-  testId?: string;
-}) {
-  return (
-    <div className="flex items-center gap-2 shrink-0">
-      {busy && (
-        // motion-safe: a spinner that keeps turning for an owner who asked
-        // the OS for reduced motion is the one thing a spinner must not do.
-        <span
-          className="material-symbols-rounded motion-safe:animate-spin text-[var(--text-muted)]"
-          style={{ fontSize: 18 }}
-          aria-hidden="true"
-          data-testid={`${testId}-busy`}
-        >
-          progress_activity
-        </span>
-      )}
-      <button
-        type="button"
-        role="switch"
-        aria-label={label}
-        aria-checked={checked}
-        aria-busy={busy}
-        disabled={disabled || busy}
-        onClick={() => onChange(!checked)}
-        data-testid={testId}
-        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-          checked ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-        }`}
-      >
-        <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${checked ? "translate-x-6" : "translate-x-1"}`} />
-      </button>
-    </div>
-  );
-}
 
 export default function CodingAgentSettingsPanel({
   onReset,
@@ -1030,6 +989,13 @@ export default function CodingAgentSettingsPanel({
           next time" on a refused action, on the run's own page — and this is
           where it is read whole and taken back. */}
       <CodingAgentRulesCard />
+
+      {/* The owner's stored secrets, and the one consent that lets a run have
+          any of them. Its own card and its own routes, like the rules card
+          above and for the same reason: the panel serialises its setting
+          writes through one chain, and a list with its own add, remove and
+          per-row tick does not belong in that chain. */}
+      <CodingAgentSecretsCard />
 
       {/* The owner's own Anthropic account — the credential half of the
           picker above. Drawn on any server that knows the selector at all,

@@ -255,6 +255,12 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // rather than leaving a run started after the wizard with permissions
       // granted before it.
       "coding_agent_allow_rules",
+      // The CONSENT for handing a run the owner's stored secrets, and the same
+      // reasoning: a run started after the wizard must not be given
+      // credentials on the strength of a yes the owner has just wiped. The
+      // SECRETS themselves are deliberately not cleared, for the reason the
+      // Anthropic key below is not — they are things the owner pasted.
+      "coding_agent_inject_secrets",
       // WHICH ACCOUNT PAYS is a setting, not a credential: "start over" puts
       // it back to the box's own plan. Left behind, an `anthropic` default
       // made the wizard the reset reopened report the agent as not ready —

@@ -234,6 +234,7 @@ async function listFolders(): Promise<string[]> {
   } catch {
     return [];
   }
+
 }
 
 /**
@@ -646,6 +647,35 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         return text(`Asked run ${run_id} to stop; it has not exited yet. Call coding_agent_status in a moment to confirm.`);
       }
       return text(`Stopped run ${run_id} (${status}). Its files and progress are kept; call coding_agent_status for details.`);
+    },
+  );
+
+  reg.tool(
+    "coding_secret_list",
+    "List the NAMES of the secrets the owner has stored on this ClawBox for coding runs — a deploy token, a test API key, an SSH target. Use it before starting a run that needs a credential, so you can tell the user which name is there and which is missing instead of watching the run fail for the want of one. There is no way to read a value, here or anywhere: the owner types it in Settings and only a run's own environment ever sees it. A name with inject:false is stored but deliberately NOT handed to runs, and one with readable:false cannot be handed over at all — in both cases tell the user to look at the secret in the Coding Agent's settings rather than starting a run that will fail.",
+    {},
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 2_000 },
+    async () => {
+      const data = await apiGet<{ names?: { name: string; scope: string; inject: boolean; readable: boolean }[] }>(
+        "/setup-api/coding-agent/secrets/names",
+        { timeoutMs: 15_000 },
+      );
+      const names = data.names ?? [];
+      if (!names.length) {
+        return text(
+          "The owner has stored no secrets on this ClawBox. A run gets no credentials of theirs."
+          + " They can add one in the Coding Agent's settings, under Secrets.",
+        );
+      }
+      return json(names.map((n) => ({
+        name: n.name,
+        // "box" or a project id, said the way the owner's own card says it.
+        scope: n.scope,
+        given_to_runs: n.inject,
+        // Only ever mentioned when it is a problem: a readable entry is the
+        // normal case and a field saying so on every row is noise.
+        ...(n.readable ? {} : { unreadable: true }),
+      })));
     },
   );
 }

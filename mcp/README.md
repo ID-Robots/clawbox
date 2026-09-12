@@ -79,7 +79,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
-| Coding agent (`coding_agent_run/status/stop`) | when the owner switched it on | when the owner switched it on |
+| Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
@@ -572,7 +572,8 @@ tells the run to link them and ship them.
 
 ### Coding agent (both editions, only while the owner's switch is on)
 
-`coding_agent_run` · `coding_agent_status` · `coding_agent_stop`
+`coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
+`coding_secret_list`
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
@@ -591,6 +592,17 @@ exists to prevent. `anthropic` works only where the owner has connected their
 own Anthropic access; `coding_agent_status` and the Coding Agent app say
 whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
+`coding_secret_list` answers the NAMES of the owner's stored secrets
+(`src/lib/project-secrets.ts`), their scope (`box` or a project id), whether
+each is handed to runs and whether this box can still decrypt it. There is no
+tool, route or parameter anywhere that answers a VALUE: the owner types one in
+the Coding Agent's settings and only a run's own environment ever holds it, and
+everything a run then says is scrubbed of it before it reaches the run record
+(`src/lib/secret-redact.ts`). There is deliberately no tool for the master
+switch either, for the reason `browser_auto_open` has none: handing an
+unattended shell the owner's credentials is a consent, and a tool that could
+turn it back on would make their "no" temporary.
+
 The run lives in the web server (`src/lib/coding-agent.ts`,
 `/setup-api/coding-agent/*`), not in this process: OpenClaw reaps the MCP
 after ten idle minutes and a run routinely outlives that. Run ids therefore

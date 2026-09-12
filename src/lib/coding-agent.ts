@@ -4349,6 +4349,39 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
 }
 
 /**
+ * WHICH project a run belongs to, for the secret store's scope.
+ *
+ * The same identity the projects listing gives a row (`CodingProject.folder`),
+ * derived the same way: a code project's id, else the FIRST folder under the
+ * owner's project folder that the run's directory sits in — at any depth, which
+ * is how a run in `~/Projects/shop/api` gets the `shop` project's secrets.
+ *
+ * Deliberately NOT `run.projectId`, which is set only for a code project: a
+ * scope keyed on it would have left every folder project — the kind the owner's
+ * own project folder holds — unable to have a secret of its own.
+ *
+ * Null when the run is in no project of the owner's (a bare absolute folder, or
+ * a box with no project folder set). Such a run gets the box-scoped entries
+ * alone; it is not a project, so no project's secrets are its own.
+ */
+async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">): Promise<string | null> {
+  if (typeof run.projectId === "string" && run.projectId) return run.projectId;
+  if (typeof run.directory !== "string" || !run.directory) return null;
+  const folders = await readProjectFolders();
+  if (!folders) return null;
+  // Both spellings of the base, the way listProjects matches them: a run
+  // records its folder symlink-resolved, and the owner's setting may not be.
+  const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
+  for (const base of new Set([folders.base, realBase])) {
+    if (!run.directory.startsWith(base + path.sep)) continue;
+    const first = path.relative(base, run.directory).split(path.sep)[0];
+    // A dot-folder is state, not a project — the same cut listProjects makes.
+    if (first && !first.startsWith(".")) return first;
+  }
+  return null;
+}
+
+/**
  * The plaintext an in-flight run holds, keyed by run id.
  *
  * IN MEMORY, never on the record and never persisted: the run record goes to
@@ -4375,7 +4408,7 @@ const runSecretEnv = new Map<string, Record<string, string>>();
  * would hand a run a token and then print it.
  */
 async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
-  const resolved = await resolveSecretsForRun({ projectId: run.projectId });
+  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
   runSecretEnv.set(run.id, resolved.env);
   registerRunSecrets(run.id, Object.entries(resolved.env).map(([name, value]) => ({ name, value })));
   run.secretNames = resolved.names;

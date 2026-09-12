@@ -129,6 +129,17 @@ function stubFetch(
     if (url.startsWith("/setup-api/coding-agent/permissions")) {
       return json({ allowRules: [], maxAllowRules: 32 });
     }
+    // Same reason for CodingAgentSecretsCard, which the panel also embeds: its
+    // own list route and the projects route behind its scope picker. Left
+    // unstubbed, the card's own "could not read the stored secrets" alert is a
+    // real message from a real child and would fail every assertion that says
+    // this panel shows no alert.
+    if (url.startsWith("/setup-api/coding-agent/secrets")) {
+      return json({ secrets: [], max: 64, maxValueChars: 8192, injectSecrets: false });
+    }
+    if (url.startsWith("/setup-api/coding-agent/projects")) {
+      return json({ directory: null, projects: [] });
+    }
     if (url.startsWith("/setup-api/coding-agent/git")) {
       if (opts.gitThrows) throw new TypeError("Failed to fetch");
       if (opts.gitStatus && opts.gitStatus !== 200) return json({ error: "gh fell over" }, opts.gitStatus);
@@ -587,6 +598,17 @@ describe("a GitHub read that failed is asked again", () => {
         gitCalls += 1;
         if (gitStatus !== 200) return json({ error: "gh fell over" }, gitStatus);
         return json({ installed: true, connected: true, login: "yalexx", loginCommand: GH_OFF.loginCommand });
+      }
+      // The embedded cards' own routes — this harness counts git calls, so
+      // everything else it does not name must still answer rather than 404.
+      if (url.startsWith("/setup-api/coding-agent/permissions")) {
+        return json({ allowRules: [], maxAllowRules: 32 });
+      }
+      if (url.startsWith("/setup-api/coding-agent/secrets")) {
+        return json({ secrets: [], max: 64, maxValueChars: 8192, injectSecrets: false });
+      }
+      if (url.startsWith("/setup-api/coding-agent/projects")) {
+        return json({ directory: null, projects: [] });
       }
       return json({ error: "unexpected" }, 404);
     }));
