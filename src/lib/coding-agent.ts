@@ -4421,6 +4421,27 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
 }
 
 /**
+ * Put a run's secrets back, from a copy taken before its settle dropped them.
+ *
+ * For ONE caller: the automatic transient retry in `finishRun`. That branch
+ * respawns the same record synchronously, from the child's own `close`
+ * handler, so it cannot re-resolve — the resolve is a disk read — and the
+ * cleanup above it has already emptied both tables. A retried child spawned
+ * with no redaction table armed is a child whose echoed token would reach the
+ * run record; one spawned with no environment is a retry that fails for the
+ * want of a credential the first attempt had.
+ *
+ * Every OTHER continuation is asynchronous and re-resolves instead
+ * (`prepareRunSecrets`): the owner's Resume, a drafted run, and each attempt of
+ * the deliverable gate. Those are the paths where re-reading is the right
+ * answer, because time has passed and the owner may have changed their mind.
+ */
+function restoreRunSecrets(runId: string, env: Record<string, string>): void {
+  runSecretEnv.set(runId, env);
+  registerRunSecrets(runId, Object.entries(env).map(([name, value]) => ({ name, value })));
+}
+
+/**
  * The environment a run gets — and nothing else. Exported for the contract test.
  *
  * The PROVIDER travels here and the credential does not: the wrapper reads
@@ -6759,6 +6780,13 @@ async function startCompletionAttempt(
   run.lastActivityAt = Date.now();
   openAttempt(run);
   pushProgress(run, RUNNER_STEP.anotherAttempt(attempt, run.completionAttempts));
+  // RE-RESOLVED for this attempt, like a resume's. The previous attempt's
+  // settle dropped the values out of memory (cleanupRunResources), so they have
+  // to be worked out again either way — and re-reading is the safer of the two
+  // answers: an entry the owner un-ticked while the run was working is not
+  // handed back to it, and the redaction table is armed again before the child
+  // that would echo one exists.
+  await prepareRunSecrets(run);
   persist(true);
   console.error(`[coding-agent] ${run.id} attempt ${attempt} of ${run.completionAttempts} at its deliverable`);
   startProjectIcon(run);
@@ -6977,6 +7005,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // A stop that raced the final message keeps "completed": the work is done.
   run.exitCode = exitCode;
   run.completedAt = Date.now();
+  // The owner's secrets, taken before the cleanup below drops them — for the
+  // retry branch alone, which cannot re-resolve them. See restoreRunSecrets.
+  const carriedSecrets = runSecretEnv.get(run.id);
   // Timers, the run's browser tab, and the verdict on what it left running.
   // Before the retry branch below, which respawns into a fresh state and a
   // fresh process group: a retry that inherited the first attempt's timers
@@ -7029,6 +7060,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       pushProgress(run, RUNNER_STEP.providerSilent);
       persist(true);
       console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
+      // The same credentials and the same redaction table as the attempt that
+      // got nowhere: this is one run making a second try at the same work, not
+      // a new decision by the owner.
+      if (carriedSecrets) restoreRunSecrets(run.id, carriedSecrets);
       try {
         spawnRun(run, null, state.tools, state.settings);
         return;

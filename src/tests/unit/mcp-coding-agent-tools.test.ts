@@ -652,6 +652,8 @@ describe("what a command deliverable's failure tells the AGENT", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("app.js was not created.");
+  });
+});
 
 describe("coding_secret_list", () => {
   /**

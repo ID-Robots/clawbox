@@ -122,3 +122,31 @@ describe("the per-run table", () => {
     expect(redactForRun("run-a", `${tiny} and ${TOKEN}`)).toBe(`${tiny} and <secret:TOK>`);
   });
 });
+
+describe("the two ways a run continues", () => {
+  /**
+   * A run can be spawned again under the same record in two quite different
+   * ways, and the secret table has to follow each one correctly:
+   *
+   *  - the AUTOMATIC transient retry, from the child's own `close` handler.
+   *    It cannot re-resolve (the resolve reads the disk) so coding-agent.ts
+   *    carries the table across with `restoreRunSecrets`. What must not happen
+   *    is a retried child running with the table empty: its output would reach
+   *    the record unscrubbed.
+   *  - every OTHER continuation — the owner's Resume, a drafted run, each
+   *    attempt of the deliverable gate — which re-resolves and REPLACES.
+   *
+   * These are the table's own halves of that; the runner's wiring is pinned in
+   * coding-agent-secret-env.test.ts and the store's in project-secrets.test.ts.
+   */
+  it("a carried table scrubs the second attempt exactly as it scrubbed the first", () => {
+    registerRunSecrets("run-a", [{ name: "TOK", value: TOKEN }]);
+    const carried = [{ name: "TOK", value: TOKEN }];
+    // What cleanupRunResources does between the two attempts.
+    forgetRunSecrets("run-a");
+    expect(redactForRun("run-a", `saw ${TOKEN}`)).toBe(`saw ${TOKEN}`);
+    // What the retry branch does before it respawns.
+    registerRunSecrets("run-a", carried);
+    expect(redactForRun("run-a", `saw ${TOKEN}`)).toBe("saw <secret:TOK>");
+  });
+});
