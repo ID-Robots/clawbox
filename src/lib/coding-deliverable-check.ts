@@ -252,7 +252,14 @@ async function checkCommand(
      * its app's server listening), but this is a CHECK, nobody is told about it,
      * and repeated checks would leak processes and hold ports.
      */
+    // ONE-SHOT, and that is a correctness requirement rather than tidiness: the
+    // pgid is only meaningful while this process still owns it. Once the leader
+    // has been reaped the kernel may hand that pid to somebody else, and a
+    // second `kill(-pid)` would then signal a group that is not ours.
+    let groupEnded = false;
     const endGroup = (): void => {
+      if (groupEnded) return;
+      groupEnded = true;
       try {
         if (child.pid) process.kill(-child.pid, "SIGKILL");
       } catch {
@@ -264,12 +271,11 @@ async function checkCommand(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // After the exit code is in hand — `done` is called FROM the close
-      // handler — so this can never race the verdict it is reporting.
-      endGroup();
       resolve(result);
     };
     const timer = setTimeout(() => {
+      // The child is definitely still alive here, so the pgid is certainly ours.
+      endGroup();
       done(verdict(false, `The deliverable command did not finish within ${Math.round(DELIVERABLE_COMMAND_TIMEOUT_MS / 60_000)} minutes.`));
     }, DELIVERABLE_COMMAND_TIMEOUT_MS);
     // The timer must never hold the web server open: this is the one
@@ -290,6 +296,14 @@ async function checkCommand(
     // `exit` with a grace, and `close` whichever comes first — see
     // COMMAND_EXIT_GRACE_MS. `done` is idempotent, so the pair cannot double-settle.
     child.on("exit", (code) => {
+      // The group is ended HERE, synchronously, not after the grace below. Node
+      // emits `exit` once it has reaped the child, so from this moment the pid is
+      // free for the kernel to reuse and the saved pgid is living on borrowed
+      // time — signalling it 250 ms later could SIGKILL an unrelated group. Doing
+      // it now reduces that window from a quarter of a second to the tick we are
+      // already on, and it is also what RELEASES the pipes a descendant was
+      // holding, so `close` usually arrives before the grace elapses at all.
+      endGroup();
       setTimeout(() => settle(code), COMMAND_EXIT_GRACE_MS).unref();
     });
     child.on("close", (code) => settle(code));

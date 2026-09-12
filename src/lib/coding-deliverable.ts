@@ -165,10 +165,18 @@ export function isSafeDeliverablePath(raw: unknown): raw is string {
   if (typeof raw !== "string") return false;
   const path = raw.trim();
   if (!path || path.length > MAX_DELIVERABLE_PATH_CHARS) return false;
+  // NO CONTROL CHARACTER, which covers the NUL and more besides.
+  //
   // A NUL truncates the string at every syscall that takes it, so a path that
   // passes a check up to the NUL and names something else afterwards is the
-  // classic way past one.
-  if (path.includes("\0")) return false;
+  // classic way past one. A NEWLINE or carriage return is the other half and the
+  // one a path rule is likely to miss: this string is interpolated into the
+  // continuation prompt the box sends the harness on stdin (`completionNudge`),
+  // where an embedded line break would let a filename forge a line of that
+  // prompt — the harness reading instructions the box never wrote. Escape and
+  // the rest of C0 are refused with them; a real source file is named in none of
+  // them, so there is nothing legitimate on the other side of this door.
+  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
   // Absolute, or a Windows-style drive or UNC path: a deliverable is always
   // relative to the run's own folder, and an absolute one would be a way to
   // ask the box whether a file it must not read exists.
@@ -281,13 +289,36 @@ export function parseDeliverable(raw: unknown): Deliverable | null {
   const value = raw as Record<string, unknown>;
   if (value.kind === "pr") return { kind: "pr" };
   if (value.kind === "paths") {
-    if (!Array.isArray(value.paths)) return null;
-    const paths = value.paths.filter(isSafeDeliverablePath).map((p) => p.trim()).slice(0, MAX_DELIVERABLE_PATHS);
+    if (!Array.isArray(value.paths) || value.paths.length === 0) return null;
+    // REJECTED, not trimmed to the cap and not filtered down to the safe ones.
+    // Repairing here would quietly WEAKEN the bar a run is held to: a record
+    // carrying one unsafe path beside three safe ones would have passed as a
+    // three-file deliverable, and a list longer than the cap as its first ten —
+    // in both cases the run could be called finished without delivering what the
+    // record says. `readDeliverableInput` refuses both at creation, so a record
+    // shaped this way was hand-edited, and "this run has no deliverable" is the
+    // safe reading of that.
+    if (value.paths.length > MAX_DELIVERABLE_PATHS) return null;
+    const paths: string[] = [];
+    for (const entry of value.paths) {
+      if (!isSafeDeliverablePath(entry)) return null;
+      const trimmed = entry.trim();
+      // Deduplication is the one thing done on the way in that is kept here: it
+      // cannot weaken the bar (the same set of files either way), and the
+      // creation reader has already applied it, so a stored list is unique
+      // anyway.
+      if (!paths.includes(trimmed)) paths.push(trimmed);
+    }
     return paths.length ? { kind: "paths", paths } : null;
   }
   if (value.kind === "command") {
     if (typeof value.command !== "string" || !value.command.trim()) return null;
-    const command = value.command.trim().slice(0, MAX_DELIVERABLE_COMMAND_CHARS);
+    const command = value.command.trim();
+    // Over-long is REJECTED rather than truncated, and this one is not merely a
+    // weaker bar: `checkCommand` hands this string to `/bin/bash -lc`, so a
+    // silent `.slice()` would have the box RUN A DIFFERENT COMMAND from the one
+    // the record names — `npm test && rm -rf x` cut mid-word is its own program.
+    if (command.length > MAX_DELIVERABLE_COMMAND_CHARS) return null;
     // Re-checked on the way OUT as well as in. The record is a file the
     // clawbox account can write, and this is the one field on it that the box
     // hands to a shell.

@@ -297,10 +297,23 @@ function describeDeliverableState(run: RunPayload): string | null {
   const check = run.deliverableCheck;
   if (!check) return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)}. The device has not checked yet.`;
   if (check.ok) return `[deliverable] It left behind ${describeDeliverable(deliverable)}${made}, which is why this counts as finished.`;
-  // `missing` is the device's own sentence — except for a command deliverable,
-  // where it ends in a bounded tail of that command's output. The envelope
-  // redacts it on the way out like every other part of this text.
-  return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)} and did not${made}: ${check.missing ?? ""}`;
+  // WHY A COMMAND DELIVERABLE SAYS LESS HERE THAN THE CARD DOES.
+  //
+  // For `pr` and `paths` the reason is the device's own vocabulary — "app.js was
+  // not created", "Nothing was committed, so there is no pull request to open" —
+  // and carrying it is the whole value of this line.
+  //
+  // For `command` it ends in a TAIL OF THAT COMMAND'S OUTPUT: arbitrary bytes a
+  // program on the box printed, reaching the model's context as part of a tool
+  // result. The envelope's redaction is about credentials, not about instructions,
+  // so a test runner that printed an imperative sentence — or a dependency that
+  // chose to — would be speaking directly to the assistant through a channel it
+  // has no reason to distrust. The owner loses nothing: the run's page carries the
+  // whole reason, and that surface is not one an injected sentence can steer.
+  const reason = deliverable.kind === "command"
+    ? "the command did not pass. Its output is on the run's page in the Coding Agent app; this tool does not repeat it."
+    : (check.missing ?? "");
+  return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)} and did not${made}: ${reason}`;
 }
 
 function describeRun(run: RunPayload, tail: number): string {

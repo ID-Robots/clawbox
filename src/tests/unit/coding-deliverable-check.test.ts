@@ -261,3 +261,36 @@ describe("what a finished check leaves behind", () => {
     }, { timeout: 5_000, interval: 50 });
   });
 });
+
+describe("the tail of a command's output", () => {
+  it("keeps a multibyte character that was split across stream chunks", async () => {
+    // `setEncoding("utf8")` is what makes this true, and no ASCII test can see
+    // it: decoding each Buffer on its own with `String(chunk)` turns a character
+    // straddling a chunk boundary into U+FFFD. The tail is what the owner reads
+    // on the card and what the nudge quotes back to the harness, so mojibake
+    // there is not cosmetic.
+    //
+    // The split is FORCED rather than hoped for. Printing a lot of CJK and
+    // trusting the 64 KiB chunking does not work — the replacement characters
+    // land mid-stream and the bounded tail is taken from the end, so the
+    // assertion passes with or without the fix (measured: it did). Instead the
+    // first byte of U+65E5 (E6 97 A5) is written, then a pause, then its other
+    // two: two chunks with one character across the seam, and the whole output
+    // short enough to BE the tail.
+    const verdict = await checkDeliverable(
+      { directory: dir, pr: null },
+      {
+        kind: "command",
+        command: "{ printf '\\346'; sleep 0.3; printf '\\227\\245 tests failed'; } >&2; exit 1",
+      },
+      sandbox(),
+    );
+    expect(verdict.ok).toBe(false);
+    // The character survived the seam…
+    expect(verdict.missing).toContain("\u65e5");
+    // …with no replacement character anywhere in the reason.
+    expect(verdict.missing).not.toContain("\ufffd");
+    // And the words after it are intact, so the tail is the real tail.
+    expect(verdict.missing).toContain("tests failed");
+  });
+});
