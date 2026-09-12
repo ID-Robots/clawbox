@@ -3,8 +3,40 @@
  * Delegates to instrumentation-node.ts which is loaded via require()
  * to avoid Edge Runtime static analysis warnings.
  */
-export async function onRequestError() {
-  // required export — no-op
+export async function onRequestError(
+  error: unknown,
+  request?: { path?: string; method?: string },
+  context?: { routeType?: string },
+): Promise<void> {
+  // Next's own hook for a server-side error thrown in a route handler or a
+  // server component — the ONE place this app already funnels those, which is
+  // why the Improvement Program hangs its capture here rather than wrapping
+  // fifty routes. It was a required no-op export before.
+  //
+  // NODE ONLY, and a dynamic import: this module is loaded by the Edge runtime
+  // too, and the incident store is `fs` and `crypto`. A static import would put
+  // both into an Edge bundle that cannot have them.
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return
+  try {
+    const { captureIncident } = await import('@/lib/incident-report')
+    await captureIncident({
+      source: 'clawbox',
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : null,
+      context: {
+        // The PATH, never the query — the sanitizer strips a query string
+        // anyway, and a route is the diagnosis.
+        path: typeof request?.path === 'string' ? request.path.split('?')[0] : 'unknown',
+        method: typeof request?.method === 'string' ? request.method : 'unknown',
+        routeType: typeof context?.routeType === 'string' ? context.routeType : 'unknown',
+      },
+      // One route that throws on every poll must not write on every poll.
+      throttleMs: 5 * 60_000,
+    })
+  } catch {
+    // A handler for errors must not add one. Next calls this from its own
+    // error path and a throw here would replace the real failure.
+  }
 }
 
 /**

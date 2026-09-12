@@ -44,6 +44,7 @@ const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
 export { INTERRUPTED_MESSAGE } from "./update-constants";
 import { INTERRUPTED_MESSAGE } from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir, type DriftReport } from "./build-identity";
+import { captureIncident } from "./incident-report";
 export { DRIFT_RESOLVED_CODE } from "./drift-codes";
 import {
   driftFact,
@@ -4550,6 +4551,16 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       runtime.state.steps[i].status = "failed";
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
+      // The Improvement Program's record of a failed update step. `void` and a
+      // module that never throws: an update that failed must reach the owner
+      // with the step's own error, not with a second error from the reporter.
+      // Nothing of the box's own state travels — the step id and the sanitized
+      // message.
+      void captureIncident({
+        source: "update",
+        message,
+        context: { step: step.id, requiresRoot: step.requiresRoot === true, failFast: step.failFast === true },
+      });
       failed = true;
       if (step.failFast || (desktopIntegration && step.id === "apt_update")) {
         runtime.state.error = message;

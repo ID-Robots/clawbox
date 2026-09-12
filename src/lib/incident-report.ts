@@ -33,12 +33,14 @@ import { githubStatus } from "@/lib/coding-github";
 import {
   getImprovementMode,
   getIncident,
+  recordIncident,
   markCommented,
   markReported,
   remainingIssuesToday,
   utcDay,
   type Incident,
   type ImprovementMode,
+  type RecordIncidentInput,
 } from "@/lib/incidents";
 
 /** Where reports go. Not configurable: a box that could be pointed at another
@@ -319,5 +321,22 @@ export async function autoReportIfEnabled(incident: Incident | null, deps: Repor
     }
   } catch {
     // An error reporter must not become a source of errors.
+  }
+}
+
+/**
+ * The one call an error path makes: record it, and — in `auto` mode — file it.
+ *
+ * Deliberately here rather than in incidents.ts, so that module stays the store
+ * and nothing on a capture path has to know there are two steps. Returns
+ * nothing and never throws: a caller writes `void captureIncident(…)` inside
+ * its own catch and carries on.
+ */
+export async function captureIncident(input: RecordIncidentInput, deps: ReportDeps = {}): Promise<void> {
+  try {
+    const incident = await recordIncident(input);
+    await autoReportIfEnabled(incident, deps);
+  } catch {
+    // Reporting an error must never become one.
   }
 }

@@ -132,6 +132,7 @@ import {
 } from "@/lib/coding-pr";
 import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
+import { captureIncident } from "@/lib/incident-report";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
 
@@ -5214,6 +5215,33 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     void clearHarnessFault().catch(() => {});
   }
 
+  // A run that FAILED is a fault worth keeping a record of on this box, and —
+  // only if the owner opted into the Improvement Program — worth telling the
+  // developers about. AFTER both the retry branch and the harness-fault
+  // verdict above: the retry is what tells a transient flap from a real fault,
+  // and the verdict is what turns the CLI's own line into a sentence and says
+  // whether the DEVICE or the task failed — so an incident captured before
+  // either would report a recovered run, with the wrong words, under the wrong
+  // source. `void` with the module's own never-throwing contract, because
+  // settling the record must not depend on it. The TASK is deliberately not
+  // passed: it is the owner's prompt, and no prompt leaves the box.
+  if (run.status === "failed") {
+    void captureIncident({
+      // The harness verdict decides which fault this is. A device that cannot
+      // get a model to answer is the same fault `assertCanSpawn` records, not
+      // a coding run that went wrong.
+      source: run.failureKind === "harness_not_ready" ? "coding-harness" : "coding-agent",
+      message: run.error ?? "A coding run failed without saying why.",
+      context: {
+        exitCode: exitCode ?? "none",
+        turns: run.numTurns,
+        filesChanged: run.filesTouched.length,
+        retried: run.retries > 0,
+        resumable: run.resumable,
+      },
+    });
+  }
+
   // The closing message becomes report.md beside the run's screenshots — for
   // a run that did not finish too, when it said anything, because a partial
   // account is what the owner reads before deciding whether to resume. After
@@ -5920,7 +5948,19 @@ async function assertCanSpawn(team: RunTeam | null = null): Promise<void> {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
   const readiness = await checkReadiness();
-  if (!readiness.ready) throw new CodingAgentError("not_ready", readiness.problems.join(" "));
+  if (!readiness.ready) {
+    // A harness fault recorded where it actually BIT — at the moment work was
+    // attempted — rather than on the status poll, which asks the same question
+    // several times a minute on an open Coding Agent window. Throttled on top
+    // of that, so a box that is unusable for a day contributes one record with
+    // a count on it rather than a thousand disk writes.
+    void captureIncident({
+      source: "coding-harness",
+      message: readiness.problems.join(" "),
+      throttleMs: 30 * 60_000,
+    });
+    throw new CodingAgentError("not_ready", readiness.problems.join(" "));
+  }
   if (team) {
     // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory guard.
     const slot = await teamSpawnSlot(team);
