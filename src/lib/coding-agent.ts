@@ -7002,7 +7002,15 @@ function readStderrLog(file: string | null): string {
       if (want <= 0) return "";
       const buf = Buffer.allocUnsafe(want);
       const read = fs.readSync(fd, buf, 0, want, size - want);
-      return buf.subarray(0, Math.max(read, 0)).toString("utf-8");
+      const text = buf.subarray(0, Math.max(read, 0)).toString("utf-8");
+      // A byte offset can land mid-line and mid-character. When the tail was cut
+      // short of the file, the first partial line goes with the cut rather than
+      // reaching the owner with a replacement character glued to its front.
+      if (want < size) {
+        const nl = text.indexOf("\n");
+        return nl >= 0 ? text.slice(nl + 1) : "";
+      }
+      return text;
     } finally {
       fs.closeSync(fd);
     }
