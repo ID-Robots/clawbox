@@ -44,11 +44,27 @@ vi.mock("@/lib/project-icon", async (importOriginal) => ({
 // outcome is the real `GitOutcome` no-change shape — `{ committed: false,
 // reason: GitSkipReason }` — so `recordRunWork` reads it as "nothing to record"
 // rather than filing a `commitError` off a shape the device never produces.
-const commitRunWork = vi.hoisted(() => vi.fn(async () => ({ committed: false as const, reason: "no_changes" as const })));
+const commitRunWork = vi.hoisted(() => vi.fn<() => Promise<import("@/lib/coding-git").GitOutcome>>(
+  async () => ({ committed: false, reason: "no_changes" }),
+));
+/**
+ * The commit a run made THROUGH ITS OWN SHELL, which `noteOwnCommit` records.
+ * Steerable per test because it is the only commit path a fake harness can take:
+ * `recordRunWork` returns early when the stream reported no file touched, and a
+ * bash stand-in emits no Write events.
+ */
+const newestCommitSince = vi.hoisted(() => vi.fn<() => Promise<string | null>>(async () => null));
 vi.mock("@/lib/coding-git", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-git")>()),
   commitRunWork,
-  newestCommitSince: vi.fn(async () => null),
+  newestCommitSince,
+}));
+// Only the GitHub call is replaced; `startRunBranch` stays real, so a run's
+// branch — and the implied pull-request bar that depends on it — is genuine.
+const openPullRequest = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-pr", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-pr")>()),
+  openPullRequest,
 }));
 
 type Lib = typeof import("@/lib/coding-agent");
@@ -196,6 +212,14 @@ beforeEach(async () => {
   process.env.SESSION_SECRET = "the-web-servers-secret";
   process.env.CLAWBOX_MCP_TOKEN = "the-mcp-bearer-token-value";
   writeConfig({});
+  // Re-armed per test: `mockResolvedValueOnce` chains in one test must not leak
+  // into the next, and the default here is the device's ordinary answer.
+  commitRunWork.mockReset();
+  commitRunWork.mockResolvedValue({ committed: false, reason: "no_changes" });
+  newestCommitSince.mockReset();
+  newestCommitSince.mockResolvedValue(null);
+  openPullRequest.mockReset();
+  openPullRequest.mockResolvedValue({ ok: false, detail: "no remote" });
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
   projectDir = makeProject("site");
@@ -598,6 +622,56 @@ describe("a run that gave up is not the box's to throw away", () => {
     expect(lib.getRun(id)?.status).toBe("gave_up");
   });
 
+  it("is not TRIMMED to make room for a new run, while an ordinary ending is", async () => {
+    // The half of this that matters most, and the half I had not covered: Clear
+    // history is at least the owner's own gesture, while the trim at
+    // MAX_RUNS_KEPT happens unasked, to make room, and past the rail's newest
+    // dozen it is invisible. `findLastFinished` scans from the OLDEST end, so the
+    // fixture puts the `gave_up` run there — exactly where the old `isHeld` test
+    // would have picked it first — and the next-oldest ordinary ending behind it.
+    installHarnessThatNeverDelivers();
+    const runsFile = path.join(root, "data", "coding-agent-runs.json");
+    const stamp = Date.now() - 10_000_000;
+    // 29 finished runs, newest first, then the one that gave up as the oldest.
+    const records: Record<string, unknown>[] = [];
+    for (let i = 0; i < 29; i += 1) {
+      records.push({
+        id: `run-trim${String(i).padStart(4, "0")}`,
+        task: `old work ${i}`,
+        directory: projectDir,
+        status: "completed",
+        startedAt: stamp + (29 - i) * 1000,
+        completedAt: stamp + (29 - i) * 1000 + 500,
+      });
+    }
+    records.push({
+      id: "run-gaveup01",
+      task: "the one waiting on the owner",
+      directory: projectDir,
+      status: "gave_up",
+      startedAt: stamp,
+      completedAt: stamp + 500,
+      sessionId: "sess-durable-1",
+      resumable: true,
+      deliverable: { kind: "paths", paths: ["app.js"] },
+      attempts: [{ startedAt: stamp, endedAt: stamp + 500, reason: "app.js was not created." }],
+    });
+    expect(records).toHaveLength(30);
+    fs.writeFileSync(runsFile, JSON.stringify(records));
+    await lib._resetCodingAgentStateForTests();
+
+    // One more run takes the list past the cap and forces exactly one trim.
+    const started = await lib.startRun({ task: "something new", projectId: "site", source: "owner" });
+    await settledForGood(started.id);
+
+    // The run holding a resumable session is still there…
+    expect(lib.getRun("run-gaveup01")?.status).toBe("gave_up");
+    // …and the oldest ORDINARY ending is what made room instead.
+    expect(lib.getRun("run-trim0028")).toBeNull();
+    // Nothing else was taken: 30 kept (29 old + the new one), one dropped.
+    expect(lib.listRuns(100)).toHaveLength(30);
+  });
+
   it("IS cleared once its folder is gone, because then it cannot be resumed", async () => {
     // The same exception paused runs and drafts get: `resumeRun` refuses a run
     // whose folder has been deleted, so kept it would be immortal.
@@ -608,6 +682,46 @@ describe("a run that gave up is not the box's to throw away", () => {
     fs.rmSync(projectDir, { recursive: true, force: true });
     expect(lib.clearFinishedRuns()).toBe(1);
     expect(lib.getRun(id)).toBeNull();
+  });
+});
+
+describe("an attempt that delivers the pull request", () => {
+  it("gets one opened, which the first settle had already ruled out", async () => {
+    // `maybeOpenPullRequest` opens a pull request only from `phase: "opening"`.
+    // The first settle committed nothing, so it recorded "blocked" — and without
+    // `reopenPullRequestStep` putting the step back, the attempt that DOES commit
+    // would find it blocked, no pull request would ever follow, and the one
+    // deliverable that can then never be met is the one the owner asked for.
+    installHarnessThatNeverDelivers();
+    initGitRepo(projectDir);
+    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 2 });
+    // Nothing on the first turn; the second leaves a commit of its own, which is
+    // what lets the pull request step run at all. Through `noteOwnCommit`, the
+    // path a run that commits through its own shell takes — and the only commit
+    // path open to a harness stand-in, which reports no file touched.
+    newestCommitSince.mockReset();
+    newestCommitSince
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue("abc1234");
+    openPullRequest.mockReset();
+    openPullRequest.mockResolvedValue({ ok: true, number: 7, url: "https://github.com/o/r/pull/7" });
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    const run = await settledForGood(started.id);
+
+    // Two harness turns: the first left nothing, the nudge asked for the missing
+    // pull request, and the second delivered.
+    expect(stdinLog()).toHaveLength(2);
+    expect(stdinLog()[1]).toContain("pull request");
+    // The step was reopened and the pull request actually opened…
+    expect(openPullRequest).toHaveBeenCalledTimes(1);
+    expect(run.pr?.number).toBe(7);
+    // …so the deliverable is met and the run is finished for real.
+    expect(run.status).toBe("completed");
+    expect(run.deliverableCheck).toMatchObject({ ok: true, missing: null });
+    expect(run.attempts).toHaveLength(2);
+    expect(run.attempts[0].reason).toMatch(/pull request/i);
+    expect(run.attempts[1].reason).toBeNull();
   });
 });
 

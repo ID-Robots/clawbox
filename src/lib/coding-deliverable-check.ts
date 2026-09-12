@@ -39,6 +39,19 @@ export const DELIVERABLE_COMMAND_TIMEOUT_MS = 5 * 60_000;
 /** How much of a failing command's own output is quoted as the reason. */
 export const MAX_COMMAND_OUTPUT_CHARS = 200;
 
+/**
+ * How long after the command EXITS its output is still waited for.
+ *
+ * `close` fires when the pipes are closed, not when the command ends — and a
+ * command that starts a descendant (`npm test &`, a test runner leaving a dev
+ * server up) leaves that descendant holding the inherited stdout and stderr, so
+ * `close` never comes and the check sat on the settle path until its five-minute
+ * deadline. The exit code is already known at `exit`, so that is the signal, and
+ * this is the grace for output still in flight. The runner's own spawn carries
+ * the same 250 ms for the same reason (see its `child.on("exit")`).
+ */
+const COMMAND_EXIT_GRACE_MS = 250;
+
 /** The sandbox a deliverable command is run in — the harness's own. */
 export interface DeliverableSandbox {
   /** The capability-dropping binary (`setpriv`). */
@@ -263,17 +276,23 @@ async function checkCommand(
     // long-lived ClawBox process.
     timer.unref?.();
 
-    child.on("error", (err) => {
-      done(verdict(false, `The deliverable command could not be run: ${err.message}`));
-    });
-    child.on("close", (code) => {
+    const settle = (code: number | null): void => {
       if (code === 0) return done(verdict(true, null));
       const tail = lastLine(output);
       done(verdict(
         false,
         `The deliverable command exited ${code ?? "without a code"}${tail ? `: ${tail}` : "."}`,
       ));
+    };
+    child.on("error", (err) => {
+      done(verdict(false, `The deliverable command could not be run: ${err.message}`));
     });
+    // `exit` with a grace, and `close` whichever comes first — see
+    // COMMAND_EXIT_GRACE_MS. `done` is idempotent, so the pair cannot double-settle.
+    child.on("exit", (code) => {
+      setTimeout(() => settle(code), COMMAND_EXIT_GRACE_MS).unref();
+    });
+    child.on("close", (code) => settle(code));
   });
 }
 

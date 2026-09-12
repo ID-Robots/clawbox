@@ -229,3 +229,35 @@ describe("the command deliverable", () => {
     fs.mkdirSync(dir, { recursive: true });
   });
 });
+
+describe("what a finished check leaves behind", () => {
+  it("ends the process GROUP, not just the command", async () => {
+    // A command that starts a descendant and exits settles through `close` with
+    // that descendant still in the detached group, and nothing later reaps it —
+    // so repeated checks would leak processes and hold ports, with nothing on any
+    // surface to explain it. The run's OWN group is deliberately left alone (the
+    // guide tells a run to leave its app's server listening, and the owner is told
+    // through `leftover`); a deliverable check is not that, and nobody is told.
+    const pidFile = path.join(dir, "bg.pid");
+    const verdict = await checkDeliverable(
+      { directory: dir, pr: null },
+      { kind: "command", command: `sleep 120 & echo $! > ${JSON.stringify(pidFile)}; exit 0` },
+      sandbox(),
+    );
+    expect(verdict.ok).toBe(true);
+
+    const pid = Number(fs.readFileSync(pidFile, "utf-8").trim());
+    expect(Number.isInteger(pid)).toBe(true);
+    // SIGKILL delivery and reaping are asynchronous, so this polls rather than
+    // asserting on the instant the promise resolved.
+    await vi.waitFor(() => {
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      expect(alive).toBe(false);
+    }, { timeout: 5_000, interval: 50 });
+  });
+});
