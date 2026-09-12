@@ -221,6 +221,17 @@ describe("a run's worktree", () => {
     fs.mkdirSync(stranger, { recursive: true });
     expect(await removeRunWorktree(dir, stranger)).toBe(false);
     expect(fs.existsSync(stranger)).toBe(true);
+
+    // "I cannot look" is not "it is gone": only ENOENT counts, so a stat that
+    // fails for any other reason leaves the caller able to try again.
+    const stat = vi.spyOn(fs, "statSync").mockImplementation(() => {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    });
+    try {
+      expect(await removeRunWorktree(dir, stranger)).toBe(false);
+    } finally {
+      stat.mockRestore();
+    }
   });
 
   it("drops a run branch on request", async () => {

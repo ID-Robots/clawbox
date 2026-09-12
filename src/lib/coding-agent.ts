@@ -8847,8 +8847,13 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     if (!slot.ok) throw new CodingAgentError("busy", slot.reason);
     return holdSpawnSlot();
   }
-  const active = loadRuns().filter((r) => isLive(r.status));
   const limit = await getMaxParallelRuns();
+  // BOTH terms read after the last await, in the same synchronous window the
+  // slot is taken in. Read before it, the list is a snapshot from before a
+  // start that has since inserted its record and given its slot back — so the
+  // run is missing from `active` AND from `startingRuns`, and the gate counts
+  // it nowhere.
+  const active = loadRuns().filter((r) => isLive(r.status));
   // The runs already going PLUS the starts that have passed this gate and have
   // not reached their record yet — see `startingRuns`.
   const going = active.length + startingRuns;

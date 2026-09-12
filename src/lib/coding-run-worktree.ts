@@ -295,8 +295,12 @@ export function removeRunWorktree(projectDir: string, worktreePath: string): Pro
     try {
       fs.statSync(worktreePath);
       return false;
-    } catch {
-      return true;
+    } catch (err) {
+      // ENOENT and nothing else. EACCES or EPERM is a path that may be sitting
+      // there perfectly well behind a mode bit, and reading "I cannot look" as
+      // "it is gone" would have the caller record a removal that did not
+      // happen — the exact thing this answer exists to stop.
+      return (err as NodeJS.ErrnoException).code === "ENOENT";
     }
   });
 }
