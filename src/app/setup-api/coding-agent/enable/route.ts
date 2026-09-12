@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
-import { logSafe } from "@/lib/log-safe";
 import { hasOwnerSession } from "@/lib/owner-session";
 import {
   clearHarnessFault,
@@ -267,13 +266,16 @@ export async function POST(request: Request) {
       console.error(`[coding-agent] attempts at a run's deliverable set to ${saved} by the owner`);
     }
     if (hasMaxParallelRuns) {
-      const saved = await setMaxParallelRuns(fields.maxParallelRuns);
-      // Through logSafe, though `saved` is a whole number between 1 and 4 that
-      // the setter has already refused anything else for: the value still
-      // arrived in the request body, and this repo's answer to `js/log-injection`
-      // is one helper rather than an argument about which values are provably
-      // safe. It costs a String() on a branch that runs once per click.
-      console.error(`[coding-agent] up to ${logSafe(String(saved))} run(s) at once, by the owner's choice`);
+      await setMaxParallelRuns(fields.maxParallelRuns);
+      // The number is deliberately NOT in the line. It is a whole number
+      // between 1 and 4 by the time it is saved — the setter throws `invalid`
+      // for anything else — but CodeQL cannot see that, and it does not
+      // recognise `logSafe` as a sanitiser either, so `js/log-injection`
+      // stands over any shape that carries the request's value into the log.
+      // The answer this route returns is the re-read status, which says the
+      // saved number, and `data/config.json` holds it; the log line is here to
+      // record that the owner changed it, which it still does.
+      console.error("[coding-agent] the number of coding runs at once was changed by the owner");
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);
