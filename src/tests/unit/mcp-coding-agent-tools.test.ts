@@ -375,3 +375,76 @@ describe("coding_agent_stop", () => {
     expect(out.text).toMatch(/has not exited yet/);
   });
 });
+
+/**
+ * WHICH ACCOUNT PAYS. `coding_agent_run` can name one per run, and the pair
+ * is checked HERE as well as at the route — the enum in the schema cannot
+ * express "this model belongs to one provider and not the other", and a
+ * round trip to be told so is a step a small model spends arguing with.
+ *
+ * The rule that costs the most to get wrong is the last one: an OMITTED
+ * provider must stay omitted. This process does not know the owner's stored
+ * default, so sending its own idea of one would quietly move a run to another
+ * account.
+ */
+describe("coding_agent_run — provider and model", () => {
+  it("offers both as closed sets, not free text", () => {
+    const shape = harness().get("coding_agent_run").shape as Record<string, { safeParse: (v: unknown) => { success: boolean } }>;
+    expect(shape.provider.safeParse("anthropic").success).toBe(true);
+    expect(shape.provider.safeParse("clawbox-ai").success).toBe(true);
+    expect(shape.provider.safeParse("openai").success).toBe(false);
+    expect(shape.model.safeParse("claude-opus-5").success).toBe(true);
+    expect(shape.model.safeParse("gpt-5").success).toBe(false);
+    // Both optional: omitting them means the owner's default.
+    expect(shape.provider.safeParse(undefined).success).toBe(true);
+    expect(shape.model.safeParse(undefined).success).toBe(true);
+  });
+
+  it("sends only what the caller actually named", async () => {
+    apiPost.mockResolvedValue({ started: true, run: RUN });
+    await harness().call("coding_agent_run", { task: "Do the thing", project_id: "site" });
+    expect(apiPost.mock.calls[0][1]).toEqual({ task: "Do the thing", projectId: "site" });
+  });
+
+  it("passes a named provider and model to the device", async () => {
+    apiPost.mockResolvedValue({ started: true, run: RUN });
+    await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "anthropic", model: "claude-sonnet-5" });
+    expect(apiPost.mock.calls[0][1]).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5" });
+  });
+
+  it("refuses a model named for ClawBox AI without calling the device", async () => {
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "clawbox-ai", model: "claude-opus-5" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/cannot be named/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("says which account a run was on when it was not the box's own plan", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, provider: "anthropic", requestedModel: "claude-opus-5", model: "claude-opus-5" } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/owner's anthropic account/i);
+  });
+
+  it("says nothing about the account for an ordinary ClawBox AI run", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, provider: "clawbox-ai" } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).not.toMatch(/account/i);
+  });
+
+  it("names both halves when the device says the harness is not ready", async () => {
+    // With two providers, "Claude Code or ClawBox AI is missing" is wrong
+    // whenever the run was to be paid from the owner's own account.
+    apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({ error: "not connected", kind: "not_ready" })));
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/the account the run would be paid from/);
+  });
+});

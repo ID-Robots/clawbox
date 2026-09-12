@@ -140,3 +140,52 @@ describe("refusals the agent must be able to tell apart", () => {
     expect((await res.json()).error).toBe("spawn EACCES");
   });
 });
+
+/**
+ * WHICH ACCOUNT PAYS. The route does not decide — `startRun` does, from the
+ * owner's stored default — so what is pinned here is that a caller's choice
+ * arrives UNTOUCHED (a route that coerced it would be a second, quieter
+ * validator beside src/lib/coding-provider.ts) and that the refusals keep the
+ * status codes the MCP layer reads.
+ */
+describe("provider and model", () => {
+  it("passes both through exactly as the caller sent them", async () => {
+    await POST(req({ body: { task: "Do the thing", projectId: "site", provider: "anthropic", model: "claude-sonnet-5" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ provider: "anthropic", model: "claude-sonnet-5" }));
+  });
+
+  it("passes `undefined` when the caller named neither, so the owner's default stands", async () => {
+    // NOT a default invented here: this process would be guessing, and a
+    // guess that disagreed with the stored setting would silently move a run
+    // onto the wrong bill.
+    await POST(req());
+    const input = startRun.mock.calls[0][0] as { provider?: unknown; model?: unknown };
+    expect(input.provider).toBeUndefined();
+    expect(input.model).toBeUndefined();
+  });
+
+  it("hands a junk provider to the runner rather than filtering it out", async () => {
+    // The refusal belongs to the one validator. Dropping the field here would
+    // turn "that provider does not exist" into a run on the default — the
+    // caller's mistake, silently honoured as something else.
+    await POST(req({ body: { task: "t", projectId: "site", provider: "openai" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ provider: "openai" }));
+  });
+
+  it("answers 400 when the runner refuses the pair", async () => {
+    startRun.mockRejectedValueOnce(new CodingAgentError("invalid", "Unknown provider. Use one of: clawbox-ai, anthropic."));
+    const res = await POST(req({ body: { task: "t", projectId: "site", provider: "openai" } }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/clawbox-ai, anthropic/);
+  });
+
+  it("answers 409 — never 403 or 500 — when that account is not connected", async () => {
+    // mcp/lib/errors.ts maps 409 to CONFLICT / do-not-retry. Anything else
+    // reads as "the device needs a restart", and the agent retries a refusal
+    // only the owner can clear.
+    startRun.mockRejectedValueOnce(new CodingAgentError("not_ready", "Your Anthropic account is not connected."));
+    const res = await POST(req({ body: { task: "t", projectId: "site", provider: "anthropic" } }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("not_ready");
+  });
+});
