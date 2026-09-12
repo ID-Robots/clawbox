@@ -42,7 +42,9 @@ import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/r
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
 import { capText } from "../../../mcp/lib/guard";
 
-const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop"];
+// `coding_secret_list` registers under the same switch: it is about what a
+// RUN will find in its environment, and it answers names alone.
+const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop", "coding_secret_list"];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
   const h = captureRegistrar(edition);
@@ -650,5 +652,53 @@ describe("what a command deliverable's failure tells the AGENT", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("app.js was not created.");
+
+describe("coding_secret_list", () => {
+  /**
+   * The tool's whole job is to let the assistant talk about a credential
+   * without holding one. So the assertions are: it names the store's own
+   * narrower route, it answers names and never a value, and it says the two
+   * things that change whether a run will actually find one.
+   */
+  it("reads the names route, never the owner's own list", async () => {
+    apiGet.mockResolvedValue({ names: [] });
+    await harness().call("coding_secret_list", {});
+    expect(apiGet).toHaveBeenCalledWith("/setup-api/coding-agent/secrets/names", expect.anything());
+  });
+
+  it("says plainly that the owner has stored nothing, and where they would add one", async () => {
+    apiGet.mockResolvedValue({ names: [] });
+    const out = await harness().call("coding_secret_list", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/no secrets/i);
+    expect(out.text).toMatch(/settings/i);
+  });
+
+  it("answers the name, the scope and whether a run gets it — and no value", async () => {
+    apiGet.mockResolvedValue({
+      names: [
+        { name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true },
+        { name: "SHOP_TOKEN", scope: "shop", inject: false, readable: true },
+        { name: "OLD_TOKEN", scope: "box", inject: true, readable: false },
+      ],
+    });
+    const out = await harness().call("coding_secret_list", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const rows = JSON.parse(out.text) as Record<string, unknown>[];
+    expect(rows[0]).toEqual({ name: "VERCEL_TOKEN", scope: "box", given_to_runs: true });
+    expect(rows[1]).toEqual({ name: "SHOP_TOKEN", scope: "shop", given_to_runs: false });
+    // `unreadable` only when it is a problem: a readable entry is the normal
+    // case and a field saying so on every row is noise a small model reads.
+    expect(rows[2]).toEqual({ name: "OLD_TOKEN", scope: "box", given_to_runs: true, unreadable: true });
+    for (const row of rows) expect(Object.keys(row)).not.toContain("value");
+  });
+
+  it("is read-only, so no host's approval gate stands between the assistant and a name", async () => {
+    expect(harness().get("coding_secret_list").opts.readOnly).toBe(true);
+    // And it takes no parameters at all: there is nothing to ask it for but
+    // the list, and certainly no name whose value it could be asked to read.
+    expect(Object.keys(harness().get("coding_secret_list").shape)).toEqual([]);
   });
 });
