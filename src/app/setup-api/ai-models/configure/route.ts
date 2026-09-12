@@ -2554,6 +2554,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
+          // The same clear the OpenClaw/dual path does further down, and for
+          // the same two reasons: this save is the owner doing what a harness
+          // fault told them to do, and `applyClawaiToHermes` takes its own
+          // before/after readiness pair — a fault still standing when it reads
+          // "after" keeps readiness false and costs the MCP refresh. The
+          // coding agent runs on this SKU too, so a clear that only happened
+          // on the editions with OpenClaw would leave the Hermes box refusing
+          // runs with nothing but the clock and the button to get it out.
+          await forgetCodingHarnessFault();
           const applied = await applyClawaiToHermes(
             clawboxAiToken,
             resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,

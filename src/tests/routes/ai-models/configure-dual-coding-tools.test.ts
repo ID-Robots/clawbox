@@ -412,6 +412,26 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     expect(order).toEqual(["clear", "hermes"]);
   });
 
+  it("clears the fault on the HERMES-ONLY SKU too, where the route returns long before the dual path", async () => {
+    // `openclawIsAbsent()` sends a hermes box down its own branch, which
+    // answers and RETURNS well above the clear the dual path performs. The
+    // coding agent runs on that SKU as well, so a clear that only happened
+    // where OpenClaw exists would leave a Hermes box refusing runs with
+    // nothing but the clock and the button to get it out — and the same
+    // ordering trap, since this branch calls applyClawaiToHermes too.
+    // Resolved from the post-reset registry, the way the hook above does:
+    // a handle captured at file scope is a different vi.fn() by now.
+    const oc = await import("@/lib/openclaw-config");
+    vi.mocked(oc.openclawIsAbsent).mockReturnValue(true);
+    const order: string[] = [];
+    vi.mocked(clearHarnessFault).mockImplementation(async () => { order.push("clear"); });
+    applyClawaiToHermesMock.mockImplementation(async () => { order.push("hermes"); return {}; });
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["clear", "hermes"]);
+  });
+
   it("hands the credential to HERMES, which is the agent answering on this box", async () => {
     // The defect: everything the route does above configures OpenClaw, and on
     // the dual SKU Hermes is what the owner is talking to. It keeps its own
