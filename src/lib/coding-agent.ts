@@ -6045,6 +6045,15 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     // than a tick over an unanswered question.
     const reason = `The deliverable could not be checked: ${err instanceof Error ? err.message : String(err)}`;
     console.error(`[coding-agent] ${origin.id} deliverable check failed:`, err instanceof Error ? err.message : err);
+    // Unless the run has ALREADY been settled by something inside the try — a
+    // `giveUp` from the attempt's own gates, or the spawn failure that settles
+    // the record as failed. Giving up a second time would push a second ending
+    // onto the timeline, announce the run twice and add a phantom attempt to
+    // the count the card shows.
+    if (origin.status !== "completed") {
+      persist(true);
+      return;
+    }
     origin.deliverableCheck = { ok: false, missing: reason.slice(0, MAX_MISSING_CHARS), checkedAt: Date.now() };
     closeAttempt(origin, reason);
     giveUp(origin, reason, origin.attempts.length);
