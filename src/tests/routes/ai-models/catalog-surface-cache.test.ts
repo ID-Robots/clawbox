@@ -19,14 +19,17 @@ import * as childProcess from "child_process";
 // Its own file because the route's `memCache` is module-level: a fresh module
 // is the only way to observe the cold path and the warm path in one test.
 
-const DATA_DIR = "/tmp/clawbox-catalog-surface-cache-test";
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+const DATA_DIR = `/tmp/clawbox-catalog-surface-cache-test-${process.pid}`;
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: () => "openclaw",
   openclawIsAbsent: () => false,
 }));
-vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/tmp/clawbox-catalog-surface-cache-test" }));
+vi.mock("@/lib/config-store", () => ({ DATA_DIR: `/tmp/clawbox-catalog-surface-cache-test-${process.pid}` }));
 
 import { refreshInBackground } from "@/app/setup-api/ai-models/catalog/route";
 

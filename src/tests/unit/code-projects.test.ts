@@ -34,8 +34,12 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+// A per-PROCESS data root, and here it is not a precaution: `/tmp/test-data`
+// was the root of FOUR suites that run in parallel, each wiping it in its own
+// `beforeEach`. The same suffix `vitest.config.ts` already gives
+// `CLAWBOX_ROOT` and `OPENCLAW_HOME`, for the same reason.
 vi.mock("@/lib/config-store", () => ({
-  DATA_DIR: "/tmp/test-data",
+  DATA_DIR: `/tmp/test-data-${process.pid}`,
 }));
 
 // buildProject now registers the built app on the desktop (durability backstop).
@@ -571,7 +575,7 @@ describe("code-projects", () => {
  */
 describe("the containment check accepts exactly what it accepted before", () => {
   const PROJECT = "probe";
-  const DIR = path.join("/tmp/test-data", "code-projects", PROJECT);
+  const DIR = path.join(`/tmp/test-data-${process.pid}`, "code-projects", PROJECT);
 
   /** Beta's predicate, verbatim apart from the root it resolves against. */
   function betaRefuses(filePath: string): boolean {

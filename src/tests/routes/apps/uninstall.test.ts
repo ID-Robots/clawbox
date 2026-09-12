@@ -28,8 +28,12 @@ vi.mock("@/lib/kv-store", () => ({
   kvDelete: vi.fn(),
 }));
 
+// A per-PROCESS data root, and here it is not a precaution: `/tmp/test-data`
+// was the root of FOUR suites that run in parallel, each wiping it in its own
+// `beforeEach`. The same suffix `vitest.config.ts` already gives
+// `CLAWBOX_ROOT` and `OPENCLAW_HOME`, for the same reason.
 vi.mock("@/lib/config-store", () => ({
-  DATA_DIR: "/tmp/test-data",
+  DATA_DIR: `/tmp/test-data-${process.pid}`,
   getAll: vi.fn().mockResolvedValue({}),
   setMany: vi.fn().mockResolvedValue(undefined),
 }));

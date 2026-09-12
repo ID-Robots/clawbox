@@ -27,8 +27,11 @@ vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
 // this one at import time. A mock that omits it makes the route unloadable
 // rather than making it fail a case — the same shape the other config-store
 // mocks in this suite already use.
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
 vi.mock("@/lib/config-store", () => ({
-  DATA_DIR: "/tmp/clawbox-chat-reasoning-test",
+  DATA_DIR: `/tmp/clawbox-chat-reasoning-test-${process.pid}`,
   get: vi.fn(),
   // The settle path records which provider answered. Without a `set` here that
   // write throws inside the recorder's own catch and is silently swallowed, so

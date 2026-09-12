@@ -26,8 +26,11 @@ vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hermes-model-options")>();
   return { ...actual, getModelOptions: vi.fn() };
 });
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
 vi.mock("@/lib/config-store", () => ({
-  DATA_DIR: "/tmp/clawbox-chat-spawn-errno-test",
+  DATA_DIR: `/tmp/clawbox-chat-spawn-errno-test-${process.pid}`,
   get: vi.fn(),
 }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: vi.fn(async () => {}) }));
