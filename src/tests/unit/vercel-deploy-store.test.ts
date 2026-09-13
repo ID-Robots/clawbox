@@ -191,6 +191,21 @@ describe("the production rate limit", () => {
     expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left).toBe(store.MAX_PRODUCTION_DEPLOYS - 1);
   });
 
+  it("gives back ONE slot when two reservations share a millisecond", async () => {
+    // `Date.now()` has millisecond resolution, so two deploys that start
+    // together stamp the same number. Releasing by VALUE gave both back, after
+    // which the surviving deployment was uncounted and the project could walk
+    // past the cap — the exact overlapping-call case this counter is for.
+    const now = Date.now();
+    const first = await store.reserveProductionSlot("shop", now);
+    const second = await store.reserveProductionSlot("shop", now);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok) return;
+    await store.releaseProductionSlot("shop", first.at);
+    expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left)
+      .toBe(store.MAX_PRODUCTION_DEPLOYS - 1);
+  });
+
   it("leaves NO record behind when a project's first production deploy never happened", async () => {
     // The first draft wrote a placeholder deployment to satisfy the reader, and
     // a failed first deploy then left the card saying "waiting for Vercel to

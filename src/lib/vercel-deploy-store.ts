@@ -233,8 +233,16 @@ export function releaseProductionSlot(scope: string, at: number): Promise<void> 
     const all = await readProjectDeploys();
     const before = Object.prototype.hasOwnProperty.call(all, scope) ? all[scope] : null;
     if (!before) return;
-    const productionAt = before.productionAt.filter((x) => x !== at);
-    if (productionAt.length === before.productionAt.length) return;
+    // ONE occurrence, not every entry with that value. `Date.now()` has
+    // millisecond resolution, so two deploys that start in the same
+    // millisecond stamp the same number — and filtering by value would give
+    // BOTH slots back when one deployment failed, after which the surviving
+    // deployment is uncounted and the project can exceed the cap. That is
+    // exactly the overlapping-call case this counter exists for (found in
+    // review).
+    const index = before.productionAt.indexOf(at);
+    if (index === -1) return;
+    const productionAt = before.productionAt.filter((_, i) => i !== index);
     const next = { ...all };
     // An entry holding neither a deployment nor a slot is not a record of
     // anything; leaving it would grow one row per project that ever tried.

@@ -92,6 +92,25 @@ describe("a folder that is a git repository", () => {
     expect(got.ok && names(got.files)).toEqual(["index.html", "report "]);
   });
 
+  it("keeps a credential-shaped name out even when git TRACKS it", async () => {
+    // A run can write a .env, commit it and ask for a deployment, after which
+    // the file is served on an address anybody with the link can open. What
+    // git ignores is still git's to decide; this is the floor underneath it.
+    gitInit();
+    write("index.html", "x");
+    write(".env", "API_KEY=hunter2hunter2");
+    write("deploy.pem", "-----BEGIN KEY-----");
+    execFileSync("git", ["add", "-A", "-f"], { cwd: dir });
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(names(got.files)).toEqual(["index.html"]);
+    expect(JSON.stringify(got.files)).not.toContain("hunter2hunter2");
+    // And it is REPORTED rather than dropped silently: an owner who tracked it
+    // on purpose is entitled to know it did not go up.
+    expect(got.skipped.sort()).toEqual([".env", "deploy.pem"]);
+  });
+
   it("hashes each file the way Vercel addresses it", async () => {
     gitInit();
     write("index.html", "hello");

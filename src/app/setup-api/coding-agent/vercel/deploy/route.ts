@@ -320,13 +320,26 @@ export async function POST(request: Request): Promise<NextResponse> {
         // one telling the owner a build is running right now.
         return refuse(409, "deploy_in_flight", "This run already has a deployment that is still building. Wait for it, or look at it on Vercel.");
       }
-      branch = run.vercel?.branch ?? run.pr?.branch ?? null;
+      // The branch this run's work is actually ON. A run gets a worktree and a
+      // branch of its own, so a run with no pull request yet has its commits
+      // on `clawbox/<runId>` and nowhere else — without this the deploy fell
+      // back to the PROJECT's current branch and built work the run did not do
+      // (found in review).
+      branch = run.vercel?.branch ?? run.pr?.branch ?? run.worktree?.branch ?? null;
       // The PROJECT, not the run's own folder: a run works in a worktree of its
       // own (`<project>/.clawbox/worktrees/<id>`), and what is deployed is the
       // project — which is also the identity the owner's Vercel link is filed
       // under. `projectDirectoryOf`'s distinction, read from the record.
       fromRun = { projectId: run.projectId, directory: run.worktree?.project ?? run.directory };
     }
+
+    // A caller may name both, and they must AGREE. Without this the route
+    // would deploy project B with run A's branch and then record the
+    // deployment on run A — a record that names a deployment of somebody
+    // else's code (found in review). Checked below, once both are resolved,
+    // because "the same project" is a question about the SCOPE rather than
+    // about the strings.
+    const namedProject = named(body.projectId) !== null || named(body.directory) !== null;
 
     const project = await projectFor({
       // What the caller named wins, so a run's page deploying its own project
@@ -341,6 +354,18 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
     if (!project.ok) return project.refusal;
     const { scope, directory } = project;
+
+    if (runId && namedProject && fromRun) {
+      const runScope = await projectFor({ projectId: fromRun.projectId, directory: fromRun.directory });
+      if (!runScope.ok) return runScope.refusal;
+      if (runScope.scope !== scope) {
+        return refuse(
+          409,
+          "run_elsewhere",
+          "That run is not in the project you asked to deploy. Deploy the run's own project, or leave the run out.",
+        );
+      }
+    }
 
     if (target === "production") {
       if (owner) {
@@ -418,7 +443,18 @@ export async function POST(request: Request): Promise<NextResponse> {
       by,
       runId,
     });
-    const entry = await recordProjectDeploy(scope, deploy);
+    // Guarded for the reason the run record below is: by this line the
+    // deployment is building on somebody's account, and a 500 would have the
+    // caller retry and deploy it a second time. The fallback preserves
+    // `productionAt` — a reservation that is no longer counted is a cap the
+    // next call can walk past.
+    let entry: ProjectDeployEntry;
+    try {
+      entry = await recordProjectDeploy(scope, deploy);
+    } catch (err) {
+      console.error(`[vercel-deploy] ${scope} deployment not recorded:`, err instanceof Error ? err.message : err);
+      entry = { latest: deploy, productionAt: (await readProjectDeploy(scope).catch(() => null))?.productionAt ?? [] };
+    }
     // And on the RUN, when there is one: the same deployment, followed by the
     // watcher that already draws building → ready → failed on a run's card.
     //
@@ -442,7 +478,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
     return NextResponse.json({
       ok: true,
-      ...(await payload(scope, entry, await readAutoProduction(scope))),
+      // Same rule: nothing after the deployment exists may turn a real
+      // deployment into a failure the caller would retry.
+      ...(await payload(scope, entry, await readAutoProduction(scope).catch(() => false))),
       // What the caller cannot see from the record, and needs in order to say
       // something true about the deploy: whether the folder's own ignore rules
       // decided what went up, and what was left out.

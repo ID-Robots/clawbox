@@ -146,14 +146,34 @@ async function isRepository(dir: string): Promise<boolean> {
 }
 
 /**
- * Credential-shaped names that never go up, whatever path found them.
+ * Credential-shaped names that never go up, WHATEVER path found them.
  *
  * The fallback walk has no `.gitignore` to honour — that is what makes it the
  * fallback — so the one thing it must not do is upload the file every project
- * keeps its secrets in. The same shape `mcp/lib/guard.ts` refuses for the
- * agent's own file tools, applied here to what leaves the box.
+ * keeps its secrets in. And git's answer gets the same floor: a run can write
+ * a `.env`, commit it, and ask for a deployment, after which the file is
+ * served on an address anybody with the link can open. The same shape
+ * `mcp/lib/guard.ts` refuses for the agent's own file tools, applied here to
+ * what leaves the box.
  */
 const NEVER_UPLOADED_FILE_RE = /^(\.env(\..*)?|\.envrc|.*\.pem|.*\.key|id_[a-z0-9]+)$/i;
+
+/**
+ * May this path go up at all?
+ *
+ * ONE rule for both paths. The credential names were applied to the fallback
+ * walk alone at first, which left a git-TRACKED `.env` going up: a run can
+ * write one, commit it and ask for a deployment, and the file is then served
+ * on an address anybody with the link can open (found in review). What git
+ * ignores is still git's to decide; this is the floor underneath that answer,
+ * and what it leaves out is reported in `skipped` rather than dropped
+ * silently.
+ */
+function excluded(rel: string): boolean {
+  const parts = rel.split("/");
+  if (parts.some((part) => NEVER_UPLOADED.has(part))) return false;
+  return !NEVER_UPLOADED_FILE_RE.test(parts[parts.length - 1] ?? "");
+}
 
 /** Every ordinary file under `dir`, relative and posix-spelled. The fallback. */
 async function walk(dir: string, base = "", out: string[] = []): Promise<string[]> {
@@ -162,6 +182,7 @@ async function walk(dir: string, base = "", out: string[] = []): Promise<string[
     if (out.length > MAX_DEPLOY_FILES) return out;
     if (NEVER_UPLOADED.has(entry.name)) continue;
     if (entry.isFile() && NEVER_UPLOADED_FILE_RE.test(entry.name)) continue;
+
     const rel = base ? `${base}/${entry.name}` : entry.name;
     // A link is never followed and never uploaded — see the header.
     if (entry.isSymbolicLink()) continue;
@@ -184,6 +205,7 @@ async function walk(dir: string, base = "", out: string[] = []): Promise<string[
 export async function collectDeployFiles(dir: string): Promise<CollectResult> {
   let names: string[];
   let usedGit = true;
+  let excludedByRule: string[] = [];
   try {
     const listed = await Promise.race([
       gitListing(dir),
@@ -193,7 +215,10 @@ export async function collectDeployFiles(dir: string): Promise<CollectResult> {
       // git lists `.clawbox/worktrees/...` and, in a repository whose ignores
       // do not cover them, `node_modules`: the never-uploaded rule is applied
       // on top of git's answer rather than instead of it.
-      names = listed.filter((rel) => !rel.split("/").some((part) => NEVER_UPLOADED.has(part)));
+      names = listed.filter(excluded);
+      // What the floor left out is REPORTED, not dropped silently: an owner
+      // who tracked a `.env` on purpose is entitled to know it did not go up.
+      excludedByRule = listed.filter((rel) => !excluded(rel));
     } else if (await isRepository(dir)) {
       // A REPOSITORY whose ignores this box could not read is refused, never
       // walked. The fallback exists for a folder that has no `.gitignore` to
@@ -223,7 +248,7 @@ export async function collectDeployFiles(dir: string): Promise<CollectResult> {
   }
 
   const files: DeployFileBody[] = [];
-  const skipped: string[] = [];
+  const skipped: string[] = [...excludedByRule];
   let bytes = 0;
   const root = path.resolve(dir);
   // The folder's own real location, resolved once: every parent below is

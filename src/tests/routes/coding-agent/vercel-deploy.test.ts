@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSessionCookie } from "@/lib/auth";
 import { saveEnv } from "@/tests/helpers/env";
+import { MAX_PRODUCTION_DEPLOYS } from "@/lib/vercel-deploy-store";
 
 const listRuns = vi.hoisted(() => vi.fn());
 const recordManualDeployment = vi.hoisted(() => vi.fn());
@@ -275,6 +276,32 @@ describe("a deploy pressed on a run", () => {
     // The PROJECT, not the run's own worktree: that is the identity the owner's
     // Vercel link is filed under.
     expect(resolveWorkingDirectory).toHaveBeenCalledWith({ projectId: null, directory: "/home/clawbox/projects/shop" });
+    // …and the branch is the run's OWN. A run with no pull request has its
+    // commits on `clawbox/<runId>` and nowhere else, so the project's current
+    // branch would build work the run did not do.
+    expect(deployProject).toHaveBeenCalledWith(expect.objectContaining({ gitRef: "clawbox/run-1" }));
+  });
+
+  it("refuses a run and a project that are not the same project", async () => {
+    // Otherwise the route deploys project B with run A's branch and records
+    // the deployment on run A — a record naming a deployment of somebody
+    // else's code.
+    // Resolve each input on its own, the way the device does: the run's folder
+    // is one project and the id the caller named is another.
+    resolveWorkingDirectory.mockImplementation(async (input: { projectId?: string | null; directory?: string | null }) => ({
+      projectId: input.projectId ?? null,
+      directory: input.directory ?? "/home/clawbox/projects/shop",
+    }));
+    resolveProjectScope.mockImplementation(async (input: { projectId: string | null; directory: string | null }) =>
+      input.projectId ? input.projectId : "shop");
+    const res = await route.POST(request({
+      method: "POST", cookie: ownerCookie(),
+      body: { target: "preview", runId: "run-1", projectId: "elsewhere" },
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("run_elsewhere");
+    expect(deployProject).not.toHaveBeenCalled();
+    expect(recordManualDeployment).not.toHaveBeenCalled();
   });
 
   it("does not let an EMPTY project field take the run's own project away", async () => {
@@ -321,6 +348,19 @@ describe("a deployment that is already real", () => {
     const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview", runId: "run-1" } }));
     expect(res.status).toBe(200);
     expect(recordProjectDeploy).toHaveBeenCalled();
+  });
+});
+
+describe("a deployment that is already real (the project record)", () => {
+  it("still answers 200 when the project record could not be written", async () => {
+    recordProjectDeploy.mockRejectedValue(new Error("disk full"));
+    const now = Date.now();
+    readProjectDeploy.mockResolvedValue({ latest: null, productionAt: [now, now] });
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview" } }));
+    expect(res.status).toBe(200);
+    // And the reservations stay counted: a slot that stops being counted is a
+    // cap the next call walks past.
+    expect((await res.json()).production.left).toBe(MAX_PRODUCTION_DEPLOYS - 2);
   });
 });
 
