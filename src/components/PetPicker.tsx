@@ -95,7 +95,7 @@ export default function PetPicker() {
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
       <div className="flex items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>pets</span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t('settings.mascot.pets')}</label>
+        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t('settings.mascot.pets')}</h3>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-4">{t('settings.mascot.petHint')}</p>
 

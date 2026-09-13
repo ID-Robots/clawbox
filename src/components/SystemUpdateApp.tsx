@@ -137,10 +137,14 @@ function StepIcon({ status }: { status: StepStatus }) {
  * brings its own padding and width, so the app skips its window chrome (the
  * full-height centring) and just lays its cards out. The desktop window and
  * the standalone page keep the default.
+ *
+ * Embedded, the hero's headline is an `h2`: the pane around it already owns the
+ * window's `h1`, and two of those would have the document claim two titles.
  */
 export default function SystemUpdateApp({ embedded = false }: { embedded?: boolean } = {}) {
   const { t } = useT();
   const tr = useTr();
+  const HeroHeading = embedded ? "h2" : "h1";
   // Settings embeds this app while the desktop can have the standalone window
   // open beside it, so the label's id has to be per-instance or the second
   // toggle would borrow the first one's name.
@@ -560,7 +564,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 </span>
               </div>
             </div>
-            <h1 className="font-display text-3xl font-bold">{hero.headline}</h1>
+            <HeroHeading className="font-display text-3xl font-bold">{hero.headline}</HeroHeading>
             <p className="mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
               {hero.subhead}
             </p>

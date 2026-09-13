@@ -233,7 +233,7 @@ export default function RemoteControlPanel() {
   return (
     <div className="max-w-xl space-y-5">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t("remoteControl.title")}</h2>
+        <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t("remoteControl.title")}</h3>
         <p className="text-sm text-[var(--text-muted)]">{t("remoteControl.subtitle")}</p>
       </div>
 

@@ -154,9 +154,9 @@ export default function SystemProfilePanel() {
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
       <div className="flex items-center gap-2 mb-4">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>tune</span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
           {t("systemProfile.title")}
-        </label>
+        </h3>
       </div>
 
       {/* Desktop environment */}
