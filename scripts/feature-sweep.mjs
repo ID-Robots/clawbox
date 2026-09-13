@@ -320,7 +320,11 @@ const AREAS = [
       // HAS WiFi, and an nmcli that could not be asked, are failures and must
       // stay failures.
       const reason = res.json && typeof res.json.reason === "string" ? res.json.reason : null;
-      if (reason === "no_wifi_device") {
+      // The 200 is part of the contract, not incidental: `no_wifi_device` is the
+      // one value the route promises to serve as an ANSWER. Carried on any other
+      // status it is the route breaking that promise, which falls through to the
+      // status check below and fails, rather than being excused as `unproven`.
+      if (res.status === 200 && reason === "no_wifi_device") {
         return { unproven: "this machine has no WiFi hardware; the route reports that as a structured 200, which is the answer, but the radio itself is unchecked" };
       }
       if (res.status === 200) return true;
