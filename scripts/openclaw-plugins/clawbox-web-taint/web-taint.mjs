@@ -105,6 +105,19 @@ export const NOT_TAINT_BY_DECISION = new Map([
   // ride out on it, and nothing rides back in. Its own consent gate is the
   // owner's mode, which a tool cannot change.
   ["clawbox_incident_report", "outbound only, over a stored and sanitized record the caller cannot compose"],
+  // The two Vercel deploys. Outbound like email_send: what goes out is the
+  // owner's own project folder or a branch of it, and what comes back is a
+  // deployment id, a state word and an address derived from the owner's own
+  // Vercel project — no third party composes a word of it, so nothing a web
+  // page wrote can ride back into the turn on either.
+  //
+  // What stops a tainted turn DEPLOYING is not this gate: the caller cannot
+  // name a Vercel project (the device resolves the owner's link), and
+  // production is refused for the agent entirely unless the owner turned it on
+  // for that project. Naming them here as taint-free is a statement about what
+  // they bring IN, not a statement that they are unguarded.
+  ["coding_deploy_preview", "outbound only — a preview address derived from the owner's own project, with no third-party text in it"],
+  ["coding_deploy_production", "outbound only, and separately gated by the owner's own per-project switch on the device"],
 ]);
 
 /**
