@@ -100,15 +100,20 @@ describe("a folder that is a git repository", () => {
     write("index.html", "x");
     write(".env", "API_KEY=hunter2hunter2");
     write("deploy.pem", "-----BEGIN KEY-----");
+    // An ssh key is as often named this way as `id_rsa`, and an
+    // alphanumeric-only suffix let both of these through.
+    write("id_rsa_backup", "-----BEGIN OPENSSH PRIVATE KEY-----");
+    write("id_ed25519-old", "-----BEGIN OPENSSH PRIVATE KEY-----");
     execFileSync("git", ["add", "-A", "-f"], { cwd: dir });
     const got = await collectDeployFiles(dir);
     expect(got.ok).toBe(true);
     if (!got.ok) return;
     expect(names(got.files)).toEqual(["index.html"]);
     expect(JSON.stringify(got.files)).not.toContain("hunter2hunter2");
+    expect(JSON.stringify(got.files)).not.toContain("OPENSSH PRIVATE KEY");
     // And it is REPORTED rather than dropped silently: an owner who tracked it
     // on purpose is entitled to know it did not go up.
-    expect(got.skipped.sort()).toEqual([".env", "deploy.pem"]);
+    expect(got.skipped.sort()).toEqual([".env", "deploy.pem", "id_ed25519-old", "id_rsa_backup"]);
   });
 
   it("hashes each file the way Vercel addresses it", async () => {

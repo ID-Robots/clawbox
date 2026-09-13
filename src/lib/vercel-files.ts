@@ -155,8 +155,15 @@ async function isRepository(dir: string): Promise<boolean> {
  * served on an address anybody with the link can open. The same shape
  * `mcp/lib/guard.ts` refuses for the agent's own file tools, applied here to
  * what leaves the box.
+ *
+ * `id_.*` and not `id_[a-z0-9]+`: an ssh key is as often `id_rsa_backup` or
+ * `id_ed25519-old` as it is `id_rsa`, and an alphanumeric-only suffix let both
+ * of those through (found in review). Everything here is deliberately wider
+ * than it strictly needs to be — what it costs is a file left out of a
+ * deployment and named in `skipped`, and what it buys is a credential that
+ * does not reach an address anybody with the link can open.
  */
-const NEVER_UPLOADED_FILE_RE = /^(\.env(\..*)?|\.envrc|.*\.pem|.*\.key|id_[a-z0-9]+)$/i;
+const NEVER_UPLOADED_FILE_RE = /^(\.env(\..*)?|\.envrc|.*\.pem|.*\.key|id_.*)$/i;
 
 /**
  * May this path go up at all?

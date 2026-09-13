@@ -377,6 +377,19 @@ describe("a deployment that is already real (the project record)", () => {
     // cap the next call walks past.
     expect((await res.json()).production.left).toBe(MAX_PRODUCTION_DEPLOYS - 2);
   });
+
+  it("keeps a PRODUCTION slot spent when the record could not be written", async () => {
+    // The deployment happened; only the bookkeeping failed. Handing the slot
+    // back would be the cap forgetting a deployment that is live.
+    recordProjectDeploy.mockRejectedValue(new Error("disk full"));
+    readProjectDeploy.mockResolvedValue({ latest: null, productionAt: [] });
+    const res = await route.POST(request({
+      method: "POST", cookie: ownerCookie(), body: { target: "production", confirm: true },
+    }));
+    expect(res.status).toBe(200);
+    expect(reserveProductionSlot).toHaveBeenCalledWith("shop");
+    expect(releaseProductionSlot).not.toHaveBeenCalled();
+  });
 });
 
 describe("what Vercel refused", () => {
