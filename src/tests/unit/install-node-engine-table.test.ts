@@ -1,0 +1,250 @@
+import { describe, expect, it, vi } from "vitest";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Starts a real bash per case: vitest's 5 s test and 10 s hook defaults are not
+// enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+/**
+ * TASK-788 — the Node engine floor both installers hold the box to.
+ *
+ * The pinned core's `engines.node` moved with 2026.9.3:
+ *
+ *   2026.8.1  >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0
+ *   2026.9.3  >=24.16.0 <25 || >=26.1.0
+ *
+ * (read off the registry, 2026-09-10). Node 22 is not merely deprecated there —
+ * every `openclaw` command exits 1 under it with a requirement banner, because
+ * `node:sqlite` truncates a TEXT value at an embedded NUL on 22.23.x, 24.15.0,
+ * 25.9.0 and 26.0.0, and the first fixed builds are 24.16.0 and 26.1.0.
+ *
+ * So a guard that still accepts Node 22 does not just mis-report: it installs
+ * Node 22 (`ensure_openclaw_node_engine`) and then installs a core that cannot
+ * run on it, leaving the box with a gateway that never comes up. The three
+ * versions that matter are therefore pinned as REJECTED here — `v22.23.2` (what
+ * every shipped image has), `v24.15.0` (the old floor, and what install-x64's
+ * verified tarball used to fetch) and `v26.0.0` — and the table is run, not
+ * read, so a future edit to either installer's `case` is measured.
+ *
+ * Both installers are held to the SAME table: arm64 boxes take install.sh and
+ * the x64 dev/demo path takes install-x64.sh, and they install the same core.
+ */
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const INSTALLERS = {
+  "install.sh": readFileSync(path.join(REPO, "install.sh"), "utf-8"),
+  "install-x64.sh": readFileSync(path.join(REPO, "install-x64.sh"), "utf-8"),
+} as const;
+
+const HAS_BASH = spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
+const HAS_DPKG = spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0;
+
+/** A shell function lifted out of an installer, so the test cannot drift from it. */
+function shellFunction(source: string, name: string): string {
+  const start = source.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found`);
+  const end = source.indexOf("\n}", start);
+  if (end < 0) throw new Error(`${name} has no closing brace`);
+  return `${source.slice(start, end)}\n}`;
+}
+
+/**
+ * The same, for a function a tree may not have yet.
+ *
+ * An absent one becomes nothing rather than an error, so this suite still RUNS
+ * against a tree that predates the split between the table and its caller and
+ * fails on what the shipped guard ANSWERED — which is how its own red was
+ * demonstrated against beta.
+ */
+function optionalShellFunction(source: string, name: string): string {
+  return source.includes(`${name}() {`) ? shellFunction(source, name) : "";
+}
+
+/**
+ * Ask the shipped guard about one Node version.
+ *
+ * Every version in the matrix is asked in ONE bash per installer, not one per
+ * case: the shipped functions are sourced once and the loop drives them over the
+ * whole list. The answers are then read per `it`, so a failure still names the
+ * version it is about. Two spawns rather than twenty-six — this suite shares the
+ * `test` job with a thousand component files, and a five-second default timeout
+ * somewhere else is not a budget to spend on process startup.
+ *
+ * The version reaches the guard the way it reaches it on a box: the function
+ * asks the `node` on PATH for `process.versions.node`, so the stub answers that
+ * from a file the loop rewrites, and nothing else is faked —
+ * `dpkg --compare-versions` is the real one.
+ */
+const VERDICTS = new Map<keyof typeof INSTALLERS, Map<string, boolean>>();
+
+/**
+ * install-x64's verified-tarball version, asked in the same batch.
+ *
+ * In the list rather than asked separately, so a future edit to that constant is
+ * measured by the same run instead of falling outside the matrix.
+ */
+const DIST_VERSION = (() => {
+  const m = /^NODE_DIST_VERSION="([^"]+)"/m.exec(INSTALLERS["install-x64.sh"]);
+  if (!m) throw new Error("NODE_DIST_VERSION not found in install-x64.sh");
+  return m[1];
+})();
+
+function verdicts(installer: keyof typeof INSTALLERS): Map<string, boolean> {
+  const cached = VERDICTS.get(installer);
+  if (cached) return cached;
+
+  const dir = mkdtempSync(path.join(tmpdir(), "clawbox-node-engine-"));
+  const bin = path.join(dir, "bin");
+  mkdirSync(bin);
+  const asked = path.join(dir, "version");
+  const stub = path.join(bin, "node");
+  writeFileSync(stub, `#!/usr/bin/env bash\ncat ${JSON.stringify(asked)}\n`);
+  chmodSync(stub, 0o755);
+
+  const source = INSTALLERS[installer];
+  const program = [
+    optionalShellFunction(source, "node_version_satisfies_openclaw_engine"),
+    shellFunction(source, "node_satisfies_openclaw_engine"),
+    `for v in ${[...REJECTED, ...ACCEPTED, DIST_VERSION].join(" ")}; do`,
+    `  printf '%s' "$v" > ${JSON.stringify(asked)}`,
+    '  if node_satisfies_openclaw_engine; then printf "%s=yes\\n" "$v"; else printf "%s=no\\n" "$v"; fi',
+    "done",
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", program], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    encoding: "utf-8",
+  });
+  if (r.status !== 0) throw new Error(`the guard could not be run (status ${r.status}): ${r.stderr}`);
+
+  const map = new Map<string, boolean>();
+  for (const line of r.stdout.split("\n").filter(Boolean)) {
+    const [version, verdict] = line.split("=");
+    map.set(version, verdict === "yes");
+  }
+  VERDICTS.set(installer, map);
+  return map;
+}
+
+/** What the shipped guard answered about one version. */
+function accepts(installer: keyof typeof INSTALLERS, version: string): boolean {
+  const map = verdicts(installer);
+  const answer = map.get(version);
+  if (answer === undefined) {
+    // A version asked about outside the matrix above would silently read as
+    // "rejected" from a missing map entry, which is how a green suite stops
+    // testing anything.
+    throw new Error(`${version} is not in the matrix the batch run covers`);
+  }
+  return answer;
+}
+
+/** Exactly the published `engines.node` of the pinned core, as a table. */
+const REJECTED = [
+  "22.22.2", // below even the old 22 floor
+  "22.22.3", // the OLD floor: accepted by 2026.8.1, refused by 2026.9.3
+  "22.23.2", // what every shipped ClawBox image runs today
+  "23.11.0", // 23 was never in any of these ranges
+  "24.15.0", // the old 24 floor — one patch below the NUL fix
+  "25.9.0", // inside the retired `>=25.9.0` arm; `<25` now excludes all of 25
+  "26.0.0", // 26 is allowed only from 26.1.0
+] as const;
+
+const ACCEPTED = [
+  "24.16.0", // the floor itself
+  "24.21.0", // the LTS build the installers provision
+  "26.1.0", // the floor of the other allowed line
+  "26.8.2", // current 26.x
+  "27.0.0", // the next major above the open-ended `>=26.1.0`
+  "100.0.0", // three digits: the case a two-digit-only pattern rejected
+] as const;
+
+describe("install.sh / install-x64.sh Node engine table", () => {
+  // ASSERTED, NOT SKIPPED ON, the way email-directive-parity.test.ts puts it:
+  // `describe.skip` on a missing tool turns the only proof of the engine floor
+  // into a green no-op, and the next edit to either `case` table would ship
+  // unmeasured with nothing saying so. Both are present on any Debian-family
+  // runner, which is every runner this repo uses, so this costs nothing where it
+  // runs and is loud where it would otherwise be silent.
+  it("has the bash and dpkg the shipped guard itself uses", () => {
+    expect(HAS_BASH).toBe(true);
+    expect(HAS_DPKG).toBe(true);
+  });
+
+  for (const installer of Object.keys(INSTALLERS) as (keyof typeof INSTALLERS)[]) {
+    describe(installer, () => {
+      for (const version of REJECTED) {
+        it(`rejects Node ${version}`, () => {
+          expect(accepts(installer, version)).toBe(false);
+        });
+      }
+      for (const version of ACCEPTED) {
+        it(`accepts Node ${version}`, () => {
+          expect(accepts(installer, version)).toBe(true);
+        });
+      }
+    });
+  }
+
+  it("states the requirement once per installer, and states the same one", () => {
+    // The failure messages used to spell the range out by hand, which is how a
+    // guard and its own error message come to disagree after a bump. One
+    // variable, and the same text in both installers.
+    for (const source of Object.values(INSTALLERS)) {
+      expect(source).toContain('OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"');
+      expect(source).not.toMatch(/requires Node >=22/);
+    }
+  });
+
+  it("fetches the NodeSource channel of the major it accepts, and never the retired one", () => {
+    // A guard that rejects 22 while the install line still pipes `setup_22.x`
+    // is the worst of both: the box takes the apt transaction, lands on a Node
+    // the guard refuses, and the step exits 1 having replaced the runtime.
+    for (const [name, source] of Object.entries(INSTALLERS)) {
+      expect(source, name).toContain("deb.nodesource.com/setup_24.x");
+      expect(source, name).not.toContain("setup_22.x");
+    }
+  });
+
+  it("leaves the e2e image on the Node every field unit starts from", () => {
+    // The opposite of the rule above, on purpose: the e2e-install image models a
+    // box BEFORE the update, so it stays on 22 and CI performs the real switch.
+    // An image baked with 24 satisfies the guard on its first call and the apt
+    // transaction never runs in CI at all.
+    const dockerfile = readFileSync(path.join(REPO, "e2e-install/Dockerfile"), "utf-8");
+    expect(dockerfile).toContain("deb.nodesource.com/setup_22.x");
+    expect(dockerfile).toContain("performs a Node MAJOR upgrade");
+  });
+
+  it("keeps install-x64's verified tarball above the floor", () => {
+    // `NODE_DIST_VERSION` is the fallback for a machine whose apt cannot
+    // deliver NodeSource's package. It is fetched, checksummed, and then put
+    // through the very guard above — so a value below the floor turns the
+    // fallback into a guaranteed `exit 1` on exactly the machines that need it.
+    expect(accepts("install-x64.sh", DIST_VERSION), DIST_VERSION).toBe(true);
+  });
+
+  it("pins the same core version everywhere it is written down", () => {
+    // FOUR places, and every one of them is a fallback for the same moment: the
+    // pin file cannot be read. `OPENCLAW_VERSION` in each installer is the
+    // version a corrupted or partial install lands on; `OPENCLAW_VERSION_FALLBACK`
+    // in the updater is what the UI's "Latest" column and the managed-plugin
+    // reinstall use. They drifted once, and the cost was not a cosmetic one:
+    // install.sh fell back to the new pin while updater.ts fell back to the old,
+    // so the UI answered "no OpenClaw update available" over a box that had one
+    // (false success) and the channel plugins were pinned to the previous core's
+    // version on the new core. Nothing can derive these — they exist for the
+    // moment the shared file is unavailable — so this case is the guard.
+    const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
+    expect(pinned).toBe("2026.9.3");
+    for (const [name, source] of Object.entries(INSTALLERS)) {
+      expect(source, name).toContain(`OPENCLAW_VERSION="${pinned}"`);
+    }
+    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
+    expect(updater, "src/lib/updater.ts").toContain(
+      `const OPENCLAW_VERSION_FALLBACK = "${pinned}";`,
+    );
+  });
+});

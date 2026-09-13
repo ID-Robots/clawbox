@@ -3,6 +3,24 @@ import * as childProcess from "child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "fs/promises";
 import { existsSync } from "fs";
+import { readFileSync } from "node:fs";
+import nodePath from "node:path";
+
+/**
+ * The core version the managed-plugin specs below carry.
+ *
+ * DERIVED, not typed: `fs/promises` is mocked in this suite, so the updater never
+ * reads a pin file and falls back to its compiled `OPENCLAW_VERSION_FALLBACK`,
+ * which must equal `config/openclaw-target.txt` (guarded by
+ * install-node-engine-table.test.ts). Sixteen literal `@2026.8.1` expectations
+ * here had to be hand-edited at the last pin bump and would again at the next —
+ * and a suite that needs hand-editing to follow a pin is a suite that can be
+ * left behind by one.
+ */
+const PINNED_CORE = readFileSync(
+  nodePath.join(__dirname, "../../../config/openclaw-target.txt"),
+  "utf-8",
+).trim();
 
 // `spawn` beside the two: `runOpenclawConfigSetBatch` — the repo's own writer
 // for `plugins.entries.<id>.enabled`, which the stranded-entry repair calls —
@@ -1398,7 +1416,7 @@ describe("updater", () => {
           `${cmd} ${(args as string[]).join(" ")}`,
         );
         const consentIndex = calls.findIndex((call) =>
-          call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
+          call.includes(`plugins install @openclaw/codex@${PINNED_CORE} --force --accept-capabilities`),
         );
         const restartIndex = calls.findIndex((call) =>
           call.includes("systemctl restart clawbox-gateway.service"),
@@ -1411,7 +1429,7 @@ describe("updater", () => {
       mockReadPluginRepairs.mockResolvedValue({
         codex: {
           id: "codex", stage: "install", reason: "offline", atMs: 1,
-          disabled: true, spec: "@openclaw/codex@2026.8.1",
+          disabled: true, spec: `@openclaw/codex@${PINNED_CORE}`,
         },
       });
       mockClawboxDisabledEntryId.mockResolvedValue("codex");
@@ -1457,7 +1475,7 @@ describe("updater", () => {
         .map((call, index) => call.includes("clawbox-gateway-maintenance.sh leave") ? index : -1)
         .filter((index) => index >= 0);
       const consentIndex = calls.findIndex((call) =>
-        call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
+        call.includes(`plugins install @openclaw/codex@${PINNED_CORE} --force --accept-capabilities`),
       );
       const doctorIndex = calls.findIndex((call) =>
         call.includes("openclaw doctor --fix --yes --non-interactive"),
@@ -1616,7 +1634,7 @@ describe("updater", () => {
       const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
         `${cmd} ${(args as string[]).join(" ")}`,
       );
-      expect(calls.some((call) => call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities")))
+      expect(calls.some((call) => call.includes(`plugins install @openclaw/codex@${PINNED_CORE} --force --accept-capabilities`)))
         .toBe(true);
       expect(calls.some((call) => call.includes("plugins enable discord --accept-capabilities")))
         .toBe(true);
@@ -1836,7 +1854,7 @@ describe("updater", () => {
           `${cmd} ${(args as string[]).join(" ")}`,
         );
         const repairIndex = calls.findIndex((call) =>
-          call.includes("plugins install @openclaw/discord@2026.8.1 --force --accept-capabilities"),
+          call.includes(`plugins install @openclaw/discord@${PINNED_CORE} --force --accept-capabilities`),
         );
         const restartIndex = calls.findIndex((call) =>
           call.includes("systemctl restart clawbox-gateway.service"),
@@ -1853,7 +1871,7 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       expect(calls.some((call) =>
-        call.includes("plugins install @openclaw/discord@2026.8.1 --force --accept-capabilities"),
+        call.includes(`plugins install @openclaw/discord@${PINNED_CORE} --force --accept-capabilities`),
       )).toBe(true);
     });
 
@@ -1961,7 +1979,7 @@ describe("updater", () => {
       // and a plugin published only under the base version 404s on a pin
       // carrying one. `deepseekPluginSpecs` already answers this the same way.
       setupExecFileMock({
-        "plugins install @openclaw/whatsapp@2026.8.1": new Error("404 Not Found"),
+        [`plugins install @openclaw/whatsapp@${PINNED_CORE}`]: new Error("404 Not Found"),
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: '- Plugin "whatsapp": configured plugin payload verification failed '
@@ -1996,7 +2014,7 @@ describe("updater", () => {
       );
       expect(calls.filter((call) => call.includes("plugins install @openclaw/whatsapp")))
         .toEqual([
-          expect.stringContaining("plugins install @openclaw/whatsapp@2026.8.1 --force --accept-capabilities"),
+          expect.stringContaining(`plugins install @openclaw/whatsapp@${PINNED_CORE} --force --accept-capabilities`),
           expect.stringContaining("plugins install @openclaw/whatsapp --force --accept-capabilities"),
         ]);
     });
@@ -2063,7 +2081,7 @@ describe("updater", () => {
         openclaw: { stdout: "1.0.0", stderr: "" },
         // The pre-start's own report, in its own words.
         "/bin/bash": {
-          stdout: "  discord plugin payload reinstalled (@openclaw/discord@2026.8.1)\n",
+          stdout: `  discord plugin payload reinstalled (@openclaw/discord@${PINNED_CORE})\n`,
           stderr: "",
         },
       });
@@ -2193,7 +2211,7 @@ describe("updater", () => {
       mockReadPluginRepairs.mockResolvedValue({
         codex: {
           id: "codex", stage: "install", reason: "offline", atMs: 1,
-          disabled: true, spec: "@openclaw/codex@2026.8.1",
+          disabled: true, spec: `@openclaw/codex@${PINNED_CORE}`,
         },
       });
       mockClawboxDisabledEntryId.mockResolvedValue("codex");
@@ -2259,7 +2277,7 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       expect(calls.some((call) =>
-        call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
+        call.includes(`plugins install @openclaw/codex@${PINNED_CORE} --force --accept-capabilities`),
       )).toBe(false);
     });
 

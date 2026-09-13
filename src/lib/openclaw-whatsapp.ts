@@ -35,6 +35,7 @@
 
 import {
   GatewayNotReadyError,
+  readConfig,
   restartGateway,
   runOpenclawConfigSet,
   spawnOpenclawCli,
@@ -47,6 +48,25 @@ import {
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
 export const WHATSAPP_CHANNEL_ID = "whatsapp";
+
+/**
+ * Is `channels.whatsapp.enabled` the thing standing in the way?
+ *
+ * EXPLICITLY false, never "not true": an absent key is a box that has never
+ * configured the channel, which `/whatsapp/configure` owns and which this must
+ * not decide for. An unreadable config answers false as well — the repair then
+ * writes nothing and the restart below is still attempted, which is the same
+ * outcome every core before 2026.9.1 had.
+ */
+async function whatsappChannelExplicitlyDisabled(): Promise<boolean> {
+  try {
+    const config = await readConfig();
+    const channels = config.channels as Record<string, { enabled?: unknown }> | undefined;
+    return channels?.[WHATSAPP_CHANNEL_ID]?.enabled === false;
+  } catch {
+    return false;
+  }
+}
 
 /** Stop the login this long after the last status poll, exactly like the Hermes manager. */
 export const REAP_AFTER_MS = 60_000;
@@ -524,10 +544,10 @@ export class OpenclawWhatsappPairing {
    * `plugins list`, and above all not a gateway restart, which would drop every
    * other channel mid-conversation.
    *
-   * AND IT DELIBERATELY DOES NOT WRITE `channels.whatsapp`, which is the obvious
-   * thing to suspect when this repair "did everything and the gateway still said
-   * no". Measured in the pinned core (2026.8.1) so nobody has to suspect it
-   * again:
+   * IT WRITES `channels.whatsapp.enabled` ONLY WHEN THAT KEY IS WHAT BLOCKS THE
+   * LOAD, which is a rule that changed under us with the 2026.9.3 pin — see the
+   * measurement two paragraphs down. On 2026.8.1 it wrote the key never, on the
+   * reasoning recorded here:
    *
    *     resolveWebLoginProvider = () => listChannelPlugins().find(p =>
    *       [...p.gatewayMethods ?? [], ...(p.gatewayMethodDescriptors ?? [])
@@ -540,10 +560,30 @@ export class OpenclawWhatsappPairing {
    * still `/whatsapp/configure`'s job — the one the owner reaches after a phone
    * is linked.
    *
-   * The same measurement settles the sequence that looks worse: `/whatsapp/
-   * unpair` writes `channels.whatsapp.enabled = false`, and a re-link after it
-   * does NOT come back here — the plugin is still loaded, so the provider still
-   * resolves, there is no refusal, and this gateway restart never happens.
+   * AND THAT IS NO LONGER THE WHOLE STORY, measured on 2026.9.3 against 2026.8.1
+   * with the same config (TASK-788): 2026.9.1 "Configuration controls" stopped
+   * LOADING a channel plugin whose `channels.<id>.enabled` is false. Same config,
+   * both cores, `plugins.entries.<id>.enabled` true throughout:
+   *
+   *     channels.<id>.enabled = false
+   *       2026.8.1  row: enabled true,  status loaded    → plugin loaded
+   *       2026.9.3  row: enabled FALSE, status disabled  → plugin NOT loaded
+   *
+   * `/whatsapp/unpair` writes `channels.whatsapp.enabled = false`, and the panel
+   * offers "Link your phone" without turning it back on — `/whatsapp/pair` never
+   * touches that key. So on the new core the sequence that used to be harmless
+   * (unpair, then re-link) IS the refusal: no loaded plugin publishes
+   * `web.login.*`, the gateway refuses, and this repair is entered — where
+   * installing an installed plugin, re-writing a `plugins.entries` that already
+   * says true and bouncing the gateway changes nothing, because the key the core
+   * now reads is the one nobody is writing. That is a loop the owner cannot see
+   * the way out of, so "make the plugin loaded" has to include that key on a core
+   * that gates loading on it.
+   *
+   * Only when it is explicitly `false`, and only from here: this is the one path
+   * entered from a pairing the owner asked for and the gateway refused, so the
+   * intent to have WhatsApp on is the owner's own. A healthy box reads the config
+   * and writes nothing.
    */
   private repairWebLoginProvider(): Promise<RepairOutcome> {
     // Two panels — or one reopened while the first install is still running —
@@ -596,6 +636,46 @@ export class OpenclawWhatsappPairing {
     // the next start pays, with someone watching. Bouncing the gateway now
     // would drop the Telegram conversation the owner has gone back to, minutes
     // after the pairing card they closed.
+    if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
+      return { ok: true, reloaded: false, gatewayReady: false };
+    }
+    // The key a core from 2026.9.1 on reads before it loads the plugin at all,
+    // cleared here because the restart below is what would otherwise reload the
+    // same unloadable plugin. READ first: on every box but the one that came
+    // through `/whatsapp/unpair` this costs a file read and writes nothing.
+    // EVERY await from here on is a window the cancel can land in, and each one
+    // is followed by the same question. `stop()` sets the snapshot back to IDLE
+    // (and bumps the epoch) while a config read or a 45 s `config set` is in
+    // flight, and `start()`'s epoch check only runs AFTER the restart — so
+    // without asking here, a pairing card the owner closed would still flip his
+    // channel on and bounce the gateway, dropping the Telegram conversation he
+    // went back to. That is the outcome the check above exists to prevent.
+    //
+    // The PHASE is the right question at each of them, not the epoch: it asks
+    // "is anybody pairing right now", which is what makes a gateway bounce
+    // wanted. The epoch asks "is this answer still the caller's", which is the
+    // call site's own check after this returns — and making the bail
+    // epoch-sensitive would be wrong here, because `this.repairing` is shared:
+    // a second session that joined an in-flight repair needs its reload.
+    if (await whatsappChannelExplicitlyDisabled()) {
+      // Asked after the READ and BEFORE the write, so a cancelled pairing does
+      // not leave the owner's channel switched on with nothing linked to it.
+      if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
+        return { ok: true, reloaded: false, gatewayReady: false };
+      }
+      try {
+        await setOpenclawWhatsappEnabled(true);
+      } catch (err) {
+        // Said, not swallowed, and not fatal: the restart may still produce a
+        // working bridge on an older core, where this key never gated loading.
+        console.error("[openclaw-whatsapp] enabling channels.whatsapp before the reload failed:", err);
+      }
+    }
+    // Asked again after the write — which on the common path (key absent or
+    // already true) is the only place the read above is covered at all. A write
+    // that has already landed stays landed: it is the owner's own channel
+    // switched back on, what `/whatsapp/configure` writes anyway, and what the
+    // next pairing needs. Only the bounce is withheld.
     if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
       return { ok: true, reloaded: false, gatewayReady: false };
     }

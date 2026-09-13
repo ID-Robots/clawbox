@@ -192,7 +192,7 @@ Full documentation: **[docs.clawbox.com/editions/overview](https://docs.clawbox.
 
 ## How It Works
 
-**Layer 1 — System bootstrap.** `install.sh` provisions the Jetson from scratch: system packages, Node.js 22 + Bun, the web OS build, the OpenClaw gateway (version-pinned), systemd services, mDNS, and the captive-portal WiFi access point for first-boot setup.
+**Layer 1 — System bootstrap.** `install.sh` provisions the Jetson from scratch: system packages, Node.js 24 + Bun, the web OS build, the OpenClaw gateway (version-pinned), systemd services, mDNS, and the captive-portal WiFi access point for first-boot setup.
 
 **Layer 2 — Setup wizard.** On first boot (or after factory reset) a guided ~5-minute wizard covers WiFi (with language picker), updates, device password, AI provider (API key or OAuth sign-in), and Telegram — see [First Boot](https://docs.clawbox.com/setup/first-boot).
 
@@ -253,7 +253,7 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 |-------|-----------|
 | **Frontend** | Next.js 16, React 19, Tailwind CSS 4 |
 | **Language** | TypeScript 5 |
-| **Runtime & tooling** | Node.js 22 (production), Bun (dev/build/packages) |
+| **Runtime & tooling** | Node.js 24 (production), Bun (dev/build/packages) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) via MCP |
 | **Local Models** | Ollama + llama.cpp (Llama, Gemma, Mistral, …) |
 | **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |

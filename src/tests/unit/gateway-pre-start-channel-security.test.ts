@@ -48,6 +48,8 @@ afterEach(() => {
 
 interface Applied {
   channels: Record<string, Record<string, unknown>>;
+  /** `plugins.entries` after the block — the stale-enablement self-heal edits it. */
+  entries: Record<string, Record<string, unknown>>;
   changed: boolean;
 }
 
@@ -60,7 +62,7 @@ function applyPolicy(config: Record<string, unknown>): Applied {
     "cfg = json.load(open(sys.argv[1]))",
     "changed = False",
     POLICY,
-    "print(json.dumps({'channels': cfg.get('channels') or {}, 'changed': changed}))",
+    "print(json.dumps({'channels': cfg.get('channels') or {}, 'entries': ((cfg.get('plugins') or {}).get('entries') or {}), 'changed': changed}))",
   ].join("\n");
   return JSON.parse(execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim());
 }
@@ -127,5 +129,59 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh channel security", () => {
     const out = applyPolicy({ gateway: { port: 18789 } });
     expect(out.changed).toBe(false);
     expect(out.channels).toEqual({});
+  });
+
+  describe("the stale channel-plugin enablement", () => {
+    // A plugin entry saying `enabled: true` for a channel that is switched off.
+    // Core repairs the plugin it thinks it needs, blocks on capability consent
+    // and refuses gateway readiness; from 2026.9.1 it also refuses to LOAD a
+    // plugin whose channel is off, so the entry describes something that cannot
+    // happen however often it is asked for.
+    const contradiction = (channel: string) => ({
+      channels: { [channel]: { enabled: false } },
+      plugins: { entries: { [channel]: { enabled: true } } },
+    });
+
+    it("clears it for slack", () => {
+      const out = applyPolicy(contradiction("slack"));
+      expect(out.entries).not.toHaveProperty("slack");
+      expect(out.changed).toBe(true);
+    });
+
+    it("clears it for whatsapp, which ClawBox's own unpair route creates", () => {
+      // TASK-788. `/whatsapp/unpair` writes `channels.whatsapp.enabled = false`
+      // and leaves the plugin entry saying true — on the pinned core that is a
+      // plugin the gateway will not load, asked for on every boot.
+      const out = applyPolicy(contradiction("whatsapp"));
+      expect(out.entries).not.toHaveProperty("whatsapp");
+      expect(out.changed).toBe(true);
+    });
+
+    it("keeps the entry when the channel is on", () => {
+      const out = applyPolicy({
+        channels: { whatsapp: { enabled: true } },
+        plugins: { entries: { whatsapp: { enabled: true } } },
+      });
+      expect(out.entries.whatsapp).toEqual({ enabled: true });
+    });
+
+    it("keeps an entry the owner switched off himself", () => {
+      // Not a contradiction: both say off, and rewriting the owner's explicit
+      // `false` would be this block inventing a decision.
+      const out = applyPolicy({
+        channels: { whatsapp: { enabled: false } },
+        plugins: { entries: { whatsapp: { enabled: false } } },
+      });
+      expect(out.entries.whatsapp).toEqual({ enabled: false });
+    });
+
+    it("leaves every other channel's entry alone", () => {
+      const out = applyPolicy({
+        channels: { telegram: { enabled: false }, discord: { enabled: false } },
+        plugins: { entries: { telegram: { enabled: true }, discord: { enabled: true } } },
+      });
+      expect(out.entries.telegram).toEqual({ enabled: true });
+      expect(out.entries.discord).toEqual({ enabled: true });
+    });
   });
 });

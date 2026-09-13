@@ -44,6 +44,14 @@ export OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG"
 # status is the line's, and `set -e` stops this ExecStartPre on it instead.
 OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 export OPENCLAW_STATE_DIR
+# Doctor repairs STATE here, never the service: the gateway this script is the
+# ExecStartPre of is ClawBox's own system unit, and systemd is mid-start of it.
+# 2026.9.3's `doctor --fix` refuses maintenance outright unless it can account
+# for the gateway's service itself, which on this box it cannot — see
+# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. Exported
+# rather than placed on the one call below because every `openclaw` this script
+# runs is on the same footing.
+export OPENCLAW_SERVICE_REPAIR_POLICY="external"
 unset OPENCLAW_HOME
 HOSTNAME_ENV="${HOSTNAME_ENV:-$CLAWBOX_ROOT/data/hostname.env}"
 
@@ -1835,9 +1843,17 @@ if isinstance(channels, dict):
 # absent plugin, blocks on capability consent, and refuses gateway readiness.
 # Remove only that contradictory stale enablement. An enabled channel, or a
 # plugin entry the owner explicitly disabled, is preserved.
+#
+# WHATSAPP JOINED THE LIST WITH THE 2026.9.3 PIN (TASK-788), and unlike slack the
+# state is ours rather than a legacy config: `/whatsapp/unpair` writes
+# `channels.whatsapp.enabled = false` and leaves `plugins.entries.whatsapp`
+# saying true, which is exactly this contradiction. 2026.9.1 also stopped LOADING
+# a plugin whose channel is off (measured, both cores), so the entry describes a
+# plugin the core will not load however often it is asked — and the re-link path
+# that needs it back writes it itself (`ensureChannelPlugin`).
 plugin_entries = (cfg.get("plugins") or {}).get("entries") if isinstance(cfg.get("plugins"), dict) else None
 if isinstance(plugin_entries, dict) and isinstance(channels, dict):
-    for _channel_name in ("slack",):
+    for _channel_name in ("slack", "whatsapp"):
         _entry = plugin_entries.get(_channel_name)
         _channel = channels.get(_channel_name)
         if (

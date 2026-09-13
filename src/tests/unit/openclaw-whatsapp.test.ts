@@ -19,6 +19,11 @@ vi.mock("@/lib/openclaw-config", async () => {
     openclawIsAbsent: () => false,
     spawnOpenclawCli: vi.fn(),
     restartGateway: vi.fn(),
+    // Both mocked because the repair now READS the config and, on one path
+    // only, writes one key back — an unmocked `readConfig` would reach the
+    // machine's own openclaw.json and an unmocked write would spawn the CLI.
+    readConfig: vi.fn(),
+    runOpenclawConfigSet: vi.fn(),
   };
 });
 vi.mock("@/lib/openclaw-channels", () => ({
@@ -27,13 +32,23 @@ vi.mock("@/lib/openclaw-channels", () => ({
   ensureChannelPlugin: vi.fn(),
 }));
 
-import { GatewayNotReadyError, restartGateway, spawnOpenclawCli } from "@/lib/openclaw-config";
+import {
+  GatewayNotReadyError,
+  readConfig,
+  restartGateway,
+  runOpenclawConfigSet,
+  spawnOpenclawCli,
+} from "@/lib/openclaw-config";
 import { ensureChannelPlugin, readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
 const mockChannelResult = vi.mocked(readCachedChannelRowResult);
 const mockEnsurePlugin = vi.mocked(ensureChannelPlugin);
 const mockRestart = vi.mocked(restartGateway);
+const mockReadConfig = vi.mocked(readConfig);
+const mockConfigSet = vi.mocked(runOpenclawConfigSet);
+/** Releases a config read held open by the absent-key cancellation case. */
+let finishAbsentRead: () => void = () => {};
 
 /**
  * The gateway ANSWERED. A `null` row from an answering gateway means "there is
@@ -68,6 +83,10 @@ describe("OpenclawWhatsappPairing", () => {
     // never entered by the tests that are not about it.
     mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
     mockRestart.mockResolvedValue(undefined);
+    // A config with no `channels.whatsapp` at all: the shape of a box that has
+    // never configured the channel, where the repair must write nothing.
+    mockReadConfig.mockResolvedValue({});
+    mockConfigSet.mockResolvedValue(undefined as never);
     lib = await import("@/lib/openclaw-whatsapp");
   });
 
@@ -179,6 +198,141 @@ describe("OpenclawWhatsappPairing", () => {
     expect(snap.phase).toBe("waiting");
     expect(snap.qrImage).toBe(QR_A);
     expect(snap.error).toBeNull();
+  });
+
+  it("clears the channel key that keeps the plugin unloaded on the pinned core", async () => {
+    // TASK-788. `/whatsapp/unpair` writes `channels.whatsapp.enabled = false`,
+    // and 2026.9.1 stopped LOADING a channel plugin whose channel is off —
+    // measured on 2026.9.3 against 2026.8.1 with the same config, the row going
+    // from `enabled true, status loaded` to `enabled false, status disabled`.
+    // `/whatsapp/pair` never touches that key, so on the new core "unpair, then
+    // Link your phone" refuses for ever: installing an installed plugin and
+    // bouncing the gateway cannot load a plugin the channel key excludes.
+    mockReadConfig.mockResolvedValue({ channels: { whatsapp: { enabled: false } } });
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(mockConfigSet).toHaveBeenCalledWith(
+      ["channels.whatsapp.enabled", "true", "--json"],
+      expect.anything(),
+    );
+    // …and BEFORE the reload, which is the whole point: a restart that runs
+    // first reloads the same unloadable plugin.
+    expect(mockConfigSet.mock.invocationCallOrder[0])
+      .toBeLessThan(mockRestart.mock.invocationCallOrder[0]);
+    expect(snap.qrImage).toBe(QR_A);
+  });
+
+  it("does not bounce the gateway for a card the owner closed while the key was being written", async () => {
+    // The window the new write opens: `config set` takes up to 45 s, and a
+    // cancel inside it used to reach the gateway restart anyway, because the
+    // phase was checked BEFORE the write and the epoch only AFTER the restart.
+    // Dropping the Telegram conversation the owner went back to is exactly what
+    // the phase check above this exists to prevent.
+    mockReadConfig.mockResolvedValue({ channels: { whatsapp: { enabled: false } } });
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    let finishWrite: () => void = () => {};
+    mockConfigSet.mockImplementation(
+      () => new Promise<void>((resolve) => { finishWrite = () => resolve(); }),
+    );
+
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockConfigSet).toHaveBeenCalled());
+    // The owner closes the card while the write is in flight.
+    pairing.stop();
+    finishWrite();
+    await started;
+
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not bounce the gateway for a card closed while a box with no such key was read", async () => {
+    // THE CASE THE OUTER GUARD IS FOR, and the one the sibling below cannot
+    // cover: a config with NO `channels.whatsapp` at all — which is every box
+    // that never unpaired, i.e. the common path. The read still happens, the
+    // cancel can still land in it, and the inner guard is never reached because
+    // the key was not off. Reviewer's probe: with the outer guard deleted this
+    // fails and the sibling below still passes.
+    mockReadConfig.mockImplementation(
+      () => new Promise((resolve) => { finishAbsentRead = () => resolve({ channels: {} }); }),
+    );
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockReadConfig).toHaveBeenCalled());
+    pairing.stop();
+    finishAbsentRead();
+    await started;
+
+    expect(mockConfigSet).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not bounce the gateway for a card closed while the config was being READ", async () => {
+    // The same window on the path every box takes: the read happens whether or
+    // not the key turns out to be off, so a guard that sat inside the "it was
+    // off" branch left the common case unprotected.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    let finishRead: () => void = () => {};
+    // Resolved with the key OFF, which is the case that would otherwise go on to
+    // write it: a read that answers "nothing to do" would prove nothing here.
+    mockReadConfig.mockImplementation(
+      () => new Promise((resolve) => {
+        finishRead = () => resolve({ channels: { whatsapp: { enabled: false } } });
+      }),
+    );
+
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockReadConfig).toHaveBeenCalled());
+    pairing.stop();
+    finishRead();
+    await started;
+
+    // Neither the owner's channel flipped on, nor the gateway bounced.
+    expect(mockConfigSet).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("leaves the channel key alone on a box that never configured the channel", async () => {
+    // ABSENT is not `false`. A box that has never had WhatsApp configured is
+    // `/whatsapp/configure`'s business, and a repair entered from a refusal must
+    // not decide it — the only key this touches is one that is explicitly off,
+    // written by our own unpair route.
+    mockReadConfig.mockResolvedValue({ channels: { telegram: { enabled: true } } });
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    await new lib.OpenclawWhatsappPairing().start();
+
+    expect(mockConfigSet).not.toHaveBeenCalled();
+    expect(mockRestart).toHaveBeenCalled();
+  });
+
+  it("still reloads when the channel key cannot be written", async () => {
+    // FALSE FAILURE refused: an older core never gated loading on that key, so
+    // a write that fails must not cost the repair its reload.
+    mockReadConfig.mockResolvedValue({ channels: { whatsapp: { enabled: false } } });
+    mockConfigSet.mockRejectedValue(new Error("config set exited 1"));
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(mockRestart).toHaveBeenCalled();
+    expect(snap.qrImage).toBe(QR_A);
   });
 
   it("recognises the refusal in the shape the CLI really rejects with", async () => {

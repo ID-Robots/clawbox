@@ -61,11 +61,14 @@ import { clearPluginRepair } from "@/lib/plugin-repair";
  *     with no version selector, or the tag `latest`
  *     (`shouldResolveLatestCompatibleNpmVersion`).
  *
- * Measured end to end: `@openclaw/whatsapp@latest` is 2026.9.3 and declares
- * `compat.pluginApi >=2026.9.3`, so a 2026.8.1 box walks past 2026.9.2
- * (>=2026.9.2) and 2026.8.2 (>=2026.8.2) to 2026.8.1 — exactly the version that
- * core's own bundled `dist/channel-catalog.json` names for it. Four stable
- * versions sit above 2026.8.1, so the walk is three registry reads.
+ * Measured end to end against the THEN pin: `@openclaw/whatsapp@latest` is
+ * 2026.9.3 and declares `compat.pluginApi >=2026.9.3`, so a 2026.8.1 box walked
+ * past 2026.9.2 (>=2026.9.2) and 2026.8.2 (>=2026.8.2) to 2026.8.1 — exactly the
+ * version that core's own bundled `dist/channel-catalog.json` named for it.
+ * Since the pin moved to 2026.9.3 (TASK-788) the host satisfies `latest`
+ * outright and there is no walk to make; the walk stays the safety net for the
+ * next time a plugin release runs ahead of the core a box is on, which is the
+ * only reason these specs are unpinned.
  *
  * WHY THE DEEPSEEK OUTAGE IS NOT A COUNTER-EXAMPLE, since it looks like one and
  * is the reason this note is long. There, an unpinned spec resolved a build

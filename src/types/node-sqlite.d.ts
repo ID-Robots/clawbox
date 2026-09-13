@@ -1,6 +1,6 @@
 /**
  * Minimal ambient surface for node:sqlite, which ships (experimental) with
- * the Node 22 the box runs but is not yet described by the repo's @types/node.
+ * the Node 24 the box runs but is not yet described by the repo's @types/node.
  * Only what src/lib/openclaw-session-store.ts uses is declared; widen it here
  * when more of the module is needed.
  */

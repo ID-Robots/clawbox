@@ -8,7 +8,7 @@ ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](http
 
 ## Stack
 
-Bun runtime (package management + builds), Node.js 22 (production runtime), Next.js 16 (App Router), React 19, TypeScript 5, Tailwind CSS v4. Optimized for local edge deployment on Jetson — `output: 'standalone'` in next.config.ts, no external CDN dependencies, fully offline-capable.
+Bun runtime (package management + builds), Node.js 24 (production runtime), Next.js 16 (App Router), React 19, TypeScript 5, Tailwind CSS v4. Optimized for local edge deployment on Jetson — `output: 'standalone'` in next.config.ts, no external CDN dependencies, fully offline-capable.
 
 ## Commands
 

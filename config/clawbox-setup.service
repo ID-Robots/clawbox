@@ -11,7 +11,7 @@ WorkingDirectory=/home/clawbox/clawbox
 # has incompatibilities with Playwright's `connectOverCDP` — the CDP WS
 # handshake to desktop Chromium never completes under Bun, which the agent
 # surfaces as "Browser control is currently blocked by a CDP connection
-# timeout (ws://127.0.0.1:18800)". Node.js 22 runs the same standalone
+# timeout (ws://127.0.0.1:18800)". Node.js 24 runs the same standalone
 # bundle fine. Bun is still used for build (`bun run build`).
 ExecStart=/usr/bin/node /home/clawbox/clawbox/production-server.js
 Restart=always

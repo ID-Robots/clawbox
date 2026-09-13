@@ -31,7 +31,7 @@
  * M-03). Anything that must change an entry goes through the gateway's own
  * API: see openclaw-session-model.ts.
  *
- * node:sqlite on purpose: it ships with the Node 22 the box runs, needs no
+ * node:sqlite on purpose: it ships with the Node 24 the box runs, needs no
  * native build on Tegra, and `DatabaseSync` keeps these reads as simple as
  * the readFile they replace. Opened with a busy timeout so a concurrently
  * writing gateway makes us wait, not fail.

@@ -54,7 +54,10 @@ describe("install-x64.sh safety contracts", () => {
   });
 
   it("downloads NodeSource before executing it and quotes the project directory", () => {
-    expect(SOURCE).not.toMatch(/setup_22\.x\s*\|\s*bash/);
+    // Version-agnostic on purpose: this pinned `setup_22.x` and went on passing
+    // when the installer moved to `setup_24.x`, i.e. it stopped testing the
+    // curl-into-bash it exists for. The rule is about ANY NodeSource channel.
+    expect(SOURCE).not.toMatch(/setup_\d+\.x\s*\|\s*bash/);
     expect(SOURCE).toContain('curl -fsSL -o "$nodesource_script"');
     expect(SOURCE).toContain(String.raw`cd \"$PROJECT_DIR\" && \"$BUN\" install`);
     expect(SOURCE).toContain(String.raw`PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$BUN\" x playwright install chromium`);

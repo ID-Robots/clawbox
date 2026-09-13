@@ -424,6 +424,9 @@ function resolveRegistryOnlyPlugin(): string {
       rootDir: registryRoot,
       source: path.join(registryRoot, "dist", "index.js"),
       dependencyStatus: { requiredInstalled: true },
+      // The one row key 2026.9.3 adds, in its measured shape (an object, not a
+      // string), so this fixture is the payload the pinned core prints.
+      trust: { reason: "record-missing", registryPath: "/var/lib/clawbox/openclaw/state/openclaw.sqlite", origin: "global" },
     }],
   });
   writeFileSync(
