@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { holdsResumableSession, isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import type { Deliverable, DeliverableVerdict, RunAttempt } from "@/lib/coding-deliverable";
 import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
@@ -2247,10 +2247,12 @@ export default function CodingAgentApp() {
                 {/* Steering, while there is still something to steer. Above
                     the controls on purpose: Stop and Pause are what an owner
                     reached for when a run went the wrong way, and the point of
-                    this box is that they no longer have to. A held run — paused
-                    or drafted — takes one too: it is delivered when the run
-                    goes back in. */}
-                {!isSettled(run.status) && (
+                    this box is that they no longer have to. The bar is the
+                    same one the library holds: a paused run, a draft and one
+                    that GAVE UP all still hold a session, and their queue goes
+                    in when they go back — which is exactly what "tell it what
+                    it missed, then Resume" needs. */}
+                {holdsResumableSession(run.status) && (
                   <CodingRunMessageBox runId={run.id} messages={run.messages} onSent={() => { void load(); }} />
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">

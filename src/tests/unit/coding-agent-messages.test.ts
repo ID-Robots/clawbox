@@ -307,6 +307,27 @@ describe("what queueRunMessage refuses", () => {
     }
   });
 
+  it("but NOT a run that gave up: its session is intact and Resume is the button on its page", async () => {
+    const run = await lib.startRun({ task: "build it", projectId: "site", source: "owner" });
+    await finished(run.id);
+    // The one settled status that still holds a resumable session. Written
+    // straight onto the record, the way a deliverable gate would leave it.
+    const file = path.join(root, "data", "coding-agent-runs.json");
+    const list = JSON.parse(fs.readFileSync(file, "utf-8")) as { id: string; status: string }[];
+    for (const r of list) if (r.id === run.id) r.status = "gave_up";
+    fs.writeFileSync(file, JSON.stringify(list), "utf-8");
+    // A fresh module, so the record is read back off disk rather than out of
+    // the runner's own in-memory copy.
+    await lib._resetCodingAgentStateForTests();
+    vi.resetModules();
+    messages = await import("@/lib/coding-run-messages");
+    lib = await import("@/lib/coding-agent");
+
+    const answer = lib.queueRunMessage(run.id, "the tests are in test/, not tests/");
+    expect(answer.delivered).toBe(false);
+    expect(answer.run.messages[0].deliveredAt).toBeNull();
+  });
+
   it("a message this box will not carry, before anything is written", async () => {
     const draft = await lib.createDraftRun({ task: "build it", projectId: "site", source: "owner" });
     for (const [bad, code] of [["   ", "empty"], ["a b", "not_plain_text"], ["x".repeat(4_001), "too_long"]] as const) {

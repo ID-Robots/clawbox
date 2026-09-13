@@ -81,7 +81,6 @@ import {
   isCodingRunStatus,
   isHeld,
   isLive,
-  isSettled,
   parsePauseReason,
 } from "@/lib/coding-agent-status";
 import {
@@ -9266,16 +9265,22 @@ export function stopRun(id: string): CodingRun {
  *    attempt at the deliverable, or the owner's own Resume.
  *
  * Either way the caller is told which, so no surface has to guess whether the
- * run has actually heard it. Refused for a SETTLED run: there is nothing left
- * to tell, and a queue nothing will ever read is worse than a plain "no".
+ * run has actually heard it.
+ *
+ * The bar is `holdsResumableSession` and not merely "is it running": a paused
+ * run and a drafted one both go back in and take their queue with them, and so
+ * does one that GAVE UP — its session is intact, Resume is the button its own
+ * page offers, and "tell it what it missed, then resume" is the whole reason
+ * that button exists. Anything genuinely over is refused, because a queue
+ * nothing will ever read is worse than a plain "no".
  */
 export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean } {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
-  if (isSettled(run.status)) {
+  if (!holdsResumableSession(run.status)) {
     throw new RunMessageError(
       "settled",
-      "That run has finished, so there is nothing left to tell it. Start a new run, or resume this one, instead.",
+      "That run is over, so there is nothing left to tell it. Start a new run instead.",
     );
   }
   // Both of these throw a RunMessageError with a stable code — the text's own
