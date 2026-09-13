@@ -183,6 +183,17 @@ export interface PipelineVerification {
   status: number | null;
   /** Why it failed, in the owner's-facing words. Null when it passed. */
   reason: string | null;
+  /**
+   * True when the page could not be CHECKED at all because something is gating
+   * it — today, Vercel's own Deployment Protection login wall.
+   *
+   * Its own fact and not a kind of failure, because the two need opposite
+   * things done: a page that is wrong goes back for improvement, while a page
+   * nobody may see is a setting in the owner's Vercel account that no amount of
+   * editing this folder fixes. Optional so a record written before this field
+   * existed reads as "not blocked", which is what it was.
+   */
+  blocked?: boolean;
   judgedBy: VerificationJudge;
   expectations: VerificationExpectation[];
   /** The vision model's verdict, when it was asked. */
@@ -208,6 +219,7 @@ export function parseVerification(raw: unknown): PipelineVerification | null {
     url: v.url.slice(0, MAX_PIPELINE_REF_CHARS),
     status: typeof v.status === "number" && Number.isFinite(v.status) ? v.status : null,
     reason: typeof v.reason === "string" ? v.reason.slice(0, MAX_PIPELINE_DETAIL_CHARS) : null,
+    blocked: v.blocked === true,
     judgedBy: v.judgedBy,
     expectations: Array.isArray(v.expectations)
       ? v.expectations

@@ -344,6 +344,9 @@ describe("reading a record back off disk", () => {
       url: "https://x.vercel.app/",
       status: 200,
       reason: "not there",
+      // A record read back off disk always carries the field: absent means
+      // "not blocked", which is what an older record was.
+      blocked: false,
       judgedBy: "expectations",
       expectations: [{ text: "Invoice", found: false }],
       vision: null,

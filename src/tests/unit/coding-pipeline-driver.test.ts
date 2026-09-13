@@ -381,6 +381,51 @@ describe("a check that fails", () => {
   });
 });
 
+describe("what is NOT the work's fault", () => {
+  it("stops on a page this box was never shown, rather than spending the rounds on it", async () => {
+    // Vercel's Deployment Protection puts every deployment URL behind its own
+    // login page. The check is honest and the page really is not the work — but
+    // asking a coding harness to fix a setting in somebody's Vercel account is
+    // the owner's allowance spent on nothing.
+    installHarness();
+    verifyDeployment.mockResolvedValue(verification(false, {
+      blocked: true,
+      reason: "That deployment is behind Vercel's Deployment Protection.",
+    }));
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "blocked");
+    expect(run.pipeline!.failure?.stage).toBe("verify_preview");
+    expect(run.pipeline!.failure?.reason).toContain("Deployment Protection");
+    // No lap was spent, and production was never reached.
+    expect(run.pipeline!.round).toBe(0);
+    expect(stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"))).toHaveLength(0);
+    expect(runDeployment).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops on a Vercel 4xx about this box's OWN request", async () => {
+    // A malformed request is not something the harness can act on from the
+    // folder. One real run spent three improvement turns and four review passes
+    // re-reviewing correct HTML over a field Vercel does not accept.
+    installHarness();
+    runDeployment.mockResolvedValue({
+      ok: false,
+      code: "refused",
+      detail: "Invalid request: `target` should be 'production', 'staging', or a custom environment identifier.",
+    });
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "blocked");
+    expect(run.pipeline!.failure?.stage).toBe("deploy_preview");
+    expect(run.pipeline!.round).toBe(0);
+    expect(stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"))).toHaveLength(0);
+  });
+});
+
 describe("a build that fails on Vercel", () => {
   it("closes the deploy stage and hands the build log to the improvement lap", async () => {
     installHarness();
