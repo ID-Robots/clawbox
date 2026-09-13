@@ -182,6 +182,10 @@ const PROBE_GATED_COMMON = [
   // coding agent's own gate, because what it answers about is what a RUN will
   // find in its environment.
   "coding_secret_list",
+  // Deploying what a run built is the other half of handing it the task, so it
+  // is behind the same switch: a box whose coding agent is off has nothing the
+  // assistant would be deploying.
+  "coding_deploy_preview", "coding_deploy_production",
   "coding_team_run", "coding_team_status", "coding_team_stop",
   "disk_cleanup", "disk_usage", "email_list", "email_read",
   "logs_tail", "screen_capture",
