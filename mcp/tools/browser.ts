@@ -22,6 +22,7 @@ import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { isInside } from "../../src/lib/file-guard";
+import { recordShotNote } from "../../src/lib/coding-shot-notes";
 import { runContext } from "../lib/run-context";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
@@ -294,6 +295,12 @@ function pageResult(message: string, reply: BrowserReply): ToolResult {
   const saved = reply.screenshot ? saveShot(reply.screenshot) : null;
   if (saved) {
     lines.push(`Screenshot archived to this run's evidence folder as ${saved}.`);
+    // The words the vision model just produced are written down beside the
+    // picture, not only relayed into the transcript: the pull request body is
+    // built from this file, so a reviewer reads what the page showed without
+    // opening the box. Best-effort — see src/lib/coding-shot-notes.ts.
+    const dir = runContext()?.artifactsDir;
+    if (dir && reply.description) recordShotNote(dir, saved, reply.description);
   } else if (reply.screenshot) {
     // Said plainly: a model told "archived" every time would cite evidence
     // the owner will never find.
