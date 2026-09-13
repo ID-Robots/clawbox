@@ -8686,6 +8686,18 @@ export async function approvePipelineProduction(runId: string): Promise<CodingRu
   if (pipeline.status !== "waiting_owner") {
     throw new CodingAgentError("invalid", `That pipeline is not waiting for you: it is ${pipeline.status}.`);
   }
+  // The wall clock, BEFORE anything is deployed. `decidePipeline` checks it at
+  // the next transition, which for this path is after `runDeployment` has
+  // already put a build on the project's own domain — so a pipeline parked
+  // overnight past its budget would have shipped and then recorded that it had
+  // run out of time. Asked here instead, where the answer is still "no".
+  if (Date.now() > pipeline.deadlineAt) {
+    const transition = decidePipeline(pipeline, "deploy_production", { kind: "passed" });
+    persist(true);
+    if (transition.action === "settled") await settlePipelineRun(runId);
+    throw new CodingAgentError("invalid", pipeline.failure?.reason
+      ?? "That pipeline ran out of its time budget while it was waiting. Start a new run.");
+  }
   pipeline.status = "running";
   // Recorded, because `resumePipelines` re-enters this stage after a restart
   // and would otherwise ask the per-project switch again and park a second
@@ -8760,7 +8772,7 @@ export function resumePipelines(): void {
 
     if (stage === "verify_preview" || stage === "verify_production") {
       if (step.state !== "running") continue;
-      pushProgress(run, RUNNER_STEP.pipelineResumed(stageNoun(stage)));
+      pushProgress(run, RUNNER_STEP.pipelineResumed);
       persist(true);
       // Re-entered rather than continued: a verification is a fetch and a
       // picture, and making it again is cheaper and more honest than guessing

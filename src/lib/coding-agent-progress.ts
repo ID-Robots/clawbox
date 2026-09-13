@@ -251,6 +251,15 @@ export const RUNNER_STEP = {
   pipelineVerifyProduction: "Delivery pipeline: checking production",
   pipelineWaitingOwner: "Delivery pipeline: waiting for you to approve the production deployment",
   pipelineComplete: "Delivery pipeline: finished, and what was deployed was checked",
+  /**
+   * A stage the web server restarted under, picked back up.
+   *
+   * No stage NAME in it, deliberately: `stageNoun` answers English, and this
+   * block's own rule is that a stage name travelling through the feed as a
+   * parameter is a word no locale can translate. Which stage it was is on the
+   * strip beside this line anyway.
+   */
+  pipelineResumed: "Delivery pipeline: picking up where it left off after a restart",
 
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
@@ -308,8 +317,7 @@ export const RUNNER_STEP = {
   pipelineImprovement: (round: number, rounds: number) => `Delivery pipeline: improvement round ${round} of ${rounds}`,
   /** The address the box fetched, screenshotted and judged. */
   pipelineVerified: (url: string) => `Checked ${url} and it shows what was asked for`,
-  /** A stage the web server restarted under, picked back up. */
-  pipelineResumed: (stage: string) => `Delivery pipeline: picking the ${stage} stage back up after a restart`,
+
   /** Why the pipeline is not going on. */
   pipelineStopped: (reason: string) => `Delivery pipeline stopped: ${reason}`,
   /** A helper going out: the type in parentheses, its own description after a colon. */
@@ -391,7 +399,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Delivery pipeline: checking the preview$/, labelKey: "pipelineVerifyPreview", icon: "fact_check" },
   { re: /^Delivery pipeline: checking production$/, labelKey: "pipelineVerifyProduction", icon: "fact_check" },
   { re: /^Delivery pipeline: waiting for you to approve the production deployment$/, labelKey: "pipelineWaitingOwner", icon: "pan_tool" },
-  { re: /^Delivery pipeline: picking the (.+) stage back up after a restart$/, labelKey: "pipelineResumed", icon: "restart_alt", params: (m) => ({ stage: m[1] }) },
+  { re: /^Delivery pipeline: picking up where it left off after a restart$/, labelKey: "pipelineResumed", icon: "restart_alt" },
   { re: /^Delivery pipeline: finished, and what was deployed was checked$/, labelKey: "pipelineComplete", icon: "verified" },
   { re: /^Delivery pipeline stopped: (.+)$/, labelKey: "pipelineStopped", icon: "cancel", params: (m) => ({ reason: m[1] }) },
   { re: /^Checked (\S+) and it shows what was asked for$/, labelKey: "pipelineVerified", icon: "verified", params: (m) => ({ url: m[1] }) },

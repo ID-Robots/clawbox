@@ -485,14 +485,15 @@ export function decidePipeline(
     return fail(pipeline, stage, step.detail, now);
   }
   if (pipeline.round >= pipeline.maxRounds) {
-    return fail(
-      pipeline,
-      stage,
-      pipeline.maxRounds === 0
-        ? `${step.detail} No improvement rounds are allowed on this ClawBox, so it was not sent back.`
-        : `${step.detail} That was the last of ${pipeline.maxRounds} improvement round(s).`,
-      now,
-    );
+    // The EXPLANATION is what this sentence exists for, so it is what must
+    // survive: `step.detail` is already at the cap, and appending to it put the
+    // whole "that was the last round" half past the clamp — leaving the owner a
+    // failure with no reason why the box stopped trying.
+    const why = pipeline.maxRounds === 0
+      ? "No improvement rounds are allowed on this ClawBox, so it was not sent back."
+      : `That was the last of ${pipeline.maxRounds} improvement round(s).`;
+    const room = MAX_PIPELINE_DETAIL_CHARS - why.length - 1;
+    return fail(pipeline, stage, `${clamp(step.detail ?? "", Math.max(0, room))} ${why}`.trim(), now);
   }
   pipeline.round += 1;
   return next(pipeline, "improvement", now);
@@ -655,6 +656,12 @@ export function readPipelineInput(raw: unknown): PipelineInputResult {
     if (trimmed && !trimmed.startsWith("/")) {
       return refusePipelineInput("bad_path", "The path to check has to start with \"/\" — it is a path on the deployment, not a whole address.");
     }
+    // `//other.example/` starts with a slash and IS a whole address once it is
+    // resolved against an origin, so a verification would have gone looking at
+    // somebody else's site and judged the owner's deployment on what it found.
+    if (trimmed.startsWith("//")) {
+      return refusePipelineInput("bad_path", "The path to check is a path on the deployment, not an address of its own.");
+    }
     if (trimmed.length > MAX_VERIFY_PATH_CHARS) {
       return refusePipelineInput("bad_path", `That path is longer than ${MAX_VERIFY_PATH_CHARS} characters.`);
     }
@@ -754,7 +761,11 @@ export function parsePipeline(raw: unknown): PipelineState | null {
       .slice(0, MAX_EXPECTATIONS)
       .map((x) => x.trim().slice(0, MAX_EXPECTATION_CHARS))
     : [];
-  const path = typeof verifyRaw.path === "string" && verifyRaw.path.startsWith("/")
+  // The same cut `readPipelineInput` makes, because a hand-edited record is
+  // exactly where a protocol-relative path would be planted.
+  const path = typeof verifyRaw.path === "string"
+    && verifyRaw.path.startsWith("/")
+    && !verifyRaw.path.startsWith("//")
     ? verifyRaw.path.slice(0, MAX_VERIFY_PATH_CHARS)
     : "/";
 

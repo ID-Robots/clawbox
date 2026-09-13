@@ -47,6 +47,19 @@ import type { PipelineVerification, VerificationExpectation } from "@/lib/coding
 // The shapes live in the PURE half, which the run page can import; see its header.
 export type { PipelineVerification, VerificationExpectation, VerificationJudge } from "@/lib/coding-pipeline";
 
+/**
+ * How many redirects the verification follows.
+ *
+ * It follows them at all because a deployment legitimately redirects — a
+ * trailing slash, a locale prefix, an auth-free marketing page — and it follows
+ * them BY HAND because `redirect: "follow"` validates nothing: a deployment
+ * that answered `302 Location: http://169.254.169.254/` would have had this box
+ * fetch a cloud metadata service, photograph it, and send the picture to a
+ * vision model. Every hop is checked, and a chain longer than this is refused
+ * rather than walked.
+ */
+export const VERIFY_MAX_REDIRECTS = 5;
+
 /** The whole fetch's budget. A cold serverless function is seconds, not minutes. */
 export const VERIFY_FETCH_TIMEOUT_MS = 30_000;
 /** How much of the answer is read and searched. Enough for any page's markup. */
@@ -95,6 +108,13 @@ export function verificationUrl(base: string, subPath: string): { ok: true; url:
   // Vercel happened to include.
   try {
     const joined = new URL(subPath || "/", parsed.origin);
+    // …and it may not move the ADDRESS. `//other.example/` is a path that
+    // starts with a slash and is a whole new origin once resolved, so a
+    // verification would have gone looking at somebody else's site and passed
+    // or failed the owner's deployment on what it found there.
+    if (joined.origin !== parsed.origin) {
+      return { ok: false, reason: "That path is an address of its own, not a path on the deployment." };
+    }
     return { ok: true, url: joined.toString() };
   } catch {
     return { ok: false, reason: "That path could not be put onto the deployment's address." };
@@ -162,6 +182,31 @@ async function screenshotPage(runId: string, url: string): Promise<{ file: strin
       args: chromiumSandboxArgs(),
     });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    // Chromium follows redirects and re-resolves DNS itself, so the address the
+    // fetch settled on proves nothing about where the RENDERER ends up. Every
+    // navigation — each redirect hop included — is put to the same rail before
+    // the browser connects, the way the browser route guards its own pages.
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      if (!request.isNavigationRequest()) {
+        await route.continue();
+        return;
+      }
+      let host: string | null = null;
+      try {
+        const parsed = new URL(request.url());
+        if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password) {
+          host = parsed.hostname;
+        }
+      } catch {
+        // Not an address this box will let a renderer reach.
+      }
+      if (!host || !(await hostIsPublic(host))) {
+        await route.abort("blockedbyclient");
+        return;
+      }
+      await route.continue();
+    });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });
     const shot = await page.screenshot({ type: "png", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });
     const name = `verify-${Date.now().toString(36)}.png`;
@@ -198,12 +243,94 @@ export function judgementPrompt(task: string): string {
   ].join("\n");
 }
 
-/** The first YES/NO in the model's answer, or "unknown" when it named neither. */
+/**
+ * The verdict off the FIRST non-blank line, or "unknown".
+ *
+ * The prompt asks for YES or NO on the first line and this reads exactly that,
+ * because searching the whole answer is not a parse: "I cannot choose YES or
+ * NO.\nNO" contains "YES" first, and a deployment showing the old version
+ * would have passed on the strength of a refusal to answer. Anything this
+ * cannot read is `unknown`, which fails the check rather than passing it.
+ *
+ * Leading punctuation is stripped because a model writes "**YES**" and "- NO".
+ */
 export function readVerdict(text: string | null): "yes" | "no" | "unknown" {
   if (!text) return "unknown";
-  const m = /\b(yes|no)\b/i.exec(text);
+  const first = text.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
+  if (!first) return "unknown";
+  const m = /^(yes|no)\b/i.exec(first.replace(/^[^A-Za-z]+/, ""));
   if (!m) return "unknown";
   return m[1].toLowerCase() === "yes" ? "yes" : "no";
+}
+
+/**
+ * Fetch the page, checking EVERY hop.
+ *
+ * `redirect: "follow"` hands the whole chain to undici, which knows nothing
+ * about which addresses are ours — so the redirects are walked here instead and
+ * each target is put to `hostIsPublic` before a connection is made to it. The
+ * same rail `src/app/setup-api/browser/route.ts` puts its own navigations on,
+ * and for the same reason: the address came from somebody else.
+ */
+async function fetchThroughRedirects(start: string): Promise<
+  | { ok: true; status: number; body: string; finalUrl: string }
+  | { ok: false; reason: string; status?: number }
+> {
+  let current = start;
+  const deadline = Date.now() + VERIFY_FETCH_TIMEOUT_MS;
+  for (let hop = 0; hop <= VERIFY_MAX_REDIRECTS; hop += 1) {
+    let target: URL;
+    try {
+      target = new URL(current);
+    } catch {
+      return { ok: false, reason: "That deployment redirected to something that is not a web address." };
+    }
+    if (target.protocol !== "https:" && target.protocol !== "http:") {
+      return { ok: false, reason: `That deployment redirected to ${target.protocol}, which this ClawBox will not follow.` };
+    }
+    if (target.username || target.password) {
+      return { ok: false, reason: "That deployment redirected to an address carrying credentials, which this ClawBox will not follow." };
+    }
+    if (!(await hostIsPublic(target.hostname))) {
+      return {
+        ok: false,
+        reason: hop === 0
+          ? "That deployment's address is not a public one, so this ClawBox did not fetch it."
+          : "That deployment redirected to an address inside this network, so this ClawBox stopped there.",
+      };
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(current, {
+        // BY HAND: see the function's header.
+        redirect: "manual",
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        headers: { "user-agent": "ClawBox-delivery-pipeline", accept: "text/html,*/*" },
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: err instanceof Error && err.name === "TimeoutError"
+          ? `The page did not answer within ${Math.round(VERIFY_FETCH_TIMEOUT_MS / 1000)} seconds.`
+          : `The page could not be fetched: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      // The body of a redirect is nothing anybody wants; releasing it keeps the
+      // connection from being held for the life of the process.
+      await response.body?.cancel().catch(() => {});
+      if (!location) {
+        return { ok: false, reason: `That deployment answered ${response.status} without saying where to go.`, status: response.status };
+      }
+      current = new URL(location, current).toString();
+      continue;
+    }
+    return { ok: true, status: response.status, body: await readBody(response), finalUrl: current };
+  }
+  return { ok: false, reason: `That deployment redirected more than ${VERIFY_MAX_REDIRECTS} times, so this ClawBox stopped following it.` };
 }
 
 export interface VerifyInput {
@@ -229,27 +356,9 @@ export async function verifyDeployment(input: VerifyInput): Promise<PipelineVeri
   if (!built.ok) return refuse(input.deploymentUrl, built.reason);
   const url = built.url;
 
-  const host = new URL(url).hostname;
-  if (!(await hostIsPublic(host))) {
-    return refuse(url, "That deployment's address is not a public one, so this ClawBox did not fetch it.");
-  }
-
-  let status: number | null = null;
-  let body = "";
-  try {
-    const response = await fetch(url, {
-      redirect: "follow",
-      signal: AbortSignal.timeout(VERIFY_FETCH_TIMEOUT_MS),
-      headers: { "user-agent": "ClawBox-delivery-pipeline", accept: "text/html,*/*" },
-    });
-    status = response.status;
-    body = await readBody(response);
-  } catch (err) {
-    const why = err instanceof Error && err.name === "TimeoutError"
-      ? `The page did not answer within ${Math.round(VERIFY_FETCH_TIMEOUT_MS / 1000)} seconds.`
-      : `The page could not be fetched: ${err instanceof Error ? err.message : String(err)}`;
-    return refuse(url, why);
-  }
+  const fetched = await fetchThroughRedirects(url);
+  if (!fetched.ok) return refuse(url, fetched.reason, { status: fetched.status ?? null });
+  const { status, body, finalUrl } = fetched;
 
   if (status < 200 || status >= 300) {
     return refuse(url, `The page answered ${status}, so the deployment is not serving what was asked for.`, { status });
@@ -260,8 +369,10 @@ export async function verifyDeployment(input: VerifyInput): Promise<PipelineVeri
 
   // The picture is taken whatever the expectations say, because it is the
   // EVIDENCE half: a verification that passed and a verification that failed
-  // are both worth being able to look at afterwards.
-  const shot = await screenshotPage(input.runId, url);
+  // are both worth being able to look at afterwards. Of the address the fetch
+  // SETTLED on — already walked hop by hop — rather than the one it started
+  // from, so Chromium repeats one fewer redirect.
+  const shot = await screenshotPage(input.runId, finalUrl);
 
   const expectations: VerificationExpectation[] = input.expect.map((text) => ({
     text,

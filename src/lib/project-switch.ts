@@ -43,8 +43,29 @@ function emptyMap(): Record<string, unknown> {
   return Object.create(null) as Record<string, unknown>;
 }
 
+/**
+ * Is this a project name a switch may be filed under?
+ *
+ * The SAME alphabet the secret store files a project's own entries under, and
+ * `BOX_SCOPE` is excluded because these are per-PROJECT switches and `@box` is
+ * the box-wide sentinel: a row under it would be a standing permission for
+ * every project at once, which neither of these settings means.
+ *
+ * It matters because `resolveProjectScope` answers the folder's own name, which
+ * is not held to that alphabet — a folder called `my.project` resolves fine and
+ * would be WRITTEN here, then dropped by the next write's filter and missing
+ * from `readProjectSwitches` in between: a switch the owner turned on, that the
+ * list does not show and that quietly disappears.
+ */
+function fileable(scope: string | null | undefined): scope is string {
+  return typeof scope === "string" && scope.length > 0 && scope !== BOX_SCOPE && isValidSecretScope(scope);
+}
+
 /** Is the switch on for this project? Anything but an explicit true is off. */
 export async function readProjectSwitch(key: string, scope: string | null | undefined): Promise<boolean> {
+  // Deliberately NOT `fileable`: a row written before this rule existed is
+  // still the owner's answer, and reading it as off would silently withdraw a
+  // permission they gave. Only the WRITE is held to the alphabet.
   if (typeof scope !== "string" || !scope) return false;
   const raw = await configGet(key);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
@@ -62,8 +83,13 @@ export async function readProjectSwitches(key: string): Promise<string[]> {
     .sort();
 }
 
-/** Turn it on or off for one project. Answers what it now is. */
+/**
+ * Turn it on or off for one project. Answers what it now IS — which for a
+ * project name this cannot file under is whatever it already was, because a
+ * write that would be dropped by the next one is worse than no write.
+ */
 export function setProjectSwitch(key: string, scope: string, enabled: boolean): Promise<boolean> {
+  if (!fileable(scope)) return readProjectSwitch(key, scope);
   return queue(key, async () => {
     const raw = await configGet(key);
     const before = typeof raw === "object" && raw !== null && !Array.isArray(raw)

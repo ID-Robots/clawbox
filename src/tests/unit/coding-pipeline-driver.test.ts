@@ -671,3 +671,31 @@ describe("only one watcher on a run's deployment", () => {
     expect(run.vercel?.phase).toBe("ready");
   });
 });
+
+describe("an approval that arrives too late", () => {
+  it("is refused rather than shipping past the pipeline's own budget", async () => {
+    installHarness();
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    await pipelineSettles(started.id, "waiting_owner");
+
+    // The owner walked away and pressed the button the next morning. The budget
+    // is checked BEFORE the deploy: `decidePipeline` checks it at the next
+    // transition, which on this path is after a build is already on the
+    // project's own domain.
+    const run = lib.getRun(started.id)!;
+    const runs = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8"));
+    for (const record of runs) {
+      if (record.id === run.id) record.pipeline.deadlineAt = Date.now() - 1;
+    }
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify(runs), "utf-8");
+    await lib._resetCodingAgentStateForTests();
+
+    await expect(lib.approvePipelineProduction(started.id)).rejects.toThrow(/budget/);
+    // ONE deployment on the whole record: the preview, and no production build.
+    expect(runDeployment).toHaveBeenCalledTimes(1);
+    expect(lib.getRun(started.id)!.pipeline!.status).toBe("failed");
+  });
+});

@@ -139,12 +139,24 @@ export default function CodingRunPipelineCard({
   const waiting = pipeline.status === "waiting_owner";
   const checked = pipeline.lastVerification;
 
+  /**
+   * Run one of the host's actions and say what came back.
+   *
+   * The `finally` is the point: a caller's promise that REJECTS — a host that
+   * does not wrap its own fetch the way this app's does — would otherwise skip
+   * `setPhase("idle")` and leave the card stuck on "Working…", with the button
+   * the owner needs gone and nothing on screen saying why.
+   */
   const act = async (run: () => Promise<string | null>) => {
     setPhase("working");
     setError(null);
-    const refused = await run();
-    setError(refused);
-    setPhase("idle");
+    try {
+      setError(await run());
+    } catch {
+      setError(t("codingAgent.pipelineWorkFailed"));
+    } finally {
+      setPhase("idle");
+    }
   };
 
   return (

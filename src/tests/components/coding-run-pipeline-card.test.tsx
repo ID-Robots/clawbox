@@ -182,6 +182,19 @@ describe("the production button", () => {
     expect(said.textContent).toContain("not waiting for you");
   });
 
+  it("does not get stuck on Working… when the host's promise REJECTS", async () => {
+    const onApproveProduction = vi.fn(async () => { throw new Error("the network went away"); });
+    render(<CodingRunPipelineCard runId="run-1" pipeline={waiting()} t={t} onApproveProduction={onApproveProduction} />);
+    fireEvent.click(screen.getByTestId("coding-agent-pipeline-deploy-production"));
+    fireEvent.click(screen.getByTestId("coding-agent-pipeline-production-confirm"));
+    const said = await screen.findByTestId("coding-agent-pipeline-error");
+    expect(said.textContent).toBe(t("codingAgent.pipelineWorkFailed"));
+    // …and the button the owner needs is back, rather than the card sitting on
+    // "Working…" with nothing on screen saying why.
+    expect(screen.queryByTestId("coding-agent-pipeline-working")).toBeNull();
+    expect(screen.getByTestId("coding-agent-pipeline-deploy-production")).toBeTruthy();
+  });
+
   it("is not offered on a pipeline that is not waiting, nor where the page does not offer it", () => {
     render(<CodingRunPipelineCard runId="run-1" pipeline={state()} t={t} onApproveProduction={vi.fn(async () => null)} />);
     expect(screen.queryByTestId("coding-agent-pipeline-deploy-production")).toBeNull();

@@ -121,3 +121,25 @@ describe("the pipeline's own default", () => {
     expect(store.PIPELINE_PROJECTS_CONFIG_KEY).toBe(KEY);
   });
 });
+
+describe("a project name this cannot be filed under", () => {
+  it("is not written, because the next write would drop it anyway", async () => {
+    // `resolveProjectScope` answers a FOLDER's own name, which is not held to
+    // the secret store's alphabet. Written, such a row would be filtered out by
+    // the next write and missing from the list in between — a permission the
+    // owner gave that quietly disappears.
+    expect(await lib.setProjectSwitch(KEY, "my.project", true)).toBe(false);
+    expect(readConfig()).toBeUndefined();
+    expect(await lib.readProjectSwitches(KEY)).toEqual([]);
+  });
+
+  it("refuses the box-wide sentinel: these are PER-project switches", async () => {
+    expect(await lib.setProjectSwitch(KEY, "@box", true)).toBe(false);
+    expect(readConfig()).toBeUndefined();
+  });
+
+  it("still READS a row written before that rule, because it was the owner's answer", async () => {
+    writeConfig({ "my.project": true });
+    expect(await lib.readProjectSwitch(KEY, "my.project")).toBe(true);
+  });
+});

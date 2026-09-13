@@ -22,7 +22,7 @@ const findPlaywrightChromium = vi.hoisted(() => vi.fn<() => string | null>(() =>
 vi.mock("@/lib/cdp-probe", () => ({ findPlaywrightChromium }));
 
 /** Every address in this suite is public; the private-host rail has its own suite. */
-const hostIsPublic = vi.hoisted(() => vi.fn(async () => true));
+const hostIsPublic = vi.hoisted(() => vi.fn<(host: string) => Promise<boolean>>(async () => true));
 vi.mock("@/lib/private-address", () => ({ hostIsPublic, isPrivateIp: () => false, lookupWithTimeout: async () => [] }));
 
 type Lib = typeof import("@/lib/coding-pipeline-verify");
@@ -67,6 +67,15 @@ describe("the address it checks", () => {
     expect(out.ok).toBe(false);
   });
 
+  it("refuses a path that is an address of its own", () => {
+    // `//other.example/` starts with a slash and IS a whole origin once
+    // resolved, so a verification would have judged the owner's deployment on
+    // somebody else's site.
+    const out = lib.verificationUrl("https://x.vercel.app", "//other.example/");
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.reason).toContain("address of its own");
+  });
+
   it("refuses a scheme that is not the web", () => {
     expect(lib.verificationUrl("file:///etc/shadow", "/").ok).toBe(false);
     expect(lib.verificationUrl("not a url", "/").ok).toBe(false);
@@ -82,6 +91,70 @@ describe("the address it checks", () => {
     expect(out.ok).toBe(false);
     expect(out.reason).toContain("not a public one");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("redirects", () => {
+  function redirect(to: string, status = 302): Response {
+    return new Response(null, { status, headers: { location: to } });
+  }
+
+  it("follows one to a public address and checks the page it lands on", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(redirect("https://x.vercel.app/invoices/"))
+      .mockResolvedValueOnce(answer("<h1>Invoice</h1>"));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/invoices", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(true);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+    expect(fetchMock.mock.calls[1][0]).toBe("https://x.vercel.app/invoices/");
+  });
+
+  it("STOPS at one pointing inside this network, and never fetches it", async () => {
+    // The whole reason redirects are walked by hand: `redirect: "follow"` would
+    // have had this box fetch a metadata service, photograph it, and send the
+    // picture to a vision model.
+    hostIsPublic.mockImplementation(async (host: string) => host.endsWith(".vercel.app"));
+    const fetchMock = vi.fn().mockResolvedValueOnce(redirect("http://169.254.169.254/latest/meta-data/"));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("inside this network");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(findPlaywrightChromium).not.toHaveBeenCalled();
+  });
+
+  it("refuses a redirect off the web entirely", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(redirect("file:///etc/shadow")));
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("file:");
+  });
+
+  it("refuses a redirect that names nowhere", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 302 })));
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("without saying where to go");
+  });
+
+  it("gives up on a chain rather than walking it for ever", async () => {
+    const fetchMock = vi.fn(async () => redirect("https://x.vercel.app/next"));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("redirected more than");
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(lib.VERIFY_MAX_REDIRECTS + 1);
   });
 });
 
@@ -165,11 +238,20 @@ describe("when nothing literal was named", () => {
 });
 
 describe("the vision verdict", () => {
-  it("reads YES and NO off the first word and ignores the rest", () => {
+  it("reads YES and NO off the FIRST line, which is what the prompt asked for", () => {
     expect(lib.readVerdict("YES — the invoice table is there.")).toBe("yes");
     expect(lib.readVerdict("No. The page is blank.")).toBe("no");
+    expect(lib.readVerdict("\n\n**YES**\nthe table renders")).toBe("yes");
+    expect(lib.readVerdict("- no, it is the old version")).toBe("no");
     expect(lib.readVerdict("It is hard to say.")).toBe("unknown");
     expect(lib.readVerdict(null)).toBe("unknown");
+  });
+
+  it("does not take a refusal to answer as a YES", () => {
+    // Searching the whole answer found "YES" in the first sentence and passed a
+    // deployment the model had just said it could not judge.
+    expect(lib.readVerdict("I cannot choose YES or NO.\nNO")).toBe("unknown");
+    expect(lib.readVerdict("The question is whether it is YES.\nNO — it is blank.")).toBe("unknown");
   });
 
   it("asks about the TASK, and tells the model to answer NO only when it plainly is not it", () => {

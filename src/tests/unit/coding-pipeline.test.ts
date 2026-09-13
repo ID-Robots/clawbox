@@ -150,6 +150,16 @@ describe("what sends the work back, and what does not", () => {
     expect(p.failure?.stage).toBe("verify_production");
   });
 
+  it("keeps the WHY when the stage reason is already at the cap", () => {
+    const p = made({ maxRounds: 0 });
+    pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview");
+    decidePipeline(p, "verify_preview", { kind: "failed", reason: "x".repeat(2_000) });
+    // The explanation is the point of the sentence, so it is what survives:
+    // appending it to an already-clamped reason put it past the second clamp
+    // and left the owner a failure with no reason the box stopped trying.
+    expect(p.failure!.reason).toContain("No improvement rounds are allowed");
+  });
+
   it("runs out of rounds and says so", () => {
     const p = made({ maxRounds: 1 });
     pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview");
@@ -280,6 +290,13 @@ describe("what a caller may ask for", () => {
     });
   });
 
+  it("refuses a path that is an address of its own", () => {
+    // `//other.example/` starts with a slash and IS a whole origin once
+    // resolved against one, so a verification would have judged the owner's
+    // deployment on somebody else's site.
+    expect(readPipelineInput({ path: "//other.example/" })).toMatchObject({ ok: false, code: "bad_path" });
+  });
+
   it("refuses with a stable code rather than repairing", () => {
     expect(readPipelineInput("yes")).toMatchObject({ ok: false, code: "not_an_object" });
     expect(readPipelineInput({ path: "invoices" })).toMatchObject({ ok: false, code: "bad_path" });
@@ -323,6 +340,14 @@ describe("reading a record back off disk", () => {
     const back = parsePipeline({ stage: "build", status: "running", startedAt: 1, steps: [] });
     expect(back!.steps.map((s) => s.stage)).toEqual([...PIPELINE_STAGES]);
     expect(back!.steps.every((s) => s.state === "pending")).toBe(true);
+  });
+
+  it("reads a protocol-relative path back as the root, not as an origin", () => {
+    const back = parsePipeline({
+      stage: "build", status: "running", startedAt: 1,
+      verify: { path: "//other.example/", expect: [] },
+    });
+    expect(back!.verify.path).toBe("/");
   });
 
   it("a hand-edited deadline cannot buy more than the budget", () => {
