@@ -51,6 +51,17 @@ export type ProgressLabelKey =
   | "reviewPass"
   | "reviewLoopTurn"
   | "reviewRound"
+  | "pipelineReview"
+  | "pipelineImprovement"
+  | "pipelineDeployPreview"
+  | "pipelineDeployProduction"
+  | "pipelineVerifyPreview"
+  | "pipelineVerifyProduction"
+  | "pipelineVerified"
+  | "pipelineWaitingOwner"
+  | "pipelineResumed"
+  | "pipelineComplete"
+  | "pipelineStopped"
   | "resuming"
   | "reattached"
   | "startingFresh"
@@ -228,6 +239,19 @@ export const RUNNER_STEP = {
   /** The deliverable the run was held to was there, so "completed" is honest. */
   deliverableMet: "The deliverable is there",
 
+  // ── the delivery pipeline (src/lib/coding-pipeline.ts) ───────────────────
+  //
+  // A sentence per stage rather than one with the stage's name in it, for the
+  // reason `deployStarted` is two sentences: a stage name travelling through
+  // the feed as an English parameter is a word no locale can translate.
+  pipelineReview: "Delivery pipeline: reviewing the work",
+  pipelineDeployPreview: "Delivery pipeline: deploying a preview",
+  pipelineDeployProduction: "Delivery pipeline: deploying to production",
+  pipelineVerifyPreview: "Delivery pipeline: checking the preview",
+  pipelineVerifyProduction: "Delivery pipeline: checking production",
+  pipelineWaitingOwner: "Delivery pipeline: waiting for you to approve the production deployment",
+  pipelineComplete: "Delivery pipeline: finished, and what was deployed was checked",
+
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
   /** On the FOLLOW-UP run: whose pull request it was started to fix. */
@@ -280,6 +304,14 @@ export const RUNNER_STEP = {
   deliverableMissing: (reason: string) => `Not finished yet: ${reason}`,
   /** Going back in for another go at the deliverable, same record, same session. */
   anotherAttempt: (attempt: number, attempts: number) => `Attempt ${attempt} of ${attempts} at the deliverable`,
+  /** The delivery pipeline sent the work back for another lap. */
+  pipelineImprovement: (round: number, rounds: number) => `Delivery pipeline: improvement round ${round} of ${rounds}`,
+  /** The address the box fetched, screenshotted and judged. */
+  pipelineVerified: (url: string) => `Checked ${url} and it shows what was asked for`,
+  /** A stage the web server restarted under, picked back up. */
+  pipelineResumed: (stage: string) => `Delivery pipeline: picking the ${stage} stage back up after a restart`,
+  /** Why the pipeline is not going on. */
+  pipelineStopped: (reason: string) => `Delivery pipeline stopped: ${reason}`,
   /** A helper going out: the type in parentheses, its own description after a colon. */
   helperStarted: (opts: { workflow: boolean; type: string; what: string }) =>
     opts.workflow
@@ -352,6 +384,17 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Automatic review pass of (\S+)$/, labelKey: "reviewPass", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
+  { re: /^Delivery pipeline: reviewing the work$/, labelKey: "pipelineReview", icon: "rate_review" },
+  { re: /^Delivery pipeline: improvement round (\d+) of (\d+)$/, labelKey: "pipelineImprovement", icon: "loop", params: (m) => ({ round: Number(m[1]), rounds: Number(m[2]) }) },
+  { re: /^Delivery pipeline: deploying a preview$/, labelKey: "pipelineDeployPreview", icon: "cloud_upload" },
+  { re: /^Delivery pipeline: deploying to production$/, labelKey: "pipelineDeployProduction", icon: "rocket_launch" },
+  { re: /^Delivery pipeline: checking the preview$/, labelKey: "pipelineVerifyPreview", icon: "fact_check" },
+  { re: /^Delivery pipeline: checking production$/, labelKey: "pipelineVerifyProduction", icon: "fact_check" },
+  { re: /^Delivery pipeline: waiting for you to approve the production deployment$/, labelKey: "pipelineWaitingOwner", icon: "pan_tool" },
+  { re: /^Delivery pipeline: picking the (.+) stage back up after a restart$/, labelKey: "pipelineResumed", icon: "restart_alt", params: (m) => ({ stage: m[1] }) },
+  { re: /^Delivery pipeline: finished, and what was deployed was checked$/, labelKey: "pipelineComplete", icon: "verified" },
+  { re: /^Delivery pipeline stopped: (.+)$/, labelKey: "pipelineStopped", icon: "cancel", params: (m) => ({ reason: m[1] }) },
+  { re: /^Checked (\S+) and it shows what was asked for$/, labelKey: "pipelineVerified", icon: "verified", params: (m) => ({ url: m[1] }) },
   { re: /^Resuming the previous session$/, labelKey: "resuming", icon: "history" },
   { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },

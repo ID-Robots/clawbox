@@ -42,6 +42,10 @@ import { findPlaywrightChromium } from "@/lib/cdp-probe";
 import { chromiumSandboxArgs } from "@/lib/chromium-sandbox";
 import { hostIsPublic } from "@/lib/private-address";
 import { describeImage } from "@/lib/vision-describe";
+import type { PipelineVerification, VerificationExpectation } from "@/lib/coding-pipeline";
+
+// The shapes live in the PURE half, which the run page can import; see its header.
+export type { PipelineVerification, VerificationExpectation, VerificationJudge } from "@/lib/coding-pipeline";
 
 /** The whole fetch's budget. A cold serverless function is seconds, not minutes. */
 export const VERIFY_FETCH_TIMEOUT_MS = 30_000;
@@ -51,31 +55,6 @@ export const VERIFY_MAX_BODY_BYTES = 2 * 1024 * 1024;
 export const VERIFY_SCREENSHOT_TIMEOUT_MS = 45_000;
 /** How much of the page's own text the judgement is given beside the picture. */
 export const VERIFY_MAX_TASK_CHARS = 600;
-
-/** What decided the verdict — see the header. */
-export type VerificationJudge = "expectations" | "vision" | "none";
-
-export interface VerificationExpectation {
-  text: string;
-  found: boolean;
-}
-
-export interface PipelineVerification {
-  ok: boolean;
-  /** The address that was actually fetched, path included. */
-  url: string;
-  /** What it answered, or null when the request never got a reply. */
-  status: number | null;
-  /** Why it failed, in the owner's-facing words. Null when it passed. */
-  reason: string | null;
-  judgedBy: VerificationJudge;
-  expectations: VerificationExpectation[];
-  /** The vision model's verdict, when it was asked. */
-  vision: { verdict: "yes" | "no" | "unknown"; description: string | null; error: string | null } | null;
-  /** The screenshot's file name in the run's evidence folder, when one was taken. */
-  screenshot: string | null;
-  checkedAt: number;
-}
 
 function refuse(url: string, reason: string, extra: Partial<PipelineVerification> = {}): PipelineVerification {
   return {

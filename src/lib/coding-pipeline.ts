@@ -157,6 +157,79 @@ export const MAX_EXPECTATIONS = 8;
 export const MAX_EXPECTATION_CHARS = 200;
 export const MAX_VERIFY_PATH_CHARS = 512;
 
+
+/**
+ * What a verification SAW — the types, here in the pure half.
+ *
+ * The looking itself is ./coding-pipeline-verify, which cannot be imported by a
+ * client component (it reaches for `fs` and Playwright). The run page draws
+ * this, so the shape has to live where the page can read it — the same split
+ * ./coding-deliverable and ./coding-deliverable-check are written with.
+ */
+
+/** What decided the verdict: the caller's literal strings, or the vision model. */
+export type VerificationJudge = "expectations" | "vision" | "none";
+
+export interface VerificationExpectation {
+  text: string;
+  found: boolean;
+}
+
+export interface PipelineVerification {
+  ok: boolean;
+  /** The address that was actually fetched, path included. */
+  url: string;
+  /** What it answered, or null when the request never got a reply. */
+  status: number | null;
+  /** Why it failed, in the owner's-facing words. Null when it passed. */
+  reason: string | null;
+  judgedBy: VerificationJudge;
+  expectations: VerificationExpectation[];
+  /** The vision model's verdict, when it was asked. */
+  vision: { verdict: "yes" | "no" | "unknown"; description: string | null; error: string | null } | null;
+  /** The screenshot's file name in the run's evidence folder, when one was taken. */
+  screenshot: string | null;
+  checkedAt: number;
+}
+
+export function isVerificationJudge(value: unknown): value is VerificationJudge {
+  return value === "expectations" || value === "vision" || value === "none";
+}
+
+/** Read a verification off an untrusted record, or null. Strict, like every parser here. */
+export function parseVerification(raw: unknown): PipelineVerification | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  if (typeof v.ok !== "boolean" || typeof v.url !== "string" || !isVerificationJudge(v.judgedBy)) return null;
+  const visionRaw = typeof v.vision === "object" && v.vision !== null ? (v.vision as Record<string, unknown>) : null;
+  const verdict = visionRaw?.verdict;
+  return {
+    ok: v.ok,
+    url: v.url.slice(0, MAX_PIPELINE_REF_CHARS),
+    status: typeof v.status === "number" && Number.isFinite(v.status) ? v.status : null,
+    reason: typeof v.reason === "string" ? v.reason.slice(0, MAX_PIPELINE_DETAIL_CHARS) : null,
+    judgedBy: v.judgedBy,
+    expectations: Array.isArray(v.expectations)
+      ? v.expectations
+        .filter((e): e is { text: string; found: boolean } =>
+          typeof e === "object" && e !== null
+          && typeof (e as Record<string, unknown>).text === "string"
+          && typeof (e as Record<string, unknown>).found === "boolean")
+        .slice(0, MAX_EXPECTATIONS)
+        .map((e) => ({ text: e.text.slice(0, MAX_EXPECTATION_CHARS), found: e.found }))
+      : [],
+    vision: visionRaw && (verdict === "yes" || verdict === "no" || verdict === "unknown")
+      ? {
+        verdict,
+        description: typeof visionRaw.description === "string" ? visionRaw.description.slice(0, MAX_PIPELINE_DETAIL_CHARS) : null,
+        error: typeof visionRaw.error === "string" ? visionRaw.error.slice(0, MAX_PIPELINE_DETAIL_CHARS) : null,
+      }
+      : null,
+    screenshot: typeof v.screenshot === "string" ? v.screenshot.slice(0, 128) : null,
+    checkedAt: typeof v.checkedAt === "number" && Number.isFinite(v.checkedAt) ? v.checkedAt : 0,
+  };
+}
+
 export interface PipelineState {
   stage: PipelineStage;
   status: PipelineStatus;
@@ -178,6 +251,15 @@ export interface PipelineState {
   production: boolean;
   /** The stage that ended it, and why, for the one sentence a caller needs. */
   failure: { stage: PipelineStage; reason: string } | null;
+  /**
+   * What the last verification saw — the whole of it, not a summary.
+   *
+   * Kept on the state rather than only as a piece of evidence because the
+   * improvement lap is built from it: which expectations were missing, what the
+   * page answered, and what the screenshot showed are exactly the facts a
+   * harness needs and a one-line evidence detail has already thrown away.
+   */
+  lastVerification: PipelineVerification | null;
 }
 
 /**
@@ -267,6 +349,7 @@ export function newPipeline(input: {
     verify: { path: input.verify.path, expect: [...input.verify.expect] },
     production: input.production,
     failure: null,
+    lastVerification: null,
   };
 }
 
@@ -674,6 +757,7 @@ export function parsePipeline(raw: unknown): PipelineState | null {
     verify: { path, expect },
     production: p.production !== false,
     failure,
+    lastVerification: parseVerification(p.lastVerification),
   };
 }
 
@@ -684,5 +768,78 @@ export function clonePipeline(pipeline: PipelineState): PipelineState {
     steps: pipeline.steps.map((s) => ({ ...s, evidence: s.evidence.map((e) => ({ ...e })) })),
     verify: { path: pipeline.verify.path, expect: [...pipeline.verify.expect] },
     failure: pipeline.failure ? { ...pipeline.failure } : null,
+    lastVerification: pipeline.lastVerification
+      ? {
+        ...pipeline.lastVerification,
+        expectations: pipeline.lastVerification.expectations.map((e) => ({ ...e })),
+        vision: pipeline.lastVerification.vision ? { ...pipeline.lastVerification.vision } : null,
+      }
+      : null,
   };
+}
+
+// ─── What the harness is told when the work comes back ──────────────────────
+
+/**
+ * The nudge that starts an improvement lap.
+ *
+ * It lands in the run's OWN session, which still holds everything it did the
+ * first time, so it says "do not start over" for the reason `completionNudge`
+ * and `buildDeployFeedback` both say it. What it adds is the EVIDENCE: the
+ * brief's rule for a failed verification is that the build log tail AND what
+ * the check actually saw go back with it, because "the deploy failed" on its
+ * own is the sentence a harness cannot act on.
+ *
+ * It carries no deploy verb and no URL to call, for the reason
+ * `buildDeployFeedback` carries none: the box owns the deploying, the run owns
+ * the code, and a run that could deploy its own work is a run that could put it
+ * in front of a project's users.
+ */
+export function improvementNudge(input: {
+  stage: PipelineStage;
+  reason: string;
+  round: number;
+  maxRounds: number;
+  /** The end of the failed build's log, when a deployment is what failed. */
+  buildLog?: string | null;
+  /** What the check saw, when a verification is what failed. */
+  verification?: {
+    url: string;
+    status: number | null;
+    missing: readonly string[];
+    description: string | null;
+  } | null;
+}): string {
+  const lines = [
+    `The delivery pipeline sent this work back at the ${stageNoun(input.stage)} stage.`,
+    "",
+    `What went wrong: ${input.reason}`,
+  ];
+
+  if (input.verification) {
+    const v = input.verification;
+    lines.push(
+      "",
+      "What this ClawBox checked:",
+      `- Address: ${v.url}`,
+      ...(v.status !== null ? [`- It answered: HTTP ${v.status}`] : ["- It did not answer."]),
+      ...(v.missing.length ? [`- Not found on the page: ${v.missing.map((m) => `"${m}"`).join(", ")}`] : []),
+      ...(v.description ? ["", "What the page looks like, described from a screenshot:", "", v.description] : []),
+    );
+  }
+
+  if (input.buildLog && input.buildLog.trim()) {
+    lines.push("", "The end of the build log:", "", "```", input.buildLog.trim(), "```");
+  }
+
+  lines.push(
+    "",
+    "Fix the cause in this folder and commit it. This is your own session: do not start the task over,",
+    "and do not redo work that already landed.",
+    "Do not try to deploy, promote or call Vercel yourself — this ClawBox deploys and checks again by itself once you finish.",
+    "If it is not something you can fix from this folder (a missing environment variable on Vercel, a paid feature,",
+    "a wrong project setting), do not guess: say exactly what is missing and finish.",
+    `This is improvement round ${input.round} of ${input.maxRounds}.`,
+  );
+  return lines.join("\n");
 }

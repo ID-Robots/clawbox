@@ -214,6 +214,7 @@ import {
   matchDeployment,
   readBuildLog,
   readDeployment,
+  readProject,
   VERCEL_MAX_WAIT_MS,
   VERCEL_POLL_INTERVAL_MS,
   type VercelAuth,
@@ -223,7 +224,31 @@ import {
   type VercelReadyState,
   type VercelState,
 } from "@/lib/vercel";
-import { readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
+import { checkVercelReadiness, readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
+import type { DeployTarget } from "@/lib/vercel-state";
+import { readAutoProduction } from "@/lib/vercel-deploy-store";
+import { runDeployment } from "@/lib/vercel-deploy-run";
+import { readPipelineDefault } from "@/lib/coding-pipeline-store";
+import {
+  addEvidence,
+  clonePipeline,
+  decidePipeline,
+  enterStage,
+  improvementNudge,
+  isPipelineLive,
+  newPipeline,
+  parsePipeline,
+  defaultPipelineInput,
+  readPipelineInput,
+  stageNoun,
+  stepFor,
+  stopPipeline,
+  type PipelineStage,
+  type PipelineState,
+  type PipelineVerify,
+  type StageOutcome,
+} from "@/lib/coding-pipeline";
+import { verificationSummary, verifyDeployment } from "@/lib/coding-pipeline-verify";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { captureIncident } from "@/lib/incident-report";
 import { ensureProjectIcon } from "@/lib/project-icon";
@@ -1174,6 +1199,22 @@ export interface CodingRun {
    * the run it continues already has.
    */
   vercelFixOf: string | null;
+  /**
+   * The DELIVERY PIPELINE this run is the build stage of, when it has one.
+   *
+   * The owner's ask of 2026-09-13: "From prompt -> coding agent -> review ->
+   * improvement -> deploy dev -> review -> deploy prod -> review -> task
+   * complete. The full run needs to be auto from start to finish." Every one of
+   * those stages already existed and each ended on its own; this is the record
+   * that joins them up, and it lives on the run that started the whole thing —
+   * the review pass and the improvement laps are turns in ITS session, and the
+   * deployments are of ITS work.
+   *
+   * Null on every run that was not asked to go through one, which is the
+   * unchanged path: such a run settles exactly as it always did. See
+   * src/lib/coding-pipeline.ts for the machine and what each stage means.
+   */
+  pipeline: PipelineState | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -1776,6 +1817,18 @@ export interface StartRunInput {
    * not otherwise have. See readDeliverableInput.
    */
   deliverable?: unknown;
+  /**
+   * Whether this run goes through the DELIVERY PIPELINE, as the CALLER sent it
+   * — unvalidated, read through `readPipelineInput`, which throws `invalid`
+   * with a stable code rather than repairing. `true` is the shorthand for the
+   * usual one; an object may name the path to check and what the page must
+   * contain, and may switch the production half off.
+   *
+   * Absent, the project's own default decides (`coding_pipeline_projects`), so
+   * a project the owner ships from every day does not need the switch typed
+   * into every prompt.
+   */
+  pipeline?: unknown;
 }
 
 /** A run's place in a coding team. */
@@ -3280,6 +3333,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // a hand-edited record is no deployment at all, the way parsePauseReason
     // treats a reason it does not recognise.
     vercel: normalizeVercel((raw as { vercel?: unknown }).vercel),
+    // Strict, and the safe direction to fall: a record whose pipeline this
+    // build cannot read has none, and settles the way a run without one does.
+    pipeline: parsePipeline((raw as { pipeline?: unknown }).pipeline),
     vercelFixOf: typeof (raw as { vercelFixOf?: unknown }).vercelFixOf === "string"
       ? (raw as { vercelFixOf: string }).vercelFixOf
       : null,
@@ -3719,6 +3775,8 @@ interface RunStore {
   settling: Set<Promise<void>>;
   /** One lifecycle change at a time per run — see transitions. */
   transitions: Map<string, Promise<CodingRun>>;
+  /** One pipeline advance at a time per run — see advancePipeline. */
+  pipelineAdvancing: Map<string, Promise<void>>;
   /** Starts past the gate and not yet visible to loadRuns() — see startingRuns. */
   startingRuns: number;
   /**
@@ -3742,6 +3800,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   reviewWatchers: new Set<string>(),
   settling: new Set<Promise<void>>(),
   transitions: new Map<string, Promise<CodingRun>>(),
+  pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
   signature: null,
 }));
@@ -4052,6 +4111,9 @@ function cloneRun(run: CodingRun): CodingRun {
     // Copied entry by entry: a route holding a clone must not be able to mark
     // a message delivered that the harness has never seen.
     messages: run.messages.map((m) => ({ ...m })),
+    // Nested two deep — steps, and the evidence under each — so a route holding
+    // a clone can neither see nor write the driver's later stages.
+    pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
   };
 }
 
@@ -6300,6 +6362,10 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // for the `pr` deliverable the answer is only knowable once the step above
   // has had its go at opening one.
   await enforceDeliverable(run, ended, review);
+  // The delivery pipeline, AFTER the gate — which can put this very record
+  // back to work, and a pipeline that advanced past a run that is running
+  // again would be deploying a folder a live session is still writing in.
+  await pipelineAfterSettle(run, ended, review);
   // After ALL of it: the review pass, another go at the deliverable and the
   // review loop all work in this very tree, and `settleRunWorktree` steps
   // aside while any of them is live. Whichever record settles last is the one
@@ -6730,6 +6796,11 @@ function settleDeploy(run: CodingRun, phase: VercelPhase, detail: string | null)
     pushProgress(run, RUNNER_STEP.deployStopped(detail ?? phase));
   }
   persist(true);
+  // The ONE place a deployment phase becomes terminal, which is why the
+  // delivery pipeline listens here rather than keeping a watcher of its own:
+  // after a restart the same watcher is re-armed by `resumeDeployWatches` and
+  // settles the same record through this line.
+  pipelineAfterDeploy(run, phase, detail);
 }
 
 /**
@@ -6940,6 +7011,11 @@ async function handOffFailedDeploy(runId: string): Promise<void> {
   try {
     const run = loadRuns().find((r) => r.id === runId);
     if (!run?.vercel || run.vercel.phase !== "failed" || run.vercel.feedbackSent) return;
+    // A DELIVERY PIPELINE owns the feedback loop for its own deployments — its
+    // improvement lap carries the same build log and the verification evidence
+    // beside it — so the one-shot hand-back stands down rather than starting a
+    // second turn in the same session.
+    if (isPipelineLive(run.pipeline)) return;
     const deploymentId = run.vercel.deploymentId;
     if (!deploymentId) return;
 
@@ -7643,8 +7719,16 @@ function reopenPullRequestStep(run: CodingRun): void {
   }
 }
 
-/** The finish notice, once the gate has decided what this run actually is. */
+/**
+ * The finish notice, once the gate has decided what this run actually is.
+ *
+ * Unless a DELIVERY PIPELINE is still going, which is the later authority on
+ * what this run is: the deliverable being there means the build stage passed,
+ * not that the work is deployed and checked. The pipeline sends the notice when
+ * it settles, so the two never both send one and never both stay silent.
+ */
 function announceGatedRun(run: CodingRun): void {
+  if (pipelineHoldsNotice(run)) return;
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -7895,6 +7979,717 @@ async function startCompletionAttempt(
     closeAttempt(run, missing);
     persist(true);
     announceGatedRun(run);
+  }
+}
+
+
+// ─── The delivery pipeline ───────────────────────────────────────────────────
+
+/**
+ * The DRIVER: what actually happens at each stage of src/lib/coding-pipeline.ts.
+ *
+ * WHY IT IS HERE AND NOT IN A MODULE OF ITS OWN. Every stage is a thing this
+ * file already does — start a run in an existing session, watch a deployment,
+ * settle a record, announce a run. The driver is the ORDER, and it is written
+ * beside the machinery it orders for the same reason `watchReviewLoop` and
+ * `watchDeployment` are: a module that had to be handed `loadRuns`, `persist`,
+ * `startRun`, `pushProgress` and the live handles is a module that has the
+ * wrong boundary. What it does NOT contain is the decision-making — that is the
+ * pure machine, so the transitions can be walked in a unit test without a run,
+ * a Vercel account or a browser.
+ *
+ * WHAT DRIVES IT. Three seams, and no timer of its own:
+ *
+ *  - a RUN settling (`pipelineAfterSettle`, from the end of `reviewAndShip`) —
+ *    the build stage, the review stage and every improvement lap;
+ *  - a DEPLOYMENT settling (`pipelineAfterDeploy`, from `settleDeploy`) — which
+ *    is the watcher that already existed, armed by `recordManualDeployment`, so
+ *    a pipeline picks its deployment back up after a restart exactly as a
+ *    manual one does;
+ *  - the OWNER pressing the production button (`approvePipelineProduction`).
+ *
+ * The verifications are the one thing it does itself, inline, because a fetch
+ * and a screenshot are seconds rather than an event to wait for.
+ */
+
+/** One advance at a time per run: two seams can fire on the same record. */
+const pipelineAdvancing = store.pipelineAdvancing;
+
+/**
+ * True while a live pipeline owes the owner the last word about this run.
+ *
+ * The same predicate `deliverableGateApplies` is, and for the same reason:
+ * "Coding agent finished run-x" over a run that is about to deploy to
+ * production is exactly the claim the gate exists to stop making. `finishRun`
+ * holds the notice on it and the pipeline sends it when it settles, so no run
+ * falls between them.
+ */
+function pipelineHoldsNotice(run: CodingRun): boolean {
+  return isPipelineLive(run.pipeline);
+}
+
+/** Queue an advance behind whatever else is advancing this run's pipeline. */
+function advancePipeline(runId: string, work: () => Promise<void>): void {
+  const previous = pipelineAdvancing.get(runId) ?? Promise.resolve();
+  const mine = previous.then(work, work).then(
+    () => {},
+    (err: unknown) => {
+      console.error(`[coding-agent] pipeline for ${runId}:`, err instanceof Error ? err.message : err);
+    },
+  );
+  pipelineAdvancing.set(runId, mine);
+  // Held like every other settle chain, so a suite can wait for it rather than
+  // remove the tree a deployment record is still being written into.
+  trackSettleWork(mine);
+}
+
+/** The project this pipeline deploys — never the run's own worktree copy. */
+async function pipelineProject(run: CodingRun): Promise<{ scope: string; directory: string } | null> {
+  const directory = projectDirectoryOf(run);
+  const scope = await projectScopeFor({ projectId: run.projectId, directory });
+  return scope ? { scope, directory } : null;
+}
+
+/**
+ * Can this box run the whole pipeline at all?
+ *
+ * Asked ONCE, when the run starts, and not at the stage that would need it.
+ * The owner's rule: a pipeline that cannot deploy because nothing is attached
+ * must say so before the box spends a build, a review pass and three
+ * improvement laps getting to stage four. Only the DEFINITE negatives refuse —
+ * `checkVercelReadiness` is tri-state on purpose, and a `null` there means this
+ * box could not ask Vercel just now (the house internet), which is not the same
+ * as a token that is wrong and must not cost the owner their pipeline.
+ */
+export async function pipelinePreflight(
+  scope: string | null,
+  verify: PipelineVerify,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!scope) {
+    return { ok: false, reason: "That folder is not one of this ClawBox's projects, so there is nothing to deploy it to." };
+  }
+  const readiness = await checkVercelReadiness(scope);
+  if (!readiness.linked) {
+    return { ok: false, reason: "No Vercel project is attached to this project, so the pipeline could not deploy anything. Attach one on the project's page first." };
+  }
+  if (readiness.tokenPresent === false) {
+    return { ok: false, reason: "The Vercel token this project's link names is not in the secret store, so the pipeline could not deploy anything." };
+  }
+  if (readiness.tokenValid === false || readiness.projectResolves === false) {
+    return { ok: false, reason: readiness.problems[0] ?? "Vercel would not accept this project's link, so the pipeline could not deploy anything." };
+  }
+  // The other half: a verification this box could not make is not a pass, so a
+  // pipeline that could only ever reach that answer is refused here instead.
+  if (verify.expect.length === 0) {
+    const token = await configGet("clawai_token");
+    if (typeof token !== "string" || !token.trim()) {
+      return {
+        ok: false,
+        reason: "This ClawBox has no vision model to check a deployed page with, and the pipeline was not told what to look for. Connect ClawBox AI, or name what the page must contain.",
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/** The review run that has just gone out for this origin, newest first. */
+function reviewRunFor(originId: string): CodingRun | null {
+  return loadRuns().find((r) => r.reviewOf === originId && isLive(r.status))
+    ?? loadRuns().find((r) => r.reviewOf === originId)
+    ?? null;
+}
+
+/**
+ * A run has settled. Close whichever stage that was, and go on.
+ *
+ * Called at the END of `reviewAndShip`, after the deliverable gate — because
+ * the gate can put the very same record back to work, and a pipeline that
+ * advanced past a run that is running again would be deploying a folder a live
+ * session is still writing in.
+ */
+async function pipelineAfterSettle(
+  finished: CodingRun,
+  ended: "stop" | "pause" | null,
+  review: ReviewPassOutcome,
+): Promise<void> {
+  const originId = finished.reviewOf ?? finished.id;
+  const origin = loadRuns().find((r) => r.id === originId);
+  const pipeline = origin?.pipeline;
+  if (!origin || !pipeline || !isPipelineLive(pipeline)) return;
+
+  // The owner's own gesture ends it. Judging a stage now would answer a
+  // question they have already closed.
+  if (ended !== null) {
+    stopPipeline(pipeline, ended === "pause"
+      ? "The run was paused, so the pipeline stopped here."
+      : "The run was stopped, so the pipeline stopped here.");
+    pushProgress(origin, RUNNER_STEP.pipelineStopped(pipeline.failure?.reason ?? "stopped"));
+    persist(true);
+    announcePipeline(origin);
+    return;
+  }
+  // A pause is not the end of a stage: the run resumes in place and its settle
+  // comes back here. Nor is a deliverable attempt that has just gone back in.
+  if (finished.status === "paused" || origin.status === "paused" || origin.status === "running") return;
+
+  if (pipeline.stage === "build" || pipeline.stage === "improvement") {
+    // Only the ORIGIN closes these: at stage `improvement` a stray review run
+    // from an earlier lap settling late must not be read as the lap's own end.
+    if (finished.id !== origin.id) return;
+    const outcome: StageOutcome = origin.status === "completed"
+      ? { kind: "passed" }
+      : { kind: "failed", reason: `The run did not finish (${origin.status}).${origin.error ? ` ${origin.error}` : ""}` };
+    await applyPipelineStage(origin.id, pipeline.stage, outcome, review);
+    return;
+  }
+
+  if (pipeline.stage === "review") {
+    if (finished.reviewOf !== origin.id) return;
+    const outcome: StageOutcome = finished.status === "completed"
+      ? { kind: "passed", detail: finished.filesTouched.length ? `The review pass changed ${finished.filesTouched.length} file(s).` : "The review pass found nothing to change." }
+      : { kind: "failed", reason: `The review pass did not finish (${finished.status}).${finished.error ? ` ${finished.error}` : ""}` };
+    await applyPipelineStage(origin.id, "review", outcome, review);
+  }
+  // Every other stage is settled by a deployment or by a verification this
+  // driver made itself; a run settling under one of them is a review-loop or
+  // deployment-fix turn, which belongs to its own watcher.
+}
+
+/** Record what a stage did, then carry on for as long as the machine says to. */
+async function applyPipelineStage(
+  runId: string,
+  stage: PipelineStage,
+  outcome: StageOutcome,
+  review?: ReviewPassOutcome,
+): Promise<void> {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run?.pipeline || !isPipelineLive(run.pipeline)) return;
+  let transition = decidePipeline(run.pipeline, stage, outcome);
+  persist(true);
+
+  // One consumption of the review outcome: it describes the pass that was
+  // started by the settle we are in, and a later lap gets its own.
+  let pendingReview = review;
+  for (;;) {
+    if (transition.action === "wait") return;
+    if (transition.action === "settled") {
+      await settlePipelineRun(runId);
+      return;
+    }
+    const entered = transition.stage;
+    const current = loadRuns().find((r) => r.id === runId);
+    if (!current?.pipeline) return;
+    const next = await enterPipelineStage(current, entered, pendingReview);
+    pendingReview = undefined;
+    persist(true);
+    // The stage is under way and something else brings the pipeline back.
+    if (!next) return;
+    const live = loadRuns().find((r) => r.id === runId);
+    if (!live?.pipeline || !isPipelineLive(live.pipeline)) return;
+    transition = decidePipeline(live.pipeline, entered, next);
+    persist(true);
+  }
+}
+
+/**
+ * Begin a stage.
+ *
+ * Answers `null` when the stage is now UNDER WAY and something else will bring
+ * the pipeline back — a run that has to finish, a deployment that has to build
+ * — and an outcome when the stage decided itself, which the two verifications
+ * and every refusal do.
+ */
+async function enterPipelineStage(
+  run: CodingRun,
+  stage: PipelineStage,
+  review?: ReviewPassOutcome,
+): Promise<StageOutcome | null> {
+  const pipeline = run.pipeline;
+  if (!pipeline) return null;
+  enterStage(pipeline, stage);
+
+  switch (stage) {
+    case "build":
+      // Never entered from a transition: the build IS the run, and it is
+      // already going when the pipeline is made.
+      return null;
+
+    case "review": {
+      if (review === "started") {
+        const reviewRun = reviewRunFor(run.id);
+        addEvidence(pipeline, "review", {
+          kind: "run",
+          ref: reviewRun?.id ?? null,
+          detail: "An automatic review pass is reading the work.",
+        });
+        pushProgress(run, RUNNER_STEP.pipelineReview);
+        persist(true);
+        return null;
+      }
+      if (review === "refused") {
+        return { kind: "failed", reason: "The automatic review pass was due and could not be started." };
+      }
+      // "skipped", and the same answer for a lap that somehow reached this
+      // stage with no outcome to read: nothing was reviewed, and saying it
+      // PASSED would be the box claiming work it did not do.
+      return { kind: "skipped", detail: "There was nothing for the review pass to read, so it did not run." };
+    }
+
+    case "improvement":
+      return startPipelineImprovement(run);
+
+    case "deploy_preview":
+      return startPipelineDeploy(run, "preview");
+
+    case "deploy_production":
+      return startPipelineDeploy(run, "production");
+
+    case "verify_preview":
+      return runPipelineVerification(run, "verify_preview");
+
+    case "verify_production":
+      return runPipelineVerification(run, "verify_production");
+
+    case "complete":
+      return null;
+  }
+}
+
+/**
+ * Send the work back in for another lap, in the SAME record and the SAME
+ * session.
+ *
+ * `startCompletionAttempt`'s shape, and for its reasons: the owner asked one
+ * question, `attempts` and the deliverable belong to one run, and the nudge can
+ * say "do not start over" and be obeyed only because the transcript of the lap
+ * that just ended is still in front of the harness.
+ */
+async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | null> {
+  const pipeline = run.pipeline;
+  if (!pipeline) return null;
+  if (!run.sessionId) {
+    return { kind: "failed", reason: "There is no session to carry on in, so the work could not be sent back for improvement." };
+  }
+
+  const failedStage = pipeline.steps.find((s) => s.state === "failed" && s.stage !== "improvement");
+  const reason = failedStage?.detail ?? pipeline.failure?.reason ?? "The delivery pipeline sent the work back.";
+  const task = improvementNudge({
+    stage: failedStage?.stage ?? "verify_preview",
+    reason,
+    round: pipeline.round,
+    maxRounds: pipeline.maxRounds,
+    buildLog: await pipelineBuildLogTail(run),
+    verification: lastVerificationFor(pipeline),
+  });
+
+  let tools: SpawnTools;
+  let releaseSlot: (() => void) | null = null;
+  try {
+    releaseSlot = await assertCanSpawn(null);
+    tools = await requireSpawnTools();
+    run.directory = await realDirectory(run.directory);
+  } catch (err) {
+    releaseSlot?.();
+    return { kind: "failed", reason: `Another turn could not be started: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  releaseSlot?.();
+
+  run.status = "running";
+  run.completedAt = null;
+  run.exitCode = null;
+  run.error = null;
+  run.pauseReason = null;
+  run.leftover = false;
+  run.lastActivityAt = Date.now();
+  addEvidence(pipeline, "improvement", {
+    kind: "note",
+    ref: null,
+    detail: `Round ${pipeline.round} of ${pipeline.maxRounds}: ${reason}`,
+  });
+  pushProgress(run, RUNNER_STEP.pipelineImprovement(pipeline.round, pipeline.maxRounds));
+  // Re-resolved for this lap, like a resume's: an entry the owner un-ticked
+  // while the run worked is not handed back to it, and the redaction table is
+  // armed again before the child that would echo one exists.
+  await prepareRunSecrets(run);
+  persist(true);
+  startProjectIcon(run);
+  try {
+    spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, task, true);
+  } catch {
+    // `spawnOrSettle` has already settled the record as failed and said why.
+    return { kind: "failed", reason: "The improvement turn could not be spawned." };
+  }
+  return null;
+}
+
+/** The end of the failed build's log, when a deployment is what went wrong. */
+async function pipelineBuildLogTail(run: CodingRun): Promise<string | null> {
+  const deployment = run.vercel;
+  if (!deployment || deployment.phase !== "failed" || !deployment.deploymentId) return null;
+  try {
+    const context = await deployContextFor(run);
+    if ("error" in context) return null;
+    const fetched = await readBuildLog(context.auth, deployment.deploymentId);
+    return fetched.ok ? fetched.log : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the last verification actually saw, for the nudge. */
+function lastVerificationFor(pipeline: PipelineState): {
+  url: string;
+  status: number | null;
+  missing: string[];
+  description: string | null;
+} | null {
+  const verification = pipeline.lastVerification;
+  if (!verification) return null;
+  return {
+    url: verification.url,
+    status: verification.status,
+    missing: verification.expectations.filter((e) => !e.found).map((e) => e.text),
+    description: verification.vision?.description ?? null,
+  };
+}
+
+/**
+ * Deploy, on the pipeline's own behalf.
+ *
+ * The GATE is right here, in one readable place, exactly as the deploy route
+ * holds its own: a pipeline is the AGENT deploying unattended, so production
+ * needs the owner's per-project standing permission and nothing else will do.
+ * With it off the pipeline WAITS rather than failing — the owner asked for a
+ * "Deploy to production" button at that point, not for six stages of work to be
+ * thrown away over a switch.
+ */
+async function startPipelineDeploy(run: CodingRun, target: DeployTarget): Promise<StageOutcome | null> {
+  const pipeline = run.pipeline;
+  if (!pipeline) return null;
+  const project = await pipelineProject(run);
+  if (!project) {
+    return { kind: "blocked", reason: "This run is not in one of this ClawBox's projects, so there is nothing to deploy." };
+  }
+
+  if (target === "production" && !(await readAutoProduction(project.scope))) {
+    return {
+      kind: "waiting_owner",
+      reason: "The preview is verified. This ClawBox does not deploy this project to production by itself, so it is waiting for you to press the button.",
+    };
+  }
+
+  pushProgress(run, target === "production" ? RUNNER_STEP.pipelineDeployProduction : RUNNER_STEP.pipelineDeployPreview);
+  persist(true);
+
+  const outcome = await runDeployment({
+    scope: project.scope,
+    directory: project.directory,
+    target,
+    // The run's OWN branch: its commits are on `clawbox/<runId>` and nowhere
+    // else, and without this the deploy falls back to the project's current
+    // branch and builds work the run did not do.
+    gitRef: run.vercel?.branch ?? run.pr?.branch ?? run.worktree?.branch ?? null,
+    runId: run.id,
+    by: "agent",
+  });
+  if (!outcome.ok) {
+    const stage: PipelineStage = target === "production" ? "deploy_production" : "deploy_preview";
+    const live = loadRuns().find((r) => r.id === run.id);
+    if (live?.pipeline) {
+      addEvidence(live.pipeline, stage, { kind: "note", ref: null, detail: outcome.detail });
+    }
+    return DEPLOY_BLOCKERS.has(outcome.code)
+      ? { kind: "blocked", reason: outcome.detail }
+      : { kind: "failed", reason: outcome.detail };
+  }
+
+  const live = loadRuns().find((r) => r.id === run.id);
+  if (live?.pipeline) {
+    addEvidence(live.pipeline, target === "production" ? "deploy_production" : "deploy_preview", {
+      kind: "deployment",
+      ref: outcome.deploy.deploymentId,
+      detail: outcome.deploy.url ? `Building ${outcome.deploy.url}` : "Vercel is building it.",
+    });
+    persist(true);
+  }
+  // `recordManualDeployment` inside `runDeployment` has armed the watcher that
+  // already existed; `pipelineAfterDeploy` is what it comes back to.
+  return null;
+}
+
+/**
+ * Deploy refusals that are the OWNER'S SETUP rather than the work.
+ *
+ * They stop the pipeline (`blocked`) instead of sending the code back for
+ * improvement, because no amount of editing this folder fixes a token that is
+ * not there — and spending the owner's improvement rounds on it would be the
+ * box burning their allowance on something it has already been told it cannot
+ * fix.
+ */
+const DEPLOY_BLOCKERS = new Set([
+  "not_linked",
+  "token_missing",
+  "token_unreadable",
+  "token_store_unavailable",
+  "not_found",
+  "auth",
+  "wrong_repository",
+  "no_remote",
+  "ignores_unreadable",
+  "rate_limited",
+]);
+
+/**
+ * A deployment has settled. Close the stage it belonged to.
+ *
+ * Called from `settleDeploy`, which is the ONE place a deployment phase becomes
+ * terminal — so this works identically after a restart, where the watcher is
+ * re-armed by `resumeDeployWatches` and settles the same record.
+ */
+function pipelineAfterDeploy(run: CodingRun, phase: VercelPhase, detail: string | null): void {
+  const pipeline = run.pipeline;
+  if (!isPipelineLive(pipeline) || !pipeline) return;
+  const stage = pipeline.stage;
+  if (stage !== "deploy_preview" && stage !== "deploy_production") return;
+  const url = run.vercel?.url ?? null;
+  const outcome: StageOutcome = phase === "ready"
+    ? { kind: "passed", detail: url ? `Deployed to ${url}` : "Vercel finished the build." }
+    : { kind: "failed", reason: detail ?? `The ${stage === "deploy_production" ? "production" : "preview"} deployment ended as ${phase}.` };
+  if (url) addEvidence(pipeline, stage, { kind: "url", ref: url, detail: `The deployment Vercel built: ${url}` });
+  advancePipeline(run.id, () => applyPipelineStage(run.id, stage, outcome));
+}
+
+/**
+ * Look at what was deployed.
+ *
+ * The stage the whole feature exists for. `verifyDeployment` does the looking
+ * (src/lib/coding-pipeline-verify.ts); what is decided here is WHICH address —
+ * for production the project's own DOMAIN, which is the thing the owner's users
+ * will load, rather than the immutable deployment URL that also serves it.
+ */
+async function runPipelineVerification(run: CodingRun, stage: PipelineStage): Promise<StageOutcome> {
+  const pipeline = run.pipeline;
+  if (!pipeline) return { kind: "failed", reason: "The pipeline record went away." };
+  const production = stage === "verify_production";
+  pushProgress(run, production ? RUNNER_STEP.pipelineVerifyProduction : RUNNER_STEP.pipelineVerifyPreview);
+  persist(true);
+
+  const target = production ? await pipelineProductionAddress(run) : run.vercel?.url ?? null;
+  if (!target) {
+    return {
+      kind: "failed",
+      reason: production
+        ? "Vercel did not say which domain the production deployment landed on, so there was nothing to check."
+        : "Vercel gave the preview no address, so there was nothing to check.",
+    };
+  }
+
+  const verification = await verifyDeployment({
+    runId: run.id,
+    deploymentUrl: target,
+    path: pipeline.verify.path,
+    expect: pipeline.verify.expect,
+    task: run.task,
+  });
+
+  const live = loadRuns().find((r) => r.id === run.id);
+  const livePipeline = live?.pipeline;
+  if (livePipeline) {
+    livePipeline.lastVerification = verification;
+    addEvidence(livePipeline, stage, {
+      kind: "url",
+      ref: verification.url,
+      detail: verificationSummary(verification),
+    });
+    if (verification.screenshot) {
+      addEvidence(livePipeline, stage, {
+        kind: "screenshot",
+        ref: verification.screenshot,
+        detail: verification.vision?.description ?? "A screenshot of the page this ClawBox checked.",
+      });
+    }
+    if (verification.ok) {
+      pushProgress(live!, RUNNER_STEP.pipelineVerified(verification.url));
+    }
+    persist(true);
+  }
+  return verification.ok
+    ? { kind: "passed", detail: verificationSummary(verification) }
+    : { kind: "failed", reason: verificationSummary(verification) };
+}
+
+/** The domain a production deployment lands on, or the deployment's own address. */
+async function pipelineProductionAddress(run: CodingRun): Promise<string | null> {
+  try {
+    const context = await deployContextFor(run);
+    if (!("error" in context)) {
+      const project = await readProject(context.auth, context.projectId);
+      if (project.ok && project.productionDomain) {
+        return project.productionDomain.startsWith("http") ? project.productionDomain : `https://${project.productionDomain}`;
+      }
+    }
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} production domain:`, err instanceof Error ? err.message : err);
+  }
+  // Vercel would not say. The deployment's own address serves the same build,
+  // so the check is still made — it just checks the address the box knows.
+  return run.vercel?.url ?? null;
+}
+
+/** The pipeline is over. Say what the run actually is, and tell the owner. */
+async function settlePipelineRun(runId: string): Promise<void> {
+  const run = loadRuns().find((r) => r.id === runId);
+  const pipeline = run?.pipeline;
+  if (!run || !pipeline) return;
+  if (pipeline.status === "complete") {
+    pushProgress(run, RUNNER_STEP.pipelineComplete);
+  } else {
+    pushProgress(run, RUNNER_STEP.pipelineStopped(pipeline.failure?.reason ?? pipeline.status));
+    // The brief's own rule: a pipeline that did not finish ends the run
+    // `gave_up`, naming the stage and the reason. Only from `completed` —
+    // a run that FAILED already has the honest ending, and overwriting it
+    // would hide what actually went wrong with a gentler word.
+    if (run.status === "completed") {
+      run.status = "gave_up";
+      run.resumable = true;
+      run.completedAt = run.completedAt ?? Date.now();
+      run.error = pipelineGaveUpReason(pipeline).slice(0, MAX_ERROR_CHARS);
+      pushProgress(run, RUNNER_STEP.finished(run.status));
+    }
+  }
+  persist(true);
+  console.error(`[coding-agent] ${run.id} pipeline ${pipeline.status} at the ${stageNoun(pipeline.stage)} stage`);
+  announcePipeline(run);
+}
+
+/** One sentence naming the stage and what stopped there. */
+function pipelineGaveUpReason(pipeline: PipelineState): string {
+  const reason = pipeline.failure?.reason ?? "The delivery pipeline did not finish.";
+  return `The delivery pipeline stopped at the ${stageNoun(pipeline.failure?.stage ?? pipeline.stage)} stage. ${reason} Resume it to carry on in the same session.`;
+}
+
+/** The finish notice `finishRun` held back while the pipeline was still going. */
+function announcePipeline(run: CodingRun): void {
+  void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
+    console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
+  });
+}
+
+/**
+ * The owner has pressed "Deploy to production" on a pipeline that was waiting
+ * for them.
+ *
+ * The route holds the gate — their session, this box's own origin, an explicit
+ * confirmation — and this is what happens after it. `waiting_owner` is the one
+ * state that resumes on an act rather than on an event, which is why it is a
+ * verb of its own rather than something a poll notices.
+ */
+export async function approvePipelineProduction(runId: string): Promise<CodingRun> {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run) throw new CodingAgentError("not_found", "There is no run with that id on this ClawBox.");
+  const pipeline = run.pipeline;
+  if (!pipeline) throw new CodingAgentError("invalid", "That run has no delivery pipeline.");
+  if (pipeline.status !== "waiting_owner") {
+    throw new CodingAgentError("invalid", `That pipeline is not waiting for you: it is ${pipeline.status}.`);
+  }
+  pipeline.status = "running";
+  const step = stepFor(pipeline, "deploy_production");
+  step.state = "pending";
+  step.detail = null;
+  persist(true);
+  await applyPipelineStage(runId, "verify_preview", { kind: "passed", detail: "The owner approved the production deployment." });
+  return getRun(runId) ?? cloneRun(run);
+}
+
+/**
+ * The owner has told a pipeline to stop.
+ *
+ * Its own verb, and not something `stopRun` covers, because the state it is
+ * most often used in is a pipeline WAITING for the production button: the run
+ * itself settled hours ago, so `stopRun` answers it untouched and the pipeline
+ * would wait for ever.
+ */
+export function stopRunPipeline(id: string): CodingRun {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no run with that id on this ClawBox.");
+  if (!run.pipeline) throw new CodingAgentError("invalid", "That run has no delivery pipeline.");
+  if (!isPipelineLive(run.pipeline)) return cloneRun(run);
+  stopPipelineFor(run, "The owner stopped the delivery pipeline.");
+  // The run's own ending stands: it built what it built, and the owner calling
+  // the rest of the flow off is not the run failing.
+  announcePipeline(run);
+  return cloneRun(run);
+}
+
+/** Stop a live pipeline because the run it belongs to was ended. */
+function stopPipelineFor(run: CodingRun, reason: string): void {
+  if (!isPipelineLive(run.pipeline) || !run.pipeline) return;
+  stopPipeline(run.pipeline, reason);
+  pushProgress(run, RUNNER_STEP.pipelineStopped(reason));
+  persist(true);
+}
+
+/**
+ * Pipelines the restart interrupted.
+ *
+ * The sibling of `resumeDeployWatches`, and it deliberately does LESS than one
+ * might expect, because most of the work is already done by the time it runs:
+ *
+ *  - a stage waiting on a RUN self-heals — `reconcileAfterRestart` reattaches or
+ *    settles the record, and that settle comes back through
+ *    `pipelineAfterSettle` exactly as it would have without the restart;
+ *  - a stage waiting on a DEPLOYMENT self-heals — `resumeDeployWatches` re-arms
+ *    the same watcher, which settles the same record through `settleDeploy`;
+ *  - `waiting_owner` is not waiting on this box at all.
+ *
+ * What is left is the two cases nothing else covers: a VERIFICATION that was in
+ * flight (a fetch and a screenshot, which nothing persisted and which is safe to
+ * simply make again), and a stage recorded as running with nothing at all
+ * behind it — which is what a restart between "enter the stage" and "start the
+ * work" leaves, and which would otherwise be pending for ever.
+ */
+export function resumePipelines(): void {
+  for (const run of loadRuns()) {
+    const pipeline = run.pipeline;
+    if (!pipeline || !isPipelineLive(pipeline)) continue;
+    const stage = pipeline.stage;
+    const step = stepFor(pipeline, stage);
+
+    if (stage === "verify_preview" || stage === "verify_production") {
+      if (step.state !== "running") continue;
+      pushProgress(run, RUNNER_STEP.pipelineResumed(stageNoun(stage)));
+      persist(true);
+      // Re-entered rather than continued: a verification is a fetch and a
+      // picture, and making it again is cheaper and more honest than guessing
+      // what the last one would have said.
+      advancePipeline(run.id, async () => {
+        const current = loadRuns().find((r) => r.id === run.id);
+        if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
+        const outcome = await runPipelineVerification(current, stage);
+        await applyPipelineStage(run.id, stage, outcome);
+      });
+      continue;
+    }
+
+    if (stage === "deploy_preview" || stage === "deploy_production") {
+      // A deployment the box actually made is on the run record and its watcher
+      // is re-armed beside this. One that was never made — the restart landed
+      // between the two — has nothing to come back, so it is tried again.
+      if (step.state !== "running" || isVercelPending(run.vercel)) continue;
+      advancePipeline(run.id, async () => {
+        const current = loadRuns().find((r) => r.id === run.id);
+        if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
+        const outcome = await enterPipelineStage(current, stage);
+        persist(true);
+        if (outcome) await applyPipelineStage(run.id, stage, outcome);
+      });
+      continue;
+    }
+
+    // build / review / improvement: a live run brings the pipeline back on its
+    // own. Nothing live means the record was settled by the reconciliation,
+    // whose settle chain has already been through `pipelineAfterSettle`, so
+    // there is nothing left for this to do either.
   }
 }
 
@@ -8282,7 +9077,12 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // making on the harness's word alone, and the run may be back at work
   // seconds later. `enforceDeliverable` sends it once it knows what the run
   // actually is — the two read the same predicate so no run falls between them.
-  if (run.status !== "paused" && !deliverableGateApplies(run)) {
+  // A live DELIVERY PIPELINE holds it for the same reason and by the same
+  // rule: the run is about to be reviewed, improved, deployed and checked, and
+  // "Coding agent finished run-x" now would be exactly the claim the pipeline
+  // exists to stop making. `settlePipelineRun` sends it when the pipeline is
+  // actually over.
+  if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineHoldsNotice(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
     });
@@ -9293,6 +10093,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // without one never grows the list.
     openAttempt(run);
 
+    // THE DELIVERY PIPELINE. Last, because it reads the branch and the project
+    // this run ended up in, and because its preflight talks to Vercel — a call
+    // that must not sit between the spawn gate and the folder checks.
+    await attachPipeline(run, input, settings);
+
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
@@ -9305,6 +10110,61 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   } finally {
     releaseSlot();
   }
+}
+
+/**
+ * Give this run a delivery pipeline, if it is to have one.
+ *
+ * WHO GETS ONE. The caller who asked for it, and — when the caller said
+ * nothing at all — a run in a project the owner has switched the pipeline on
+ * for. Never a review pass, a review-loop turn, a deployment-fix turn, a
+ * read-only planner or a team's run: each of those is a TURN INSIDE somebody
+ * else's chain, and a pipeline on one of them would be a second chain driving
+ * the same folder.
+ *
+ * THE PREFLIGHT, AND THE TWO WAYS IT LANDS. A pipeline that cannot deploy must
+ * say so before the box spends a build, a review pass and three improvement
+ * laps getting to the stage that needs it — the owner's own rule. What differs
+ * is who asked: a caller who NAMED a pipeline is refused, because they can fix
+ * the request and a silent downgrade would have them believe the box was
+ * shipping; a project DEFAULT stands aside instead, with the reason in the
+ * run's own feed, because refusing there would take ordinary runs away from a
+ * project whose Vercel token merely expired.
+ */
+async function attachPipeline(run: CodingRun, input: StartRunInput, settings: RunSettings): Promise<void> {
+  if (run.reviewOf || run.reviewLoopOf || run.vercelFixOf || run.readOnly || run.team) return;
+  const asked = readPipelineInput(input.pipeline);
+  let wanted = asked;
+  const explicit = asked !== null;
+  if (input.pipeline === undefined || input.pipeline === null) {
+    const scope = await projectScopeFor(run);
+    wanted = (await readPipelineDefault(scope)) ? defaultPipelineInput() : null;
+  }
+  if (!wanted) return;
+
+  const scope = await projectScopeFor(run);
+  const ready = await pipelinePreflight(scope, wanted.verify);
+  if (!ready.ok) {
+    if (explicit) throw new CodingAgentError("invalid", ready.reason);
+    pushProgress(run, RUNNER_STEP.pipelineStopped(ready.reason));
+    return;
+  }
+
+  run.pipeline = newPipeline({
+    verify: wanted.verify,
+    production: wanted.production,
+    // The owner's review-rounds setting, frozen here — the cap on how many
+    // times the work goes back round. Read with the run's other settings so a
+    // pipeline and the pull-request loop it runs beside cannot disagree.
+    maxRounds: await getReviewRounds(),
+  });
+  enterStage(run.pipeline, "build");
+  addEvidence(run.pipeline, "build", { kind: "run", ref: run.id, detail: "The run that does the work." });
+  // The review stage IS the automatic review pass, so the switch this run was
+  // frozen with has to be ON — otherwise the pipeline would wait for a pass
+  // that the settle path was never going to start.
+  settings.reviewPass = true;
+  run.reviewPass = true;
 }
 
 /**
@@ -9418,6 +10278,7 @@ function newRunRecord(fields: {
   readOnly?: boolean;
   extraBrief?: string | null;
   deliverable?: Deliverable | null;
+  pipeline?: PipelineState | null;
 }): CodingRun {
   const now = Date.now();
   return {
@@ -9468,6 +10329,7 @@ function newRunRecord(fields: {
     reviewLoopOf: fields.reviewLoopOf ?? null,
     vercel: null,
     vercelFixOf: fields.vercelFixOf ?? null,
+    pipeline: fields.pipeline ?? null,
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
@@ -9590,6 +10452,10 @@ export function stopRun(id: string): CodingRun {
     // the loop that is waiting for it would sit in "working" until the next
     // restart — pending in every sweep, and polled again at boot.
     endReviewLoopFor(run, "The review round was stopped while it was paused, so the pull request is still open.");
+    // And the delivery pipeline, for the same reason: this path never reaches
+    // finishRun, so nothing else would end it and it would hold the finish
+    // notice for good.
+    stopPipelineFor(run, "The run was stopped while it was paused, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
@@ -9603,6 +10469,7 @@ export function stopRun(id: string): CodingRun {
     run.error = "Stopped.";
     run.completedAt = Date.now();
     cleanupRunResources(run, null);
+    stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
