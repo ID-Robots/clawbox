@@ -234,6 +234,10 @@ exit 0
 const SHIPPED = [
   assignment("OPENCLAW_VERSION"),
   assignment("OPENCLAW_NODE_ENGINE"),
+  // What the step's `doctor --fix` runs under. Lifted rather than declared for
+  // the usual reason, and load-bearing under `set -u`: unset, the slice dies on
+  // the doctor line instead of exercising the ordering this file is about.
+  assignment("OPENCLAW_SERVICE_REPAIR_POLICY"),
   shellFunction("node_version_satisfies_openclaw_engine"),
   shellFunction("node_satisfies_openclaw_engine"),
   shellFunction("node_engine_remedy"),

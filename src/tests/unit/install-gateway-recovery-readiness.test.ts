@@ -158,9 +158,11 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
       // Every helper the step reaches that is not what is under test.
       "is_hermes_edition() { return 1; }",
       'as_clawbox() { "$@"; }',
-      // The step-wide budget counter is a TOP-LEVEL assignment, cut from
-      // install.sh like the functions so a test cannot pass by declaring it.
-      `grep -E '^GATEWAY_READY_SPENT=' "$1" > "${tmp}/fns.sh"`,
+      // Both top-level assignments the step reaches, cut from install.sh like
+      // the functions so a test cannot pass by declaring them: the step-wide
+      // budget counter, and the service-repair policy its `doctor --fix` runs
+      // under (unset, `set -u` ends the slice before the step does anything).
+      `grep -E '^(GATEWAY_READY_SPENT|OPENCLAW_SERVICE_REPAIR_POLICY)=' "$1" > "${tmp}/fns.sh"`,
       ...[
         "gateway_port_listening",
         "gateway_unit_running_or_starting",

@@ -921,6 +921,35 @@ OPENCLAW_VERSION="2026.9.3"
 # Current pin: upstream tag v2026.9.7 == "Hermes Agent v0.21.1" (TASK-784).
 HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-2237be355906fbe6065ce1815711eee52b2d646e}"
 
+# WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
+# guess. ClawBox supervises the gateway itself, as the SYSTEM unit
+# clawbox-gateway.service, which the core neither installed nor can claim; the
+# core's own service is a systemd USER unit that does not exist on this box.
+#
+# 2026.9.3 made `doctor --fix` refuse to enter maintenance unless it can see
+# that service as its own, absent, or provably offline
+# (`assertDoctorMaintenanceInspection`). On a ClawBox it is none of the three —
+# `openclaw gateway status --deep` reports ours under "Other gateway-like
+# services detected" — so doctor exited 1 with "Gateway service ownership or
+# shutdown could not be verified" on a box whose gateway this installer had
+# just stopped for it. Measured on two Orin boards: the migration call site in
+# step_openclaw_install exited 1 under 2026.9.3 with the gateway already
+# stopped, exited 0 with this variable set, and had exited 0 under 2026.8.1.
+#
+# This is the core's own knob for it (`resolveServiceRepairPolicy`): doctor
+# repairs the STATE it was pointed at and leaves the service to its supervisor,
+# which is exactly the division of labour here — stopping and restarting the
+# gateway around a migration is `stop_openclaw_gateways_for_migration` and
+# `step_gateway_setup`'s job, and always has been. It is NOT
+# `OPENCLAW_SUPERVISOR_MODE=external`, which is the wider claim: that one also
+# blocks gateway service mutations and the core's self-update, neither of which
+# this needs.
+#
+# Carried under the core's own name so each call site reads as what it passes;
+# `as_clawbox` is `sudo -u`, which resets the environment, so it has to travel
+# through an explicit `env` at every site rather than an export here.
+OPENCLAW_SERVICE_REPAIR_POLICY="external"
+
 # The OpenAI Codex CLI (TASK-439). The pinned version and the digest that
 # authorises it live in config/codex-target.txt; these two are only WHERE the
 # result lands.
@@ -5134,6 +5163,7 @@ step_openclaw_install() {
     _oc_doctor_out="$(as_clawbox -H env \
       OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
       OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
+      OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
       "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
     printf '%s\n' "$_oc_doctor_out"
     if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
@@ -7955,7 +7985,8 @@ step_gateway_legacy_state_recovery() {
 
   echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
   local doctor_out=""
-  doctor_out=$(as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive 2>&1) || true
+  doctor_out=$(as_clawbox env OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+    "$OPENCLAW_BIN" doctor --fix --yes --non-interactive 2>&1) || true
   printf '%s\n' "$doctor_out"
   # `doctor` refusing BECAUSE the gateway holds its own state directory is
   # positive evidence that the gateway is alive — it is the loser of a lock the
@@ -8012,7 +8043,8 @@ step_gateway_legacy_state_recovery() {
     echo "  No known legacy migration blocker files found to quarantine"
   fi
 
-  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  as_clawbox env OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+    "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   # `restart`, as the first attempt above already does. The stop before the
   # quarantine loop does NOT make `start` safe here: `doctor --fix` on the line

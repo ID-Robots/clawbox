@@ -44,6 +44,14 @@ export OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG"
 # status is the line's, and `set -e` stops this ExecStartPre on it instead.
 OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 export OPENCLAW_STATE_DIR
+# Doctor repairs STATE here, never the service: the gateway this script is the
+# ExecStartPre of is ClawBox's own system unit, and systemd is mid-start of it.
+# 2026.9.3's `doctor --fix` refuses maintenance outright unless it can account
+# for the gateway's service itself, which on this box it cannot — see
+# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. Exported
+# rather than placed on the one call below because every `openclaw` this script
+# runs is on the same footing.
+export OPENCLAW_SERVICE_REPAIR_POLICY="external"
 unset OPENCLAW_HOME
 HOSTNAME_ENV="${HOSTNAME_ENV:-$CLAWBOX_ROOT/data/hostname.env}"
 

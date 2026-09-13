@@ -10,6 +10,18 @@ function fn(name: string) {
   if (start < 0) throw new Error(`Missing ${name}`);
   return source.slice(start + 1, source.indexOf("\n}", start) + 2);
 }
+/**
+ * A top-level assignment the sliced step reads, lifted rather than repeated.
+ *
+ * Only load-bearing under `set -euo pipefail`, which this harness runs with on
+ * purpose: an unset one ends the slice on the line that reads it, and every
+ * case then fails on a scenario it never reached.
+ */
+function assignment(name: string) {
+  const m = new RegExp(`^${name}=.*$`, "m").exec(source);
+  if (!m) throw new Error(`Missing ${name}`);
+  return m[0];
+}
 // Execute the real installer step, not a mirrored caller. Doctor deliberately
 // can fail or succeed; all side effects use isolated fixtures.
 function run(scenario: string, needsInstall = false) {
@@ -26,6 +38,7 @@ SRC_DIR=/nonexistent
 OPENCLAW_BIN="${core}"
 OPENCLAW_PIN_VERSION=${v1 ? "2026.7.1" : "2026.8.1"}
 OPENCLAW_VERSION=2026.8.1
+${assignment("OPENCLAW_SERVICE_REPAIR_POLICY")}
 NPM_PREFIX=/nonexistent
 CLAWBOX_HOME=/nonexistent
 id() { echo 1000; }
