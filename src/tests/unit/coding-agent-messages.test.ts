@@ -330,7 +330,7 @@ describe("what queueRunMessage refuses", () => {
 
   it("a message this box will not carry, before anything is written", async () => {
     const draft = await lib.createDraftRun({ task: "build it", projectId: "site", source: "owner" });
-    for (const [bad, code] of [["   ", "empty"], ["a b", "not_plain_text"], ["x".repeat(4_001), "too_long"]] as const) {
+    for (const [bad, code] of [["   ", "empty"], ["a\u0000b", "not_plain_text"], ["x".repeat(4_001), "too_long"]] as const) {
       try {
         lib.queueRunMessage(draft.id, bad);
         throw new Error(`should have refused ${code}`);
