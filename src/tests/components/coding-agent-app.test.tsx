@@ -95,6 +95,8 @@ function stubFetch(
     tree?: { entries: { name: string; type: "file" | "directory"; size: number | null; modified: string | null }[] };
     /** What changed, as `git?…&changes=1` answers it. */
     changes?: Record<string, unknown>;
+    /** The delete route's preview, as `GET projects/delete?folder=…` answers it. */
+    deletePreview?: Record<string, unknown>;
   } = {},
 ) {
   let runs = runsArg;
@@ -144,6 +146,48 @@ function stubFetch(
       return json({ cleared: before - runs.length });
     }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });
+    // Removing a project folder — BEFORE the listing below, whose `startsWith`
+    // would otherwise swallow it. The removal answers the re-read listing the
+    // way the real route does, so what the list shows afterwards is the box's
+    // answer and not the component's own optimism.
+    if (url.startsWith("/setup-api/coding-agent/projects/delete")) {
+      if (init?.method === "DELETE") {
+        const body = JSON.parse(String(init.body)) as { folder: string };
+        posts.push({ url: "/setup-api/coding-agent/projects/delete", body });
+        projects.projects = (projects.projects as { folder?: string }[]).filter((p) => p.folder !== body.folder);
+        return json({
+          ok: true,
+          folder: body.folder,
+          trashPath: `/home/clawbox/clawbox/data/deleted-projects/${body.folder}--20260913T120000Z`,
+          retentionDays: 30,
+          retentionMax: 10,
+          vercelLinkRemoved: false,
+          secretsRemoved: [],
+          metadataKeptFor: null,
+          prunedEarly: [],
+          runsKept: 0,
+          projects: projects.projects,
+          projectsDirectory: projects.directory,
+        });
+      }
+      const folder = new URL(url, "http://localhost").searchParams.get("folder") ?? "";
+      return json(opts.deletePreview ?? {
+        folder,
+        kind: "folder",
+        directory: `/home/clawbox/Projects/${folder}`,
+        size: { bytes: 2048, files: 7, truncated: false },
+        unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
+        liveRuns: [],
+        vercelLinked: false,
+        secretNames: [],
+        runCount: 0,
+        retentionDays: 30,
+        retentionMax: 10,
+        trashCount: 0,
+        wouldPurge: [],
+        refusal: null,
+      });
+    }
     if (url.startsWith("/setup-api/coding-agent/projects")) return json(projects);
     if (url.startsWith("/setup-api/coding-agent/tree?")) {
       return json({ listing: { path: "", truncated: false, ...(opts.tree ?? { entries: [] }) } });
@@ -2502,5 +2546,132 @@ describe("CodingAgentApp — the run page's honesty", () => {
       expect(within(page).getByTestId("coding-agent-deliverable-what"))
         .toHaveTextContent(translations.en["codingAgent.deliverablePr"]);
     });
+  });
+
+  describe("removing a project folder", () => {
+    /** A folder project of the owner's, which is the kind the list offers Delete on. */
+    const SHOP = { ...PROJECT, folder: "shop", directory: "/home/clawbox/Projects/shop", name: "My Shop" };
+
+    it("offers Delete on every project row without making it the loudest thing there", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [], { projects: [SHOP, SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await screen.findByTestId("coding-agent-projects");
+      for (const folder of ["shop", "site"]) {
+        const button = screen.getByTestId(`coding-agent-delete-${folder}`);
+        expect(button).toHaveAttribute("title", translations.en["codingAgent.delete.action"]);
+      }
+      // The row still opens the project: the Delete button must not swallow
+      // the click the row is for.
+      fireEvent.click(screen.getByTestId("coding-agent-project-shop"));
+      await screen.findByTestId("coding-agent-project-page");
+    });
+
+    it("opens the dialog over the row, naming the folder and its size", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [], { projects: [SHOP] });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
+
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByText(t("codingAgent.delete.title", { name: "My Shop" }))).toBeInTheDocument();
+      expect((await screen.findByTestId("coding-agent-delete-facts")).textContent)
+        .toContain(t("codingAgent.delete.whatIsThere", { size: "2.0 KB", files: 7 }));
+      // The row is not opened by the Delete button.
+      expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
+    });
+
+    it("drops the row and says where the folder went", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [], { projects: [SHOP, SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
+      await screen.findByTestId("coding-agent-delete-facts");
+      fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+      fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+
+      await waitFor(() => expect(screen.queryByTestId("coding-agent-project-shop")).toBeNull());
+      expect(posts.filter((p) => p.url === "/setup-api/coding-agent/projects/delete"))
+        .toEqual([{ url: "/setup-api/coding-agent/projects/delete", body: { folder: "shop", kind: "folder", confirm: "shop", force: false, purgeOldest: false } }]);
+      // The other project is untouched.
+      expect(screen.getByTestId("coding-agent-project-site")).toBeInTheDocument();
+
+      // And the path stays on the list after the dialog closes — it is the undo.
+      fireEvent.click(screen.getByTestId("coding-agent-delete-close"));
+      const line = await screen.findByTestId("coding-agent-project-removed");
+      expect(line.textContent).toContain("/home/clawbox/clawbox/data/deleted-projects/shop--20260913T120000Z");
+      fireEvent.click(screen.getByTestId("coding-agent-project-removed-dismiss"));
+      expect(screen.queryByTestId("coding-agent-project-removed")).toBeNull();
+    });
+
+    it("renders a run whose project is gone, and says that is why", async () => {
+      // The record is kept when the folder goes, so its page still has to read.
+      // RUN is filed against the code project `site`; with no such project in
+      // the listing, the page says so rather than drawing a run that appears to
+      // belong nowhere — which is also what a team worker looks like.
+      //
+      // Reached from the SIDEBAR's recent runs, which is the one surface that
+      // lists a run whatever project it belonged to, so the rail is brought up
+      // the way the sidebar test does.
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SHOP] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button")[0]);
+
+        const page = await screen.findByTestId("coding-agent-run-page");
+        expect(within(page).getByTestId("coding-agent-run-project-gone"))
+          .toHaveTextContent(t("codingAgent.delete.projectGone", { folder: "site" }));
+        expect(within(page).queryByTestId("coding-agent-run-project")).toBeNull();
+        // The run itself still renders in full.
+        expect(within(page).getByTestId("coding-agent-run-title")).toBeInTheDocument();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("says nothing about a missing project for a run that belongs to one", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+      const page = await openRunFromProject(RUN.id);
+      expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
+      expect(within(page).getByTestId("coding-agent-run-project")).toBeInTheDocument();
+    });
+
+    it("does not call the Test-harness scratch project removed", async () => {
+      // listProjects keeps `harness-test` OUT of the listing on purpose, so its
+      // smoke run matches no row BY DESIGN. Reading that as "its project was
+      // removed" claimed a folder was gone that the box had just made.
+      const smoke = { ...RUN, id: "run-smoke0002", projectId: "harness-test", directory: "/home/clawbox/clawbox/data/code-projects/harness-test" };
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        stubFetch({ enabled: true, readiness: READY }, [smoke], { projects: [SHOP] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button")[0]);
+        const page = await screen.findByTestId("coding-agent-run-page");
+        expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    async function openRunFromProject(id: string) {
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId(`coding-agent-details-${id}`));
+      return screen.findByTestId("coding-agent-run-page");
+    }
   });
 });

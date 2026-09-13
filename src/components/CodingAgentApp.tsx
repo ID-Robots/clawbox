@@ -13,8 +13,9 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
-import { startHarnessTest } from "@/lib/coding-agent-harness-test";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
+import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
@@ -321,6 +322,46 @@ function runBelongsTo(r: Run, pr: Project): boolean {
   return (r.worktree?.project ?? r.directory) === pr.directory;
 }
 
+/**
+ * The project this run worked in, when it is no longer on the box — the name
+ * alone, or null when nothing is missing.
+ *
+ * Run records keep their history when a project folder is removed, so a run
+ * whose project is gone still has a page and still has to be readable. Without
+ * this it rendered as a run belonging to nothing, which is what a team worker in
+ * a worktree also looks like, and the two need different things said.
+ *
+ * Derived rather than stamped on the record, deliberately: the answer has to
+ * survive a reload and a second browser, and the one durable fact is the shape
+ * of the run's own folder against the listing the box just served. The rule is
+ * `projectScopeFor`'s, spelled client-side — a code project is named by its id,
+ * a folder project by the FIRST segment under the owner's project folder — so a
+ * run working three levels down in a project that is still there is not mistaken
+ * for one whose project is gone.
+ */
+function missingProjectOf(r: Run, projects: Project[], projectsDir: string | null): string | null {
+  if (projects.some((pr) => runBelongsTo(r, pr))) return null;
+  // The Test-harness button's scratch project is KEPT OUT of the listing on
+  // purpose (listProjects skips HARNESS_TEST_PROJECT_ID), so its smoke run
+  // matches no row by design — and this said "harness-test — removed" about a
+  // folder the box had just made and never touched. "Belongs to no listed
+  // project" and "its project was removed" are different facts, and this is the
+  // one place the listing cannot tell them apart for us.
+  if (r.projectId === HARNESS_TEST_PROJECT) return null;
+  if (r.projectId) {
+    return projects.some((pr) => pr.kind === "codeProject" && pr.folder === r.projectId) ? null : r.projectId;
+  }
+  if (!projectsDir) return null;
+  const worked = r.worktree?.project ?? r.directory;
+  if (typeof worked !== "string" || !worked) return null;
+  const base = projectsDir.endsWith("/") ? projectsDir : `${projectsDir}/`;
+  if (!worked.startsWith(base)) return null;
+  // A dot-folder is state, not a project — the same cut the listing makes.
+  const first = worked.slice(base.length).split("/")[0];
+  if (!first || first.startsWith(".")) return null;
+  return projects.some((pr) => pr.kind === "folder" && pr.folder === first) ? null : first;
+}
+
 interface GitInfo {
   branch: string | null;
   commits: number;
@@ -510,6 +551,16 @@ export default function CodingAgentApp() {
   const [projectsDir, setProjectsDir] = useState<string | null>(null);
   /** Which folder name was just copied, for the two-second "Copied". */
   const [copiedFolder, setCopiedFolder] = useState<string | null>(null);
+  /**
+   * The project whose Delete dialog is open, if any.
+   *
+   * The whole row rather than its folder name: the dialog titles itself with
+   * the NAME the list shows (a code project's is its project.json name, not its
+   * folder) while every request it makes is keyed by the folder and the kind.
+   */
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  /** Where the last removed project went — the line the list keeps afterwards. */
+  const [removedProject, setRemovedProject] = useState<{ folder: string; trashPath: string } | null>(null);
   // Pull requests opened from a project's page this session, by folder.
   const [projectPrs, setProjectPrs] = useState<Record<string, { number: number; url: string }>>({});
   // The New app wizard: an inline card, closed by Cancel, by Create, and
@@ -1940,6 +1991,30 @@ export default function CodingAgentApp() {
 
 
 
+          {/* WHERE THE LAST REMOVED PROJECT WENT. Kept on the list after the
+              dialog closes, because that path is the undo: the folder is a `mv`
+              away from being back, and a line that vanished with the dialog
+              would have said so only to whoever was still reading. */}
+          {removedProject && (
+            <div
+              className={`${INSET_SURFACE} mt-2 flex items-start justify-between gap-3 px-3 py-2`}
+              data-testid="coding-agent-project-removed"
+            >
+              <p className="text-[11px] text-[var(--text-muted)] break-all">
+                {t("codingAgent.delete.movedTo", { folder: removedProject.folder })}{" "}
+                <span className="font-mono text-[var(--text-secondary)]">{removedProject.trashPath}</span>
+              </p>
+              <button
+                type="button"
+                onClick={() => setRemovedProject(null)}
+                className={BTN_QUIET}
+                data-testid="coding-agent-project-removed-dismiss"
+              >
+                {t("codingAgent.delete.close")}
+              </button>
+            </div>
+          )}
+
           {projects.length === 0 ? (
             // The window is mostly empty at this point in a box's life, and a
             // single grey sentence against all that space read like a bug. A
@@ -2050,6 +2125,22 @@ export default function CodingAgentApp() {
                         {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                       </button>
                     )}
+                    {/* Removing the folder. Quiet rather than secondary, and an
+                        icon rather than a word: it sits on every row of a list
+                        whose purpose is to OPEN a project, and a red button per
+                        row would make the destructive act the loudest thing on
+                        the page. Everything that makes it safe is in the dialog
+                        behind it — the row's only job is to open that. */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(project); }}
+                      data-testid={`coding-agent-delete-${project.folder}`}
+                      title={t("codingAgent.delete.action")}
+                      aria-label={t("codingAgent.delete.actionFor", { name: project.name })}
+                      className={`${BTN_QUIET} hover:text-red-300`}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">delete</span>
+                    </button>
                     <span className="material-symbols-rounded text-[var(--text-muted)] opacity-60 shrink-0 self-center" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                   </li>
                 );
@@ -2066,6 +2157,10 @@ export default function CodingAgentApp() {
           const started = run.status !== "draft";
           const mainOutcome = runOutcome(run.status);
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
+          // Its project folder has been removed. The record is kept — see
+          // missingProjectOf — so the page has to say so rather than draw a run
+          // that appears to belong nowhere.
+          const missingProject = missingProjectOf(run, projects, projectsDir);
           const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
           const artifactsFolded = artifacts.length > ARTIFACT_PREVIEW && artifactsOpenFor !== run.id;
@@ -2153,6 +2248,18 @@ export default function CodingAgentApp() {
                       <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">folder</span>
                       {project.name}
                     </button>
+                  )}
+                  {/* Its project folder was removed. The run itself is history
+                      and stays — this is the chip that says why there is
+                      nothing to click through to. */}
+                  {!project && missingProject && (
+                    <span
+                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20 inline-flex items-center gap-1"
+                      data-testid="coding-agent-run-project-gone"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">folder_off</span>
+                      {t("codingAgent.delete.projectGone", { folder: missingProject })}
+                    </span>
                   )}
                 </div>
                 {prDetail(run)}
@@ -2866,6 +2973,28 @@ export default function CodingAgentApp() {
 
       </div>
       </div>
+
+      {/* Mounted at the top level rather than inside the row, so the backdrop
+          covers the window and the focus trap has the whole app behind it. */}
+      {deleteTarget && (
+        <CodingProjectDeleteDialog
+          key={deleteTarget.directory}
+          folder={deleteTarget.folder}
+          kind={deleteTarget.kind}
+          name={deleteTarget.name}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={(outcome) => {
+            setRemovedProject({ folder: outcome.folder, trashPath: outcome.trashPath });
+            // Drop the row at once AND re-read: the optimistic removal is what
+            // keeps a project the box has already moved from sitting under the
+            // dialog that removed it, and the re-read is what makes the list
+            // the box's answer rather than ours.
+            setProjects((current) => current.filter((p) => p.directory !== deleteTarget.directory));
+            if (openProjectDir === deleteTarget.directory) setOpenProjectDir(null);
+            void load();
+          }}
+        />
+      )}
 
     </div>
   );

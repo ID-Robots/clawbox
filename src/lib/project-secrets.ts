@@ -452,6 +452,36 @@ export async function setSecretInject(input: { name: unknown; scope?: unknown; i
   });
 }
 
+/**
+ * Take back every entry filed under ONE project's scope. Answers the names
+ * removed, in the order they were stored.
+ *
+ * For the one caller that has to: deleting a project folder
+ * (src/lib/coding-project-delete.ts). A project's secrets are keyed by the same
+ * identity the projects listing names a row with, so once the folder is gone
+ * the rows are credentials for a project that no longer exists — kept, they sit
+ * in the owner's list looking like a live grant, and a NEW folder of the same
+ * name would silently inherit them. `BOX_SCOPE` is refused rather than accepted
+ * and ignored: a caller that asked to clear "the box" means something this
+ * function must never do.
+ *
+ * Answers the NAMES and never a value, like everything else here — that is what
+ * lets the delete route tell the owner what went with the folder.
+ */
+export async function deleteSecretsForScope(scope: unknown): Promise<string[]> {
+  const key = requireSecretScope(scope);
+  if (key === BOX_SCOPE) {
+    throw new SecretStoreError("invalid_scope", "Box-wide secrets belong to no one project and are never cleared with one.");
+  }
+  return serialised(async () => {
+    const entries = await readStore();
+    const removed = entries.filter((entry) => entry.scope === key).map((entry) => entry.name);
+    if (!removed.length) return [];
+    await writeStore(entries.filter((entry) => entry.scope !== key));
+    return removed;
+  });
+}
+
 /** Take one back. Answers the list as it now stands. */
 export async function deleteSecret(input: { name: unknown; scope?: unknown }): Promise<SecretView[]> {
   const name = requireSecretName(input.name);
