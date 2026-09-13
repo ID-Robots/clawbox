@@ -341,17 +341,17 @@ export async function POST(request: Request): Promise<NextResponse> {
     // about the strings.
     const namedProject = named(body.projectId) !== null || named(body.directory) !== null;
 
-    const project = await projectFor({
-      // What the caller named wins, so a run's page deploying its own project
-      // sends both and they agree; a caller that named only a run gets the
-      // run's project rather than a refusal.
-      //
-      // `named` and not `typeof … === "string"`: an EMPTY string is what a form
-      // sends for a field it did not fill in, and letting one win would take
-      // the run's own project away and refuse the call it came with.
-      projectId: named(body.projectId) ?? fromRun?.projectId ?? null,
-      directory: named(body.directory) ?? fromRun?.directory ?? null,
-    });
+    // The caller's pair, or the run's — as a UNIT, never field by field. A
+    // caller's `directory` merged with a run's `projectId` is neither of the
+    // two things asked for, and `resolveWorkingDirectory` prefers the id, so
+    // the directory would be silently dropped.
+    //
+    // `named` and not `typeof … === "string"`: an EMPTY string is what a form
+    // sends for a field it did not fill in, and letting one win would take the
+    // run's own project away and refuse the call it came with.
+    const project = await projectFor(namedProject
+      ? { projectId: named(body.projectId), directory: named(body.directory) }
+      : { projectId: fromRun?.projectId ?? null, directory: fromRun?.directory ?? null });
     if (!project.ok) return project.refusal;
     const { scope, directory } = project;
 

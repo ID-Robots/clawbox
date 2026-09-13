@@ -282,6 +282,21 @@ describe("a deploy pressed on a run", () => {
     expect(deployProject).toHaveBeenCalledWith(expect.objectContaining({ gitRef: "clawbox/run-1" }));
   });
 
+  it("takes the caller's project as a UNIT, never mixed with the run's", async () => {
+    // A caller's `directory` merged with a run's `projectId` is neither of the
+    // two things asked for, and `resolveWorkingDirectory` prefers the id — so
+    // the directory would be silently dropped.
+    listRuns.mockReturnValue([{
+      id: "run-1", projectId: "site", directory: "/home/clawbox/clawbox/data/code-projects/site",
+      pr: null, vercel: null,
+    }]);
+    await route.POST(request({
+      method: "POST", cookie: ownerCookie(),
+      body: { target: "preview", runId: "run-1", directory: "/home/clawbox/projects/shop" },
+    }));
+    expect(resolveWorkingDirectory).toHaveBeenCalledWith({ projectId: null, directory: "/home/clawbox/projects/shop" });
+  });
+
   it("refuses a run and a project that are not the same project", async () => {
     // Otherwise the route deploys project B with run A's branch and records
     // the deployment on run A — a record naming a deployment of somebody
