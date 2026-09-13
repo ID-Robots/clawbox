@@ -5,7 +5,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { getAll as configGetAll } from "@/lib/config-store";
-import { OpenclawConfigUnreadableError, openclawSkillRoot, findOpenclawBin } from "@/lib/openclaw-config";
+import { OpenclawConfigUnreadableError, openclawSkillRoot, findOpenclawBin, openclawSkillsAgentArgs } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
@@ -208,10 +208,18 @@ function httpStatusForInstallFailure(code: InstallFailureCode | undefined): numb
 }
 
 async function runOpenclawInstall(openclawBin: string, ref: string): Promise<ClawhubResult> {
+  // Measured on a box with four agents: `skills install` refuses with the
+  // multi-agent error BEFORE it looks at the ref, so every install failed
+  // there. `--agent` is named only when the box has more than one — see
+  // openclawSkillsAgentArgs. Resolved once, outside the retry loop: the
+  // backoff is for ClawHub's 429 and nothing about the config changes between
+  // attempts.
+  const agent = await openclawSkillsAgentArgs();
   for (let attempt = 0; ; attempt++) {
     try {
       const { stdout, stderr } = await execFileAsync(openclawBin, [
         "skills", "install", ref,
+        ...agent,
         "--force",
       ], {
         timeout: 60_000,

@@ -131,3 +131,93 @@ def test_prune_delegates_to_apply_retention(capsys: pytest.CaptureFixture[str]) 
     assert out["deleted"] == ["old1", "old2"]
     assert out["keepLast"] == 5
     ret.assert_called_once_with(CREDS, 5)
+
+
+# ── The error envelope carries the daemon's own classification ──────────────
+#
+# Found by the device feature sweep on a box whose account is over quota:
+# `clawkeep snapshots` said `Cloud backup quota reached. Upgrade your plan or
+# remove old snapshots.` while the TS bridge answered HTTP 502 "Could not list
+# cloud backups". `ApiError` classifies every portal failure precisely so
+# callers "can branch … without parsing English error strings", and `_emit_err`
+# dropped that classification: the bridge had nothing but the sentence, which it
+# is right not to surface verbatim (it can be a traceback, and it carries device
+# paths). Every credential-minting subcommand is affected, not just `snapshots`:
+# `label`, `lock`, `unlock`, `delete` and `prune` all mint first.
+
+
+def test_emit_err_carries_the_api_error_kind(capsys: pytest.CaptureFixture[str]) -> None:
+    from clawkeep.api import ApiError
+
+    rc = cli._emit_err(ApiError("quota_full", "Cloud backup quota reached.", 402), 1)
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out == {
+        "ok": False,
+        "error": "Cloud backup quota reached.",
+        "kind": "quota_full",
+    }
+
+
+def test_emit_err_omits_kind_for_an_exception_that_has_none(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `token.TokenError` and `config.ConfigError` have no kind, and the bridge's
+    # `default:` branch is the honest answer for them.
+    rc = cli._emit_err(RuntimeError("boto3 is not installed"), 1)
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"ok": False, "error": "boto3 is not installed"}
+    assert "kind" not in out
+
+
+def test_emit_err_ignores_a_kind_that_is_not_a_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The envelope's shape is a contract with the TS bridge; an attribute that
+    # happens to be called `kind` must not be able to change it.
+    class Weird(Exception):
+        kind = {"not": "a string"}
+
+    cli._emit_err(Weird("nope"), 1)
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"ok": False, "error": "nope"}
+
+
+def test_snapshots_reports_the_quota_kind_the_portal_answered(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The whole path, as the box produced it: listing mints credentials first,
+    the portal answers 402 while the account is over quota, and the envelope
+    must name that rather than leaving the bridge to guess."""
+    from clawkeep.api import ApiError
+
+    with (
+        patch(
+            "clawkeep.cli._load_cfg_and_token",
+            return_value=(_stub_cfg(), "claw_token"),
+        ),
+        patch(
+            "clawkeep.api.mint_credentials",
+            side_effect=ApiError(
+                "quota_full",
+                "Cloud backup quota reached. Upgrade your plan or remove old snapshots.",
+                402,
+            ),
+        ),
+        patch("clawkeep.cli.s3.list_snapshots") as list_snapshots,
+    ):
+        rc = cli._snapshots_main([])
+    assert rc == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False
+    assert out["kind"] == "quota_full"
+    # Nothing was listed — the credential is withheld before the read.
+    list_snapshots.assert_not_called()
+
+
+def _stub_cfg() -> object:
+    class Cfg:
+        server = "https://portal.example"
+
+    return Cfg()

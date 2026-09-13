@@ -1180,6 +1180,12 @@ export interface OpenClawConfig {
     }>;
   };
   agents?: {
+    /**
+     * One entry per configured agent, keyed by agent id. ClawBox's own is
+     * `main`; an owner can add more from the Terminal, which is what makes
+     * {@link openclawSkillsAgentArgs} necessary.
+     */
+    entries?: Record<string, unknown>;
     defaults?: {
       // NOT widened to `ToolModelSlot`, deliberately: the core coerces a bare
       // string here too, but every reader of the CHAT model slot is outside
@@ -3124,4 +3130,38 @@ export function getSkillsDir(): string {
     // See above: a stat under the wrong root is a miss, not damage.
   }
   return wellKnownWorkspace();
+}
+
+/**
+ * The `--agent <id>` argument an `openclaw skills …` call needs, or nothing.
+ *
+ * `openclaw skills` infers its owner from the cwd and then from the default
+ * agent, and when neither inference lands AND more than one agent is
+ * configured it refuses outright: `cli_error`, "Multiple agents are
+ * configured, but the skills command has no explicit owner. Pass --agent
+ * <id>." The web server's cwd is the ClawBox checkout, which infers nothing,
+ * so on a box whose owner added a second agent every `skills` call failed —
+ * `skills list` took the whole App Store skill surface with it (a 503 for
+ * every id, installed or not: the settings window, the Ready / Needs setup
+ * badge and the enable switch's read-back), and `skills install` refused
+ * before it had even looked at the ref.
+ *
+ * Named only when the config actually holds more than one agent, which is the
+ * only condition the CLI refuses: a stock appliance has one and keeps the
+ * inference that has always worked there, so this can never make a working box
+ * worse. `main` is ClawBox's own agent — the same id `clawkeep-memory.ts`
+ * names for `openclaw memory` — and with several agents and no `main` the
+ * first entry is a better guess than a certain refusal.
+ *
+ * Lenient by construction: {@link readConfig} answers `{}` for a config it
+ * cannot read, which lands on the empty argument list and today's behaviour.
+ */
+export async function openclawSkillsAgentArgs(): Promise<string[]> {
+  const config = await readConfig();
+  const entries = config.agents?.entries;
+  if (!isPlainObject(entries)) return [];
+  const ids = Object.keys(entries);
+  if (ids.length < 2) return [];
+  const id = ids.includes("main") ? "main" : ids[0];
+  return ["--agent", id];
 }

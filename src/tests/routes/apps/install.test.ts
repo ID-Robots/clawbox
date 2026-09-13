@@ -49,6 +49,7 @@ const { ConfigUnreadable } = vi.hoisted(() => ({
 vi.mock("@/lib/openclaw-config", () => ({
   openclawSkillRoot: vi.fn(() => "/home/clawbox/.openclaw/workspace/skills"),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  openclawSkillsAgentArgs: vi.fn(async () => []),
   OpenclawConfigUnreadableError: ConfigUnreadable,
 }));
 
@@ -153,6 +154,21 @@ describe("/setup-api/apps/install", () => {
       ["skills", "install", "@someone/test-app", "--force"],
       expect.anything(),
     );
+  });
+
+  // Regression, measured on a box with four agents: `openclaw skills install`
+  // refuses with "Multiple agents are configured…" BEFORE it looks at the ref,
+  // so every install failed there. The agent is named after the ref and before
+  // --force, and only when the config holds more than one.
+  it("names the agent the CLI refuses to guess, and only then", async () => {
+    const { openclawSkillsAgentArgs } = await import("@/lib/openclaw-config");
+    await POST(install({ appId: "test-app" }));
+    expect(exec.mock.calls[0][1]).toEqual(["skills", "install", "@someone/test-app", "--force"]);
+
+    vi.mocked(openclawSkillsAgentArgs).mockResolvedValue(["--agent", "main"]);
+    await POST(install({ appId: "test-app" }));
+    const last = exec.mock.calls[exec.mock.calls.length - 1][1];
+    expect(last).toEqual(["skills", "install", "@someone/test-app", "--agent", "main", "--force"]);
   });
 
   it("does not pass --acknowledge-clawhub-risk: a review-required release is the owner's call", async () => {

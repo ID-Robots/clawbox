@@ -50,7 +50,40 @@ export async function GET() {
       readLinkQuality(),
     ]);
     if (status.error) {
-      return NextResponse.json({ error: status.error }, { status: 500 });
+      // A machine with no WiFi HARDWARE is not a failure of this route — it is
+      // an answer, and one every caller has to be able to read: `wifi_status`
+      // (mcp/tools/system.ts) does NOT catch this call the way it catches the
+      // ethernet one, so a 500 here threw the whole tool and the agent could not
+      // say whether the box was online even with a working cable.
+      if (status.errorCode === "no_wifi_device") {
+        const body = {
+          connected: false,
+          available: false,
+          reason: "no_wifi_device",
+          interface: IFACE,
+          ssid: null,
+          ip: null,
+          gateway: null,
+          signalDbm: null,
+          bitrateMbps: null,
+          pingMs: null,
+        };
+        cache = { body, at: Date.now() };
+        return NextResponse.json(body);
+      }
+      // Everything else is still a 500 — a misconfigured `NETWORK_INTERFACE` on
+      // a box that HAS WiFi, or an nmcli that could not be asked — and carries
+      // its classification, so a caller does not have to read the English to
+      // tell a real failure from absent hardware. `wifiDevices` is present only
+      // for the mismatch, and is the fix: point NETWORK_INTERFACE at one of them.
+      return NextResponse.json(
+        {
+          error: status.error,
+          reason: status.errorCode ?? "unavailable",
+          ...(status.wifiDevices ? { wifiDevices: status.wifiDevices.split(",") } : {}),
+        },
+        { status: 500 },
+      );
     }
     const state = status["GENERAL.STATE"] || "";
     const ssid = status["GENERAL.CONNECTION"] || null;
@@ -60,6 +93,9 @@ export async function GET() {
     const pingMs = connected ? await pingGateway(gateway) : null;
     const body = {
       connected,
+      // Says the hardware IS there, so "no WiFi on this machine" and a server
+      // that predates the distinction are not the same answer.
+      available: true,
       ssid: connected ? ssid : null,
       ip, gateway,
       signalDbm: connected ? quality.signalDbm : null,

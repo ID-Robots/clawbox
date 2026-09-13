@@ -32,6 +32,7 @@ vi.mock("fs/promises", () => ({
 
 vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  openclawSkillsAgentArgs: vi.fn(async () => []),
   getSkillsDir: vi.fn(() => "/home/clawbox/.openclaw/workspace"),
   openclawIsAbsent: vi.fn(() => false),
   readSkillEnabled: vi.fn(async () => true),

@@ -614,6 +614,32 @@ export async function getEthernetStatus(): Promise<EthernetStatus> {
   }
 }
 
+/**
+ * nmcli's exit code for "the connection, device, or access point does not
+ * exist" (`man nmcli`, EXIT_STATUS). For `device show <iface>` there is only
+ * one thing it can be about: this machine has no such interface.
+ *
+ * It is what lets {@link getWifiStatus} tell "no WiFi hardware" apart from
+ * "nmcli broke" — an nmcli that is not installed (ENOENT), a NetworkManager
+ * that is not answering, a timeout. Both used to answer the same sentence, so
+ * the route turned the first into an HTTP 500 and the MCP `wifi_status` tool
+ * threw on it: on a box with no WiFi NIC the agent could not say whether the
+ * device was online at all, even with a working cable.
+ */
+const NMCLI_EXIT_NOT_FOUND = 10;
+
+/**
+ * The interface's nmcli fields, or a sentinel bag with `error` — and, since the
+ * device sweep of 2026-09-13, `errorCode`, so a caller can tell the failures
+ * apart without matching on the English:
+ *
+ * - `no_wifi_device` — this machine has no WiFi hardware. An ANSWER, not a
+ *   failure; the route serves it as a 200.
+ * - `interface_mismatch` — there is WiFi hardware, under other names (carried in
+ *   `wifiDevices`), and `NETWORK_INTERFACE` names none of them. A
+ *   misconfiguration an operator must fix, so still a 500.
+ * - `unavailable` — nmcli is missing, timed out, or could not say. Still a 500.
+ */
 export async function getWifiStatus(): Promise<Record<string, string>> {
   try {
     const { stdout } = await exec("nmcli", [
@@ -633,7 +659,54 @@ export async function getWifiStatus(): Promise<Record<string, string>> {
       }
     }
     return info;
-  } catch {
-    return { error: "WiFi interface not available" };
+  } catch (err) {
+    const code = (err as { code?: number | string })?.code;
+    if (code === NMCLI_EXIT_NOT_FOUND) return await classifyMissingInterface();
+    return { error: "WiFi interface not available", errorCode: "unavailable" };
   }
+}
+
+/**
+ * `NETWORK_INTERFACE` is not here — so is there WiFi hardware at all?
+ *
+ * Exit 10 alone does NOT mean "this machine has no WiFi". `NETWORK_INTERFACE`
+ * defaults to the Jetson's `wlP1p1s0` and can name a device that is not on this
+ * board (a renamed NIC, a config carried over from another machine), and
+ * reporting that as absent hardware would hide a configuration error behind a
+ * hardware fact nobody can act on. So ask nmcli which devices it HAS, the way
+ * {@link getEthernetStatus} already does, and answer the two cases apart:
+ *
+ * - no `wifi`-typed device at all → `no_wifi_device`, which is the hardware fact
+ * - some, but not the configured one → `interface_mismatch`, carrying their
+ *   names, because the fix is to point `NETWORK_INTERFACE` at one of them
+ *
+ * A probe that itself fails answers `unavailable`: not knowing must fail towards
+ * "something here is wrong", never towards a claim about the hardware.
+ */
+async function classifyMissingInterface(): Promise<Record<string, string>> {
+  let devices: string[];
+  try {
+    const { stdout } = await exec("nmcli", [
+      "-t", "-f", "DEVICE,TYPE",
+      "device", "status",
+    ], { timeout: NETWORK_TIMEOUT });
+    devices = stdout
+      .split("\n")
+      .map((line) => parseNmcliTerseLine(line))
+      .filter(([dev, type]) => type === "wifi" && !!dev)
+      .map(([dev]) => dev);
+  } catch {
+    return { error: "WiFi interface not available", errorCode: "unavailable" };
+  }
+  if (devices.length === 0) {
+    return {
+      error: "This machine has no WiFi hardware",
+      errorCode: "no_wifi_device",
+    };
+  }
+  return {
+    error: `No WiFi interface named ${IFACE} — this machine has ${devices.join(", ")}`,
+    errorCode: "interface_mismatch",
+    wifiDevices: devices.join(","),
+  };
 }
