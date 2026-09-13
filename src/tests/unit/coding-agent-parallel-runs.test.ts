@@ -375,6 +375,11 @@ describe("the weekly worktree sweep", () => {
     makeGitProject("alpha");
     const started = await lib.startRun({ task: "look", directory: "alpha", source: "owner" });
     await finished(started.id);
+    // The SETTLE has to be over first. It removes this run's copy (nothing on
+    // its branch), and a sweep that lands between git's removal and its prune
+    // sees a registration whose files are gone and tidies it — counting one
+    // removal for work the settle was already doing.
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
     expect(await lib.sweepCodingWorktrees()).toBe(0);
     const config = JSON.parse(fs.readFileSync(path.join(root, "data", "config.json"), "utf-8"));
     expect(typeof config[lib.WORKTREE_SWEEP_AT_KEY]).toBe("number");
