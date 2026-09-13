@@ -33,6 +33,7 @@ import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
 import CodingRunVercelCard from "./CodingRunVercelCard";
 import VercelProjectCard from "./VercelProjectCard";
+import VercelDeployPanel from "./VercelDeployPanel";
 import CodingRunTeamMembers from "./CodingRunTeamMembers";
 import {
   OPEN_CODING_RUN_EVENT,
@@ -2370,6 +2371,23 @@ export default function CodingAgentApp() {
                   t={t}
                   onPromote={(deploymentId) => promoteDeployment(run.id, deploymentId)}
                   onOpenRun={showRun}
+                />
+              )}
+              {/* Deploy what this run built. The panel draws nothing at all on
+                  a project with no Vercel project attached, so a run in a
+                  folder nobody deploys is unchanged; the owner's own page is
+                  where the link and the settings live. Not on the standalone
+                  page, which has no project context to send the deploy to. */}
+              {!standalone && (
+                <VercelDeployPanel
+                  key={`deploy-${run.id}`}
+                  query={run.projectId
+                    ? `projectId=${encodeURIComponent(run.projectId)}`
+                    : `directory=${encodeURIComponent(run.worktree?.project ?? run.directory)}`}
+                  t={t}
+                  runId={run.id}
+                  compact
+                  onDeployed={() => void load()}
                 />
               )}
 

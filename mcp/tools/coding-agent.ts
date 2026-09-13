@@ -879,6 +879,168 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       })));
     },
   );
+
+  // ─── Deploying to Vercel ───────────────────────────────────────────────────
+  //
+  // WHY THERE ARE TWO TOOLS AND NOT ONE WITH A `target`. The two are different
+  // acts, and a model choosing between two values of one argument treats them
+  // as the same act with a knob on it. A preview is a throwaway address nobody
+  // has; production is the project's real domain in front of whoever uses it.
+  // Two names means the second one has to be reached for on purpose, and it
+  // means the description of each can say the whole truth about that one thing
+  // without hedging about the other.
+  //
+  // WHAT NEITHER OF THEM CAN DO: name a Vercel project. Both take a CODING
+  // project — a project id, a folder, or a run id — and the device looks up the
+  // Vercel project the OWNER attached to it. There is no argument anywhere on
+  // this surface for a Vercel project, a team or a token, so a prompt-injected
+  // agent cannot deploy the owner's code to an account it chose.
+  //
+  // AND PRODUCTION IS THE OWNER'S TO ALLOW, PER PROJECT. The device refuses
+  // `coding_deploy_production` outright unless the owner has turned it on for
+  // that project (`coding_vercel_auto_production`, off when absent). There is
+  // deliberately no tool for that switch: one that could turn it on would make
+  // the owner's answer temporary, which is the reason `browser_auto_open` has
+  // none either.
+
+  reg.tool(
+    "coding_deploy_preview",
+    "Deploy a project on this ClawBox to Vercel as a PREVIEW — a private address the user can open to try what was just built. Use it after a coding run has finished something the user wants to look at, or when they ask you to deploy or publish a preview. Name the project the same way you would for a coding run (project_id, directory, or the run_id of the run that built it). The Vercel project and the token are the owner's own setting on the device; you cannot choose them and do not need them. A preview never touches the project's real domain. The deployment starts at once and builds for a minute or two — report the address and stop; do not poll.",
+    {
+      project_id: zOptText(64, "A code project id from code_project_list. Give this, directory, or run_id."),
+      directory: zOptText(512, "The project folder to deploy (its name, or its absolute path)."),
+      run_id: zOptText(40, "The run that built it, e.g. \"run-k3x9q2ab\" — deploys that run's project and records the deployment on the run."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 2_000 },
+    async (args: { project_id?: string; directory?: string; run_id?: string }) => deploy(args, "preview"),
+  );
+
+  reg.tool(
+    "coding_deploy_production",
+    "Deploy a project on this ClawBox to Vercel PRODUCTION — the project's real domain, which everyone using it sees straight away. Only call this when the user has asked for it in as many words; a preview is what you use to show them something. The owner has to have allowed it for that project on the device first, and when they have not this is refused with a sentence telling them where to turn it on — relay that rather than retrying or deploying to production some other way. The Vercel project and the token are the owner's own setting; you cannot choose them.",
+    {
+      project_id: zOptText(64, "A code project id from code_project_list. Give this, directory, or run_id."),
+      directory: zOptText(512, "The project folder to deploy (its name, or its absolute path)."),
+      run_id: zOptText(40, "The run that built it, e.g. \"run-k3x9q2ab\" — deploys that run's project and records the deployment on the run."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 2_000 },
+    async (args: { project_id?: string; directory?: string; run_id?: string }) => deploy(args, "production"),
+  );
+}
+
+/** What the deploy route answers. */
+interface DeployPayload {
+  linked?: boolean;
+  deploy?: {
+    target: string;
+    phase: string;
+    url: string | null;
+    inspectorUrl: string | null;
+    deploymentId: string | null;
+    source: string;
+    gitRef: string | null;
+    fileCount: number | null;
+  } | null;
+  production?: { left: number; max: number };
+  usedGit?: boolean;
+  skipped?: string[];
+}
+
+/**
+ * The refusals worth naming, rather than letting the generic mapping call them
+ * "the device rejected one of the arguments".
+ *
+ * Each one has a different thing for the agent to DO, and folding them together
+ * is what makes a model retry the one thing that cannot work: a project with no
+ * Vercel link needs the owner to attach one, a production deploy the owner has
+ * not allowed needs the owner (and a preview is the thing to offer meanwhile),
+ * and a rate limit needs waiting rather than a second call.
+ */
+const DEPLOY_RULES: ErrorRule[] = [
+  {
+    status: 403,
+    match: /"code":\s*"auto_production_off"/,
+    code: "NOT_SUPPORTED_HERE",
+    message: "This ClawBox does not let its assistant deploy that project to production.",
+    next: "Tell the user they can turn that on for this project in the Coding Agent app, on the project's page, under Vercel deploys. Offer coding_deploy_preview instead; do not retry.",
+  },
+  {
+    status: 429,
+    match: /"code":\s*"rate_limited"/,
+    code: "CONFLICT",
+    message: "That project has had as many production deployments in the last hour as this ClawBox makes.",
+    next: "Tell the user and stop. Do not retry; a preview deployment is still available.",
+  },
+  {
+    status: 400,
+    match: /"code":\s*"not_linked"/,
+    code: "CONFLICT",
+    message: "No Vercel project is attached to that project on this ClawBox.",
+    next: "Tell the user to attach one in the Coding Agent app, on the project's page, under Vercel deploys. Do not retry.",
+  },
+];
+
+/**
+ * One deploy, for both tools.
+ *
+ * The TARGET is this function's argument and never the model's: it comes from
+ * which tool was called, so there is no value a caller can send that turns a
+ * preview into a production deployment.
+ */
+async function deploy(
+  args: { project_id?: string; directory?: string; run_id?: string },
+  target: "preview" | "production",
+) {
+  if (!args.project_id && !args.directory && !args.run_id) {
+    throw new ToolError(
+      "BAD_ARGUMENT",
+      "Nothing was named to deploy.",
+      "Give project_id from code_project_list, the folder as directory, or the run_id of the run that built it.",
+    );
+  }
+  const body: Record<string, unknown> = { target };
+  if (args.project_id) body.projectId = args.project_id;
+  if (args.directory) body.directory = args.directory;
+  if (args.run_id) body.runId = args.run_id;
+
+  let res: DeployPayload;
+  try {
+    res = await apiPost<DeployPayload>("/setup-api/coding-agent/vercel/deploy", body, {
+      // A file upload of a whole project folder is the slow shape, and it
+      // happens inside this one call.
+      timeoutMs: 180_000,
+      rules: DEPLOY_RULES,
+    });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 400) {
+      throw new ToolError(
+        "BAD_ARGUMENT",
+        routeReason(err) ?? "The ClawBox refused that deployment.",
+        WORKING_FOLDER_NEXT,
+      );
+    }
+    throw err;
+  }
+
+  const made = res.deploy;
+  if (!made) {
+    throw new ToolError(
+      "ENDPOINT_DOWN",
+      "The ClawBox did not say what it deployed.",
+      "Tell the user to look at the project's page in the Coding Agent app, and do not retry more than once.",
+    );
+  }
+  const where = target === "production" ? "to production" : "as a preview";
+  const how = made.source === "git"
+    ? `Vercel is building ${made.gitRef ?? "the project's branch"} from the connected repository.`
+    : `${made.fileCount ?? 0} file(s) were uploaded from the folder${res.usedGit === false ? " (this ClawBox could not ask git what to leave out, so only .git, node_modules and .clawbox were skipped)" : ""}.`;
+  return text(
+    `Deployed ${where} on Vercel. ${how}`
+    + (made.url ? ` The address is ${made.url}.` : " Vercel has not given it an address yet.")
+    + " It takes a minute or two to build."
+    + (made.inspectorUrl ? ` The build page is ${made.inspectorUrl}.` : "")
+    + " Tell the user and stop — do not poll for the build; they can watch it on the project's page in the Coding Agent app.",
+  );
 }
 
 // ─── Coding TEAMS ────────────────────────────────────────────────────────────

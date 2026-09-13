@@ -79,7 +79,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
-| Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
+| Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`, `coding_deploy_preview/production`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
@@ -573,7 +573,8 @@ tells the run to link them and ship them.
 ### Coding agent (both editions, only while the owner's switch is on)
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
-`coding_run_message` · `coding_secret_list`
+`coding_run_message` · `coding_secret_list` · `coding_deploy_preview` ·
+`coding_deploy_production`
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
@@ -602,6 +603,31 @@ everything a run then says is scrubbed of it before it reaches the run record
 switch either, for the reason `browser_auto_open` has none: handing an
 unattended shell the owner's credentials is a consent, and a tool that could
 turn it back on would make their "no" temporary.
+
+`coding_deploy_preview` and `coding_deploy_production` deploy a coding-agent
+project to Vercel (`src/lib/vercel-deploy.ts`). They are TWO tools rather than
+one with a `target`, because the two are different acts and a model choosing
+between two values of one argument treats them as the same act with a knob on
+it: a preview is a throwaway address nobody has, production is the project's
+real domain in front of whoever uses it.
+
+NEITHER can name a Vercel project. Both take a CODING project — `project_id`,
+`directory`, or the `run_id` of the run that built it — and the device looks up
+the Vercel project the OWNER attached to it, with the token from the owner's
+own secret store. There is no argument anywhere on this surface for a Vercel
+project, a team or a token, so a prompt-injected agent cannot deploy the
+owner's code to an account it chose, and the token never reaches this process.
+
+A preview is the agent's to make. PRODUCTION is refused (403,
+`auto_production_off`) unless the owner has turned it on for THAT project —
+`coding_vercel_auto_production`, off when absent, per project so that "the
+assistant may ship the toy site by itself" does not also mean "and the shop".
+With it on the agent may deploy that one project to production without asking
+again, which is the automatic flow this was asked for. Production deploys are
+additionally rate limited per project and the refusal (`rate_limited`) is a
+thing to tell the user rather than retry. There is deliberately no tool for the
+switch, for the reason there is none for the secret store's: one that could
+turn it on would make the owner's answer temporary.
 
 The run lives in the web server (`src/lib/coding-agent.ts`,
 `/setup-api/coding-agent/*`), not in this process: OpenClaw reaps the MCP

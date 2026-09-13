@@ -148,7 +148,7 @@ describe("verifyToken and readProject", () => {
 
   it("resolves a project and keeps the id the caller asked about when Vercel omits one", async () => {
     fakeApi(() => answer(200, { name: "acme-app" }));
-    expect(await readProject(AUTH, "acme-app")).toEqual({ ok: true, id: "acme-app", name: "acme-app" });
+    expect(await readProject(AUTH, "acme-app")).toEqual({ ok: true, id: "acme-app", name: "acme-app", gitLink: null, productionDomain: null });
   });
 });
 

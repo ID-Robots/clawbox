@@ -30,7 +30,7 @@
  * coding-review.ts is written from, and for the same box.
  */
 
-import { parseDeployment, type VercelDeployment } from "./vercel-state";
+import { parseDeployment, type DeployTarget, type VercelDeployment } from "./vercel-state";
 
 // One import for server callers, the way ./coding-pr re-exports its own pure
 // half; the browser imports ./vercel-state directly.
@@ -166,16 +166,48 @@ function upstreamMessage(body: string): string | null {
 async function call(
   auth: VercelAuth,
   pathname: string,
-  init: { method?: "GET" | "POST"; query?: Record<string, string>; timeoutMs?: number; maxChars?: number } = {},
+  init: {
+    method?: "GET" | "POST";
+    query?: Record<string, string>;
+    timeoutMs?: number;
+    maxChars?: number;
+    /**
+     * The request body, for the two calls that send one.
+     *
+     * A JSON value is serialised here and sent as `application/json`; raw bytes
+     * are sent as they are, which is what the file-upload endpoint takes. The
+     * body never carries the token — it goes in the Authorization header, the
+     * way every other call here sends it — and nothing this function is given
+     * is ever echoed into a failure sentence unredacted.
+     */
+    json?: unknown;
+    bytes?: Uint8Array;
+    /** Extra request headers. Only ever the upload digest and length today. */
+    headers?: Record<string, string>;
+  } = {},
 ): Promise<VercelResult<{ body: string; status: number }>> {
   let res: Response;
   try {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${auth.token}`,
+      Accept: "application/json",
+      ...(init.json !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+    };
     res = await fetch(url(pathname, auth, init.query ?? {}), {
       method: init.method ?? "GET",
-      headers: {
-        Authorization: `Bearer ${auth.token}`,
-        Accept: "application/json",
-      },
+      headers,
+      ...(init.json !== undefined
+        ? { body: JSON.stringify(init.json) }
+        : init.bytes !== undefined
+          // A COPY of exactly this view's bytes. `Buffer.prototype.slice` is
+          // `subarray` under another name — it returns a VIEW, not a copy — so
+          // `.slice().buffer` hands over Node's whole pooled allocation and
+          // uploads whatever else was in that pool, with a length that does
+          // not match `Content-Length`. `new Uint8Array(view)` copies the view
+          // and nothing else (found in review).
+          ? { body: new Uint8Array(init.bytes) }
+          : {}),
       signal: AbortSignal.timeout(init.timeoutMs ?? CALL_TIMEOUT_MS),
     });
   } catch (err) {
@@ -230,13 +262,129 @@ export async function verifyToken(auth: VercelAuth): Promise<VercelResult<{ user
   return { ok: true, username };
 }
 
-/** Does this project id resolve, and what is it called? */
-export async function readProject(auth: VercelAuth, projectId: string): Promise<VercelResult<{ id: string; name: string | null }>> {
-  const answered = await json<{ id?: unknown; name?: unknown }>(auth, `/v9/projects/${encodeURIComponent(projectId)}`);
+/**
+ * Does this project id resolve, what is it called, and is it wired to a git
+ * repository?
+ *
+ * The git link is what decides HOW a deployment of it is created, and it is
+ * read from the project rather than guessed at or configured a second time on
+ * this box: a Vercel project that Vercel itself says is connected to
+ * `acme/shop` is deployed by naming a REF, and one that says nothing is
+ * deployed by uploading the folder. Asking the owner which shape they have
+ * would be asking them to repeat, in a form on a Jetson, a fact Vercel already
+ * holds — and to keep it in step by hand when they connect the repository
+ * later.
+ */
+export async function readProject(
+  auth: VercelAuth,
+  projectId: string,
+): Promise<VercelResult<{ id: string; name: string | null; gitLink: VercelGitLink | null; productionDomain: string | null }>> {
+  const answered = await json<{ id?: unknown; name?: unknown; link?: unknown; targets?: unknown; alias?: unknown }>(
+    auth,
+    `/v9/projects/${encodeURIComponent(projectId)}`,
+  );
   if (!answered.ok) return answered;
   const id = typeof answered.data?.id === "string" ? answered.data.id : projectId;
   const name = typeof answered.data?.name === "string" ? answered.data.name : null;
-  return { ok: true, id, name };
+  return {
+    ok: true,
+    id,
+    name,
+    gitLink: parseGitLink(answered.data?.link),
+    productionDomain: parseProductionDomain(answered.data),
+  };
+}
+
+/**
+ * The address a production deployment of this project lands on.
+ *
+ * Read from the project record this box already fetches rather than from
+ * `/v9/projects/:id/domains`, because it is wanted for ONE sentence — the
+ * question the owner is asked before a production deploy — and a second
+ * upstream call to word a confirmation is a cost paid on a page that may never
+ * see the button pressed.
+ *
+ * Null is an honest answer and the card says the project's name instead: a
+ * project that has never had a production deployment has no alias yet, and
+ * inventing `<name>.vercel.app` would put a domain in a confirmation sentence
+ * that may belong to somebody else's project.
+ */
+export function parseProductionDomain(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  const host = (x: unknown): string | null => {
+    if (typeof x !== "string") return null;
+    const trimmed = x.trim();
+    // A domain and nothing else — this ends up in a sentence and, on the
+    // card, in an `href`. The same alphabet `deploymentUrl` admits for a bare
+    // host, for the same reason.
+    return trimmed && /^[A-Za-z0-9.-]+$/.test(trimmed) ? trimmed : null;
+  };
+  const targets = typeof v.targets === "object" && v.targets !== null ? (v.targets as Record<string, unknown>) : null;
+  const production = targets && typeof targets.production === "object" && targets.production !== null
+    ? (targets.production as Record<string, unknown>)
+    : null;
+  const fromTarget = Array.isArray(production?.alias)
+    ? production.alias.map(host).find((x): x is string => x !== null) ?? null
+    : null;
+  if (fromTarget) return fromTarget;
+  // The project's own alias list: entries are `{ domain }` on some answers and
+  // bare strings on others, so both are read — the `parseDeployment` rule.
+  if (Array.isArray(v.alias)) {
+    for (const entry of v.alias) {
+      const found = host(typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>).domain : entry);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * The git repository a Vercel project is connected to, when it is connected to
+ * one.
+ *
+ * `repoId` is what the deployments endpoint actually wants for a GitHub source,
+ * and `org`/`repo` are the spelling every other provider takes — both are kept
+ * because Vercel's own `link` object answers whichever its provider uses, and a
+ * parser written to one of them silently reports "not connected" for the other,
+ * which would push a perfectly wired project onto the upload path and deploy
+ * the box's own copy of the folder instead of the branch.
+ */
+export interface VercelGitLink {
+  /** `github`, `gitlab` or `bitbucket`, as Vercel spells it. */
+  type: string;
+  /** GitHub's numeric repository id, when Vercel gave one. */
+  repoId: string | null;
+  org: string | null;
+  repo: string | null;
+  /** The project's production branch, when Vercel said. */
+  defaultBranch: string | null;
+}
+
+/** Read Vercel's `link` object. Exported for its test. */
+export function parseGitLink(raw: unknown): VercelGitLink | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  const type = typeof v.type === "string" && v.type.trim() ? v.type.trim().toLowerCase() : null;
+  if (!type) return null;
+  // Vercel sends the repository id as a number on some answers and as a string
+  // on others; both are the same id and both go into a URL as text.
+  const repoId = typeof v.repoId === "number" && Number.isFinite(v.repoId)
+    ? String(v.repoId)
+    : typeof v.repoId === "string" && v.repoId.trim() ? v.repoId.trim() : null;
+  const str = (x: unknown): string | null => (typeof x === "string" && x.trim() ? x.trim() : null);
+  const link: VercelGitLink = {
+    type,
+    repoId,
+    org: str(v.org) ?? str(v.owner) ?? str(v.namespace) ?? null,
+    repo: str(v.repo) ?? str(v.slug) ?? str(v.name) ?? null,
+    defaultBranch: str(v.productionBranch) ?? str(v.defaultBranch) ?? null,
+  };
+  // A `link` that names neither an id nor an owner/repo pair names no
+  // repository, and deploying "the ref of nothing" is a 400 from Vercel with a
+  // sentence nobody can act on. Read as NOT connected, so the upload path — the
+  // one that always works — is taken instead.
+  return link.repoId || (link.org && link.repo) ? link : null;
 }
 
 // ── deployments ─────────────────────────────────────────────────────────────
@@ -373,4 +521,192 @@ export async function promoteDeployment(
   );
   if (!answered.ok) return answered;
   return { ok: true, promoted: true };
+}
+
+// ── creating a deployment ───────────────────────────────────────────────────
+
+/**
+ * WHY THIS EXISTS AT ALL, AND WHAT IT DELIBERATELY DOES NOT DECIDE.
+ *
+ * Until this section the box could only WATCH what Vercel's git integration
+ * did by itself after a run pushed a branch. That covers exactly one shape of
+ * customer — a Vercel project already connected to a GitHub repository — and it
+ * covers it only when a push happens. The owner's ask was a button: build
+ * something, press deploy, look at it; and a second button for the real domain.
+ *
+ * Two shapes, because both exist on real accounts:
+ *
+ *  - GIT-CONNECTED. The deployment names a REF on the repository Vercel is
+ *    already wired to, so Vercel builds exactly what git has and this box
+ *    uploads nothing. The branch must be PUSHED first — Vercel clones from the
+ *    remote, not from the Jetson — which is the caller's job and is said in the
+ *    refusal when it has not happened.
+ *  - NOT CONNECTED. The folder's files are hashed, uploaded and named in the
+ *    deployment. This is the shape a folder the agent just created has, and it
+ *    is why "press deploy and look at it" works on a project that has never
+ *    been near GitHub.
+ *
+ * WHICH ONE IS NEVER GUESSED. `readProject` asks Vercel, and its answer
+ * decides (see `parseGitLink`). A box that assumed one shape would either
+ * upload over a customer's git history or ask for a ref a project has no
+ * repository for.
+ *
+ * THE TOKEN IS STILL NEVER AN ARGUMENT AND NEVER AN ANSWER. Same `VercelAuth`,
+ * same `redactToken` on every sentence that quotes the far side. Nothing in
+ * this section logs, and nothing returns the credential.
+ */
+
+/** How long creating a deployment gets: it is a POST that Vercel queues. */
+const DEPLOY_TIMEOUT_MS = 60_000;
+
+/** How long ONE file upload gets. A file can be a few megabytes on a slow line. */
+const UPLOAD_TIMEOUT_MS = 120_000;
+
+/** A file as the deployments endpoint names it: the path, its sha1 and its size. */
+export interface DeployFileRef {
+  /** The path INSIDE the deployment, with forward slashes and no leading one. */
+  file: string;
+  /** The sha1 of the contents, lowercase hex — Vercel's own content address. */
+  sha: string;
+  size: number;
+}
+
+/** A file with its bytes, as the upload step takes it. */
+export interface DeployFileBody extends DeployFileRef {
+  data: Uint8Array;
+}
+
+/**
+ * Put one file's bytes where a deployment can name them.
+ *
+ * Vercel's upload is content-addressed: the bytes go up under their sha1, and
+ * the deployment then refers to that sha. Uploading a file the account already
+ * has is answered 200 without transferring anything, which is why this is safe
+ * to call for every file rather than only for the changed ones — and why a
+ * second deploy of a folder that barely changed is quick.
+ */
+export async function uploadDeployFile(auth: VercelAuth, file: DeployFileBody): Promise<VercelResult<{ uploaded: true }>> {
+  const answered = await call(auth, "/v2/files", {
+    method: "POST",
+    bytes: file.data,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+    headers: {
+      // Vercel's own names for "here is the content address of what follows".
+      "x-vercel-digest": file.sha,
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(file.size),
+    },
+    // An upload answers a short JSON body; nothing here needs the megabyte cap.
+    maxChars: 8_192,
+  });
+  if (!answered.ok) return answered;
+  return { ok: true, uploaded: true };
+}
+
+export interface CreateDeploymentInput {
+  /** The Vercel project — always the one the OWNER linked, never a caller's. */
+  projectId: string;
+  /** The project's name, which Vercel wants beside the id on this endpoint. */
+  projectName?: string | null;
+  /**
+   * The account to create it under.
+   *
+   * Redundant with `auth.teamId` in every caller today and taken anyway,
+   * because the deployment is the one call here whose account is worth stating
+   * at the call site: a deployment made under the wrong scope is a build in
+   * somebody else's account, and `undefined` reading as "personal" is the kind
+   * of default that gets noticed late.
+   */
+  teamId?: string | null;
+  target: DeployTarget;
+  /**
+   * The git ref to build, for a project Vercel is connected to. Mutually
+   * exclusive with `files` — a caller that sends both is refused rather than
+   * silently having one of them win.
+   */
+  gitRef?: string | null;
+  /** The repository, from `readProject`. Required with `gitRef`. */
+  gitLink?: VercelGitLink | null;
+  /** The uploaded files, for a project with no repository. */
+  files?: readonly DeployFileRef[];
+  /** Free-form key/values Vercel shows on the build. Never a credential. */
+  meta?: Record<string, string>;
+}
+
+/**
+ * Create a deployment, and answer it the way every other read here answers one.
+ *
+ * The result is a `VercelDeployment` so the CALLER has nothing new to parse:
+ * the phase fold, the URL handling and the watcher all already speak that
+ * shape, and a deployment that has just been created is simply one whose
+ * `readyState` is still `queued`.
+ */
+export async function createDeployment(
+  auth: VercelAuth,
+  input: CreateDeploymentInput,
+): Promise<VercelResult<{ deployment: VercelDeployment }>> {
+  const hasGit = typeof input.gitRef === "string" && input.gitRef.trim() !== "";
+  const hasFiles = Array.isArray(input.files) && input.files.length > 0;
+  if (hasGit === hasFiles) {
+    // Both, or neither. Refused rather than resolved, because either resolution
+    // deploys something the caller did not ask for: a ref they never named, or
+    // a folder they thought was coming from git.
+    return failure(
+      "refused",
+      hasGit
+        ? "A deployment is either a git ref or a set of files, not both."
+        : "There is nothing to deploy: no git ref and no files.",
+    );
+  }
+
+  const scoped: VercelAuth = { token: auth.token, teamId: input.teamId ?? auth.teamId };
+  const body: Record<string, unknown> = {
+    // Vercel wants the project's NAME here and its id in `project`; a project
+    // whose name this box could not read falls back to the id, which Vercel
+    // accepts for a project named that way.
+    name: input.projectName?.trim() || input.projectId,
+    project: input.projectId,
+    // `preview` is Vercel's default and is sent explicitly all the same: the
+    // difference between the two targets is the whole of what the owner's two
+    // buttons mean, and leaving it implied is how a production deploy becomes a
+    // preview after an API default changes.
+    target: input.target,
+    ...(input.meta ? { meta: input.meta } : {}),
+  };
+
+  if (hasGit) {
+    const link = input.gitLink;
+    if (!link) {
+      return failure("refused", "That Vercel project is not connected to a repository, so it cannot deploy a branch.");
+    }
+    const ref = (input.gitRef ?? "").trim();
+    body.gitSource = {
+      type: link.type,
+      ref,
+      ...(link.repoId ? { repoId: link.repoId } : {}),
+      ...(link.org ? { org: link.org } : {}),
+      ...(link.repo ? { repo: link.repo } : {}),
+    };
+  } else {
+    body.files = input.files;
+    // The project's own build settings are what Vercel should use; sending an
+    // empty object rather than a framework guess is what makes an uploaded
+    // deployment build the way the dashboard says it does.
+    body.projectSettings = {};
+  }
+
+  const answered = await json<unknown>(scoped, "/v13/deployments", {
+    method: "POST",
+    json: body,
+    timeoutMs: DEPLOY_TIMEOUT_MS,
+    // `skipAutoDetectionConfirmation` is Vercel's own "do not stop and ask":
+    // this box is headless and there is nobody to confirm a framework guess to,
+    // so a deployment that waited for one would sit in the account for ever
+    // while the card said "building".
+    query: { skipAutoDetectionConfirmation: "1" },
+  });
+  if (!answered.ok) return answered;
+  const deployment = parseDeployment(answered.data);
+  if (!deployment) return failure("upstream", "Vercel did not say which deployment it created.");
+  return { ok: true, deployment };
 }

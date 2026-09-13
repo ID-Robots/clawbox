@@ -407,3 +407,72 @@ export function buildDeployFeedback(input: {
   ];
   return lines.join("\n");
 }
+
+// ── a deployment the owner or the agent ASKED for ───────────────────────────
+
+/**
+ * Which domain a deployment lands on.
+ *
+ * `preview` is a throwaway address nobody but the owner has; `production` is
+ * the project's real domain, in front of whoever uses it. Everything in this
+ * feature that is gated is gated on this one value being `production`, which
+ * is why it is a named type rather than a boolean called `prod`.
+ */
+export type DeployTarget = "preview" | "production";
+
+export const DEPLOY_TARGETS: readonly DeployTarget[] = ["preview", "production"];
+
+export function isDeployTarget(value: unknown): value is DeployTarget {
+  return value === "preview" || value === "production";
+}
+
+/**
+ * Who asked for a deployment.
+ *
+ * `owner` is a signed-in browser on this box's own page; `agent` is the MCP
+ * bearer — the assistant, acting on the owner's behalf under a switch they
+ * turned on. Recorded on every deployment because "who put this in front of
+ * the project's users" is the question a record of a production change exists
+ * to answer, and after the fact there is no other way to tell the two apart.
+ */
+export type DeployActor = "owner" | "agent";
+
+/**
+ * A deployment this box CREATED for a project, as the project card reads it.
+ *
+ * The sibling of `VercelState`, which is what a run's PUSH became — and
+ * deliberately not the same record. A run's deployment belongs to that run and
+ * is watched until it settles; this one belongs to the PROJECT, is the answer
+ * to "what did the last Deploy button do", and outlives every run in the
+ * folder. Folding them into one would mean a project with no runs (an imported
+ * repository, a folder the owner made by hand) could not deploy at all.
+ */
+export interface ProjectDeploy {
+  target: DeployTarget;
+  phase: VercelPhase;
+  readyState: VercelReadyState;
+  /** The Vercel project it went to — from the owner's link, never a caller's. */
+  projectId: string;
+  teamId: string | null;
+  deploymentId: string | null;
+  url: string | null;
+  inspectorUrl: string | null;
+  /** How it was made: a git ref Vercel built, or the folder's files uploaded. */
+  source: "git" | "files";
+  /** The ref, when it was a git deployment. */
+  gitRef: string | null;
+  /** How many files went up, when it was an upload. */
+  fileCount: number | null;
+  by: DeployActor;
+  /** The run this deployment was asked for from, when it was asked for on one. */
+  runId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  /** Why it failed or was abandoned, in words meant for the owner. */
+  detail: string | null;
+}
+
+/** True while this box would still learn something by asking Vercel again. */
+export function isProjectDeployPending(deploy: ProjectDeploy | null | undefined): boolean {
+  return deploy != null && (deploy.phase === "looking" || deploy.phase === "building");
+}

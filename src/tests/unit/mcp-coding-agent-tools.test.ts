@@ -45,7 +45,12 @@ import { capText } from "../../../mcp/lib/guard";
 
 // `coding_secret_list` registers under the same switch: it is about what a
 // RUN will find in its environment, and it answers names alone.
-const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop", "coding_run_message", "coding_secret_list"];
+const NAMES = [
+  "coding_agent_run", "coding_agent_status", "coding_agent_stop", "coding_run_message", "coding_secret_list",
+  // Same switch, same harness: deploying what a run built is the other half of
+  // handing it the task.
+  "coding_deploy_preview", "coding_deploy_production",
+];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
   const h = captureRegistrar(edition);
