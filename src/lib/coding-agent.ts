@@ -8054,8 +8054,15 @@ function pipelineHoldsNotice(run: CodingRun): boolean {
   return false;
 }
 
-/** Queue an advance behind whatever else is advancing this run's pipeline. */
-function advancePipeline(runId: string, work: () => Promise<void>): void {
+/**
+ * Queue an advance behind whatever else is advancing this run's pipeline.
+ *
+ * BOTH seams go through it, and that is the point: a deployment settling on its
+ * watcher's timer and a run settling on its child's `close` handler are two
+ * different call stacks reaching the same record, and each stage guard reads
+ * `pipeline.stage` — which the other one is in the middle of moving.
+ */
+function queuePipelineWork(runId: string, work: () => Promise<void>): Promise<void> {
   const previous = pipelineAdvancing.get(runId) ?? Promise.resolve();
   const mine = previous.then(work, work).then(
     () => {},
@@ -8064,9 +8071,14 @@ function advancePipeline(runId: string, work: () => Promise<void>): void {
     },
   );
   pipelineAdvancing.set(runId, mine);
+  return mine;
+}
+
+/** The fire-and-forget form, for a caller with nothing to wait on. */
+function advancePipeline(runId: string, work: () => Promise<void>): void {
   // Held like every other settle chain, so a suite can wait for it rather than
   // remove the tree a deployment record is still being written into.
-  trackSettleWork(mine);
+  trackSettleWork(queuePipelineWork(runId, work));
 }
 
 /** The project this pipeline deploys — never the run's own worktree copy. */
@@ -8133,7 +8145,19 @@ function reviewRunFor(originId: string): CodingRun | null {
  * advanced past a run that is running again would be deploying a folder a live
  * session is still writing in.
  */
-async function pipelineAfterSettle(
+function pipelineAfterSettle(
+  finished: CodingRun,
+  ended: "stop" | "pause" | null,
+  review: ReviewPassOutcome,
+): Promise<void> {
+  // AWAITED by the settle chain, unlike the deployment seam: `settleRunWorktree`
+  // runs straight after and steps aside only while a run is LIVE in the tree, so
+  // an improvement lap that had not been spawned yet would have its folder
+  // merged home and removed out from under it.
+  return queuePipelineWork(finished.reviewOf ?? finished.id, () => settlePipelineStage(finished, ended, review));
+}
+
+async function settlePipelineStage(
   finished: CodingRun,
   ended: "stop" | "pause" | null,
   review: ReviewPassOutcome,
@@ -8314,15 +8338,26 @@ async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | 
     return { kind: "failed", reason: "There is no session to carry on in, so the work could not be sent back for improvement." };
   }
 
-  const failedStage = pipeline.steps.find((s) => s.state === "failed" && s.stage !== "improvement");
+  // The stage that failed MOST RECENTLY, not the first one in stage order: a
+  // lap sent back by a failed deploy after an earlier failed review would
+  // otherwise be told to fix the review.
+  const failedStage = pipeline.steps
+    .filter((s) => s.state === "failed" && s.stage !== "improvement")
+    .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+  const stage = failedStage?.stage ?? "verify_preview";
   const reason = failedStage?.detail ?? pipeline.failure?.reason ?? "The delivery pipeline sent the work back.";
   const task = improvementNudge({
-    stage: failedStage?.stage ?? "verify_preview",
+    stage,
     reason,
     round: pipeline.round,
     maxRounds: pipeline.maxRounds,
     buildLog: await pipelineBuildLogTail(run),
-    verification: lastVerificationFor(pipeline),
+    // Only when a VERIFICATION is what failed: after a failed deploy the last
+    // one on the record describes a lap that already passed, and handing it
+    // over as "what this ClawBox checked" would be a lie about this one.
+    verification: stage === "verify_preview" || stage === "verify_production"
+      ? lastVerificationFor(pipeline)
+      : null,
   });
 
   let tools: SpawnTools;
@@ -8331,6 +8366,13 @@ async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | 
     releaseSlot = await assertCanSpawn(null);
     tools = await requireSpawnTools();
     run.directory = await realDirectory(run.directory);
+    // Nobody else may be working in this folder. A pipelined run can ALSO have
+    // the pull-request review loop going — GitHub's checks are a different
+    // question from the pipeline's own — and that loop's fix turns resume the
+    // same session in the same tree. Two harnesses there edit each other's
+    // half-written files and each settle's `git add -A` commits the other's,
+    // which is the whole reason a run gets a copy of the project to itself.
+    assertDirectoryFree(run.directory, run.id);
   } catch (err) {
     releaseSlot?.();
     return { kind: "failed", reason: `Another turn could not be started: ${err instanceof Error ? err.message : String(err)}` };
@@ -8719,8 +8761,12 @@ export function resumePipelines(): void {
       advancePipeline(run.id, async () => {
         const current = loadRuns().find((r) => r.id === run.id);
         if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
-        const outcome = await runPipelineVerification(current, stage);
-        await applyPipelineStage(run.id, stage, outcome);
+        // Through the same door a fresh entry uses, so the attempt is COUNTED:
+        // a box crash-looping mid-verification would otherwise re-fetch and
+        // re-photograph for ever, bounded only by the wall clock.
+        const outcome = await enterPipelineStage(current, stage);
+        persist(true);
+        if (outcome) await applyPipelineStage(run.id, stage, outcome);
       });
       continue;
     }

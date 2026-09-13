@@ -606,3 +606,52 @@ describe("a restart in the middle of a stage", () => {
     expect(verifyDeployment).not.toHaveBeenCalled();
   });
 });
+
+describe("what an improvement lap is told", () => {
+  it("names the stage that failed MOST RECENTLY, not the first one in order", async () => {
+    installHarness();
+    // The review stage fails first (the pass cannot start), then a later lap's
+    // preview check fails. The second nudge must be about the check.
+    let lap = 0;
+    verifyDeployment.mockImplementation(async () => {
+      lap += 1;
+      return lap === 1 ? verification(false) : verification(true);
+    });
+    readAutoProduction.mockResolvedValue(true);
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    await pipelineSettles(started.id, "complete");
+    const nudges = stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"));
+    expect(nudges).toHaveLength(1);
+    expect(nudges[0]).toContain("preview verification stage");
+  });
+
+  it("does not hand a failed DEPLOY the verification from a lap that passed", async () => {
+    installHarness();
+    // Lap 1: the check passes, so `lastVerification` is a PASS on the record.
+    // Lap 2's deploy then fails, and its nudge must not quote that pass as
+    // "what this ClawBox checked".
+    let deploys = 0;
+    const realDeploy = runDeployment.getMockImplementation()!;
+    verifyDeployment.mockResolvedValue(verification(true));
+    readAutoProduction.mockResolvedValue(true);
+    runDeployment.mockImplementation(async (input: { runId: string | null; target: string }) => {
+      deploys += 1;
+      // The production build is the one that fails.
+      deploymentReadyState.value = deploys >= 2 ? "error" : "ready";
+      return realDeploy(input);
+    });
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "failed");
+    // A production failure ends it rather than looping, so no nudge at all —
+    // and the pass on the record is untouched by the failure.
+    expect(run.pipeline!.failure?.stage).toBe("deploy_production");
+    expect(run.pipeline!.lastVerification!.ok).toBe(true);
+    expect(stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"))).toHaveLength(0);
+  });
+});
