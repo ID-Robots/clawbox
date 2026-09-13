@@ -956,6 +956,21 @@ export const de: Record<string, string> = {
   "codingAgent.worktreeRemove": "Kopie entfernen",
   "codingAgent.worktreeRemoveFailed": "Die Kopie des Projekts konnte nicht entfernt werden.",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "Dem Agenten etwas sagen",
+  "codingAgent.message.hint": "Senden Sie eine Korrektur oder etwas, das er wissen sollte. Er macht dort weiter, wo er ist — er fängt nicht von vorne an.",
+  "codingAgent.message.placeholder": "Dem Agenten etwas sagen…",
+  "codingAgent.message.send": "Senden",
+  "codingAgent.message.sending": "Wird gesendet…",
+  "codingAgent.message.queued": "In Warteschlange",
+  "codingAgent.message.delivered": "Zugestellt",
+  "codingAgent.message.failed": "Die Nachricht konnte nicht an den Lauf gesendet werden.",
+  "codingAgent.message.errorEmpty": "Geben Sie etwas zum Senden ein.",
+  "codingAgent.message.errorTooLong": "Diese Nachricht ist zu lang: höchstens {max} Zeichen.",
+  "codingAgent.message.errorNotPlainText": "Eine Nachricht muss reiner Text sein.",
+  "codingAgent.message.errorQueueFull": "Dieser Lauf hat bereits {n} wartende Nachrichten. Warten Sie, bis er sie gelesen hat.",
+  "codingAgent.message.errorSettled": "Dieser Lauf ist beendet, es gibt ihm nichts mehr zu sagen.",
+
   "codingAgent.wizardTitle": "Coding-Agent einrichten",
   "codingAgent.wizardIntro": "Mit dem Coding-Agenten übergibt Ihr Assistent eine ganze Aufgabe an Claude Code auf dieser Box: Er liest und schreibt Dateien in einem Ordner, führt dort Befehle aus und meldet sich zurück. Die Einrichtung dauert vier Schritte.",
   "codingAgent.wizardEnable": "Aktivieren",

@@ -967,6 +967,21 @@ export const zh: Record<string, string> = {
   "codingAgent.worktreeRemove": "删除副本",
   "codingAgent.worktreeRemoveFailed": "无法删除这次运行的项目副本。",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "告诉智能体",
+  "codingAgent.message.hint": "发送一条更正或它该知道的信息。它会从当前进度继续，不会重新开始。",
+  "codingAgent.message.placeholder": "告诉智能体…",
+  "codingAgent.message.send": "发送",
+  "codingAgent.message.sending": "发送中…",
+  "codingAgent.message.queued": "排队中",
+  "codingAgent.message.delivered": "已送达",
+  "codingAgent.message.failed": "无法向该运行发送这条消息。",
+  "codingAgent.message.errorEmpty": "请输入要发送的内容。",
+  "codingAgent.message.errorTooLong": "这条消息太长：最多 {max} 个字符。",
+  "codingAgent.message.errorNotPlainText": "消息必须是纯文本。",
+  "codingAgent.message.errorQueueFull": "该运行已有 {n} 条消息在等待。请等它读完。",
+  "codingAgent.message.errorSettled": "该运行已结束，没有什么可再告诉它的了。",
+
   "codingAgent.wizardTitle": "设置编程助手",
   "codingAgent.wizardIntro": "编程助手让助理把整项任务交给这台设备上的 Claude Code：它在一个文件夹内读写文件、执行命令，并汇报结果。设置只需四步。",
   "codingAgent.wizardEnable": "启用",

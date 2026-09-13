@@ -958,6 +958,21 @@ export const ja: Record<string, string> = {
   "codingAgent.worktreeRemove": "コピーを削除",
   "codingAgent.worktreeRemoveFailed": "この実行のプロジェクトのコピーを削除できませんでした。",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "エージェントに伝える",
+  "codingAgent.message.hint": "訂正や知っておくべきことを送ります。今の続きから進み、最初からやり直すことはありません。",
+  "codingAgent.message.placeholder": "エージェントに伝える…",
+  "codingAgent.message.send": "送信",
+  "codingAgent.message.sending": "送信中…",
+  "codingAgent.message.queued": "待機中",
+  "codingAgent.message.delivered": "配信済み",
+  "codingAgent.message.failed": "この実行にメッセージを送信できませんでした。",
+  "codingAgent.message.errorEmpty": "送信する内容を入力してください。",
+  "codingAgent.message.errorTooLong": "メッセージが長すぎます: 最大 {max} 文字です。",
+  "codingAgent.message.errorNotPlainText": "メッセージはプレーンテキストである必要があります。",
+  "codingAgent.message.errorQueueFull": "この実行にはすでに {n} 件のメッセージが待機しています。読まれるまでお待ちください。",
+  "codingAgent.message.errorSettled": "この実行は終了しているため、もう伝えられることはありません。",
+
   "codingAgent.wizardTitle": "コーディングエージェントの設定",
   "codingAgent.wizardIntro": "コーディングエージェントを使うと、アシスタントがタスク全体をこのボックス上の Claude Code に任せられます。指定した 1 つのフォルダー内でファイルを読み書きし、コマンドを実行して、結果を報告します。設定は 4 ステップです。",
   "codingAgent.wizardEnable": "有効にする",

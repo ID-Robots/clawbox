@@ -19,6 +19,8 @@ import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
+import CodingRunMessageBox from "./CodingRunMessageBox";
+import type { RunMessage } from "@/lib/coding-run-messages";
 import type { VercelState } from "@/lib/vercel-state";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
@@ -178,6 +180,10 @@ interface Run {
   attempts?: RunAttempt[];
   /** The ceiling that applied to this run. */
   completionAttempts?: number;
+  /** What the owner (or the assistant) has told this run while it works, and
+   *  whether the harness has had each of them yet. Absent on a server that
+   *  predates the queue, which is why the card reads it defensively. */
+  messages?: RunMessage[];
 }
 
 /**
@@ -2237,6 +2243,15 @@ export default function CodingAgentApp() {
                       })()}
                     </p>
                   </div>
+                )}
+                {/* Steering, while there is still something to steer. Above
+                    the controls on purpose: Stop and Pause are what an owner
+                    reached for when a run went the wrong way, and the point of
+                    this box is that they no longer have to. A held run — paused
+                    or drafted — takes one too: it is delivered when the run
+                    goes back in. */}
+                {!isSettled(run.status) && (
+                  <CodingRunMessageBox runId={run.id} messages={run.messages} onSent={() => { void load(); }} />
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
                   {runControls(run, "page")}

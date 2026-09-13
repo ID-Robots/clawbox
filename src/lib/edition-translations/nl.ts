@@ -957,6 +957,21 @@ export const nl: Record<string, string> = {
   "codingAgent.worktreeRemove": "Kopie verwijderen",
   "codingAgent.worktreeRemoveFailed": "Kon de kopie van het project niet verwijderen.",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "De agent iets vertellen",
+  "codingAgent.message.hint": "Stuur een correctie of iets wat hij moet weten. Hij gaat verder waar hij is — hij begint niet opnieuw.",
+  "codingAgent.message.placeholder": "De agent iets vertellen…",
+  "codingAgent.message.send": "Versturen",
+  "codingAgent.message.sending": "Versturen…",
+  "codingAgent.message.queued": "In wachtrij",
+  "codingAgent.message.delivered": "Bezorgd",
+  "codingAgent.message.failed": "Kon dat bericht niet naar de run sturen.",
+  "codingAgent.message.errorEmpty": "Typ iets om te versturen.",
+  "codingAgent.message.errorTooLong": "Dat bericht is te lang: maximaal {max} tekens.",
+  "codingAgent.message.errorNotPlainText": "Een bericht moet platte tekst zijn.",
+  "codingAgent.message.errorQueueFull": "Deze run heeft al {n} berichten in de wachtrij. Wacht tot hij ze gelezen heeft.",
+  "codingAgent.message.errorSettled": "Die run is klaar, dus er valt niets meer te vertellen.",
+
   "codingAgent.wizardTitle": "Codeagent instellen",
   "codingAgent.wizardIntro": "Met de codeagent geeft je assistent een hele taak door aan Claude Code op deze box: hij leest en schrijft bestanden in één map, voert daar opdrachten uit en rapporteert terug. Instellen kost vier stappen.",
   "codingAgent.wizardEnable": "Inschakelen",

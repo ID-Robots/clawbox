@@ -952,6 +952,21 @@ export const es: Record<string, string> = {
   "codingAgent.worktreeRemove": "Quitar copia",
   "codingAgent.worktreeRemoveFailed": "No se pudo quitar la copia del proyecto de la ejecución.",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "Decirle algo al agente",
+  "codingAgent.message.hint": "Envía una corrección o algo que deba saber. Continúa desde donde está: no empieza de nuevo.",
+  "codingAgent.message.placeholder": "Decirle algo al agente…",
+  "codingAgent.message.send": "Enviar",
+  "codingAgent.message.sending": "Enviando…",
+  "codingAgent.message.queued": "En cola",
+  "codingAgent.message.delivered": "Entregado",
+  "codingAgent.message.failed": "No se pudo enviar ese mensaje a la ejecución.",
+  "codingAgent.message.errorEmpty": "Escribe algo para enviar.",
+  "codingAgent.message.errorTooLong": "Ese mensaje es demasiado largo: como máximo {max} caracteres.",
+  "codingAgent.message.errorNotPlainText": "Un mensaje debe ser texto sin formato.",
+  "codingAgent.message.errorQueueFull": "Esta ejecución ya tiene {n} mensajes esperando. Espera a que los lea.",
+  "codingAgent.message.errorSettled": "Esa ejecución ha terminado, así que ya no hay nada que decirle.",
+
   "codingAgent.wizardTitle": "Configurar el agente de código",
   "codingAgent.wizardIntro": "El agente de código permite que tu asistente delegue una tarea completa a Claude Code en esta caja: lee y escribe archivos en una carpeta, ejecuta comandos allí e informa del resultado. Configurarlo lleva cuatro pasos.",
   "codingAgent.wizardEnable": "Activar",

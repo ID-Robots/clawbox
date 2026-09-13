@@ -75,6 +75,27 @@ export class RunMessageError extends Error {
 }
 
 /**
+ * Each refusal's translation key.
+ *
+ * Here rather than in the component for the reason `ALLOW_RULE_REFUSAL_KEYS`
+ * is: the route answers the code and the card words it, and the two must not
+ * be able to drift. `too_long` fills `{max}` and `queue_full` `{n}` from the
+ * constants above.
+ */
+export const RUN_MESSAGE_REFUSAL_KEYS: Record<RunMessageRefusal, string> = {
+  empty: "codingAgent.message.errorEmpty",
+  too_long: "codingAgent.message.errorTooLong",
+  not_plain_text: "codingAgent.message.errorNotPlainText",
+  queue_full: "codingAgent.message.errorQueueFull",
+  settled: "codingAgent.message.errorSettled",
+};
+
+/** Is this one of the codes this build knows how to word? */
+export function isRunMessageRefusal(value: unknown): value is RunMessageRefusal {
+  return typeof value === "string" && value in RUN_MESSAGE_REFUSAL_KEYS;
+}
+
+/**
  * Anything that is not printable text, a newline or a tab.
  *
  * PLAIN TEXT ONLY is a rule about what reaches the harness's stdin, and it is

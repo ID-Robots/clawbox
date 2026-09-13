@@ -943,6 +943,21 @@ export const bg: Record<string, string> = {
   "codingAgent.worktreeRemove": "Премахване на копието",
   "codingAgent.worktreeRemoveFailed": "Копието на проекта не можа да бъде премахнато.",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "Кажете нещо на агента",
+  "codingAgent.message.hint": "Изпратете корекция или нещо, което трябва да знае. Продължава оттам, докъдето е стигнал — не започва отначало.",
+  "codingAgent.message.placeholder": "Кажете нещо на агента…",
+  "codingAgent.message.send": "Изпрати",
+  "codingAgent.message.sending": "Изпраща се…",
+  "codingAgent.message.queued": "На опашка",
+  "codingAgent.message.delivered": "Доставено",
+  "codingAgent.message.failed": "Съобщението не можа да бъде изпратено към изпълнението.",
+  "codingAgent.message.errorEmpty": "Въведете нещо за изпращане.",
+  "codingAgent.message.errorTooLong": "Съобщението е твърде дълго: най-много {max} знака.",
+  "codingAgent.message.errorNotPlainText": "Съобщението трябва да е обикновен текст.",
+  "codingAgent.message.errorQueueFull": "Това изпълнение вече има {n} чакащи съобщения. Изчакайте да ги прочете.",
+  "codingAgent.message.errorSettled": "Това изпълнение приключи, така че няма какво повече да му се каже.",
+
   "codingAgent.wizardTitle": "Настройка на кодиращия агент",
   "codingAgent.wizardIntro": "Кодиращият агент позволява на асистента ви да предаде цяла задача на Claude Code на тази кутия: чете и записва файлове в една папка, изпълнява команди там и се отчита. Настройката е в четири стъпки.",
   "codingAgent.wizardEnable": "Активиране",
