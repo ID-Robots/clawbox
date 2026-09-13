@@ -79,8 +79,16 @@ export const MAX_DEPLOY_RECORDS = 50;
 
 /** One project's deployment history, as little of it as is worth keeping. */
 export interface ProjectDeployEntry {
-  /** The last deployment this box made for the project. */
-  latest: ProjectDeploy;
+  /**
+   * The last deployment this box made for the project.
+   *
+   * NULL is a real state and not a missing field: a project can hold a
+   * production slot it reserved a moment ago and have no deployment yet, and
+   * the first draft wrote a placeholder deployment to avoid saying so — which
+   * left a project whose first production deploy FAILED showing "waiting for
+   * Vercel to start the build" for ever.
+   */
+  latest: ProjectDeploy | null;
   /** When production deploys happened, newest last — the rate limit's memory. */
   productionAt: number[];
 }
@@ -109,7 +117,7 @@ function isDeploy(value: unknown): value is ProjectDeploy {
 function isEntry(value: unknown): value is ProjectDeployEntry {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
-  return isDeploy(v.latest)
+  return (v.latest === null || isDeploy(v.latest))
     && Array.isArray(v.productionAt)
     && v.productionAt.every((x) => typeof x === "number");
 }
@@ -159,31 +167,88 @@ function queue<T>(fn: () => Promise<T>): Promise<T> {
   return mine;
 }
 
+/** When this project was last heard from — a deployment, or a slot it took. */
+function touchedAt(entry: ProjectDeployEntry): number {
+  return Math.max(entry.latest?.startedAt ?? 0, ...entry.productionAt, 0);
+}
+
 /** Prune to the cap, oldest record first. */
 function pruned(all: ProjectDeploys): ProjectDeploys {
   const keys = Object.keys(all);
   if (keys.length <= MAX_DEPLOY_RECORDS) return all;
-  const order = keys.sort((a, b) => all[a].latest.startedAt - all[b].latest.startedAt);
+  const order = keys.sort((a, b) => touchedAt(all[a]) - touchedAt(all[b]));
   const next = empty();
   for (const key of order.slice(keys.length - MAX_DEPLOY_RECORDS)) next[key] = all[key];
   return next;
 }
 
-/** Record a deployment this box has just created. Answers what was stored. */
+/**
+ * Take a production slot, or say there is none — CHECKED AND WRITTEN in one
+ * queued step.
+ *
+ * Read-then-write with an `await` between them is not a rate limit: a model
+ * that fires two production deploys at once reads the same count twice and both
+ * pass. The whole point of this counter is to bound what happens when something
+ * loops, which is exactly when calls overlap, so the check and the reservation
+ * have to be the same operation — the reasoning `assertCanSpawn` in
+ * coding-agent.ts is written from.
+ *
+ * A reservation that never became a deployment is given back
+ * (`releaseProductionSlot`): the counter bounds DEPLOYMENTS, not attempts, and a
+ * token that is wrong must not lock the owner out of their own domain for an
+ * hour after three instant failures.
+ */
+export function reserveProductionSlot(scope: string, now = Date.now()): Promise<{ ok: true; at: number } | { ok: false; nextAt: number | null }> {
+  return queue(async () => {
+    const all = await readProjectDeploys();
+    const before = Object.prototype.hasOwnProperty.call(all, scope) ? all[scope] : null;
+    const allowance = productionAllowance(before, now);
+    if (allowance.left <= 0) return { ok: false as const, nextAt: allowance.nextAt };
+    const within = (before?.productionAt ?? []).filter((at) => now - at < PRODUCTION_WINDOW_MS);
+    const entry: ProjectDeployEntry = {
+      // A project whose first act is a production deploy has no deployment yet,
+      // and says so. The real one is recorded a moment later.
+      latest: before?.latest ?? null,
+      // The window is what bounds this list, and the cap is a second bound for
+      // a clock that moved backwards: a record from "the future" would survive
+      // every prune otherwise.
+      productionAt: [...within, now].slice(-MAX_PRODUCTION_DEPLOYS * 4),
+    };
+    await configSet(VERCEL_DEPLOYS_CONFIG_KEY, pruned({ ...all, [scope]: entry }));
+    return { ok: true as const, at: now };
+  });
+}
+
+/** Give a reserved slot back, for a deployment that never happened. */
+export function releaseProductionSlot(scope: string, at: number): Promise<void> {
+  return queue(async () => {
+    const all = await readProjectDeploys();
+    const before = Object.prototype.hasOwnProperty.call(all, scope) ? all[scope] : null;
+    if (!before) return;
+    const productionAt = before.productionAt.filter((x) => x !== at);
+    if (productionAt.length === before.productionAt.length) return;
+    const next = { ...all };
+    // An entry holding neither a deployment nor a slot is not a record of
+    // anything; leaving it would grow one row per project that ever tried.
+    if (!before.latest && productionAt.length === 0) delete next[scope];
+    else next[scope] = { ...before, productionAt };
+    await configSet(VERCEL_DEPLOYS_CONFIG_KEY, next);
+  });
+}
+
+/**
+ * Record a deployment this box has just created. Answers what was stored.
+ *
+ * It does NOT touch `productionAt`: `reserveProductionSlot` is the only writer
+ * of the counter, so the check and the increment cannot come apart.
+ */
 export function recordProjectDeploy(scope: string, deploy: ProjectDeploy): Promise<ProjectDeployEntry> {
   return queue(async () => {
     const all = await readProjectDeploys();
     const before = Object.prototype.hasOwnProperty.call(all, scope) ? all[scope] : null;
-    const now = deploy.startedAt;
     const entry: ProjectDeployEntry = {
       latest: deploy,
-      productionAt: [
-        ...(before?.productionAt ?? []).filter((at) => now - at < PRODUCTION_WINDOW_MS),
-        ...(deploy.target === "production" ? [now] : []),
-      // The window is what bounds this list, and the cap is a second bound for
-      // a clock that moved backwards: a record from "the future" would survive
-      // every prune otherwise.
-      ].slice(-MAX_PRODUCTION_DEPLOYS * 4),
+      productionAt: (before?.productionAt ?? []).filter((at) => deploy.startedAt - at < PRODUCTION_WINDOW_MS),
     };
     await configSet(VERCEL_DEPLOYS_CONFIG_KEY, pruned({ ...all, [scope]: entry }));
     return entry;
@@ -202,7 +267,7 @@ export function updateProjectDeploy(
     // Only the deployment the caller was told about: a poll that comes home
     // after the owner pressed Deploy again must not write the old build's
     // verdict over the new build's record.
-    if (!before || before.latest.deploymentId !== deploymentId) return null;
+    if (!before?.latest || before.latest.deploymentId !== deploymentId) return null;
     const entry: ProjectDeployEntry = { ...before, latest: { ...before.latest, ...change } };
     await configSet(VERCEL_DEPLOYS_CONFIG_KEY, { ...all, [scope]: entry });
     return entry;

@@ -18,6 +18,8 @@ import {
   readAutoProduction,
   readProjectDeploy,
   recordProjectDeploy,
+  releaseProductionSlot,
+  reserveProductionSlot,
   setAutoProduction,
   updateProjectDeploy,
   MAX_PRODUCTION_DEPLOYS,
@@ -339,18 +341,22 @@ export async function POST(request: Request): Promise<NextResponse> {
     // The rate limit, on the TARGET rather than on who asked: a bound on how
     // often this box rebuilds a domain other people are using is not a
     // statement about whether the owner is trusted, and an owner who really
-    // means it has the Vercel dashboard. It is the loop it stops.
-    const existing = await readProjectDeploy(scope);
+    // means it has the Vercel dashboard. It is the loop it stops — which is why
+    // the slot is RESERVED in one step rather than checked and then taken: two
+    // calls that arrive together read the same count, and a loop is exactly
+    // when calls arrive together.
+    let reserved: number | null = null;
     if (target === "production") {
-      const allowance = productionAllowance(existing);
-      if (allowance.left <= 0) {
+      const slot = await reserveProductionSlot(scope);
+      if (!slot.ok) {
         return refuse(
           429,
           "rate_limited",
           `This project has had ${MAX_PRODUCTION_DEPLOYS} production deployments in the last hour, which is as many as this ClawBox makes. Wait, or deploy it from Vercel.`,
-          { nextAt: allowance.nextAt },
+          { nextAt: slot.nextAt },
         );
       }
+      reserved = slot.at;
     }
 
     const made = await deployProject({
@@ -363,6 +369,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       meta: { clawbox: "1", clawboxProject: scope, ...(runId ? { clawboxRun: runId } : {}) },
     });
     if (!made.ok) {
+      // Nothing was deployed, so the slot goes back: the counter bounds
+      // DEPLOYMENTS, not attempts, and a wrong token must not lock the owner
+      // out of their own domain for an hour after three instant failures.
+      if (reserved !== null) await releaseProductionSlot(scope, reserved);
       return NextResponse.json(
         { error: made.detail, kind: made.code, code: made.code },
         // A refusal Vercel spoke is a 502 — the request was fine and the far

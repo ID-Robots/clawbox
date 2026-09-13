@@ -50,6 +50,8 @@ vi.mock("@/lib/vercel", async (importOriginal) => ({
   readProject,
 }));
 
+const reserveProductionSlot = vi.hoisted(() => vi.fn());
+const releaseProductionSlot = vi.hoisted(() => vi.fn());
 const readAutoProduction = vi.hoisted(() => vi.fn());
 const setAutoProduction = vi.hoisted(() => vi.fn());
 const readProjectDeploy = vi.hoisted(() => vi.fn());
@@ -62,6 +64,8 @@ vi.mock("@/lib/vercel-deploy-store", async (importOriginal) => ({
   readProjectDeploy,
   recordProjectDeploy,
   updateProjectDeploy,
+  reserveProductionSlot,
+  releaseProductionSlot,
 }));
 
 const SESSION_SECRET = "a".repeat(64);
@@ -115,6 +119,8 @@ beforeEach(async () => {
   readDeployment.mockResolvedValue({ ok: true, deployment: DEPLOYMENT });
   deployProject.mockResolvedValue(MADE);
   readAutoProduction.mockResolvedValue(false);
+  reserveProductionSlot.mockResolvedValue({ ok: true, at: 1_000 });
+  releaseProductionSlot.mockResolvedValue(undefined);
   setAutoProduction.mockResolvedValue(true);
   readProjectDeploy.mockResolvedValue(null);
   recordProjectDeploy.mockImplementation(async (_scope: string, latest: unknown) => ({ latest, productionAt: [] }));
@@ -185,27 +191,37 @@ describe("production", () => {
     expect(recordProjectDeploy.mock.calls[0][1]).toMatchObject({ by: "agent", target: "production" });
   });
 
+  it("RESERVES its slot before deploying, so two calls that arrive together cannot both pass", async () => {
+    await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "production", confirm: true } }));
+    expect(reserveProductionSlot).toHaveBeenCalledWith("shop");
+    expect(reserveProductionSlot.mock.invocationCallOrder[0])
+      .toBeLessThan(deployProject.mock.invocationCallOrder[0]);
+  });
+
   it("is rate limited per project, and the refusal says when", async () => {
-    const now = Date.now();
-    readProjectDeploy.mockResolvedValue({
-      latest: { target: "production", phase: "ready", projectId: "prj_acme", startedAt: now, by: "owner", deploymentId: "dpl_0" },
-      productionAt: [now, now, now],
-    });
+    const nextAt = Date.now() + 3_600_000;
+    reserveProductionSlot.mockResolvedValue({ ok: false, nextAt });
     const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "production", confirm: true } }));
     expect(res.status).toBe(429);
     const body = await res.json();
     expect(body.code).toBe("rate_limited");
-    expect(typeof body.nextAt).toBe("number");
+    expect(body.nextAt).toBe(nextAt);
     expect(deployProject).not.toHaveBeenCalled();
   });
 
+  it("gives the slot back when nothing was deployed", async () => {
+    // The counter bounds DEPLOYMENTS, not attempts: a wrong token must not lock
+    // the owner out of their own domain for an hour after three instant
+    // failures.
+    deployProject.mockResolvedValue({ ok: false, code: "auth", detail: "insufficient scope" });
+    await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "production", confirm: true } }));
+    expect(releaseProductionSlot).toHaveBeenCalledWith("shop", 1_000);
+  });
+
   it("does NOT rate limit a preview — that bound is about a domain people are on", async () => {
-    const now = Date.now();
-    readProjectDeploy.mockResolvedValue({
-      latest: { target: "production", phase: "ready", projectId: "prj_acme", startedAt: now, by: "owner", deploymentId: "dpl_0" },
-      productionAt: [now, now, now],
-    });
     expect((await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview" } }))).status).toBe(200);
+    expect(reserveProductionSlot).not.toHaveBeenCalled();
+    expect(releaseProductionSlot).not.toHaveBeenCalled();
   });
 });
 

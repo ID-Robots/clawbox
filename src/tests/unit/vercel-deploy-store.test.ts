@@ -70,7 +70,7 @@ describe("the record of what was deployed", () => {
 
   it("records WHO asked — after the fact there is no other way to tell", async () => {
     await store.recordProjectDeploy("shop", deploy({ by: "agent", target: "production" }));
-    expect((await store.readProjectDeploy("shop"))?.latest.by).toBe("agent");
+    expect((await store.readProjectDeploy("shop"))?.latest?.by).toBe("agent");
   });
 
   it("writes what a poll learned onto the deployment it was told about", async () => {
@@ -83,7 +83,7 @@ describe("the record of what was deployed", () => {
     await store.recordProjectDeploy("shop", deploy({ deploymentId: "dpl_2", startedAt: 2_000 }));
     // The first build's verdict, arriving after the owner pressed Deploy again.
     expect(await store.updateProjectDeploy("shop", "dpl_1", { phase: "failed" })).toBeNull();
-    expect((await store.readProjectDeploy("shop"))?.latest.phase).toBe("building");
+    expect((await store.readProjectDeploy("shop"))?.latest?.phase).toBe("building");
   });
 
   it("reads a malformed entry as no record rather than taking the page down", async () => {
@@ -127,36 +127,76 @@ describe("the owner's standing permission for the assistant", () => {
 });
 
 describe("the production rate limit", () => {
-  it("counts production deploys and not previews", async () => {
+  it("is spent by RESERVING a slot, not by recording a deployment", async () => {
     const now = Date.now();
-    await store.recordProjectDeploy("shop", deploy({ target: "preview", startedAt: now }));
+    // Recording a preview, or a production deployment whose slot was already
+    // reserved, must not spend a second one: the reservation is the only writer
+    // of the counter, so the check and the increment cannot come apart.
+    await store.recordProjectDeploy("shop", deploy({ target: "production", startedAt: now }));
     expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left).toBe(store.MAX_PRODUCTION_DEPLOYS);
-    await store.recordProjectDeploy("shop", deploy({ target: "production", startedAt: now, deploymentId: "dpl_2" }));
+    expect(await store.reserveProductionSlot("shop", now)).toMatchObject({ ok: true });
     expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left).toBe(store.MAX_PRODUCTION_DEPLOYS - 1);
   });
 
   it("runs out, and says when the next one is possible", async () => {
     const now = Date.now();
     for (let i = 0; i < store.MAX_PRODUCTION_DEPLOYS; i++) {
-      await store.recordProjectDeploy("shop", deploy({ target: "production", startedAt: now, deploymentId: `dpl_${i}` }));
+      expect(await store.reserveProductionSlot("shop", now), `slot ${i}`).toMatchObject({ ok: true });
     }
-    const allowance = store.productionAllowance(await store.readProjectDeploy("shop"), now);
-    expect(allowance.left).toBe(0);
-    expect(allowance.nextAt).toBe(now + store.PRODUCTION_WINDOW_MS);
+    expect(await store.reserveProductionSlot("shop", now)).toEqual({ ok: false, nextAt: now + store.PRODUCTION_WINDOW_MS });
+  });
+
+  it("cannot be overspent by calls that arrive together — that is when a loop arrives", async () => {
+    const now = Date.now();
+    // Read-then-write would let all five through: each reads the same count.
+    const asked = await Promise.all(
+      Array.from({ length: 5 }, () => store.reserveProductionSlot("shop", now)),
+    );
+    expect(asked.filter((a) => a.ok)).toHaveLength(store.MAX_PRODUCTION_DEPLOYS);
+  });
+
+  it("gives a slot back for a deployment that never happened", async () => {
+    const now = Date.now();
+    const slot = await store.reserveProductionSlot("shop", now);
+    expect(slot.ok).toBe(true);
+    if (!slot.ok) return;
+    // A wrong token must not lock the owner out of their own domain for an
+    // hour after three instant failures: the counter bounds DEPLOYMENTS.
+    await store.releaseProductionSlot("shop", slot.at);
+    expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left).toBe(store.MAX_PRODUCTION_DEPLOYS);
+  });
+
+  it("keeps a reservation readable on a project with no deployment yet", async () => {
+    const now = Date.now();
+    await store.reserveProductionSlot("shop", now);
+    // A row the reader refuses is a counter that vanishes at the next read,
+    // which is the one failure a rate limit cannot have — so `latest: null` is
+    // a real state rather than a placeholder deployment.
+    expect((await store.readProjectDeploy("shop"))?.latest).toBeNull();
+    expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left).toBe(store.MAX_PRODUCTION_DEPLOYS - 1);
+  });
+
+  it("leaves NO record behind when a project's first production deploy never happened", async () => {
+    // The first draft wrote a placeholder deployment to satisfy the reader, and
+    // a failed first deploy then left the card saying "waiting for Vercel to
+    // start the build" for ever.
+    const now = Date.now();
+    const slot = await store.reserveProductionSlot("shop", now);
+    if (!slot.ok) throw new Error("no slot");
+    await store.releaseProductionSlot("shop", slot.at);
+    expect(await store.readProjectDeploy("shop")).toBeNull();
   });
 
   it("is a WINDOW, not a total — yesterday's deploys are not held against today's", async () => {
     const now = Date.now();
     const old = now - store.PRODUCTION_WINDOW_MS - 1;
-    for (let i = 0; i < store.MAX_PRODUCTION_DEPLOYS; i++) {
-      await store.recordProjectDeploy("shop", deploy({ target: "production", startedAt: old, deploymentId: `dpl_${i}` }));
-    }
+    for (let i = 0; i < store.MAX_PRODUCTION_DEPLOYS; i++) await store.reserveProductionSlot("shop", old);
     expect(store.productionAllowance(await store.readProjectDeploy("shop"), now).left).toBe(store.MAX_PRODUCTION_DEPLOYS);
   });
 
   it("is on DISK, so a restart does not hand the allowance back", async () => {
     const now = Date.now();
-    await store.recordProjectDeploy("shop", deploy({ target: "production", startedAt: now }));
+    await store.reserveProductionSlot("shop", now);
     // A fresh module graph is what a restarted web server has.
     vi.resetModules();
     const restarted = await import("@/lib/vercel-deploy-store");
