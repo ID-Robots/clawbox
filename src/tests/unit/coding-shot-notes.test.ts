@@ -95,6 +95,21 @@ it("answers {} for a note file too big to read on the server's own thread", () =
   expect(readShotNotes(dir)).toEqual({});
 });
 
+it("reads a file exactly at the ceiling, and one byte over it is refused", () => {
+  const file = path.join(dir, SHOT_NOTES_FILE);
+  const body = (padding: number) => `{"shot-001.png":"a note","pad":"${"x".repeat(padding)}"}`;
+  // Built by bisection so the JSON is valid at exactly MAX_NOTES_FILE_BYTES:
+  // the ceiling itself must READ, or "at most N bytes" would mean N - 1.
+  let pad = MAX_NOTES_FILE_BYTES - body(0).length;
+  while (body(pad).length > MAX_NOTES_FILE_BYTES) pad -= 1;
+  fs.writeFileSync(file, body(pad));
+  expect(fs.statSync(file).size).toBe(MAX_NOTES_FILE_BYTES);
+  expect(readShotNotes(dir)["shot-001.png"]).toBe("a note");
+
+  fs.writeFileSync(file, body(pad + 1));
+  expect(readShotNotes(dir)).toEqual({});
+});
+
 it("stops at the cap when reading a file it did not write alone", () => {
   const forged: Record<string, string> = {};
   for (let i = 0; i < MAX_SHOT_NOTES + 40; i += 1) forged[`shot-${String(i).padStart(4, "0")}.png`] = `state ${i}`;

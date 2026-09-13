@@ -82,19 +82,46 @@ export function tidyNote(text: string): string {
  */
 export const MAX_NOTES_FILE_BYTES = 4 * MAX_SHOT_NOTES * (100 + MAX_NOTE_CHARS);
 
+/**
+ * The bytes of the note file, or null when there are too many of them.
+ *
+ * ONE open handle, never stat-then-read — the `vision/describe` route's rule,
+ * and for its reason: the run whose folder this is can rewrite the file between
+ * the two calls, so a size checked on the path says nothing about the size read
+ * from it. At most MAX_NOTES_FILE_BYTES + 1 bytes ever enter this process, and
+ * that one extra byte IS the verdict: it can only arrive from a file over the
+ * ceiling.
+ */
+function readNotesFile(file: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, "r");
+    const buffer = Buffer.allocUnsafe(MAX_NOTES_FILE_BYTES + 1);
+    let filled = 0;
+    for (;;) {
+      const read = fs.readSync(fd, buffer, filled, buffer.length - filled, null);
+      if (read === 0) break;
+      filled += read;
+      if (filled >= buffer.length) return null;
+    }
+    return buffer.subarray(0, filled).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Nothing left to do about a descriptor that will not close.
+      }
+    }
+  }
+}
+
 /** Picture name → what it showed. `{}` for a run that captured nothing. */
 export function readShotNotes(dir: string): Record<string, string> {
-  const file = notesPath(dir);
-  let raw: string;
-  try {
-    // Asked of the file, then read: a file that grew between the two is still
-    // bounded by what one read returns, and the point is the pathological case
-    // (a run that wrote megabytes), not a byte-exact ceiling.
-    if (fs.statSync(file).size > MAX_NOTES_FILE_BYTES) return {};
-    raw = fs.readFileSync(file, "utf8");
-  } catch {
-    return {};
-  }
+  const raw = readNotesFile(notesPath(dir));
+  if (raw === null) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
