@@ -180,6 +180,30 @@ describe("the body", () => {
     expect(message).toContain("{ autoMerge: boolean }");
   });
 
+  it("takes the runs-at-once setting, refuses a value outside the range, and names it in the refusal", async () => {
+    const ok = await POST(request({ cookie: ownerCookie(), body: { maxParallelRuns: 3 } }));
+    expect(ok.status).toBe(200);
+
+    for (const bad of [0, 5, 2.5, -1]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { maxParallelRuns: bad } }));
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error as string).toContain("between 1 and 4");
+    }
+
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    expect((await empty.json()).error as string).toContain("{ maxParallelRuns: number }");
+  });
+
+  it("refuses a runs-at-once value BEFORE any other setting in the same body is saved", async () => {
+    // The settings are applied one at a time, so a value refused halfway
+    // through would answer 400 over an effort that had already moved. The
+    // check sits with the folder-length one, ahead of the first setter.
+    setEffort.mockClear();
+    const res = await POST(request({ cookie: ownerCookie(), body: { effort: "high", maxParallelRuns: 9 } }));
+    expect(res.status).toBe(400);
+    expect(setEffort).not.toHaveBeenCalled();
+  });
+
   it("takes 0 rounds — the loop switched off is a setting, not an empty body", async () => {
     // `!fields.reviewRounds` would read 0 as "this request is not about the
     // rounds" and answer 400 for the one value that switches the loop off.

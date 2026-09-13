@@ -7,6 +7,8 @@ import {
   getCodingAgentStatus,
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
+  MAX_MAX_PARALLEL_RUNS,
+  MIN_MAX_PARALLEL_RUNS,
   setCodingAgentEnabled,
   setCodingProvider,
   setDefaultDirectory,
@@ -203,6 +205,21 @@ export async function POST(request: Request) {
   }
   if (typeof fields.defaultDirectory === "string" && fields.defaultDirectory.length > MAX_DIRECTORY_CHARS) {
     return NextResponse.json({ error: "The folder path is too long.", kind: "invalid" }, { status: 400 });
+  }
+  // Checked BEFORE the first setter runs, the way the folder length above is.
+  // The setters below apply one at a time, so a value refused halfway through
+  // answers 400 over settings that have already been saved — a body carrying
+  // both `effort` and a runs-at-once number this box does not offer would move
+  // the effort and then report a failure. The setter keeps its own throw: it is
+  // the library's door, and the MCP path does not come through here.
+  if (hasMaxParallelRuns
+    && (!Number.isInteger(fields.maxParallelRuns)
+      || (fields.maxParallelRuns as number) < MIN_MAX_PARALLEL_RUNS
+      || (fields.maxParallelRuns as number) > MAX_MAX_PARALLEL_RUNS)) {
+    return NextResponse.json(
+      { error: `The number of runs at once must be a whole number between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`, kind: "invalid" },
+      { status: 400 },
+    );
   }
 
   try {
