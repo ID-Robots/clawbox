@@ -15,7 +15,7 @@ import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
 import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import CodingProjectDeleteDialog from "./CodingProjectDeleteDialog";
-import { startHarnessTest } from "@/lib/coding-agent-harness-test";
+import { HARNESS_TEST_PROJECT, startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
@@ -336,6 +336,13 @@ function runBelongsTo(r: Run, pr: Project): boolean {
  */
 function missingProjectOf(r: Run, projects: Project[], projectsDir: string | null): string | null {
   if (projects.some((pr) => runBelongsTo(r, pr))) return null;
+  // The Test-harness button's scratch project is KEPT OUT of the listing on
+  // purpose (listProjects skips HARNESS_TEST_PROJECT_ID), so its smoke run
+  // matches no row by design — and this said "harness-test — removed" about a
+  // folder the box had just made and never touched. "Belongs to no listed
+  // project" and "its project was removed" are different facts, and this is the
+  // one place the listing cannot tell them apart for us.
+  if (r.projectId === HARNESS_TEST_PROJECT) return null;
   if (r.projectId) {
     return projects.some((pr) => pr.kind === "codeProject" && pr.folder === r.projectId) ? null : r.projectId;
   }

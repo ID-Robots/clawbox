@@ -25,12 +25,15 @@ const CLEAN: ProjectDeletePreview = {
   kind: "folder",
   directory: "/home/clawbox/Projects/shop",
   size: { bytes: 4096, files: 12, truncated: false },
-  unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, worktrees: [], notARepository: false, any: false },
+  unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
   liveRuns: [],
   vercelLinked: false,
   secretNames: [],
   runCount: 0,
   retentionDays: 30,
+  retentionMax: 10,
+  trashCount: 2,
+  wouldPurge: [],
   refusal: null,
 };
 
@@ -38,8 +41,11 @@ const OUTCOME = {
   folder: "shop",
   trashPath: "/home/clawbox/clawbox/data/deleted-projects/shop--20260913T120000Z",
   retentionDays: 30,
+  retentionMax: 10,
   vercelLinkRemoved: true,
   secretsRemoved: ["VERCEL_TOKEN"],
+  metadataKeptFor: null,
+  prunedEarly: [],
   runsKept: 3,
 };
 
@@ -93,7 +99,7 @@ describe("a project that may go", () => {
 
     const facts = await screen.findByTestId("coding-agent-delete-facts");
     expect(facts.textContent).toContain(t("codingAgent.delete.whatIsThere", { size: "4.0 KB", files: 12 }));
-    expect(facts.textContent).toContain(t("codingAgent.delete.willMove", { days: 30 }));
+    expect(facts.textContent).toContain(t("codingAgent.delete.willMove", { days: 30, max: 10 }));
     expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveVercel"));
     expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
     // The runs are KEPT, and the dialog says so rather than leaving it to be
@@ -127,12 +133,97 @@ describe("a project that may go", () => {
     fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
 
     await waitFor(() => expect(screen.queryByTestId("coding-agent-delete-done")).toBeTruthy());
-    expect(deletes).toEqual([{ body: { folder: "shop", kind: "folder", confirm: "shop", force: false } }]);
+    expect(deletes).toEqual([{ body: { folder: "shop", kind: "folder", confirm: "shop", force: false, purgeOldest: false } }]);
     expect(screen.getByTestId("coding-agent-delete-trash-path").textContent).toBe(OUTCOME.trashPath);
-    expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.retention", { days: 30 }));
+    expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.retention", { days: 30, max: 10 }));
     expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.vercelRemoved"));
     expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.runsKept", { n: 3 }));
     expect(onDeleted).toHaveBeenCalledWith(OUTCOME);
+  });
+
+  it("states BOTH retention bounds, never the period on its own", async () => {
+    // The consent defect: "kept for 30 days" is untrue the moment an eleventh
+    // removal arrives. The dialog must say the count bound wherever it says the
+    // period — see coding-project-delete-promise.test.ts for the copy's own half
+    // of this rule.
+    stubFetch(CLEAN);
+    open();
+    const facts = await screen.findByTestId("coding-agent-delete-facts");
+    expect(facts.textContent).toContain("10");
+    expect(facts.textContent).toContain("30");
+    // Nothing is at risk on a shelf with room, so no warning is drawn.
+    expect(screen.queryByTestId("coding-agent-delete-would-purge")).toBeNull();
+  });
+
+  it("names what this removal would delete early, and DEMANDS a yes for it", async () => {
+    // The folder at risk is another project, still inside the thirty days it
+    // was promised. Being told is not the same as agreeing, so the tick is a
+    // condition and not a nudge — and it lives inside the panel that names it.
+    stubFetch({ ...CLEAN, trashCount: 10, wouldPurge: ["old-thing--20260801T090000Z"] });
+    open();
+    const warning = await screen.findByTestId("coding-agent-delete-would-purge");
+    expect(warning.textContent).toContain(t("codingAgent.delete.willPurge", { names: "old-thing--20260801T090000Z", max: 10 }));
+    expect(warning.querySelector("[data-testid='coding-agent-delete-purge-oldest']")).toBeTruthy();
+
+    const button = screen.getByTestId("coding-agent-delete-confirm") as HTMLButtonElement;
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    // The name alone is not enough while another project is at stake.
+    expect(button.disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId("coding-agent-delete-purge-oldest"));
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    expect(deletes[0].body).toMatchObject({ purgeOldest: true });
+  });
+
+  it("asks for no such yes when the shelf has room", async () => {
+    stubFetch(CLEAN);
+    open();
+    await screen.findByTestId("coding-agent-delete-facts");
+    expect(screen.queryByTestId("coding-agent-delete-purge-oldest")).toBeNull();
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    expect((screen.getByTestId("coding-agent-delete-confirm") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("says when the secrets stayed because another project shares the name", async () => {
+    stubFetch(CLEAN, {
+      ok: true,
+      body: { ...OUTCOME, vercelLinkRemoved: false, secretsRemoved: [], metadataKeptFor: "/home/clawbox/clawbox/data/code-projects/shop" },
+    });
+    open();
+    await screen.findByTestId("coding-agent-delete-facts");
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+    // "No secrets went" would otherwise read as "there were none".
+    expect((await screen.findByTestId("coding-agent-delete-metadata-kept")).textContent)
+      .toBe(t("codingAgent.delete.metadataKept"));
+  });
+
+  it("reports afterwards what the count bound actually took", async () => {
+    stubFetch(
+      { ...CLEAN, trashCount: 10, wouldPurge: ["old-thing--20260801T090000Z"] },
+      { ok: true, body: { ...OUTCOME, prunedEarly: ["old-thing--20260801T090000Z"] } },
+    );
+    open();
+    await screen.findByTestId("coding-agent-delete-facts");
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    // The shelf is full, so the removal needs the explicit yes as well.
+    fireEvent.click(screen.getByTestId("coding-agent-delete-purge-oldest"));
+    fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+
+    const purged = await screen.findByTestId("coding-agent-delete-purged");
+    expect(purged.textContent).toBe(t("codingAgent.delete.purged", { names: "old-thing--20260801T090000Z" }));
+  });
+
+  it("says nothing about a purge when nothing went early", async () => {
+    stubFetch(CLEAN);
+    open();
+    await screen.findByTestId("coding-agent-delete-facts");
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+    await screen.findByTestId("coding-agent-delete-done");
+    expect(screen.queryByTestId("coding-agent-delete-purged")).toBeNull();
   });
 
   it("says a folder is empty rather than quoting a size of nothing", async () => {
@@ -156,6 +247,10 @@ describe("a project with work that exists nowhere else", () => {
       dirtyCount: 14,
       dirtyTruncated: true,
       unpushed: 2,
+      stashes: 1,
+      ignored: ["app.db"],
+      ignoredCount: 1,
+      ignoredTruncated: false,
       worktrees: ["run-abc12345"],
       notARepository: false,
       any: true,
@@ -172,6 +267,12 @@ describe("a project with work that exists nowhere else", () => {
     expect(panel.textContent).toContain("index.html, src/app.ts");
     expect(panel.textContent).toContain(t("codingAgent.delete.andMore"));
     expect(panel.textContent).toContain(t("codingAgent.delete.unsavedUnpushed", { n: 2 }));
+    // Stashes and ignored files are work that exists nowhere else too, and the
+    // ignored ones are NAMED, because git cannot tell `node_modules/` from the
+    // only copy of a database and the owner can.
+    expect(panel.textContent).toContain(t("codingAgent.delete.unsavedStashes", { n: 1 }));
+    expect(panel.textContent).toContain(t("codingAgent.delete.unsavedIgnored", { n: 1 }));
+    expect(panel.textContent).toContain("app.db");
     expect(panel.textContent).toContain(t("codingAgent.delete.unsavedWorktrees", { names: "run-abc12345" }));
     // The flag lives INSIDE the panel that lists the losses: it cannot be
     // reached without the list being on screen.

@@ -46,12 +46,17 @@ export const dynamic = "force-dynamic";
  *    up; the only caller is a person in a dialog.
  *
  * GET    ?folder=…&kind=…                     → the preview the dialog draws
- * DELETE { folder, kind?, confirm, force? }   → do it, and say where it went
+ * DELETE { folder, kind?, confirm, force?, purgeOldest? } → do it, and say where it went
  *
- * `force` clears ONE refusal — a folder with work that exists nowhere else —
- * and the UI offers it only after this route's own preview has listed what that
- * work is. Every other refusal is a fact about the box or the request, and no
- * flag in a body makes it untrue.
+ * TWO flags, each clearing exactly ONE refusal, and each offered by the UI only
+ * after this route's own preview has named what it costs. `force` clears
+ * `unsaved_work` — a folder holding work that exists nowhere else. `purgeOldest`
+ * clears `trash_full` — a shelf of removed projects all still inside their
+ * thirty days, where making room for this one deletes another for good. That
+ * second one is a refusal rather than a warning because the folders at risk are
+ * OTHER projects the owner was promised a month for, and being told is not the
+ * same as agreeing. Every remaining refusal is a fact about the box or the
+ * request, and no flag in a body makes it untrue.
  *
  * The DELETE answers with the re-read projects listing beside its outcome, so
  * the app redraws from the box's own answer rather than from the row it hoped
@@ -134,6 +139,7 @@ export async function DELETE(request: Request) {
   let kind: unknown = query.get("kind") ?? undefined;
   let confirm: unknown = query.get("confirm") ?? undefined;
   let force: unknown = query.get("force") === "true";
+  let purgeOldest: unknown = query.get("purgeOldest") === "true";
   // A DELETE may carry a body and not every client sends one, exactly as on the
   // secrets route: the query is read first so a caller that cannot send a body
   // still works, and the body wins when it names a folder, because that is the
@@ -143,16 +149,17 @@ export async function DELETE(request: Request) {
     if (!read.ok) {
       return read.reason === "too_long"
         ? refuse(413, "invalid", TOO_LONG, "invalid")
-        : refuse(400, "invalid", "Invalid body. Expected { folder, kind?, confirm, force? }.", "invalid");
+        : refuse(400, "invalid", "Invalid body. Expected { folder, kind?, confirm, force?, purgeOldest? }.", "invalid");
     }
     folder = read.body?.folder;
     kind = read.body?.kind;
     confirm = read.body?.confirm;
     force = read.body?.force === true;
+    purgeOldest = read.body?.purgeOldest === true;
   }
 
   try {
-    const outcome = await deleteProject({ folder, kind, confirm, force });
+    const outcome = await deleteProject({ folder, kind, confirm, force, purgeOldest });
     // The NAME and where it went, never the owner's file list — this line goes
     // to the journal, which is a place a project's contents do not belong.
     console.error(

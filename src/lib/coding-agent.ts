@@ -113,6 +113,7 @@ import {
 } from "@/lib/coding-provider";
 import { getAnthropicConnection, type AnthropicSource } from "@/lib/coding-anthropic";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
 import { APP_ID_RE } from "@/lib/code-projects";
@@ -10045,6 +10046,22 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
  * other's half-written files and each settle would commit the other's.
  */
 function assertDirectoryFree(directory: string, exceptRunId?: string): void {
+  // A project the owner is REMOVING right now, before the run store is asked.
+  //
+  // This is the run half of a mutual exclusion, and the removal holds the other
+  // (`beginProjectRemoval` in src/lib/coding-project-delete.ts). The gap it
+  // closes: a removal checks for live runs, then spends four git processes and
+  // — on a cross-device move — a whole recursive copy before the folder
+  // actually goes. A run that started inside that window found nothing live,
+  // began writing, and the copy-then-remove deleted a file written after it was
+  // copied: gone from the original and never in the trash. Synchronous on both
+  // sides, so the two cannot each decide the other is not there.
+  if (isProjectBeingRemoved(directory)) {
+    throw new CodingAgentError(
+      "busy",
+      "That project folder is being removed right now. Wait for it to finish, or work somewhere else.",
+    );
+  }
   const busy = loadRuns().find((r) => isLive(r.status) && r.id !== exceptRunId && r.directory === directory);
   if (busy) {
     throw new CodingAgentError(

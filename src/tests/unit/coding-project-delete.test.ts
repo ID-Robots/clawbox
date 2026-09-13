@@ -113,6 +113,24 @@ describe("resolveProjectTarget", () => {
     expect(await refusal(() => lib.resolveProjectTarget({ folder: 42 }, roots()))).toBe("invalid");
   });
 
+  it("never trims a folder name into a DIFFERENT project", async () => {
+    // A trailing space is legal in a folder name and the listing hands it to
+    // the app as it found it. Trimming here resolved "shop " to "shop": the
+    // dialog named one folder and the box would have moved another.
+    fs.mkdirSync(path.join(owner, "shop"));
+    fs.mkdirSync(path.join(owner, "shop "));
+    expect((await lib.resolveProjectTarget({ folder: "shop " }, roots())).directory)
+      .toBe(path.join(owner, "shop "));
+    expect((await lib.resolveProjectTarget({ folder: "shop" }, roots())).directory)
+      .toBe(path.join(owner, "shop"));
+  });
+
+  it("still refuses a name that is nothing but whitespace", async () => {
+    for (const folder of ["", " ", "\t", "  \n "]) {
+      expect(await refusal(() => lib.resolveProjectTarget({ folder }, roots())), JSON.stringify(folder)).toBe("invalid");
+    }
+  });
+
   it("refuses a name nothing answers to", async () => {
     expect(await refusal(() => lib.resolveProjectTarget({ folder: "nope" }, roots()))).toBe("not_found");
   });
@@ -170,6 +188,37 @@ describe("resolveProjectTarget", () => {
     expect(fs.existsSync(checkout)).toBe(true);
   });
 
+  it("refuses a folder that HOLDS the checkout, not only the checkout itself", async () => {
+    // A project folder set a level above the box's own repository — config.json
+    // is a file the owner can edit — makes the folder containing the running OS
+    // an ordinary row with a Delete button on it. The equality check alone let
+    // it through, and only the kernel's refusal to move a folder into its own
+    // descendant stopped it.
+    const holder = path.join(root, "Holder");
+    const checkout = path.join(holder, "dev", "clawbox");
+    fs.mkdirSync(path.join(checkout, "data", "code-projects"), { recursive: true });
+    expect(await refusal(() => lib.resolveProjectTarget({ folder: "dev" }, {
+      ownerFolder: holder,
+      codeProjects: path.join(checkout, "data", "code-projects"),
+      checkout,
+    }))).toBe("protected_checkout");
+    expect(fs.existsSync(checkout)).toBe(true);
+  });
+
+  it("still allows a project that merely SITS BESIDE the checkout", async () => {
+    // The mirror of the rule above: containment is one-directional. A code
+    // project lives INSIDE the checkout and must stay removable.
+    const holder = path.join(root, "Holder2");
+    const checkout = path.join(holder, "clawbox");
+    fs.mkdirSync(path.join(checkout, "data"), { recursive: true });
+    fs.mkdirSync(path.join(holder, "shop"));
+    expect(await lib.resolveProjectTarget({ folder: "shop" }, {
+      ownerFolder: holder,
+      codeProjects: path.join(checkout, "data", "code-projects"),
+      checkout,
+    })).toMatchObject({ folder: "shop", kind: "folder" });
+  });
+
   it("says so when there is no owner folder and no code project of that name", async () => {
     expect(await refusal(() => lib.resolveProjectTarget({ folder: "shop" }, { ...roots(), ownerFolder: null })))
       .toBe("not_found");
@@ -204,6 +253,15 @@ describe("the trash and its retention rule", () => {
     expect(lib.trashEntryTime(moved.trashName)).toBe(at);
   });
 
+  it("refuses to move a folder that holds the trash, rather than asking the kernel to", async () => {
+    // `moveProjectToTrash` is exported, so the checkout guard upstream is not
+    // the only way in. A folder holding `data/` would be a move into its own
+    // descendant; refused by name instead of as an errno.
+    expect(await refusal(() => lib.moveProjectToTrash(root, Date.parse("2026-09-13T12:00:00.000Z"))))
+      .toBe("protected_checkout");
+    expect(fs.existsSync(path.join(root, "data"))).toBe(true);
+  });
+
   it("never writes over an entry that is already there", async () => {
     const at = Date.parse("2026-09-13T12:00:00.000Z");
     for (const n of [1, 2]) {
@@ -216,16 +274,63 @@ describe("the trash and its retention rule", () => {
     expect(fs.readdirSync(lib.projectTrashDir()).sort()).toEqual(["shop--20260913T120000Z", "shop-2--20260913T120000Z"]);
   });
 
+  describe("the cross-device fallback", () => {
+    /** Force the EXDEV branch: a different mount is the only real way in. */
+    function renameFailsExdev() {
+      vi.spyOn(fs.promises, "rename").mockRejectedValue(Object.assign(new Error("EXDEV"), { code: "EXDEV" }));
+    }
+
+    it("keeps the ORIGINAL when the copy fails, and sweeps the partial copy up", async () => {
+      const project = path.join(owner, "shop");
+      fs.mkdirSync(project);
+      fs.writeFileSync(path.join(project, "index.html"), "hi");
+      renameFailsExdev();
+      vi.spyOn(fs.promises, "cp").mockRejectedValue(new Error("ENOSPC: no space left on device"));
+
+      await expect(lib.moveProjectToTrash(project, Date.parse("2026-09-13T12:00:00.000Z")))
+        .rejects.toMatchObject({ code: "trash_failed", message: expect.stringContaining("nothing was removed") });
+      expect(fs.readFileSync(path.join(project, "index.html"), "utf8")).toBe("hi");
+      expect(fs.readdirSync(lib.projectTrashDir())).toEqual([]);
+    });
+
+    it("keeps the COPY when the original cannot be removed, and says so", async () => {
+      // `fs.rm` deletes as it walks, so a remove that fails part-way leaves the
+      // original gutted and the copy the only whole one. Deleting the copy here
+      // — which one `try` around both halves did — loses the folder outright
+      // while reporting that nothing was removed.
+      const project = path.join(owner, "shop");
+      fs.mkdirSync(project);
+      fs.writeFileSync(path.join(project, "index.html"), "hi");
+      renameFailsExdev();
+      const realRm = fs.promises.rm.bind(fs.promises);
+      vi.spyOn(fs.promises, "rm").mockImplementation(async (target, opts) => {
+        if (path.resolve(String(target)) === path.resolve(project)) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+        return realRm(target, opts);
+      });
+
+      await expect(lib.moveProjectToTrash(project, Date.parse("2026-09-13T12:00:00.000Z")))
+        .rejects.toMatchObject({ code: "trash_failed", message: expect.stringContaining("copy is whole and has been kept") });
+      const kept = fs.readdirSync(lib.projectTrashDir());
+      expect(kept).toEqual(["shop--20260913T120000Z"]);
+      expect(fs.readFileSync(path.join(lib.projectTrashDir(), kept[0], "index.html"), "utf8")).toBe("hi");
+    });
+  });
+
+  /** A trash entry named the way this module names one, `ms` ago. */
+  const stamped = (name: string, now: number, ms: number) =>
+    `${name}--${new Date(now - ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
+
   it("prunes on age, oldest first, and leaves what is still in date", async () => {
     const now = Date.parse("2026-09-13T12:00:00.000Z");
     const trash = lib.projectTrashDir();
     fs.mkdirSync(trash, { recursive: true });
-    const old = `old--${new Date(now - 31 * day).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
-    const fresh = `fresh--${new Date(now - 2 * day).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
+    const old = stamped("old", now, 31 * day);
+    const fresh = stamped("fresh", now, 2 * day);
     fs.mkdirSync(path.join(trash, old));
     fs.mkdirSync(path.join(trash, fresh));
 
-    expect(await lib.pruneProjectTrash(now)).toEqual([old]);
+    // Expired, and reported as expired — nobody was promised those.
+    expect(await lib.pruneProjectTrash(now)).toEqual({ removed: [old], expired: [old], early: [] });
     expect(fs.existsSync(path.join(trash, fresh))).toBe(true);
   });
 
@@ -234,17 +339,59 @@ describe("the trash and its retention rule", () => {
     const trash = lib.projectTrashDir();
     fs.mkdirSync(trash, { recursive: true });
     for (let i = 0; i < lib.MAX_TRASH_ENTRIES + 3; i += 1) {
-      const at = new Date(now - i * 60_000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-      fs.mkdirSync(path.join(trash, `p${i}--${at}`));
+      fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
     }
     // Somebody's own folder, put there by hand. It carries no stamp, so the
     // prune must leave it alone however full the trash is.
     fs.mkdirSync(path.join(trash, "keep-me-please"));
 
-    const removed = await lib.pruneProjectTrash(now);
-    expect(removed).toHaveLength(3);
+    const pruned = await lib.pruneProjectTrash(now);
+    expect(pruned.removed).toHaveLength(3);
+    // Reported as EARLY, not expired: these were inside their thirty days and
+    // went only because the shelf was full. That distinction is what the dialog
+    // needs in order not to lie about "kept for 30 days".
+    expect(pruned.early).toHaveLength(3);
+    expect(pruned.expired).toEqual([]);
     expect(fs.readdirSync(trash).filter((n) => n.includes("--"))).toHaveLength(lib.MAX_TRASH_ENTRIES);
     expect(fs.existsSync(path.join(trash, "keep-me-please"))).toBe(true);
+  });
+
+  it("says which entry ONE MORE removal would delete early, before it happens", async () => {
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const trash = lib.projectTrashDir();
+    fs.mkdirSync(trash, { recursive: true });
+    // Exactly full, all well inside their thirty days.
+    for (let i = 0; i < lib.MAX_TRASH_ENTRIES; i += 1) {
+      fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
+    }
+    const oldest = stamped(`p${lib.MAX_TRASH_ENTRIES - 1}`, now, (lib.MAX_TRASH_ENTRIES - 1) * 60_000);
+
+    expect(await lib.trashPurgedByOneMore(now)).toEqual({ count: lib.MAX_TRASH_ENTRIES, early: [oldest] });
+    // Nothing has been touched: this is a question, not an act.
+    expect(fs.readdirSync(trash)).toHaveLength(lib.MAX_TRASH_ENTRIES);
+  });
+
+  it("warns about nothing while the shelf has room", async () => {
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const trash = lib.projectTrashDir();
+    fs.mkdirSync(trash, { recursive: true });
+    for (let i = 0; i < lib.MAX_TRASH_ENTRIES - 1; i += 1) {
+      fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
+    }
+    expect(await lib.trashPurgedByOneMore(now)).toEqual({ count: lib.MAX_TRASH_ENTRIES - 1, early: [] });
+  });
+
+  it("counts an EXPIRED entry as room rather than as an early loss", async () => {
+    // A full shelf where one entry is already past its thirty days: the
+    // arriving folder takes that one's place, and nothing goes early.
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const trash = lib.projectTrashDir();
+    fs.mkdirSync(trash, { recursive: true });
+    fs.mkdirSync(path.join(trash, stamped("ancient", now, 40 * day)));
+    for (let i = 0; i < lib.MAX_TRASH_ENTRIES - 1; i += 1) {
+      fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
+    }
+    expect((await lib.trashPurgedByOneMore(now)).early).toEqual([]);
   });
 
   it("reads a name it did not write as having no time, so the prune skips it", () => {

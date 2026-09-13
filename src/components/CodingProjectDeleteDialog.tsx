@@ -43,6 +43,10 @@ export interface ProjectDeletePreview {
     dirtyCount: number;
     dirtyTruncated: boolean;
     unpushed: number | null;
+    stashes: number;
+    ignored: string[];
+    ignoredCount: number;
+    ignoredTruncated: boolean;
     worktrees: string[];
     notARepository: boolean;
     any: boolean;
@@ -52,6 +56,11 @@ export interface ProjectDeletePreview {
   secretNames: string[];
   runCount: number;
   retentionDays: number;
+  /** The count bound on the trash — the other half of the retention rule. */
+  retentionMax: number;
+  trashCount: number;
+  /** What this removal would delete for good, straight away, to make room. */
+  wouldPurge: string[];
   refusal: { code: string; message: string } | null;
 }
 
@@ -60,8 +69,13 @@ export interface ProjectDeleteOutcome {
   folder: string;
   trashPath: string;
   retentionDays: number;
+  retentionMax: number;
   vercelLinkRemoved: boolean;
   secretsRemoved: string[];
+  /** Another project of the same name still uses the secrets and link, so they stayed. */
+  metadataKeptFor: string | null;
+  /** Older removals the count bound took early to make room for this one. */
+  prunedEarly: string[];
   runsKept: number;
 }
 
@@ -86,6 +100,8 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
   const [blocked, setBlocked] = useState<{ code: string; message: string } | null>(null);
   const [typed, setTyped] = useState("");
   const [force, setForce] = useState(false);
+  /** The owner's explicit yes to deleting somebody else's recoverable project. */
+  const [purgeOldest, setPurgeOldest] = useState(false);
   const [busy, setBusy] = useState(false);
   /** A refusal the removal met, which is not always the one the preview showed. */
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
@@ -139,7 +155,12 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
       const res = await fetch("/setup-api/coding-agent/projects/delete", {
         method: "DELETE",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ folder, kind, confirm: typed.trim(), force }),
+        // `typed`, NOT `typed.trim()`: the route compares the confirmation to
+        // the folder's own name byte for byte, and a folder name may legally
+        // end in a space. Trimming here would make such a folder impossible to
+        // confirm, and — before the route stopped trimming its own side — was
+        // half of how "shop " could have removed "shop".
+        body: JSON.stringify({ folder, kind, confirm: typed, force, purgeOldest }),
       });
       const body = await res.json().catch(() => null) as (ProjectDeleteOutcome & { error?: string; code?: string }) | null;
       if (!res.ok || !body) {
@@ -153,15 +174,22 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
     } finally {
       setBusy(false);
     }
-  }, [folder, kind, typed, force, onDeleted, t]);
+  }, [folder, kind, typed, force, purgeOldest, onDeleted, t]);
 
   const unsaved = preview?.unsaved;
   // The ONE refusal a flag can clear. Everything else the preview reports keeps
   // the button off entirely.
   const unsavedOnly = preview?.refusal?.code === "unsaved_work";
   const hardRefusal = blocked ?? (preview?.refusal && !unsavedOnly ? preview.refusal : null);
-  const nameMatches = typed.trim() === folder;
-  const canRemove = !!preview && !hardRefusal && nameMatches && (!unsavedOnly || force) && !busy;
+  // Exact, for the reason the body below is not trimmed either: this gate and
+  // the route's own comparison have to be the same question.
+  const nameMatches = typed === folder;
+  // Both flags are conditions, not preferences: each is demanded only when the
+  // box has something to lose by it, and each is offered only beside the list of
+  // what that is.
+  const needsPurgeConsent = (preview?.wouldPurge.length ?? 0) > 0;
+  const canRemove = !!preview && !hardRefusal && nameMatches
+    && (!unsavedOnly || force) && (!needsPurgeConsent || purgeOldest) && !busy;
 
   return (
     <div
@@ -192,15 +220,30 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
               {done.trashPath}
             </code>
             <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-              {t("codingAgent.delete.retention", { days: done.retentionDays })}
+              {t("codingAgent.delete.retention", { days: done.retentionDays, max: done.retentionMax })}
             </p>
-            {(done.vercelLinkRemoved || done.secretsRemoved.length > 0 || done.runsKept > 0) && (
+            {done.prunedEarly.length > 0 && (
+              // What this removal cost somebody else. Reported rather than left
+              // to be discovered: these folders were inside the thirty days the
+              // owner was promised for them.
+              <p
+                className="mt-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100"
+                data-testid="coding-agent-delete-purged"
+              >
+                {t("codingAgent.delete.purged", { names: done.prunedEarly.join(", ") })}
+              </p>
+            )}
+            {(done.vercelLinkRemoved || done.secretsRemoved.length > 0 || done.runsKept > 0 || done.metadataKeptFor) && (
               <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-muted)]">
                 {done.vercelLinkRemoved && <li>{t("codingAgent.delete.vercelRemoved")}</li>}
                 {done.secretsRemoved.length > 0 && (
                   <li>{t("codingAgent.delete.secretsRemoved", { names: done.secretsRemoved.join(", ") })}</li>
                 )}
                 {done.runsKept > 0 && <li>{t("codingAgent.delete.runsKept", { n: done.runsKept })}</li>}
+                {/* The credentials stayed because another project answers to
+                    the same name. Said plainly, or "no secrets went" would read
+                    as "there were none". */}
+                {done.metadataKeptFor && <li data-testid="coding-agent-delete-metadata-kept">{t("codingAgent.delete.metadataKept")}</li>}
               </ul>
             )}
             <div className="mt-4 flex justify-end">
@@ -250,7 +293,10 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
                     {preview.size.truncated && <> {t("codingAgent.delete.sizeAtLeast")}</>}
                   </p>
                   <ul className="mt-1.5 space-y-1 text-[11px] text-[var(--text-muted)]">
-                    <li>{t("codingAgent.delete.willMove", { days: preview.retentionDays })}</li>
+                    {/* BOTH bounds, always. `retentionDays` alone read as a
+                        month's guarantee, which the count bound can cut to
+                        minutes — see the library header. */}
+                    <li>{t("codingAgent.delete.willMove", { days: preview.retentionDays, max: preview.retentionMax })}</li>
                     {preview.vercelLinked && <li>{t("codingAgent.delete.willRemoveVercel")}</li>}
                     {preview.secretNames.length > 0 && (
                       <li>{t("codingAgent.delete.willRemoveSecrets", { names: preview.secretNames.join(", ") })}</li>
@@ -258,6 +304,32 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
                     {preview.runCount > 0 && <li>{t("codingAgent.delete.willKeepRuns", { n: preview.runCount })}</li>}
                   </ul>
                 </div>
+
+                {preview.wouldPurge.length > 0 && (
+                  // The shelf is full, so THIS removal deletes an older one for
+                  // good — a folder still inside the thirty days it was promised.
+                  // A TICK, not a warning: the thing at risk is somebody else's
+                  // recoverable project, and being told is not the same as
+                  // agreeing. The route refuses `trash_full` without it.
+                  <div
+                    className="mt-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2"
+                    data-testid="coding-agent-delete-would-purge"
+                  >
+                    <p className="text-[11px] leading-relaxed text-amber-100">
+                      {t("codingAgent.delete.willPurge", { names: preview.wouldPurge.join(", "), max: preview.retentionMax })}
+                    </p>
+                    <label className="mt-2.5 flex cursor-pointer items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={purgeOldest}
+                        onChange={(e) => setPurgeOldest(e.target.checked)}
+                        data-testid="coding-agent-delete-purge-oldest"
+                        className="mt-0.5"
+                      />
+                      <span className="text-[11px] text-amber-100">{t("codingAgent.delete.purgeOldestLabel")}</span>
+                    </label>
+                  </div>
+                )}
 
                 {unsavedOnly && unsaved && (
                   // EXACTLY what would be lost, before the flag that would lose
@@ -279,6 +351,19 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
                         </li>
                       )}
                       {(unsaved.unpushed ?? 0) > 0 && <li>{t("codingAgent.delete.unsavedUnpushed", { n: unsaved.unpushed ?? 0 })}</li>}
+                      {unsaved.stashes > 0 && <li>{t("codingAgent.delete.unsavedStashes", { n: unsaved.stashes })}</li>}
+                      {/* Named one by one, because git ignores `node_modules/`
+                          and `app.db` by the same rule and only the owner can
+                          tell which of theirs is the only copy. */}
+                      {unsaved.ignoredCount > 0 && (
+                        <li>
+                          {t("codingAgent.delete.unsavedIgnored", { n: unsaved.ignoredCount })}
+                          <span className="block break-all opacity-80">
+                            {unsaved.ignored.join(", ")}
+                            {unsaved.ignoredTruncated && ` ${t("codingAgent.delete.andMore")}`}
+                          </span>
+                        </li>
+                      )}
                       {unsaved.worktrees.length > 0 && (
                         <li>{t("codingAgent.delete.unsavedWorktrees", { names: unsaved.worktrees.join(", ") })}</li>
                       )}

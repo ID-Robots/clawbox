@@ -159,6 +159,28 @@ describe("the project has to be named twice", () => {
     expect(fs.existsSync(project)).toBe(true);
   });
 
+  it("never lets a name with a trailing space remove the folder beside it", async () => {
+    const shop = repo("shop", { pushed: true });
+    const spaced = path.join(owner, "shop ");
+    fs.mkdirSync(spaced);
+
+    // The spaced folder is not a repository, so it needs `force` — and what it
+    // removes must be ITSELF, with `shop` untouched.
+    const res = await DELETE(del({ folder: "shop ", confirm: "shop ", force: true }, owned()));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.directory).toBe(spaced);
+    expect(fs.existsSync(spaced)).toBe(false);
+    expect(fs.existsSync(shop)).toBe(true);
+
+    // And the trimmed confirmation does not satisfy the untrimmed name.
+    fs.mkdirSync(spaced);
+    const trimmed = await DELETE(del({ folder: "shop ", confirm: "shop", force: true }, owned()));
+    expect(trimmed.status).toBe(400);
+    expect(await trimmed.json()).toMatchObject({ code: "confirm_mismatch" });
+    expect(fs.existsSync(spaced)).toBe(true);
+  });
+
   it("refuses a name that is a path rather than one folder", async () => {
     const res = await DELETE(del({ folder: "../Projects", confirm: "../Projects" }, owned()));
     expect(res.status).toBe(400);
@@ -272,6 +294,71 @@ describe("the refusals", () => {
     expect((await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).status).toBe(409);
   });
 
+  it("sees unpushed commits on a branch that is NOT checked out", async () => {
+    // `@{upstream}..HEAD` asks only about the branch in the working tree, so a
+    // finished feature branch nobody pushed reported ZERO and the folder
+    // deleted without force.
+    const project = repo("shop", { pushed: true });
+    git(project, "checkout", "-q", "-b", "feature");
+    fs.writeFileSync(path.join(project, "feature.txt"), "only here");
+    git(project, "add", "-A");
+    git(project, "commit", "-qm", "on the feature branch");
+    git(project, "checkout", "-q", "main");
+
+    const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
+    expect(preview.unsaved).toMatchObject({ dirtyCount: 0, unpushed: 1, any: true });
+    expect((await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).status).toBe(409);
+    expect(fs.existsSync(project)).toBe(true);
+  });
+
+  it("sees a stash, which no branch and no push carries", async () => {
+    const project = repo("shop", { pushed: true });
+    fs.writeFileSync(path.join(project, "index.html"), "work in progress");
+    git(project, "stash", "push", "-q", "-m", "wip");
+
+    const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
+    expect(preview.unsaved).toMatchObject({ dirtyCount: 0, stashes: 1, any: true });
+    expect((await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).status).toBe(409);
+  });
+
+  it("sees IGNORED files — the only copy of a local database looks like node_modules to git", async () => {
+    const project = repo("shop", { pushed: true });
+    fs.writeFileSync(path.join(project, ".gitignore"), "app.db\n");
+    fs.writeFileSync(path.join(project, "app.db"), "the only copy");
+    git(project, "add", "-A");
+    git(project, "commit", "-qm", "ignore the db");
+    git(project, "push", "-q", "origin", "main");
+
+    const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
+    expect(preview.unsaved.ignored).toContain("app.db");
+    expect(preview.unsaved.any).toBe(true);
+    expect((await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).status).toBe(409);
+  });
+
+  it("does not read a PARENT repository's cleanliness as the project's own", async () => {
+    // A code project with no `.git` of its own, nested under the app repo.
+    // `--is-inside-work-tree` says yes and every check then described the
+    // PARENT — clean, pushed, and knowing nothing about this folder. It
+    // deleted without force.
+    const outer = path.join(owner, "outer");
+    fs.mkdirSync(outer, { recursive: true });
+    git(outer, "init", "-q", "-b", "main");
+    git(outer, "config", "user.email", "t@x");
+    git(outer, "config", "user.name", "t");
+    fs.writeFileSync(path.join(outer, "readme.md"), "outer");
+    git(outer, "add", "-A");
+    git(outer, "commit", "-qm", "outer");
+    const nested = path.join(outer, "nested");
+    fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, "only-here.txt"), "not in any repository of its own");
+
+    getDefaultDirectory.mockResolvedValue(outer);
+    const preview = await (await GET(get({ folder: "nested" }, owned()))).json();
+    expect(preview.unsaved).toMatchObject({ notARepository: true, any: true });
+    expect((await DELETE(del({ folder: "nested", confirm: "nested" }, owned()))).status).toBe(409);
+    expect(fs.existsSync(nested)).toBe(true);
+  });
+
   it("refuses a folder with no git history of its own", async () => {
     const plain = path.join(owner, "notes");
     fs.mkdirSync(plain, { recursive: true });
@@ -281,6 +368,69 @@ describe("the refusals", () => {
     expect(preview.unsaved).toMatchObject({ notARepository: true, any: true });
     expect((await DELETE(del({ folder: "notes", confirm: "notes" }, owned()))).status).toBe(409);
     expect(fs.existsSync(plain)).toBe(true);
+  });
+});
+
+describe("a run that starts while the removal is in flight", () => {
+  it("is refused, and the folder is NOT moved out from under it", async () => {
+    // The audit's repro: the live-run check passes, then four git processes and
+    // a copy run, and a run inserted in that window writes into a folder that
+    // is being copied. A file written between the copy and the removal was gone
+    // from both — and the delete answered success.
+    const project = repo("shop", { pushed: true });
+    // The run store answers "nothing live" the first time and a live run the
+    // second, which is exactly a record landing during the git checks.
+    let asked = 0;
+    listRuns.mockImplementation(() => {
+      asked += 1;
+      return asked <= 1
+        ? []
+        : [{ id: "run-raced0001", task: "t", status: "running", projectId: null, directory: project }];
+    });
+
+    const res = await DELETE(del({ folder: "shop", confirm: "shop" }, owned()));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "live_run" });
+    expect(fs.existsSync(path.join(project, "index.html"))).toBe(true);
+  });
+
+  it("cannot start at all: the run lifecycle refuses a folder being removed", async () => {
+    // The other half of the exclusion, and the half a second unlocked check
+    // could not provide. Both sides read one synchronous set.
+    const lock = await import("@/lib/coding-project-removal-lock");
+    lock._resetProjectRemovalsForTests();
+    const project = path.join(owner, "shop");
+
+    expect(lock.isProjectBeingRemoved(project)).toBe(false);
+    const release = lock.beginProjectRemoval(project);
+    try {
+      expect(lock.isProjectBeingRemoved(project)).toBe(true);
+      // A run works at any depth inside its project, so the whole subtree is shut.
+      expect(lock.isProjectBeingRemoved(path.join(project, "src", "api"))).toBe(true);
+      expect(lock.isProjectBeingRemoved(path.join(project, ".clawbox", "worktrees", "run-x"))).toBe(true);
+      // …and nothing beside it is.
+      expect(lock.isProjectBeingRemoved(path.join(owner, "shop-two"))).toBe(false);
+      expect(lock.isProjectBeingRemoved(owner)).toBe(false);
+    } finally {
+      release();
+    }
+    expect(lock.isProjectBeingRemoved(project)).toBe(false);
+  });
+
+  it("releases the claim however the removal ends", async () => {
+    const lock = await import("@/lib/coding-project-removal-lock");
+    lock._resetProjectRemovalsForTests();
+    const project = repo("shop", { pushed: true });
+
+    // A refusal must not leave the folder claimed for ever — that would make
+    // every later run in it fail with "being removed".
+    listRuns.mockReturnValue([{ id: "run-live00001", task: "t", status: "running", projectId: null, directory: project }]);
+    expect((await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).status).toBe(409);
+    expect(lock.isProjectBeingRemoved(project)).toBe(false);
+
+    listRuns.mockReturnValue([]);
+    expect((await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).status).toBe(200);
+    expect(lock.isProjectBeingRemoved(project)).toBe(false);
   });
 });
 
@@ -301,6 +451,9 @@ describe("the success path", () => {
       vercelLinked: true,
       secretNames: ["VERCEL_TOKEN"],
       retentionDays: 30,
+      retentionMax: 10,
+      trashCount: 0,
+      wouldPurge: [],
     });
     expect(preview.size.files).toBeGreaterThan(0);
 
@@ -315,6 +468,8 @@ describe("the success path", () => {
       secretsRemoved: ["VERCEL_TOKEN"],
       forced: false,
       retentionDays: 30,
+      retentionMax: 10,
+      prunedEarly: [],
     });
     // IT IS A MOVE, NOT A DELETE. The folder is gone from the project root and
     // its contents are readable where the answer says they are.
@@ -384,6 +539,106 @@ describe("the success path", () => {
     const body = await (await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).json();
     expect(body.pruned).toEqual([`ancient--${long}`]);
     expect(fs.existsSync(path.join(trash, `ancient--${long}`))).toBe(false);
+  });
+
+  it("warns which removal the count bound would take, then reports that it did", async () => {
+    // The consent defect the audit found: the dialog promised 30 days while the
+    // count bound could take a folder minutes after it arrived. The preview now
+    // names what THIS removal would cost, and the outcome says what it cost.
+    repo("shop", { pushed: true });
+    const trash = path.join(session.root, "data", "deleted-projects");
+    fs.mkdirSync(trash, { recursive: true });
+    const stamp = (msAgo: number) => new Date(Date.now() - msAgo).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    // A full shelf, every entry well inside its thirty days.
+    const names: string[] = [];
+    for (let i = 0; i < 10; i += 1) {
+      const name = `p${i}--${stamp(i * 60_000)}`;
+      names.push(name);
+      fs.mkdirSync(path.join(trash, name));
+    }
+    const oldest = names[names.length - 1];
+
+    const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
+    expect(preview).toMatchObject({ retentionMax: 10, trashCount: 10, wouldPurge: [oldest] });
+    // The preview NAMES it rather than refusing: the dialog has to be able to
+    // draw the tick beside the list. The refusal is the route's, and only when
+    // the tick is absent — see "refuses to purge somebody else's…" above.
+    expect(preview.refusal).toBeNull();
+    expect(fs.existsSync(path.join(trash, oldest))).toBe(true);
+
+    const body = await (await DELETE(del({ folder: "shop", confirm: "shop", purgeOldest: true }, owned()))).json();
+    expect(body.prunedEarly).toEqual([oldest]);
+    expect(body.pruned).toEqual([oldest]);
+    expect(fs.existsSync(path.join(trash, oldest))).toBe(false);
+    // The shelf is still exactly the bound, with the new arrival on it.
+    expect(fs.readdirSync(trash)).toHaveLength(10);
+  });
+
+  it("reports an EXPIRED prune apart from an early one", async () => {
+    repo("shop", { pushed: true });
+    const trash = path.join(session.root, "data", "deleted-projects");
+    fs.mkdirSync(trash, { recursive: true });
+    const long = new Date(Date.now() - 60 * 24 * 60 * 60_000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    fs.mkdirSync(path.join(trash, `ancient--${long}`));
+
+    const body = await (await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).json();
+    expect(body.pruned).toEqual([`ancient--${long}`]);
+    // Nobody was promised that one, so the dialog has nothing to apologise for.
+    expect(body.prunedEarly).toEqual([]);
+  });
+
+  it("refuses to purge somebody else's recoverable project without an explicit yes", async () => {
+    // The shelf is full and every entry is still inside its thirty days, so
+    // this removal would delete one for good. Refused — being told is not the
+    // same as agreeing — and cleared only by the flag the dialog ticks.
+    repo("shop", { pushed: true });
+    const trash = path.join(session.root, "data", "deleted-projects");
+    fs.mkdirSync(trash, { recursive: true });
+    const stamp = (msAgo: number) => new Date(Date.now() - msAgo).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    const names: string[] = [];
+    for (let i = 0; i < 10; i += 1) {
+      const name = `p${i}--${stamp(i * 60_000)}`;
+      names.push(name);
+      fs.mkdirSync(path.join(trash, name));
+    }
+    const oldest = names[names.length - 1];
+
+    const refused = await DELETE(del({ folder: "shop", confirm: "shop" }, owned()));
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "trash_full" });
+    // NOTHING happened: the project is still there and so is the oldest entry.
+    expect(fs.existsSync(path.join(owner, "shop"))).toBe(true);
+    expect(fs.existsSync(path.join(trash, oldest))).toBe(true);
+
+    const body = await (await DELETE(del({ folder: "shop", confirm: "shop", purgeOldest: true }, owned()))).json();
+    expect(body.prunedEarly).toEqual([oldest]);
+    expect(fs.existsSync(path.join(trash, oldest))).toBe(false);
+  });
+
+  it("leaves the secrets and the Vercel link alone when another project shares the name", async () => {
+    // A folder project and a code project may both be called `shop`, and the
+    // secret store is keyed by that name alone — so clearing it here took the
+    // credentials of a project that is still on disk and possibly mid-run.
+    repo("shop", { pushed: true });
+    fs.mkdirSync(path.join(session.root, "data", "code-projects", "shop"), { recursive: true });
+
+    const body = await (await DELETE(del({ folder: "shop", kind: "folder", confirm: "shop" }, owned()))).json();
+    expect(body.ok).toBe(true);
+    expect(body.metadataKeptFor).toBe(path.join(session.root, "data", "code-projects", "shop"));
+    expect(deleteSecretsForScope).not.toHaveBeenCalled();
+    expect(deleteVercelLink).not.toHaveBeenCalled();
+    expect(body.secretsRemoved).toEqual([]);
+    expect(body.vercelLinkRemoved).toBe(false);
+    // The other project is untouched.
+    expect(fs.existsSync(path.join(session.root, "data", "code-projects", "shop"))).toBe(true);
+  });
+
+  it("clears the metadata as usual when no other project shares the name", async () => {
+    repo("shop", { pushed: true });
+    const body = await (await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).json();
+    expect(body.metadataKeptFor).toBeNull();
+    expect(deleteSecretsForScope).toHaveBeenCalledWith("shop");
+    expect(deleteVercelLink).toHaveBeenCalledWith("shop");
   });
 
   it("reads the folder from the query when the caller sends no body", async () => {

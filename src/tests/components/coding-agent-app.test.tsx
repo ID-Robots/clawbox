@@ -160,8 +160,11 @@ function stubFetch(
           folder: body.folder,
           trashPath: `/home/clawbox/clawbox/data/deleted-projects/${body.folder}--20260913T120000Z`,
           retentionDays: 30,
+          retentionMax: 10,
           vercelLinkRemoved: false,
           secretsRemoved: [],
+          metadataKeptFor: null,
+          prunedEarly: [],
           runsKept: 0,
           projects: projects.projects,
           projectsDirectory: projects.directory,
@@ -173,12 +176,15 @@ function stubFetch(
         kind: "folder",
         directory: `/home/clawbox/Projects/${folder}`,
         size: { bytes: 2048, files: 7, truncated: false },
-        unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, worktrees: [], notARepository: false, any: false },
+        unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
         liveRuns: [],
         vercelLinked: false,
         secretNames: [],
         runCount: 0,
         retentionDays: 30,
+        retentionMax: 10,
+        trashCount: 0,
+        wouldPurge: [],
         refusal: null,
       });
     }
@@ -2583,7 +2589,7 @@ describe("CodingAgentApp — the run page's honesty", () => {
 
       await waitFor(() => expect(screen.queryByTestId("coding-agent-project-shop")).toBeNull());
       expect(posts.filter((p) => p.url === "/setup-api/coding-agent/projects/delete"))
-        .toEqual([{ url: "/setup-api/coding-agent/projects/delete", body: { folder: "shop", kind: "folder", confirm: "shop", force: false } }]);
+        .toEqual([{ url: "/setup-api/coding-agent/projects/delete", body: { folder: "shop", kind: "folder", confirm: "shop", force: false, purgeOldest: false } }]);
       // The other project is untouched.
       expect(screen.getByTestId("coding-agent-project-site")).toBeInTheDocument();
 
@@ -2634,6 +2640,31 @@ describe("CodingAgentApp — the run page's honesty", () => {
       const page = await openRunFromProject(RUN.id);
       expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
       expect(within(page).getByTestId("coding-agent-run-project")).toBeInTheDocument();
+    });
+
+    it("does not call the Test-harness scratch project removed", async () => {
+      // listProjects keeps `harness-test` OUT of the listing on purpose, so its
+      // smoke run matches no row BY DESIGN. Reading that as "its project was
+      // removed" claimed a folder was gone that the box had just made.
+      const smoke = { ...RUN, id: "run-smoke0002", projectId: "harness-test", directory: "/home/clawbox/clawbox/data/code-projects/harness-test" };
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        stubFetch({ enabled: true, readiness: READY }, [smoke], { projects: [SHOP] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button")[0]);
+        const page = await screen.findByTestId("coding-agent-run-page");
+        expect(within(page).queryByTestId("coding-agent-run-project-gone")).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     async function openRunFromProject(id: string) {
