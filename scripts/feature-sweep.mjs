@@ -313,7 +313,17 @@ const AREAS = [
   ["network", [
     { name: "the box knows whether it is online", path: "/setup-api/network/internet", expect: ok("online") },
     { name: "wifi reports itself", path: "/setup-api/wifi/status", expect: (res) => {
-      if (res.status === 200) return true;
+      // The route now says which of the two it is (`available: false` for a
+      // machine with no WiFi NIC, a 500 only for a broken nmcli), so the sweep
+      // says so too rather than reading a structured "there is no WiFi here" as
+      // proof that WiFi works. A server that predates the field sends no
+      // `available`, which is a box that HAS an interface and reported on it.
+      if (res.status === 200) {
+        if (res.json && res.json.available === false) {
+          return { unproven: `this box has no WiFi interface (${res.json.reason || "no_interface"}); the route reports that as a structured 200, which is the answer, but the radio itself is unchecked` };
+        }
+        return true;
+      }
       if (/interface not available/i.test(res.text)) {
         return { unproven: `this box has no WiFi interface, and the route says so as ${res.status} rather than a structured answer` };
       }
