@@ -228,13 +228,34 @@ describe("a deployment nobody may look at", () => {
     expect(out.blocked).toBeFalsy();
   });
 
-  it("names the wall only when the address actually LEFT the deployment", () => {
+  it("names the wall only for the sign-in gate, on an address that LEFT the deployment", () => {
+    // `blocked` ends a pipeline, so it is the one verdict that must not be
+    // reached by resemblance: both halves have to hold.
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com/login?next=%2Fsso")).toContain("Deployment Protection");
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com/sso-api?url=x")).toContain("Deployment Protection");
+    expect(lib.protectionWall("https://x.vercel.app/", "https://www.vercel.com/login/sso")).toContain("Deployment Protection");
+    // The deployment's own origin is not a redirect away from it.
     expect(lib.protectionWall("https://x.vercel.app/", "https://x.vercel.app/login")).toBeNull();
-    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com/login")).toContain("Deployment Protection");
-    expect(lib.protectionWall("https://x.vercel.app/", "https://api.vercel.com/x")).toContain("Deployment Protection");
+    // Somewhere else on vercel.com that is not the gate: fetched and judged on
+    // its merits like any other destination.
+    expect(lib.protectionWall("https://x.vercel.app/", "https://api.vercel.com/x")).toBeNull();
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com/docs")).toBeNull();
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com/logins-are-fun")).toBeNull();
     // Not a Vercel host merely because the string is in it.
-    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com.evil.example/")).toBeNull();
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com.evil.example/login")).toBeNull();
     expect(lib.protectionWall("nonsense", "https://vercel.com/login")).toBeNull();
+  });
+
+  it("still checks a page that merely redirected somewhere on vercel.com", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(redirect("https://vercel.com/docs"))
+      .mockResolvedValueOnce(answer("<h1>Invoice</h1>"));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x-abc.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.blocked).toBeFalsy();
+    expect(out.ok).toBe(true);
   });
 });
 
