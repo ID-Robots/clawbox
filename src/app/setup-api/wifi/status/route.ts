@@ -50,17 +50,16 @@ export async function GET() {
       readLinkQuality(),
     ]);
     if (status.error) {
-      // A machine with no WiFi NIC is not a failure of this route — it is an
-      // answer, and one every caller has to be able to read: `wifi_status`
+      // A machine with no WiFi HARDWARE is not a failure of this route — it is
+      // an answer, and one every caller has to be able to read: `wifi_status`
       // (mcp/tools/system.ts) does NOT catch this call the way it catches the
       // ethernet one, so a 500 here threw the whole tool and the agent could not
-      // say whether the box was online even with a working cable. Only a real
-      // nmcli failure — not installed, not answering, timed out — is a 500.
-      if (status.errorCode === "no_interface") {
+      // say whether the box was online even with a working cable.
+      if (status.errorCode === "no_wifi_device") {
         const body = {
           connected: false,
           available: false,
-          reason: "no_interface",
+          reason: "no_wifi_device",
           interface: IFACE,
           ssid: null,
           ip: null,
@@ -72,7 +71,19 @@ export async function GET() {
         cache = { body, at: Date.now() };
         return NextResponse.json(body);
       }
-      return NextResponse.json({ error: status.error }, { status: 500 });
+      // Everything else is still a 500 — a misconfigured `NETWORK_INTERFACE` on
+      // a box that HAS WiFi, or an nmcli that could not be asked — and carries
+      // its classification, so a caller does not have to read the English to
+      // tell a real failure from absent hardware. `wifiDevices` is present only
+      // for the mismatch, and is the fix: point NETWORK_INTERFACE at one of them.
+      return NextResponse.json(
+        {
+          error: status.error,
+          reason: status.errorCode ?? "unavailable",
+          ...(status.wifiDevices ? { wifiDevices: status.wifiDevices.split(",") } : {}),
+        },
+        { status: 500 },
+      );
     }
     const state = status["GENERAL.STATE"] || "";
     const ssid = status["GENERAL.CONNECTION"] || null;

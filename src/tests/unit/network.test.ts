@@ -347,15 +347,52 @@ describe("network", () => {
     // that can be about. Measured: promisified execFile puts that on
     // `err.code` as a NUMBER, and a missing binary puts the string "ENOENT"
     // there — which must stay `unavailable`.
-    it("tells an absent interface apart from a broken nmcli", async () => {
+    it("reports no WiFi hardware when nmcli knows of no wifi device", async () => {
       const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
-      setupExecFileMock({ "nmcli": notFound });
+      setupExecFileMock({
+        "-t -f GENERAL.STATE,GENERAL.CONNECTION": notFound,
+        "-t -f DEVICE,TYPE device status": { stdout: "enp4s0:ethernet\nlo:loopback\n", stderr: "" },
+      });
 
       network = await import("@/lib/network");
       const result = await network.getWifiStatus();
 
-      expect(result.errorCode).toBe("no_interface");
-      expect(result.error).toContain("No WiFi interface");
+      expect(result.errorCode).toBe("no_wifi_device");
+      expect(result.error).toContain("no WiFi hardware");
+    });
+
+    // Exit 10 alone does not mean "no WiFi on this machine": NETWORK_INTERFACE
+    // defaults to the Jetson's name and can be carried onto a board whose NIC is
+    // called something else. Saying "no WiFi hardware" there would hide a
+    // misconfiguration behind a hardware fact nobody can act on.
+    it("reports a misconfigured interface when WiFi devices exist under other names", async () => {
+      const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
+      setupExecFileMock({
+        "-t -f GENERAL.STATE,GENERAL.CONNECTION": notFound,
+        "-t -f DEVICE,TYPE device status": { stdout: "wlan0:wifi\nwlan1:wifi\nenp4s0:ethernet\n", stderr: "" },
+      });
+
+      network = await import("@/lib/network");
+      const result = await network.getWifiStatus();
+
+      expect(result.errorCode).toBe("interface_mismatch");
+      expect(result.wifiDevices).toBe("wlan0,wlan1");
+      expect(result.error).toContain("wlan0, wlan1");
+    });
+
+    it("falls back to a plain failure when the device probe itself cannot be made", async () => {
+      const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
+      setupExecFileMock({
+        "-t -f GENERAL.STATE,GENERAL.CONNECTION": notFound,
+        "-t -f DEVICE,TYPE device status": new Error("nmcli went away"),
+      });
+
+      network = await import("@/lib/network");
+      const result = await network.getWifiStatus();
+
+      // Not knowing must fail towards "something here is wrong", never towards a
+      // claim about the hardware.
+      expect(result.errorCode).toBe("unavailable");
     });
 
     it("keeps a missing nmcli and a timeout as a real failure", async () => {
