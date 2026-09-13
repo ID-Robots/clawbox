@@ -8384,8 +8384,12 @@ function spawnRun(
       // deliverable all arrive here, so none of them needs its own copy.
       const waiting = queuedMessages(run.messages);
       const note = runMessagesNote(run.messages);
-      child.stdin?.end(note ? `${firstTurn}\n\n${note}` : firstTurn);
-      if (waiting.length) noteMessagesDelivered(run, waiting);
+      if (child.stdin) {
+        child.stdin.end(note ? `${firstTurn}\n\n${note}` : firstTurn);
+        // Only once the bytes are on the pipe: with no stdin at all nothing
+        // was said, and the queue is still the box's to deliver.
+        noteMessagesDelivered(run, waiting);
+      }
     }
   } catch {
     // reported through the exit path
@@ -8400,14 +8404,18 @@ function spawnRun(
  * the card, and the feed line is what makes the same fact visible in the
  * transcript preview and on the timeline.
  */
-function noteMessagesDelivered(run: CodingRun, messages: RunMessage[]): void {
+function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]): void {
   const now = Date.now();
+  let marked = 0;
   for (const message of messages) {
     if (message.deliveredAt !== null) continue;
     message.deliveredAt = now;
+    // pushProgress scrubs the owner's secrets out of the line and caps it,
+    // like every other step in the feed.
     pushProgress(run, runMessageProgressLine(message.text));
+    marked += 1;
   }
-  persist();
+  if (marked > 0) persist();
 }
 
 /**
@@ -8416,16 +8424,15 @@ function noteMessagesDelivered(run: CodingRun, messages: RunMessage[]): void {
  *
  * A no-op on a run whose stdin this process does not hold — a plain spawn, one
  * reattached after a restart, or one whose harness has already been told to
- * finish. Those queues are delivered at the next attempt or resume instead
- * (see `takeQueuedMessagesNote`), which is why nothing here is an error.
+ * finish. Those queues ride out with the next spawn's own stdin instead, which
+ * is why nothing here is an error.
  */
 function flushRunMessages(run: CodingRun, state: LiveRun): number {
   const stdin = state.child?.stdin;
   if (!state.streamInput || !state.stdinOpen || !stdin || stdin.destroyed || stdin.writableEnded) return 0;
   const waiting = queuedMessages(run.messages);
   if (!waiting.length) return 0;
-  const now = Date.now();
-  let sent = 0;
+  const sent: RunMessage[] = [];
   for (const message of waiting) {
     try {
       stdin.write(streamJsonUserTurn(runMessageTurn(message.text)));
@@ -8435,16 +8442,12 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
       state.stdinOpen = false;
       break;
     }
-    // Marked only once the bytes are on the pipe — "delivered" is a claim the
-    // owner reads, and a message still in the queue is one the box owes them.
-    message.deliveredAt = now;
-    // The feed is what makes a delivered message visible in the transcript
-    // preview and on the timeline. pushProgress scrubs and caps it.
-    pushProgress(run, runMessageProgressLine(message.text));
-    sent += 1;
+    sent.push(message);
   }
-  if (sent > 0) persist();
-  return sent;
+  // Marked only once the bytes are on the pipe — "delivered" is a claim the
+  // owner reads, and a message still in the queue is one the box owes them.
+  noteMessagesDelivered(run, sent);
+  return sent.length;
 }
 
 /**
