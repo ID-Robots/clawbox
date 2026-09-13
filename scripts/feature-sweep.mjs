@@ -310,8 +310,11 @@ Read-mostly and safe against a box in use: it starts nothing, changes no
 setting, deletes nothing and spends nothing at a provider. Authenticates with
 the MCP bearer from data/.mcp-token (override with CLAWBOX_MCP_TOKEN, or point
 CLAWBOX_ROOT at the install); owner-only routes are checked by asserting they
-REFUSE that bearer. Exit 0 when everything it could check passed, 1 otherwise;
-\`unproven\` never fails the run.`;
+REFUSE that bearer.
+
+Exit 0 when everything it could check passed, 1 when anything it could check
+failed or the box did not answer, 2 for a usage error. \`unproven\` never fails
+the run.`;
 
 function parseArgs(argv) {
   const args = { host: "127.0.0.1", json: false, only: null, timeout: 15000, help: false };
@@ -345,8 +348,9 @@ function parseArgs(argv) {
  * Credentials in the address are REFUSED rather than quietly dropped. `.origin`
  * would drop them — which is what keeps them out of every printed line — but a
  * sweep that silently ignored the half of the address the operator believed was
- * authenticating it would report a box-wide `unproven` for the wrong reason.
- * This box authenticates with the MCP bearer, never with userinfo.
+ * authenticating it would then fail every check on a refusal, and the operator
+ * would be reading that as the box. This box authenticates with the MCP bearer,
+ * never with userinfo.
  */
 function baseUrl(host) {
   let url;
