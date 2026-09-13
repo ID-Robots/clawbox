@@ -33,7 +33,15 @@
  * reset by every restart, and a restart is one `systemctl restart` (or one
  * in-app update) away, so a loop that kept failing and retrying would get its
  * whole allowance back each time. It rides in the same config entry as the
- * record, so a deploy is one read and one write rather than two of each.
+ * record, so there is one file to read and one shape to reason about.
+ *
+ * AND WHY THE SLOT IS RESERVED RATHER THAN COUNTED. Reading the count, making
+ * the deployment and writing the count back is not a rate limit: two calls that
+ * arrive together read the same number and both pass — and a loop is exactly
+ * when calls arrive together, which is the only thing this counter is for. So
+ * `reserveProductionSlot` checks and takes in ONE queued step and is the only
+ * writer of `productionAt`, and a reservation whose deployment never happened
+ * is given back.
  */
 
 import { get as configGet, set as configSet } from "@/lib/config-store";
