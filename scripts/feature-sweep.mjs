@@ -333,12 +333,32 @@ function parseArgs(argv) {
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (!Number.isFinite(args.timeout) || args.timeout <= 0) throw new Error("--timeout needs a positive number of milliseconds");
+  args.base = baseUrl(args.host);
   return args;
 }
 
+/**
+ * The origin to sweep. Normalised through URL so a typo is a usage error here
+ * rather than a TypeError from the first fetch, and so a pasted address with a
+ * path on it (`…/setup-api/`) does not end up doubled into every request.
+ *
+ * Credentials in the address are REFUSED rather than quietly dropped. `.origin`
+ * would drop them — which is what keeps them out of every printed line — but a
+ * sweep that silently ignored the half of the address the operator believed was
+ * authenticating it would report a box-wide `unproven` for the wrong reason.
+ * This box authenticates with the MCP bearer, never with userinfo.
+ */
 function baseUrl(host) {
-  if (/^https?:\/\//.test(host)) return host.replace(/\/$/, "");
-  return `http://${host}`;
+  let url;
+  try {
+    url = new URL(/^https?:\/\//.test(host) ? host : `http://${host}`);
+  } catch {
+    throw new Error(`--host is not a usable address: ${host}`);
+  }
+  if (url.username || url.password) {
+    throw new Error("--host must not carry a username or password: this box authenticates with the MCP bearer");
+  }
+  return url.origin;
 }
 
 const LOOPBACK = /^(?:127\.\d+\.\d+\.\d+|localhost|\[?::1\]?|\[?::ffff:127\.\d+\.\d+\.\d+\]?)$/i;
@@ -484,14 +504,13 @@ async function main() {
   }
 
   const token = readToken();
-  const base = baseUrl(args.host);
-  const refusal = transportRefusal(args.host, base);
+  const refusal = transportRefusal(args.host, args.base);
   if (refusal) {
     console.error(refusal);
     return 2;
   }
   const ctx = {
-    base,
+    base: args.base,
     token,
     timeout: args.timeout,
     // The sweep's own KV key, deleted again whatever happens below. Random
