@@ -208,7 +208,7 @@ describe("run branches", () => {
   });
 
   it("knows which PRs are still being watched", () => {
-    const base = { number: 1, url: "u", branch: "b", base: "main", checks: emptyChecks(), detail: null, startedAt: 0, endedAt: null, reviewOk: true };
+    const base = { number: 1, url: "u", branch: "b", base: "main", checks: emptyChecks(), detail: null, startedAt: 0, endedAt: null, reviewOk: true, foundBy: "opened" as const };
     expect(isPrPending({ ...base, phase: "waiting" })).toBe(true);
     expect(isPrPending({ ...base, phase: "opening" })).toBe(true);
     expect(isPrPending({ ...base, phase: "merged" })).toBe(false);

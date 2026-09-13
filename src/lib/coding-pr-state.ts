@@ -61,6 +61,29 @@ export function isPrPhase(value: unknown): value is PrPhase {
   return typeof value === "string" && (PR_PHASES as readonly string[]).includes(value);
 }
 
+/**
+ * HOW the box came by this pull request.
+ *
+ * `opened` — the auto-PR path opened it with `gh pr create`. `adopted` — the
+ * RUN opened it itself, because its task said to, and the settle found it on
+ * the run's own branch with `gh pr list --head`.
+ *
+ * Worth a field of its own, because the difference is the whole of a defect
+ * this box shipped: the review loop engaged only for a pull request the box
+ * had opened, so a run told to open its own left `pr: null` on the record and
+ * was never watched at all. A record that says `adopted` is the evidence that
+ * the loop now watches a pull request whoever opened it.
+ */
+export type PrFoundBy = "opened" | "adopted";
+
+/** The allow-list a stored record is validated against, beside its type for
+ *  the reason PR_PHASES is. */
+export const PR_FOUND_BY: readonly PrFoundBy[] = ["opened", "adopted"];
+
+export function isPrFoundBy(value: unknown): value is PrFoundBy {
+  return typeof value === "string" && (PR_FOUND_BY as readonly string[]).includes(value);
+}
+
 export interface PrChecks {
   total: number;
   passed: number;
@@ -93,6 +116,14 @@ export interface PrState {
    * review had rejected.
    */
   reviewOk: boolean;
+  /**
+   * How the box came by this pull request — see PrFoundBy.
+   *
+   * Null on a record written before the field, and on one that has no pull
+   * request yet: "we do not know" rather than "we opened it", because the
+   * whole point of the field is to tell the two apart.
+   */
+  foundBy: PrFoundBy | null;
 }
 
 export function emptyChecks(): PrChecks {

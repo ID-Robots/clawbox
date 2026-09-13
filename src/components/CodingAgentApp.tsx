@@ -142,6 +142,9 @@ interface Run {
   reviewOf?: string | null;
   /** The run whose pull request this one is a REVIEW ROUND of, when it is one. */
   reviewLoopOf?: string | null;
+  /** Which round of that loop it is, 1-based. Absent on a run recorded before
+   *  the field, where the chip falls back to naming the loop alone. */
+  reviewRound?: number | null;
   /** The review loop over this run's pull request — the rounds of CI failures,
    *  review comments and conflicts the box handed back to the harness after the
    *  pull request was opened. Absent on a run recorded before the loop. */
@@ -1245,6 +1248,15 @@ export default function CodingAgentApp() {
             {review.detail}
           </p>
         )}
+        {review.fixDetail && (
+          // HOW the last round's fixes were got done, and why — the run's own
+          // session resumed, or a fresh one on the same branch. Drawn under the
+          // chip that names the run, because the two are one fact: which run
+          // took the round, and what it started with.
+          <p className="mt-1.5 text-[11px] break-words text-[var(--text-secondary)]" data-testid="coding-agent-review-fix-detail">
+            {review.fixDetail}
+          </p>
+        )}
         {review.fixRunId && runChip(review.fixRunId, t("codingAgent.reviewFixRun", { id: review.fixRunId }), "coding-agent-review-fix-run")}
       </div>
     );
@@ -1489,7 +1501,9 @@ export default function CodingAgentApp() {
                         {/* A review pass names the run it reviewed, and that
                             run names its reviewer. */}
                         {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                  {run.reviewLoopOf && runChip(run.reviewLoopOf, t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
+                  {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
+                    ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
+                    : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
                         {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                         {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
                         <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
@@ -2205,7 +2219,9 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                   {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
-                  {run.reviewLoopOf && runChip(run.reviewLoopOf, t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
+                  {run.reviewLoopOf && runChip(run.reviewLoopOf, run.reviewRound
+                    ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
+                    : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
                   {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                   {project && (
                     <button

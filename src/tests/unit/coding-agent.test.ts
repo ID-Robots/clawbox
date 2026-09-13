@@ -2083,11 +2083,28 @@ describe("the pull request on disk", () => {
     writeRunWithPr({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
+      foundBy: "adopted",
     });
     expect(lib.listRuns()[0]?.pr).toEqual({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
+      foundBy: "adopted",
     });
+  });
+
+  it("says NOTHING about who opened a pull request a record predates the question", () => {
+    // Null rather than "opened": a record written before the field carries no
+    // evidence either way, and claiming the box opened it would make the one
+    // thing PrFoundBy exists to tell apart unreadable on exactly the records
+    // that motivated it.
+    writeRunWithPr({
+      phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
+      checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
+    });
+    expect(lib.listRuns()[0]?.pr?.foundBy).toBeNull();
+    // And a value nothing here could have written is no answer either.
+    writeRunWithPr({ phase: "merged", startedAt: 1, number: 7, foundBy: "guessed" });
+    expect(lib.listRuns()[0]?.pr?.foundBy).toBeNull();
   });
 
   it("drops a blob whose phase is not one of ours — that is not a pull request", () => {

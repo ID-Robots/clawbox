@@ -91,6 +91,30 @@ export function isReviewLoopState(value: unknown): value is ReviewLoopState {
   return typeof value === "string" && (REVIEW_LOOP_STATES as readonly string[]).includes(value);
 }
 
+/**
+ * How a round's fixes got done.
+ *
+ * `resumed` is the default and the one to want: the findings go back into the
+ * session that wrote the code, which already holds what it built and why, so
+ * nothing has to be re-read and no reasoning is lost.
+ *
+ * `fresh` is the fallback, and it exists because a round routinely arrives
+ * twenty minutes or more after the run settled — the install check alone takes
+ * that long — and a settled run's session is not always still resumable. A
+ * fresh run works the same branch, in the same project, on the same provider,
+ * model and effort; what it does not have is the memory, so it is told to read
+ * the diff before it touches anything.
+ */
+export type ReviewFixMode = "resumed" | "fresh";
+
+/** The allow-list a stored record is validated against, beside its type for
+ *  the reason REVIEW_LOOP_STATES is. */
+export const REVIEW_FIX_MODES: readonly ReviewFixMode[] = ["resumed", "fresh"];
+
+export function isReviewFixMode(value: unknown): value is ReviewFixMode {
+  return typeof value === "string" && (REVIEW_FIX_MODES as readonly string[]).includes(value);
+}
+
 /** The loop as it sits on the run record. */
 export interface ReviewLoop {
   prNumber: number;
@@ -116,6 +140,18 @@ export interface ReviewLoop {
   /** The follow-up run fixing things right now, so the loop can pick up when
    *  it settles and the card can point at it. */
   fixRunId: string | null;
+  /** How the LAST round's fixes were got done — see ReviewFixMode. Null until
+   *  a round has gone out. */
+  fixMode: ReviewFixMode | null;
+  /**
+   * Why that path was taken, in words meant for the owner.
+   *
+   * On the record rather than only in the log, because "was this round handed
+   * to the session that wrote the code, or to a run starting cold?" is the
+   * first question asked of a round that went wrong, and the server's log is
+   * rotated long before a pull request is looked at again.
+   */
+  fixDetail: string | null;
 }
 
 /** True while the box is still watching this pull request. */
@@ -449,6 +485,60 @@ export function describeProblems(problems: ReviewProblems): string {
   return `Still open: ${parts.join(", ")}. The pull request is waiting for you.`;
 }
 
+/** What the loop needs to know about the run it would hand the round to.
+ *  Structural rather than a `CodingRun`, because this module is the pure half
+ *  and the browser imports it — see the header. */
+export interface ReviewFixCandidate {
+  id: string;
+  /** The harness session on the record, or null when it never opened one. */
+  sessionId: string | null;
+  /** The run's status, as CodingRunStatus spells it. */
+  status: string;
+  /** Whether the record says that session can still be re-entered. */
+  resumable: boolean;
+}
+
+/**
+ * Which way a round's fixes get done, and why.
+ *
+ * The DEFAULT is to resume, and that is not a tie-break: the run holds the code
+ * it wrote and the reasons it wrote it that way, and re-reading all of it in a
+ * fresh context costs tokens to arrive somewhere worse. So the only question
+ * here is whether the session is still there to resume.
+ *
+ * The test is deliberately the SAME one `startRun` applies to a `resumeRunId`
+ * (`resumable || status === "completed"`, and a session id to re-enter at all).
+ * If the two drifted apart the record would claim a round was handed to the
+ * session that wrote the code while the harness had in fact started cold — the
+ * one thing this field exists to be trusted about.
+ *
+ * A run that is still RUNNING answers "resumed": a session cannot be re-entered
+ * while it is in use, but that is a fact about the box this minute, not about
+ * the session, and the caller's start is refused as busy and the round retried
+ * rather than spent.
+ */
+export function decideReviewFixPath(candidate: ReviewFixCandidate | null): { mode: ReviewFixMode; detail: string } {
+  if (!candidate) {
+    return { mode: "fresh", detail: "The run that would have been resumed is no longer on the record, so a fresh run took the round on the same branch." };
+  }
+  if (!candidate.sessionId) {
+    return { mode: "fresh", detail: `Run ${candidate.id} never opened a session to resume, so a fresh run took the round on the same branch.` };
+  }
+  if (candidate.status === "running") {
+    return { mode: "resumed", detail: `Resuming run ${candidate.id}, which is still working.` };
+  }
+  if (candidate.resumable) {
+    return { mode: "resumed", detail: `Resumed run ${candidate.id}: its session was still open, so the round went to the context that wrote the code.` };
+  }
+  if (candidate.status === "completed") {
+    return { mode: "resumed", detail: `Resumed run ${candidate.id}: it completed, so its session was intact and the round went to the context that wrote the code.` };
+  }
+  return {
+    mode: "fresh",
+    detail: `Run ${candidate.id} settled ${candidate.status} with no session left to resume, so a fresh run took the round on the same branch.`,
+  };
+}
+
 /** A failing check with whatever of its log could be read. */
 export interface FailedCheckLog {
   check: ReviewCheck;
@@ -459,9 +549,17 @@ export interface FailedCheckLog {
 /**
  * The follow-up turn's task text.
  *
- * It is a TASK and not a system prompt: it travels on stdin into the resumed
- * session, so the run already remembers what it built and why. What it does not
- * know is what happened on GitHub in the meantime, which is all this says.
+ * It is a TASK and not a system prompt: on the RESUMED path it travels on stdin
+ * into the session that wrote the code, so the run already remembers what it
+ * built and why. What it does not know is what happened on GitHub in the
+ * meantime, which is all this says.
+ *
+ * On the FRESH path (`fresh`) none of that holds — the session was gone, and
+ * what starts is a run in the same folder on the same branch with no memory of
+ * either. The findings are identical; what changes is that it is told so, and
+ * told to read the diff before it touches anything. Writing one message for
+ * both and letting the fresh run infer its own amnesia is how a round opens by
+ * "fixing" code it has not read.
  *
  * Every quoted byte here is GitHub's, so the whole thing is bounded and it is
  * labelled as information rather than instructions, the way the MCP status tool
@@ -479,13 +577,25 @@ export function buildReviewFeedback(input: {
   threads: readonly ReviewThread[];
   conflicting: boolean;
   changesRequested: boolean;
+  /** True when this goes to a run starting COLD rather than to the session that
+   *  wrote the code — see decideReviewFixPath. */
+  fresh?: boolean;
 }): string {
   const lines: string[] = [];
   lines.push(
-    `Your pull request #${input.prNumber}${input.url ? ` (${input.url})` : ""} is open`
+    `${input.fresh ? "The" : "Your"} pull request #${input.prNumber}${input.url ? ` (${input.url})` : ""} is open`
     + `${input.base ? ` against ${input.base}` : ""}${input.branch ? ` from ${input.branch}` : ""},`
     + ` and it is not ready to merge. This is review round ${input.round} of ${input.maxRounds}.`,
   );
+  if (input.fresh) {
+    lines.push(
+      "You did not write this branch and you are starting with no memory of it: the run that did has"
+      + " finished and its session could not be resumed. Before you change anything, read what is there —"
+      + " `git log --oneline " + (input.base ? `origin/${input.base}..HEAD` : "-20") + "` and"
+      + " `git diff " + (input.base ? `origin/${input.base}...HEAD` : "HEAD~1") + "` — so your fixes"
+      + " match the intent of the work rather than replacing it.",
+    );
+  }
   lines.push(
     "Work in this folder, on the branch you are already on. Fix the points below, commit,"
     + " and push with `git push`. Do not open another pull request and do not merge this one.",
@@ -608,6 +718,8 @@ export function parseReviewLoop(raw: unknown): ReviewLoop | null {
     roundStartedAt: typeof value.roundStartedAt === "number" ? value.roundStartedAt : Date.now(),
     detail: typeof value.detail === "string" ? value.detail.slice(0, 600) : null,
     fixRunId: str(value.fixRunId) || null,
+    fixMode: isReviewFixMode(value.fixMode) ? value.fixMode : null,
+    fixDetail: typeof value.fixDetail === "string" ? value.fixDetail.slice(0, 600) : null,
   };
 }
 
