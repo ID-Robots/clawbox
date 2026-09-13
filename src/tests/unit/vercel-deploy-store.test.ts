@@ -98,6 +98,21 @@ describe("the record of what was deployed", () => {
     expect(await store.readProjectDeploy("__proto__")).toBeNull();
     expect(await store.readProjectDeploy("constructor")).toBeNull();
   });
+
+  it("WRITES a prototype-shaped id as an ordinary key, leaving every other record alone", async () => {
+    // Reading those names proves nothing on its own: an implementation that
+    // sets the accumulator's prototype when RECORDING them still answers null
+    // for the read. `__proto__` is spellable in the project alphabet, so both
+    // halves are exercised.
+    await store.recordProjectDeploy("shop", deploy());
+    await store.recordProjectDeploy("__proto__", deploy({ deploymentId: "dpl_proto" }));
+    await store.recordProjectDeploy("constructor", deploy({ deploymentId: "dpl_ctor" }));
+    expect((await store.readProjectDeploy("__proto__"))?.latest?.deploymentId).toBe("dpl_proto");
+    expect((await store.readProjectDeploy("constructor"))?.latest?.deploymentId).toBe("dpl_ctor");
+    expect((await store.readProjectDeploy("shop"))?.latest?.deploymentId).toBe("dpl_1");
+    // And nothing leaked onto an unrelated object.
+    expect(({} as Record<string, unknown>).latest).toBeUndefined();
+  });
 });
 
 describe("the owner's standing permission for the assistant", () => {

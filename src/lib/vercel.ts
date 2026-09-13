@@ -200,10 +200,13 @@ async function call(
       ...(init.json !== undefined
         ? { body: JSON.stringify(init.json) }
         : init.bytes !== undefined
-          // A fresh copy, because `fetch` wants an ArrayBuffer of exactly the
-          // bytes: a Buffer is a VIEW on a pooled allocation, and handing its
-          // whole `buffer` over uploads whatever else Node had in that pool.
-          ? { body: init.bytes.slice().buffer as ArrayBuffer }
+          // A COPY of exactly this view's bytes. `Buffer.prototype.slice` is
+          // `subarray` under another name — it returns a VIEW, not a copy — so
+          // `.slice().buffer` hands over Node's whole pooled allocation and
+          // uploads whatever else was in that pool, with a length that does
+          // not match `Content-Length`. `new Uint8Array(view)` copies the view
+          // and nothing else (found in review).
+          ? { body: new Uint8Array(init.bytes) }
           : {}),
       signal: AbortSignal.timeout(init.timeoutMs ?? CALL_TIMEOUT_MS),
     });

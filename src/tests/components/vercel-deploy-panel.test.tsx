@@ -18,10 +18,10 @@
  *     thing it governs.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import VercelDeployPanel from "@/components/VercelDeployPanel";
-import type { ProjectDeploy } from "@/lib/vercel-state";
+import { VERCEL_POLL_INTERVAL_MS as POLL_INTERVAL_MS, type ProjectDeploy } from "@/lib/vercel-state";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -190,10 +190,34 @@ describe("the owner's standing permission for the assistant", () => {
 
 describe("what it costs to have open", () => {
   it("asks Vercel for the domain ONCE, not on every poll", async () => {
-    api({ ...LINKED, deploy: deploy({ phase: "building" }) });
-    render(<VercelDeployPanel query="projectId=shop" t={t} />);
-    await screen.findByTestId("coding-agent-deploy-preview-btn");
-    const withDomain = calls.filter((c) => c.method === "GET" && c.url.includes("domain=1"));
-    expect(withDomain).toHaveLength(1);
+    // The POLL has to actually run: waiting for the first render only proves
+    // the first GET, and an implementation that put `domain=1` on every poll
+    // would pass that. Fake timers, one interval advanced, then both counts.
+    vi.useFakeTimers();
+    try {
+      api({ ...LINKED, deploy: deploy({ phase: "building" }) });
+      render(<VercelDeployPanel query="projectId=shop" t={t} />);
+      // The interval is only armed once the first answer has landed and said
+      // the deployment is still building, so wait for the row it draws.
+      await vi.waitFor(() => expect(screen.queryByTestId("coding-agent-project-deploy")).not.toBeNull());
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS + 100); });
+      await vi.waitFor(() => expect(calls.filter((c) => c.method === "GET").length).toBeGreaterThan(1));
+      expect(calls.filter((c) => c.method === "GET" && c.url.includes("domain=1"))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not poll at all once the deployment has settled", async () => {
+    vi.useFakeTimers();
+    try {
+      api({ ...LINKED, deploy: deploy({ phase: "ready" }) });
+      render(<VercelDeployPanel query="projectId=shop" t={t} />);
+      await vi.waitFor(() => expect(screen.queryByTestId("coding-agent-project-deploy")).not.toBeNull());
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3); });
+      expect(calls.filter((c) => c.method === "GET")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

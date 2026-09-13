@@ -81,12 +81,43 @@ describe("a folder that is a git repository", () => {
     expect(names(got.files)).toEqual(["index.html"]);
   });
 
+  it("keeps a filename's own whitespace, which git permits and -z carries", async () => {
+    gitInit();
+    write("index.html", "x");
+    write("report ", "trailing space is a legal filename");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(true);
+    // Trimming each path changed it before it was opened, so the tracked file
+    // was dropped from the deployment.
+    expect(got.ok && names(got.files)).toEqual(["index.html", "report "]);
+  });
+
   it("hashes each file the way Vercel addresses it", async () => {
     gitInit();
     write("index.html", "hello");
     const got = await collectDeployFiles(dir);
     expect(got.ok && got.files[0].sha).toBe(sha1Of(Buffer.from("hello")));
     expect(got.ok && got.files[0].size).toBe(5);
+  });
+});
+
+describe("when git cannot say what the project ignores", () => {
+  it("REFUSES a repository rather than falling back to an unrestricted walk", async () => {
+    gitInit();
+    write("index.html", "x");
+    write(".gitignore", "secret.env\n");
+    write("secret.env", "API_KEY=hunter2hunter2");
+    // A git that fails or times out in a repository must not become "upload
+    // everything": .gitignore is what keeps a .env out of a deployment.
+    const broken = path.join(dir, "no-git-here");
+    fs.mkdirSync(broken);
+    fs.renameSync(path.join(dir, ".git"), path.join(broken, "moved"));
+    // `.git` is now a FILE-shaped absence: put a plain file there, which is
+    // what a worktree checkout looks like and what git will refuse to read.
+    fs.writeFileSync(path.join(dir, ".git"), "not a gitdir");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(false);
+    expect(got.ok === false && got.code).toBe("ignores_unreadable");
   });
 });
 
@@ -100,6 +131,18 @@ describe("a folder that is not a repository", () => {
     // An owner is entitled to know their own ignore rules were not what decided.
     expect(got.usedGit).toBe(false);
     expect(names(got.files)).toEqual(["index.html"]);
+  });
+
+  it("still keeps the credential-shaped names out — the walk has no .gitignore to honour", async () => {
+    write("index.html", "x");
+    write(".env", "API_KEY=hunter2hunter2");
+    write(".env.production", "API_KEY=hunter2hunter2");
+    write("deploy.pem", "-----BEGIN KEY-----");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(names(got.files)).toEqual(["index.html"]);
+    expect(JSON.stringify(got.files)).not.toContain("hunter2hunter2");
   });
 });
 

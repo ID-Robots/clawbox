@@ -297,18 +297,16 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const project = await projectFor({
-      projectId: typeof body.projectId === "string" ? body.projectId : null,
-      directory: typeof body.directory === "string" ? body.directory : null,
-    });
-    if (!project.ok) return project.refusal;
-    const { scope, directory } = project;
-
-    // The run this deploy belongs to, when it was pressed on one. Checked
-    // before anything is sent, so a bad id is a refusal rather than a
-    // deployment nobody can find again.
+    // The run this deploy belongs to, when it was pressed on one. Resolved
+    // FIRST, because a run NAMES its project: `coding_deploy_preview` takes a
+    // `run_id` on its own ("deploy what that run built"), and reading the
+    // project out of the body before looking at the run answered every such
+    // call with "name a folder" — `resolveWorkingDirectory` throws when neither
+    // a project nor a directory is given and has no fallback to a run's own
+    // (found in review).
     const runId = typeof body.runId === "string" && body.runId.trim() ? body.runId.trim() : null;
     let branch: string | null = null;
+    let fromRun: { projectId: string | null; directory: string } | null = null;
     if (runId) {
       const run = listRuns().find((r) => r.id === runId);
       if (!run) return refuse(404, "not_found", "There is no run with that id on this ClawBox.");
@@ -318,7 +316,22 @@ export async function POST(request: Request): Promise<NextResponse> {
         return refuse(409, "deploy_in_flight", "This run already has a deployment that is still building. Wait for it, or look at it on Vercel.");
       }
       branch = run.vercel?.branch ?? run.pr?.branch ?? null;
+      // The PROJECT, not the run's own folder: a run works in a worktree of its
+      // own (`<project>/.clawbox/worktrees/<id>`), and what is deployed is the
+      // project — which is also the identity the owner's Vercel link is filed
+      // under. `projectDirectoryOf`'s distinction, read from the record.
+      fromRun = { projectId: run.projectId, directory: run.worktree?.project ?? run.directory };
     }
+
+    const project = await projectFor({
+      // What the caller named wins, so a run's page deploying its own project
+      // sends both and they agree; a caller that named only a run gets the
+      // run's project rather than a refusal.
+      projectId: typeof body.projectId === "string" ? body.projectId : fromRun?.projectId ?? null,
+      directory: typeof body.directory === "string" ? body.directory : fromRun?.directory ?? null,
+    });
+    if (!project.ok) return project.refusal;
+    const { scope, directory } = project;
 
     if (target === "production") {
       if (owner) {

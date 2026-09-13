@@ -85,7 +85,7 @@ export const NEVER_UPLOADED = new Set([".git", "node_modules", ".clawbox"]);
 /** How long git gets to list a folder. */
 const LIST_TIMEOUT_MS = 30_000;
 
-export type CollectRefusal = "too_many_files" | "too_large" | "empty" | "unreadable";
+export type CollectRefusal = "too_many_files" | "too_large" | "empty" | "unreadable" | "ignores_unreadable";
 
 export interface CollectedFiles {
   ok: true;
@@ -115,9 +115,45 @@ export function sha1Of(data: Uint8Array): string {
 async function gitListing(dir: string): Promise<string[] | null> {
   const listed = await gitIn(dir, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
   if (listed.code !== 0) return null;
-  const paths = listed.stdout.split("\0").map((p) => p.trim()).filter(Boolean);
-  return paths;
+  // NO `trim()` per path: git permits leading and trailing whitespace in a
+  // filename, `-z` is exactly the format that carries one unambiguously, and
+  // trimming changed the path before it was opened — so the tracked file was
+  // dropped from the deployment (found in review).
+  //
+  // One residue is outside this module and is stated rather than hidden:
+  // `runChild` trims the WHOLE of a child's stdout, so a leading space on the
+  // FIRST path git lists (which is where such a name sorts) is gone before
+  // this sees it. That file is then skipped and reported in `skipped` — an
+  // omission the caller can see, never a wrong file under a right name.
+  return listed.stdout.split("\0").filter((p) => p.length > 0);
 }
+
+/**
+ * Is this folder a git repository at all?
+ *
+ * Asked on DISK rather than of git, because the question only arises when git
+ * has just failed to answer one — a second spawn would be just as likely to
+ * time out. `.git` is a directory in an ordinary checkout and a FILE in a
+ * worktree, so the presence of the name is the test.
+ */
+async function isRepository(dir: string): Promise<boolean> {
+  try {
+    await fsp.lstat(path.join(dir, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Credential-shaped names that never go up, whatever path found them.
+ *
+ * The fallback walk has no `.gitignore` to honour — that is what makes it the
+ * fallback — so the one thing it must not do is upload the file every project
+ * keeps its secrets in. The same shape `mcp/lib/guard.ts` refuses for the
+ * agent's own file tools, applied here to what leaves the box.
+ */
+const NEVER_UPLOADED_FILE_RE = /^(\.env(\..*)?|\.envrc|.*\.pem|.*\.key|id_[a-z0-9]+)$/i;
 
 /** Every ordinary file under `dir`, relative and posix-spelled. The fallback. */
 async function walk(dir: string, base = "", out: string[] = []): Promise<string[]> {
@@ -125,6 +161,7 @@ async function walk(dir: string, base = "", out: string[] = []): Promise<string[
   for (const entry of entries) {
     if (out.length > MAX_DEPLOY_FILES) return out;
     if (NEVER_UPLOADED.has(entry.name)) continue;
+    if (entry.isFile() && NEVER_UPLOADED_FILE_RE.test(entry.name)) continue;
     const rel = base ? `${base}/${entry.name}` : entry.name;
     // A link is never followed and never uploaded — see the header.
     if (entry.isSymbolicLink()) continue;
@@ -157,6 +194,18 @@ export async function collectDeployFiles(dir: string): Promise<CollectResult> {
       // do not cover them, `node_modules`: the never-uploaded rule is applied
       // on top of git's answer rather than instead of it.
       names = listed.filter((rel) => !rel.split("/").some((part) => NEVER_UPLOADED.has(part)));
+    } else if (await isRepository(dir)) {
+      // A REPOSITORY whose ignores this box could not read is refused, never
+      // walked. The fallback exists for a folder that has no `.gitignore` to
+      // honour; using it here would upload the very files the owner told git
+      // to keep — `.env` first among them — because git happened to time out
+      // or fail. Refusing is recoverable; a credential on somebody else's
+      // servers is not (found in review).
+      return {
+        ok: false,
+        code: "ignores_unreadable",
+        detail: "This ClawBox could not ask git what this project ignores, and it will not upload a repository without that answer — .gitignore is what keeps a .env out of a deployment. Try again in a moment.",
+      };
     } else {
       usedGit = false;
       names = await walk(dir);

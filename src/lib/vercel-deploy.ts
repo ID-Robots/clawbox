@@ -34,6 +34,7 @@
  */
 
 import { gitInfo } from "@/lib/coding-git";
+import { githubRepoName } from "@/lib/github-url";
 import { collectDeployFiles, type CollectRefusal } from "@/lib/vercel-files";
 import { readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
 import {
@@ -52,6 +53,7 @@ export type DeployRefusal =
   | "not_linked"
   | "no_branch"
   | "no_remote"
+  | "wrong_repository"
   | CollectRefusal
   | VercelLinkRefusal
   | VercelErrorKind;
@@ -199,6 +201,27 @@ async function deployFromGit(input: DeployProjectInput & {
     return fail(
       "no_remote",
       "That Vercel project builds from a git repository, and this folder has no remote — back it up to GitHub first, so Vercel has something to clone.",
+    );
+  }
+
+  // …and it clones the repository VERCEL is connected to, which is not
+  // necessarily the one this folder pushes to. Both having a branch called
+  // `main` is the ordinary case, so without this the owner presses Deploy on
+  // one project and Vercel builds somebody else's code of the same name —
+  // silently, and successfully (found in review).
+  //
+  // Only when BOTH can be read: a remote this box cannot parse (a self-hosted
+  // GitLab, an SSH alias) and a link Vercel described without an owner/repo
+  // pair are "could not tell", and refusing on those would take the feature
+  // away from every setup outside github.com.
+  const here = githubRepoName(info.remote)?.toLowerCase() ?? null;
+  const there = input.gitLink.org && input.gitLink.repo
+    ? `${input.gitLink.org}/${input.gitLink.repo}`.toLowerCase()
+    : null;
+  if (here && there && here !== there) {
+    return fail(
+      "wrong_repository",
+      `That Vercel project builds ${input.gitLink.org}/${input.gitLink.repo}, and this folder pushes to ${here}. Point the link at the Vercel project for this repository, or connect that Vercel project to this one.`,
     );
   }
 

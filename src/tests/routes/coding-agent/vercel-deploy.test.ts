@@ -262,6 +262,21 @@ describe("a deploy pressed on a run", () => {
     expect(recordProjectDeploy.mock.calls[0][1]).toMatchObject({ runId: "run-1" });
   });
 
+  it("takes the PROJECT from the run when the caller named only a run id", async () => {
+    // `coding_deploy_preview` takes a run_id on its own. Reading the project
+    // out of the body first answered every such call with "name a folder".
+    listRuns.mockReturnValue([{
+      id: "run-1", projectId: null, directory: "/home/clawbox/projects/shop/.clawbox/worktrees/run-1",
+      pr: null, vercel: null,
+      worktree: { project: "/home/clawbox/projects/shop", branch: "clawbox/run-1", base: "main", path: "x", removed: false },
+    }]);
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview", runId: "run-1" } }));
+    expect(res.status).toBe(200);
+    // The PROJECT, not the run's own worktree: that is the identity the owner's
+    // Vercel link is filed under.
+    expect(resolveWorkingDirectory).toHaveBeenCalledWith({ projectId: null, directory: "/home/clawbox/projects/shop" });
+  });
+
   it("refuses an unknown run before anything is sent", async () => {
     listRuns.mockReturnValue([]);
     const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview", runId: "run-9" } }));
