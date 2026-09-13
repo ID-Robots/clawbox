@@ -24,7 +24,8 @@ import type { VercelLink } from "@/lib/vercel-state";
 /** The readiness the route answers, as this card reads it. */
 export interface VercelReadinessView {
   linked: boolean;
-  tokenPresent: boolean;
+  /** Null is "this box could not read its own secret store" — see the route. */
+  tokenPresent: boolean | null;
   tokenValid: boolean | null;
   username: string | null;
   projectResolves: boolean | null;

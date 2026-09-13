@@ -594,14 +594,27 @@ export async function resolveSecretsForRun(run: { project?: string | null }): Pr
  * their own refusal, and a store that cannot be read is not this function's to
  * explain.
  */
+/**
+ * THREE ways to not have a value, and they are kept apart because each one
+ * needs a different sentence said to the owner.
+ *
+ * Folding any two of them together gives advice that is wrong for the other:
+ * "save it under that name" is useless about an entry that is already there,
+ * and worse than useless about a store this box cannot read at all — the owner
+ * would type a credential into a file that is not going to keep it.
+ */
 export type SecretLookup =
   /** There is an entry, and this box can open it. */
   | { found: true; value: string }
   /** There is an entry and this box CANNOT open it — sealed under a key that is
    *  gone (a factory reset took `.session-secret`), or edited by hand. */
   | { found: false; reason: "unreadable" }
-  /** No entry of that name in either scope, or the store could not be read. */
-  | { found: false; reason: "missing" };
+  /** The store was read, and holds no entry of that name in either scope. */
+  | { found: false; reason: "missing" }
+  /** The store or its key could not be read AT ALL: `data/secrets.json` is
+   *  unreadable or is not the list it should be, or there is no session secret
+   *  to derive the key from. Nothing is known about any entry. */
+  | { found: false; reason: "unavailable" };
 
 export async function readSecretForProject(input: { name: string; project?: string | null }): Promise<SecretLookup> {
   try {
@@ -623,10 +636,14 @@ export async function readSecretForProject(input: { name: string; project?: stri
       return value === null ? { found: false, reason: "unreadable" } : { found: true, value };
     }
     return { found: false, reason: "missing" };
-  } catch {
-    // A store this box cannot read is reported as MISSING rather than as
-    // unreadable: "unreadable" is a statement about one entry, and there may be
-    // no entry at all.
-    return { found: false, reason: "missing" };
+  } catch (err) {
+    // A store this box cannot READ says nothing about whether the entry exists,
+    // so it is neither "missing" nor "unreadable" — both of those are claims
+    // about one entry, and this is a fault in the store itself (found in
+    // review). An invalid NAME is the caller's error and is the one thing here
+    // that really does mean "there is no such entry".
+    const bad = err instanceof SecretStoreError
+      && (err.code === "invalid_name" || err.code === "reserved_name");
+    return { found: false, reason: bad ? "missing" : "unavailable" };
   }
 }

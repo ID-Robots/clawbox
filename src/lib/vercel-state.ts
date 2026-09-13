@@ -350,6 +350,7 @@ export type VercelLinkRefusal =
   | "not_linked"
   | "token_missing"
   | "token_unreadable"
+  | "token_store_unavailable"
   | "link_unreadable"
   | "link_unwritable";
 

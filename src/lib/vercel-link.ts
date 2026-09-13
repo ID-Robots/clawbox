@@ -183,18 +183,27 @@ export async function deleteVercelLink(scope: unknown): Promise<boolean> {
 export async function resolveVercelAuth(link: VercelLink, scope: string): Promise<VercelAuth> {
   const found = await readSecretForProject({ name: link.tokenSecretName, project: scope });
   if (!found.found) {
-    // The two reasons need opposite things said, which is why the store tells
-    // them apart: "save it under that name" is useless advice about an entry
-    // that is already there and merely cannot be opened.
-    throw found.reason === "unreadable"
-      ? new VercelLinkError(
+    // THREE reasons, and each needs a different thing said. Folding any two of
+    // them together gives advice that is wrong for the other: "save it under
+    // that name" is useless about an entry already in the owner's list, and
+    // worse than useless about a store this box cannot read — it would have
+    // them type a credential into a file that will not keep it.
+    if (found.reason === "unreadable") {
+      throw new VercelLinkError(
         "token_unreadable",
         `This ClawBox has a secret called ${link.tokenSecretName} but can no longer open it — it was saved under a key this box has lost. Save the Vercel token again under the same name.`,
-      )
-      : new VercelLinkError(
-        "token_missing",
-        `This ClawBox has no secret called ${link.tokenSecretName} for this project. Save the Vercel token under that name, or point the link at one that is there.`,
       );
+    }
+    if (found.reason === "unavailable") {
+      throw new VercelLinkError(
+        "token_store_unavailable",
+        "This ClawBox could not read its own secret store, so it cannot tell whether the Vercel token is there. Nothing is wrong with your link — this is the box, and saving the token again will not help until the store can be read.",
+      );
+    }
+    throw new VercelLinkError(
+      "token_missing",
+      `This ClawBox has no secret called ${link.tokenSecretName} for this project. Save the Vercel token under that name, or point the link at one that is there.`,
+    );
   }
   return { token: found.value, teamId: link.teamId };
 }
@@ -222,8 +231,15 @@ export interface VercelReadiness {
   projectId: string | null;
   teamId: string | null;
   tokenSecretName: string | null;
-  /** Is the named secret there and openable? */
-  tokenPresent: boolean;
+  /**
+   * Is the named secret there and openable?
+   *
+   * TRI-STATE like `tokenValid` below, and for the same reason: `null` is "this
+   * box could not read its own secret store", which is neither "it is there"
+   * nor "it is not". A card that read that as `false` would tell the owner to
+   * save a token when the thing that is broken is the store (found in review).
+   */
+  tokenPresent: boolean | null;
   /** Did Vercel accept it? Null when this box could not ask. */
   tokenValid: boolean | null;
   /** Whose account it is, when Vercel said. */
@@ -264,9 +280,11 @@ export async function checkVercelReadiness(scope: string | null | undefined): Pr
     const code = err instanceof VercelLinkError ? err.code : "token_missing";
     return {
       ...base,
-      // An entry that is THERE and cannot be opened is present: the card must
-      // not tell the owner to save a secret they can see in their own list.
-      tokenPresent: code === "token_unreadable",
+      // An entry that is THERE and cannot be opened is PRESENT: the card must
+      // not tell the owner to save a secret they can see in their own list. A
+      // store this box could not read at all says nothing either way, so it is
+      // null rather than false.
+      tokenPresent: code === "token_unreadable" ? true : code === "token_store_unavailable" ? null : false,
       code,
       problems: [err instanceof Error ? err.message : "This ClawBox could not read the Vercel token."],
     };

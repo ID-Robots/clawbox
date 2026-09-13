@@ -162,6 +162,25 @@ describe("resolving the token", () => {
     await expect(links.resolveVercelAuth(link, "shop")).rejects.toMatchObject({ code: "token_missing" });
   });
 
+  it("tells a store it CANNOT READ apart from one that simply holds no such entry", async () => {
+    // The third reason, and the one whose advice matters most: telling the
+    // owner to "save the token under that name" when `secrets.json` is
+    // unreadable would have them type a credential into a file that is not
+    // going to keep it (found in review).
+    fs.writeFileSync(path.join(dataDir, "secrets.json"), "{ this is not the list it should be");
+    const link = await links.setVercelLink({ scope: "shop", projectId: "prj_a", tokenSecretName: "VERCEL_TOKEN" });
+    await expect(links.resolveVercelAuth(link, "shop")).rejects.toMatchObject({ code: "token_store_unavailable" });
+
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const readiness = await links.checkVercelReadiness("shop");
+    // NOT false: "could not look" is not "it is not there".
+    expect(readiness.tokenPresent).toBeNull();
+    expect(readiness).toMatchObject({ linked: true, ready: false, code: "token_store_unavailable" });
+    expect(readiness.problems[0]).toMatch(/could not read its own secret store/i);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("tells an entry this box CANNOT OPEN apart from one that is not there", async () => {
     // The two need opposite things said: "save it under that name" is useless
     // advice about an entry the owner can see in their own list (found in
