@@ -277,6 +277,22 @@ describe("a deploy pressed on a run", () => {
     expect(resolveWorkingDirectory).toHaveBeenCalledWith({ projectId: null, directory: "/home/clawbox/projects/shop" });
   });
 
+  it("does not let an EMPTY project field take the run's own project away", async () => {
+    // What a form sends for a field it did not fill in.
+    listRuns.mockReturnValue([{
+      id: "run-1", projectId: "site", directory: "/home/clawbox/clawbox/data/code-projects/site",
+      pr: null, vercel: null,
+    }]);
+    const res = await route.POST(request({
+      method: "POST", cookie: ownerCookie(),
+      body: { target: "preview", runId: "run-1", projectId: "", directory: "" },
+    }));
+    expect(res.status).toBe(200);
+    expect(resolveWorkingDirectory).toHaveBeenCalledWith({
+      projectId: "site", directory: "/home/clawbox/clawbox/data/code-projects/site",
+    });
+  });
+
   it("refuses an unknown run before anything is sent", async () => {
     listRuns.mockReturnValue([]);
     const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview", runId: "run-9" } }));

@@ -85,6 +85,11 @@ function refuse(status: number, code: string, error: string, extra: Record<strin
   return NextResponse.json({ error, kind: code, code, ...extra }, { status });
 }
 
+/** A body field the caller actually filled in, or null. */
+function named(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
 /** A body here is a couple of identifiers and a flag. */
 const MAX_BODY_BYTES = 4_096;
 const TOO_LONG = "That request is larger than a deployment request can be.";
@@ -327,8 +332,12 @@ export async function POST(request: Request): Promise<NextResponse> {
       // What the caller named wins, so a run's page deploying its own project
       // sends both and they agree; a caller that named only a run gets the
       // run's project rather than a refusal.
-      projectId: typeof body.projectId === "string" ? body.projectId : fromRun?.projectId ?? null,
-      directory: typeof body.directory === "string" ? body.directory : fromRun?.directory ?? null,
+      //
+      // `named` and not `typeof … === "string"`: an EMPTY string is what a form
+      // sends for a field it did not fill in, and letting one win would take
+      // the run's own project away and refuse the call it came with.
+      projectId: named(body.projectId) ?? fromRun?.projectId ?? null,
+      directory: named(body.directory) ?? fromRun?.directory ?? null,
     });
     if (!project.ok) return project.refusal;
     const { scope, directory } = project;
