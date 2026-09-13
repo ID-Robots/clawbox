@@ -181,7 +181,16 @@ async function screenshotPage(runId: string, url: string): Promise<{ file: strin
       // starts.
       args: chromiumSandboxArgs(),
     });
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+      // WITHOUT THIS THE GUARD BELOW HAS A HOLE IN IT. `page.route` does not
+      // intercept a request a Service Worker makes, so a deployment that
+      // registered one could fetch a private or link-local address from inside
+      // it and never touch the handler. Nothing a verification needs is served
+      // by a worker — this is a screenshot of a first load — so the cheapest
+      // answer is that there are none.
+      serviceWorkers: "block",
+    });
     // Chromium follows redirects and re-resolves DNS itself, so the address the
     // fetch settled on proves nothing about where the RENDERER ends up. EVERY
     // request is put to the same rail before the browser connects — not only

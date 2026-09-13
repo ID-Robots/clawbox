@@ -28,10 +28,12 @@ vi.mock("@/lib/cdp-probe", () => ({ findPlaywrightChromium }));
  */
 const routeHandler = vi.hoisted(() => ({ current: null as ((route: unknown) => Promise<void>) | null }));
 const gotoCalls = vi.hoisted(() => ({ urls: [] as string[] }));
+const pageOptions = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }));
 vi.mock("playwright", () => ({
   chromium: {
     launch: async () => ({
-      newPage: async () => ({
+      newPage: async (options: Record<string, unknown>) => ({
+        __options: (pageOptions.last = options),
         route: async (_glob: string, handler: (route: unknown) => Promise<void>) => { routeHandler.current = handler; },
         goto: async (url: string) => { gotoCalls.urls.push(url); },
         screenshot: async () => Buffer.from("not-really-a-png"),
@@ -66,6 +68,7 @@ beforeEach(async () => {
   findPlaywrightChromium.mockReturnValue(null);
   routeHandler.current = null;
   gotoCalls.urls = [];
+  pageOptions.last = null;
   hostIsPublic.mockReset();
   hostIsPublic.mockResolvedValue(true);
   vi.resetModules();
@@ -364,6 +367,13 @@ describe("what the RENDERER may reach", () => {
     // whole point of the question.
     await ask("https://x.vercel.app/elsewhere", true);
     expect(hostIsPublic.mock.calls.length - before).toBe(2);
+  });
+
+  it("blocks Service Workers, which `page.route` cannot see inside", async () => {
+    // A deployment that registered one could fetch a private address from
+    // inside it and never touch the handler above.
+    await guard();
+    expect(pageOptions.last).toMatchObject({ serviceWorkers: "block" });
   });
 
   it("photographs the address the fetch SETTLED on, not the one it started from", async () => {
