@@ -525,6 +525,7 @@ function pipelineRecord(stage: string, stageState: string, over: Record<string, 
     verify: { path: "/", expect: ["Invoice"] },
     production: true,
     failure: null,
+    sentBackFrom: null,
     productionApprovedAt: null,
     lastVerification: null,
     steps: [{ stage, state: stageState, attempt: 1, startedAt: now - 10_000, endedAt: null, detail: null, evidence: [] }],
@@ -608,51 +609,87 @@ describe("a restart in the middle of a stage", () => {
 });
 
 describe("what an improvement lap is told", () => {
-  it("names the stage that failed MOST RECENTLY, not the first one in order", async () => {
+  it("names the stage that sent it back, even with an older failed stage on the record", async () => {
     installHarness();
-    // The review stage fails first (the pass cannot start), then a later lap's
-    // preview check fails. The second nudge must be about the check.
-    let lap = 0;
-    verifyDeployment.mockImplementation(async () => {
-      lap += 1;
-      return lap === 1 ? verification(false) : verification(true);
+    // Lap 1: the preview CHECK fails. Lap 2: the check never runs, because the
+    // DEPLOY fails first — and `verify_preview` is still `failed` on the record
+    // from lap 1. Reading the steps in stage order names the deploy both times;
+    // reading them by when they ended names the check for lap 1 and the deploy
+    // for lap 2. Only the recorded `sentBackFrom` gets both right.
+    let deploys = 0;
+    const realDeploy = runDeployment.getMockImplementation()!;
+    runDeployment.mockImplementation(async (input: { runId: string | null; target: string }) => {
+      deploys += 1;
+      deploymentReadyState.value = deploys >= 2 ? "error" : "ready";
+      return realDeploy(input);
     });
+    verifyDeployment.mockResolvedValue(verification(false));
+
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "failed");
+
+    const nudges = stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"));
+    expect(nudges).toHaveLength(2);
+    expect(nudges[0]).toContain("preview verification stage");
+    expect(nudges[1]).toContain("preview deployment stage");
+    // Both stages really are `failed` on the record at the same time, which is
+    // the state that made the old search pick wrong.
+    const state = (s: string) => run.pipeline!.steps.find((x) => x.stage === s)!.state;
+    expect(state("verify_preview")).toBe("failed");
+    expect(state("deploy_preview")).toBe("failed");
+  });
+
+  it("does not hand a failed DEPLOY the verification left over from the last lap", async () => {
+    installHarness();
+    let deploys = 0;
+    const realDeploy = runDeployment.getMockImplementation()!;
+    runDeployment.mockImplementation(async (input: { runId: string | null; target: string }) => {
+      deploys += 1;
+      deploymentReadyState.value = deploys >= 2 ? "error" : "ready";
+      return realDeploy(input);
+    });
+    verifyDeployment.mockResolvedValue(verification(false));
+
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "failed");
+
+    const nudges = stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"));
+    // Lap 1 was sent back by the CHECK, so it carries what the check saw…
+    expect(nudges[0]).toContain("What this ClawBox checked");
+    expect(nudges[0]).toContain("HTTP 200");
+    // …and lap 2 was sent back by the DEPLOY, so it carries the build log and
+    // NOT the previous lap's check, which says nothing about this work.
+    expect(nudges[1]).not.toContain("What this ClawBox checked");
+    expect(nudges[1]).toContain("error TS2304");
+    // The check's own result is still on the record for the card to draw.
+    expect(run.pipeline!.lastVerification!.ok).toBe(false);
+  });
+});
+
+describe("the advance queue", () => {
+  it("does not keep a settled promise per run for the life of the process", async () => {
+    installHarness();
     readAutoProduction.mockResolvedValue(true);
     const started = await lib.startRun({
       task: "build an invoice page", projectId: "site", source: "owner",
       pipeline: { path: "/", expect: ["Invoice"] },
     });
     await pipelineSettles(started.id, "complete");
-    const nudges = stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"));
-    expect(nudges).toHaveLength(1);
-    expect(nudges[0]).toContain("preview verification stage");
-  });
 
-  it("does not hand a failed DEPLOY the verification from a lap that passed", async () => {
-    installHarness();
-    // Lap 1: the check passes, so `lastVerification` is a PASS on the record.
-    // Lap 2's deploy then fails, and its nudge must not quote that pass as
-    // "what this ClawBox checked".
-    let deploys = 0;
-    const realDeploy = runDeployment.getMockImplementation()!;
-    verifyDeployment.mockResolvedValue(verification(true));
-    readAutoProduction.mockResolvedValue(true);
-    runDeployment.mockImplementation(async (input: { runId: string | null; target: string }) => {
-      deploys += 1;
-      // The production build is the one that fails.
-      deploymentReadyState.value = deploys >= 2 ? "error" : "ready";
-      return realDeploy(input);
-    });
-    const started = await lib.startRun({
-      task: "build an invoice page", projectId: "site", source: "owner",
-      pipeline: { path: "/", expect: ["Invoice"] },
-    });
-    const run = await pipelineSettles(started.id, "failed");
-    // A production failure ends it rather than looping, so no nudge at all —
-    // and the pass on the record is untouched by the failure.
-    expect(run.pipeline!.failure?.stage).toBe("deploy_production");
-    expect(run.pipeline!.lastVerification!.ok).toBe(true);
-    expect(stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"))).toHaveLength(0);
+    // The store is process-wide and lives as long as the web server, so an
+    // entry per pipeline that ever ran is a leak with no upper bound.
+    const { processStore } = await import("@/lib/process-store");
+    const store = processStore<{ pipelineAdvancing: Map<string, unknown> }>(
+      path.join(root, "data", "coding-agent-runs.json"),
+      () => ({ pipelineAdvancing: new Map() }),
+    );
+    await vi.waitFor(() => expect(store.pipelineAdvancing.size).toBe(0), { timeout: 10_000, interval: 50 });
   });
 });
 

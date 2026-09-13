@@ -183,29 +183,39 @@ async function screenshotPage(runId: string, url: string): Promise<{ file: strin
     });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     // Chromium follows redirects and re-resolves DNS itself, so the address the
-    // fetch settled on proves nothing about where the RENDERER ends up. Every
-    // navigation — each redirect hop included — is put to the same rail before
-    // the browser connects, the way the browser route guards its own pages.
+    // fetch settled on proves nothing about where the RENDERER ends up. EVERY
+    // request is put to the same rail before the browser connects — not only
+    // navigations: the page being rendered is somebody else's, and an
+    // `<img src="http://169.254.169.254/…">` or a `fetch()` in its own script
+    // reaches an internal service exactly as a redirect would, and lands in the
+    // screenshot this box then sends to a vision model.
+    //
+    // The answers are cached per ORIGIN for the length of the capture, which is
+    // what keeps a page with sixty assets from costing sixty DNS lookups; a
+    // navigation is never served from that cache, because a redirect hop is the
+    // one request whose destination is the point.
+    const origins = new Map<string, Promise<boolean>>();
     await page.route("**/*", async (route) => {
       const request = route.request();
-      if (!request.isNavigationRequest()) {
-        await route.continue();
-        return;
-      }
-      let host: string | null = null;
+      let parsed: URL | null = null;
       try {
-        const parsed = new URL(request.url());
-        if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password) {
-          host = parsed.hostname;
-        }
+        parsed = new URL(request.url());
       } catch {
         // Not an address this box will let a renderer reach.
       }
-      if (!host || !(await hostIsPublic(host))) {
+      const allowedScheme = parsed?.protocol === "http:" || parsed?.protocol === "https:";
+      if (!parsed || !allowedScheme || parsed.username || parsed.password) {
         await route.abort("blockedbyclient");
         return;
       }
-      await route.continue();
+      const navigation = request.isNavigationRequest();
+      const cached = navigation ? undefined : origins.get(parsed.origin);
+      const check = cached ?? hostIsPublic(parsed.hostname);
+      if (!cached && !navigation) {
+        if (origins.size >= 128) origins.delete(origins.keys().next().value!);
+        origins.set(parsed.origin, check);
+      }
+      await (await check ? route.continue() : route.abort("blockedbyclient"));
     });
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });
     const shot = await page.screenshot({ type: "png", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });

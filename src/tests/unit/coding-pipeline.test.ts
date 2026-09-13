@@ -94,6 +94,31 @@ describe("what sends the work back, and what does not", () => {
     expect(stepFor(p, "verify_preview").detail).toContain("500");
   });
 
+  it("RECORDS which stage sent the work back, so the lap need not guess", () => {
+    const p = made({ maxRounds: 3 });
+    pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview");
+    decidePipeline(p, "verify_preview", { kind: "failed", reason: "The page does not contain \"Invoice\"." });
+    expect(p.sentBackFrom).toEqual({ stage: "verify_preview", reason: "The page does not contain \"Invoice\"." });
+
+    // The NEXT lap overwrites it. Both stages are `failed` on the record at
+    // this point — the earlier check was never re-run — and searching `steps`
+    // in stage order would name the deploy for the first lap and keep naming it
+    // for the second.
+    enterStage(p, "improvement");
+    pass(p, "improvement");
+    pass(p, "review");
+    decidePipeline(p, "deploy_preview", { kind: "failed", reason: "the build failed" });
+    expect(p.sentBackFrom).toEqual({ stage: "deploy_preview", reason: "the build failed" });
+    expect(stepFor(p, "verify_preview").state).toBe("failed");
+  });
+
+  it("is not recorded by a failure that ENDS the pipeline", () => {
+    const p = made({ maxRounds: 3 });
+    pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview"); pass(p, "verify_preview");
+    decidePipeline(p, "deploy_production", { kind: "failed", reason: "Vercel refused it" });
+    expect(p.sentBackFrom).toBeNull();
+  });
+
   it("an improvement lap goes back to REVIEW, not straight to the deploy", () => {
     const p = made();
     pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview");
@@ -325,6 +350,7 @@ describe("reading a record back off disk", () => {
       screenshot: "verify-1.png",
       checkedAt: 5,
     };
+    p.sentBackFrom = { stage: "verify_preview", reason: "not there" };
     const back = parsePipeline(JSON.parse(JSON.stringify(p)));
     expect(back).toEqual(p);
   });

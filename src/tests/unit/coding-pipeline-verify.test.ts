@@ -21,6 +21,26 @@ vi.mock("@/lib/vision-describe", () => ({ describeImage }));
 const findPlaywrightChromium = vi.hoisted(() => vi.fn<() => string | null>(() => null));
 vi.mock("@/lib/cdp-probe", () => ({ findPlaywrightChromium }));
 
+/**
+ * A Chromium stand-in that keeps the handler `page.route` was given, so the
+ * guard around what the RENDERER may reach can be driven directly. Launching a
+ * real browser in a unit suite is neither available on CI nor the subject.
+ */
+const routeHandler = vi.hoisted(() => ({ current: null as ((route: unknown) => Promise<void>) | null }));
+const gotoCalls = vi.hoisted(() => ({ urls: [] as string[] }));
+vi.mock("playwright", () => ({
+  chromium: {
+    launch: async () => ({
+      newPage: async () => ({
+        route: async (_glob: string, handler: (route: unknown) => Promise<void>) => { routeHandler.current = handler; },
+        goto: async (url: string) => { gotoCalls.urls.push(url); },
+        screenshot: async () => Buffer.from("not-really-a-png"),
+      }),
+      close: async () => {},
+    }),
+  },
+}));
+
 /** Every address in this suite is public; the private-host rail has its own suite. */
 const hostIsPublic = vi.hoisted(() => vi.fn<(host: string) => Promise<boolean>>(async () => true));
 vi.mock("@/lib/private-address", () => ({ hostIsPublic, isPrivateIp: () => false, lookupWithTimeout: async () => [] }));
@@ -44,6 +64,8 @@ beforeEach(async () => {
   describeImage.mockResolvedValue({ text: null, error: "no model" });
   findPlaywrightChromium.mockReset();
   findPlaywrightChromium.mockReturnValue(null);
+  routeHandler.current = null;
+  gotoCalls.urls = [];
   hostIsPublic.mockReset();
   hostIsPublic.mockResolvedValue(true);
   vi.resetModules();
@@ -276,5 +298,82 @@ describe("the summary a stage records", () => {
       ok: false, url: "https://x/", status: 500, reason: "it answered 500", judgedBy: "none",
       expectations: [], vision: null, screenshot: null, checkedAt: 0,
     })).toBe("it answered 500");
+  });
+});
+
+
+describe("what the RENDERER may reach", () => {
+  /** One request as Playwright hands it to a route handler. */
+  function requestFor(url: string, navigation: boolean) {
+    const verdict = { continued: false, aborted: false };
+    const route = {
+      request: () => ({ url: () => url, isNavigationRequest: () => navigation }),
+      continue: async () => { verdict.continued = true; },
+      abort: async () => { verdict.aborted = true; },
+    };
+    return { route, verdict };
+  }
+
+  async function guard(): Promise<(url: string, navigation: boolean) => Promise<{ continued: boolean; aborted: boolean }>> {
+    findPlaywrightChromium.mockReturnValue("/opt/chromium");
+    hostIsPublic.mockImplementation(async (host: string) => host.endsWith(".vercel.app"));
+    vi.stubGlobal("fetch", vi.fn(async () => answer("<h1>Invoice</h1>")));
+    await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    const handler = routeHandler.current;
+    expect(handler).toBeTruthy();
+    return async (url, navigation) => {
+      const { route, verdict } = requestFor(url, navigation);
+      await handler!(route);
+      return verdict;
+    };
+  }
+
+  it("checks EVERY request, not only navigations", async () => {
+    const ask = await guard();
+    // The page being rendered is somebody else's: an image, a stylesheet or a
+    // `fetch()` in its own script reaches an internal service exactly as a
+    // redirect would, and lands in the screenshot sent to a vision model.
+    expect(await ask("http://169.254.169.254/latest/meta-data/", false)).toMatchObject({ aborted: true });
+    expect(await ask("http://127.0.0.1:18789/", false)).toMatchObject({ aborted: true });
+    expect(await ask("https://other.internal/style.css", false)).toMatchObject({ aborted: true });
+    expect(await ask("https://x.vercel.app/style.css", false)).toMatchObject({ continued: true });
+  });
+
+  it("stops a navigation to an address inside this network", async () => {
+    const ask = await guard();
+    expect(await ask("http://10.0.0.5/", true)).toMatchObject({ aborted: true });
+    expect(await ask("https://x.vercel.app/next", true)).toMatchObject({ continued: true });
+  });
+
+  it("refuses a scheme or an address a renderer has no business reaching", async () => {
+    const ask = await guard();
+    expect(await ask("file:///etc/shadow", false)).toMatchObject({ aborted: true });
+    expect(await ask("data:text/html,<script>", false)).toMatchObject({ aborted: true });
+    expect(await ask("https://user:pw@x.vercel.app/", false)).toMatchObject({ aborted: true });
+    expect(await ask("not a url", false)).toMatchObject({ aborted: true });
+  });
+
+  it("asks once per ORIGIN for assets, so a page of sixty is not sixty lookups", async () => {
+    const ask = await guard();
+    const before = hostIsPublic.mock.calls.length;
+    for (let i = 0; i < 10; i += 1) await ask(`https://x.vercel.app/asset-${i}.css`, false);
+    expect(hostIsPublic.mock.calls.length - before).toBe(1);
+    // …and never from that cache for a NAVIGATION, whose destination is the
+    // whole point of the question.
+    await ask("https://x.vercel.app/elsewhere", true);
+    expect(hostIsPublic.mock.calls.length - before).toBe(2);
+  });
+
+  it("photographs the address the fetch SETTLED on, not the one it started from", async () => {
+    findPlaywrightChromium.mockReturnValue("/opt/chromium");
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://x.vercel.app/final/" } }))
+      .mockResolvedValueOnce(answer("<h1>Invoice</h1>")));
+    await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(gotoCalls.urls).toEqual(["https://x.vercel.app/final/"]);
   });
 });

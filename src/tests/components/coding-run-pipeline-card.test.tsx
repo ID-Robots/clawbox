@@ -54,6 +54,7 @@ function state(over: Partial<PipelineState> = {}, states: Partial<Record<Pipelin
     verify: { path: "/", expect: ["Invoice"] },
     production: true,
     failure: null,
+    sentBackFrom: null,
     productionApprovedAt: null,
     lastVerification: null,
     ...over,

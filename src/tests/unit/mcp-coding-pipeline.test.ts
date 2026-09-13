@@ -81,6 +81,7 @@ function pipeline(over: Partial<PipelineState> = {}): PipelineState {
     verify: { path: "/", expect: ["Invoice"] },
     production: true,
     failure: null,
+    sentBackFrom: null,
     productionApprovedAt: null,
     lastVerification: {
       ok: true,

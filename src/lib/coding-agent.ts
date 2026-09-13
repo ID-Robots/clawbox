@@ -8078,6 +8078,13 @@ function queuePipelineWork(runId: string, work: () => Promise<void>): Promise<vo
     },
   );
   pipelineAdvancing.set(runId, mine);
+  // Dropped once it settles, and only when it is still the one in the map: the
+  // store is process-wide and lives as long as the web server, so without this
+  // every pipeline that ever ran leaves a settled promise behind.
+  const forget = () => {
+    if (pipelineAdvancing.get(runId) === mine) pipelineAdvancing.delete(runId);
+  };
+  void mine.then(forget, forget);
   return mine;
 }
 
@@ -8345,23 +8352,22 @@ async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | 
     return { kind: "failed", reason: "There is no session to carry on in, so the work could not be sent back for improvement." };
   }
 
-  // The stage that failed MOST RECENTLY, not the first one in stage order: a
-  // lap sent back by a failed deploy after an earlier failed review would
-  // otherwise be told to fix the review.
-  const failedStage = pipeline.steps
-    .filter((s) => s.state === "failed" && s.stage !== "improvement")
-    .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
-  const stage = failedStage?.stage ?? "verify_preview";
-  const reason = failedStage?.detail ?? pipeline.failure?.reason ?? "The delivery pipeline sent the work back.";
+  // The stage the MACHINE recorded when it routed here, never a search through
+  // `steps` for a failed one: see `PipelineState.sentBackFrom` for the two ways
+  // that guess was wrong.
+  const sentBack = pipeline.sentBackFrom;
+  const stage = sentBack?.stage ?? "verify_preview";
+  const reason = sentBack?.reason ?? "The delivery pipeline sent the work back.";
   const task = improvementNudge({
     stage,
     reason,
     round: pipeline.round,
     maxRounds: pipeline.maxRounds,
     buildLog: await pipelineBuildLogTail(run),
-    // Only when a VERIFICATION is what failed: after a failed deploy the last
-    // one on the record describes a lap that already passed, and handing it
-    // over as "what this ClawBox checked" would be a lie about this one.
+    // Only when THIS lap was sent back by a verification: `lastVerification`
+    // survives a lap, so after a failed deploy the one on the record belongs to
+    // an earlier check, and handing it over as "what this ClawBox checked"
+    // would be a lie about the work in front of the harness now.
     verification: stage === "verify_preview" || stage === "verify_production"
       ? lastVerificationFor(pipeline)
       : null,

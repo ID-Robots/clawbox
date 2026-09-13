@@ -263,6 +263,20 @@ export interface PipelineState {
   /** The stage that ended it, and why, for the one sentence a caller needs. */
   failure: { stage: PipelineStage; reason: string } | null;
   /**
+   * Which stage sent the work back for the lap that is running now.
+   *
+   * RECORDED rather than worked out, because the improvement lap's whole
+   * content depends on it — the nudge names this stage, and carries the
+   * verification evidence only when a verification is what failed. The first
+   * draft searched `steps` for a failed one, which is a guess: it picked the
+   * first in stage ORDER (so a lap sent back by a deploy after an earlier
+   * failed review was told to fix the review), and it could not tell a
+   * verification belonging to THIS lap from one left on the record by the last.
+   *
+   * Null before the first lap and on a pipeline that never looped.
+   */
+  sentBackFrom: { stage: PipelineStage; reason: string } | null;
+  /**
    * What the last verification saw — the whole of it, not a summary.
    *
    * Kept on the state rather than only as a piece of evidence because the
@@ -360,6 +374,7 @@ export function newPipeline(input: {
     verify: { path: input.verify.path, expect: [...input.verify.expect] },
     production: input.production,
     failure: null,
+    sentBackFrom: null,
     productionApprovedAt: null,
     lastVerification: null,
   };
@@ -496,6 +511,7 @@ export function decidePipeline(
     return fail(pipeline, stage, `${clamp(step.detail ?? "", Math.max(0, room))} ${why}`.trim(), now);
   }
   pipeline.round += 1;
+  pipeline.sentBackFrom = { stage, reason: step.detail };
   return next(pipeline, "improvement", now);
 }
 
@@ -769,10 +785,15 @@ export function parsePipeline(raw: unknown): PipelineState | null {
     ? verifyRaw.path.slice(0, MAX_VERIFY_PATH_CHARS)
     : "/";
 
-  const failureRaw = typeof p.failure === "object" && p.failure !== null ? (p.failure as Record<string, unknown>) : null;
-  const failure = failureRaw && isPipelineStage(failureRaw.stage) && typeof failureRaw.reason === "string"
-    ? { stage: failureRaw.stage, reason: clamp(failureRaw.reason, MAX_PIPELINE_DETAIL_CHARS) }
-    : null;
+  const readStageReason = (raw: unknown): { stage: PipelineStage; reason: string } | null => {
+    if (typeof raw !== "object" || raw === null) return null;
+    const v = raw as Record<string, unknown>;
+    return isPipelineStage(v.stage) && typeof v.reason === "string"
+      ? { stage: v.stage, reason: clamp(v.reason, MAX_PIPELINE_DETAIL_CHARS) }
+      : null;
+  };
+  const failure = readStageReason(p.failure);
+  const sentBack = readStageReason(p.sentBackFrom);
 
   const startedAt = p.startedAt;
   return {
@@ -792,6 +813,7 @@ export function parsePipeline(raw: unknown): PipelineState | null {
     verify: { path, expect },
     production: p.production !== false,
     failure,
+    sentBackFrom: sentBack,
     productionApprovedAt: typeof p.productionApprovedAt === "number" && Number.isFinite(p.productionApprovedAt)
       ? p.productionApprovedAt
       : null,
@@ -806,6 +828,7 @@ export function clonePipeline(pipeline: PipelineState): PipelineState {
     steps: pipeline.steps.map((s) => ({ ...s, evidence: s.evidence.map((e) => ({ ...e })) })),
     verify: { path: pipeline.verify.path, expect: [...pipeline.verify.expect] },
     failure: pipeline.failure ? { ...pipeline.failure } : null,
+    sentBackFrom: pipeline.sentBackFrom ? { ...pipeline.sentBackFrom } : null,
     lastVerification: pipeline.lastVerification
       ? {
         ...pipeline.lastVerification,
