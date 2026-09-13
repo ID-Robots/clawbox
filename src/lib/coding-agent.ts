@@ -162,6 +162,7 @@ import {
   removeRunWorktree,
   restoreRunWorktree,
   sweepRunWorktrees,
+  type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
 import {
   buildReviewFeedback,
@@ -1485,6 +1486,48 @@ export interface RunWorktree {
    * "the branch is still there" — the answer for every copy such a record has.
    */
   branchRemoved: boolean;
+  /**
+   * What became of the run's work: is it IN the project, or only on the
+   * branch — and if only on the branch, what stood in the way.
+   *
+   * The settle merges a run's branch home, and refuses conservatively: the
+   * project folder has uncommitted changes of its own, it has been moved to
+   * another branch, the merge conflicts. Until this field existed the run
+   * still said `completed`, the only control on its card was Remove copy, and
+   * the owner's one clue was a progress line. On a box whose owner keeps any
+   * uncommitted change in a project folder that is EVERY run — so the state
+   * is recorded, the card says it in one sentence with the next step that
+   * clears it, and `bringRunWorkHome` re-attempts the merge.
+   *
+   * Null on a record written before this field, and on the two settles that
+   * decided nothing about a merge: a branch with nothing on it (the tree and
+   * the branch both go) and a branch a pull request owns (merging would take
+   * the commits away from the request they are open as).
+   */
+  result?: RunWorktreeResult | null;
+}
+
+/**
+ * Where a run's work ended up.
+ *
+ * `merged` is the answer the card needs to say WHERE it went — `base` and the
+ * merge commit — and `unmerged` the one it needs to say what to do next.
+ * `detail` is the device's own English sentence, kept beside the `reason` for
+ * the same purpose `code` serves everywhere else here: the card words the
+ * reason in the owner's language, and anything without that catalogue (a log,
+ * an older surface) still has something true to print.
+ */
+export interface RunWorktreeResult {
+  /** `merged`: the work is in the project. `unmerged`: it is only on the branch. */
+  kind: "merged" | "unmerged";
+  /** Why the merge did not happen. Null on a merged result. */
+  reason: MergeHomeBlocker | null;
+  /** The device's own sentence for that reason. Null on a merged result. */
+  detail: string | null;
+  /** The branch it went into. Null on an unmerged result. */
+  base: string | null;
+  /** The merge commit. Null on an unmerged result, and when git would not name it. */
+  commit: string | null;
 }
 
 /** Which media a run may ask this box for — read once, at its start. */
@@ -3308,7 +3351,34 @@ function parseRunWorktree(raw: unknown): RunWorktree | null {
     project: w.project,
     removed: w.removed === true,
     branchRemoved: w.branchRemoved === true,
+    result: parseWorktreeResult((raw as { result?: unknown }).result),
   };
+}
+
+/** Every blocker this box words a next step for; anything else off disk is not one. */
+const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed"];
+
+/**
+ * The merge verdict off disk, or null.
+ *
+ * Strict in the same way `parseRunWorktree` is, and for a sharper reason: the
+ * card branches on this to decide whether to tell the owner their work is home
+ * or offer to bring it home. A half-written record must read as "nothing was
+ * decided" (the pre-field behaviour, where the card falls back to the general
+ * sentence) rather than as a claim in either direction — so an `unmerged`
+ * whose reason is not one this box knows is no verdict at all.
+ */
+function parseWorktreeResult(raw: unknown): RunWorktreeResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Partial<RunWorktreeResult>;
+  const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  if (r.kind === "merged") {
+    return { kind: "merged", reason: null, detail: null, base: str(r.base), commit: str(r.commit) };
+  }
+  if (r.kind !== "unmerged") return null;
+  const reason = MERGE_HOME_BLOCKERS.find((b) => b === r.reason);
+  if (!reason) return null;
+  return { kind: "unmerged", reason, detail: str(r.detail), base: null, commit: null };
 }
 
 /**
@@ -8507,7 +8577,7 @@ async function attachRunWorktree(run: CodingRun, projectDir: string): Promise<vo
     if (made.reason === "failed") pushProgress(run, RUNNER_STEP.worktreeKept(`it could not be made — ${made.detail}`));
     return;
   }
-  run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false, branchRemoved: false };
+  run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false, branchRemoved: false, result: null };
   run.directory = made.path;
   pushProgress(run, RUNNER_STEP.worktree(made.branch, made.base));
 }
@@ -8528,8 +8598,11 @@ async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> 
   if (!wt) return null;
   const back = await restoreRunWorktree(wt.project, wt.path, wt.branch, wt.base).catch(() => false);
   // A restore re-creates the branch when a settle had dropped an empty one, so
-  // a copy that is back has its branch back with it.
-  return { ...wt, removed: !back, branchRemoved: back ? false : wt.branchRemoved };
+  // a copy that is back has its branch back with it. The merge verdict goes:
+  // it described a chain that had ENDED, and this run is about to work in the
+  // tree again — an "it could not be merged, the project is dirty" carried
+  // forward would have the card offer a next step for a run still going.
+  return { ...wt, removed: !back, branchRemoved: back ? false : wt.branchRemoved, result: null };
 }
 
 /** Every live run working in this exact folder — the question "is anybody still in there?". */
@@ -8607,10 +8680,14 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
     });
     if (!merged.ok) {
+      // Recorded, not just logged: this is the state the card reads to say
+      // what is in the way and offer to bring the work home once it is not.
+      wt.result = { kind: "unmerged", reason: merged.reason, detail: merged.detail, base: null, commit: null };
       pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
       persist(true);
       return;
     }
+    wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
     if (!(await removeRunWorktree(wt.project, wt.path))) {
       // The work IS home — the merge landed — so this is only the copy left
       // behind, and the card's Remove is what answers it.
@@ -8624,6 +8701,88 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
   } catch (err) {
     console.error(`[coding-agent] ${run.id} worktree settle:`, err instanceof Error ? err.message : err);
   }
+}
+
+/**
+ * What the owner's **Bring the work home** answers with.
+ *
+ * A blocker is NOT an exception: it is the expected ending on a box whose
+ * owner keeps uncommitted work in a project folder, and the caller has to be
+ * able to show WHICH one it was and what clears it. So the refusal comes back
+ * as a value with a stable `reason`, and the run record travels with it either
+ * way — the card redraws from the box's own answer rather than from a second
+ * poll, exactly as Remove copy already does.
+ */
+export type BringHomeOutcome =
+  | { ok: true; merged: boolean; base: string; commit: string | null; run: CodingRun }
+  | { ok: false; reason: MergeHomeBlocker; detail: string; run: CodingRun };
+
+/**
+ * The owner's **Bring the work home** button: merge a settled run's branch
+ * into the project it was asked to work in.
+ *
+ * WHY. The settle already tries this, and refuses conservatively — the
+ * project folder has uncommitted changes of its own, it has been moved to
+ * another branch, the merge conflicts. Each refusal leaves the run saying
+ * `completed` with its work reachable only as `clawbox/<runId>`, and the only
+ * control on the card was Remove copy: a dead end, and on a box whose owner
+ * keeps any uncommitted change in a project folder it is EVERY run. This is
+ * the explicit gesture that finishes the job once the blocker is gone.
+ *
+ * WHAT IT WILL NOT DO. Exactly what the settle will not do, because the
+ * project checkout is the owner's: it never stashes, discards, forces or
+ * resets anything. It re-runs `mergeRunBranch`, which re-checks each
+ * precondition, and answers the same reason when the blocker is still there.
+ * The owner commits or stashes their own work, or switches the project back to
+ * the base branch, and presses it again.
+ */
+export async function bringRunWorkHome(id: string): Promise<BringHomeOutcome> {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  const wt = run.worktree;
+  if (!wt) throw new CodingAgentError("invalid", "That run worked in the project folder itself, so its work is already there.");
+  if (wt.branchRemoved) throw new CodingAgentError("invalid", "That run left nothing on its branch, so there is no work to bring home.");
+  // A live run is still writing into that tree and committing to that branch:
+  // merging half of it home is exactly the race worktrees exist to stop.
+  if (isLive(run.status) || liveRunsIn(wt.path).length > 0) {
+    throw new CodingAgentError("busy", "A run is still working in that copy of the project. Stop it first.");
+  }
+  const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
+  if (ahead === null) {
+    throw new CodingAgentError("invalid", `Git could not say what is on ${wt.branch}. The project may have moved or the branch may be gone.`);
+  }
+  if (ahead === 0) {
+    // Already home, or there was never anything on it. Either way the card
+    // must stop offering to bring it home — so the verdict is recorded rather
+    // than the call quietly succeeding against an unchanged record.
+    wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: null };
+    persist(true);
+    return { ok: true, merged: false, base: wt.base, commit: null, run: cloneRun(run) };
+  }
+  const merged = await mergeRunBranch({
+    projectDir: wt.project,
+    branch: wt.branch,
+    base: wt.base,
+    message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
+  });
+  if (!merged.ok) {
+    wt.result = { kind: "unmerged", reason: merged.reason, detail: merged.detail, base: null, commit: null };
+    pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
+    persist(true);
+    return { ok: false, reason: merged.reason, detail: merged.detail, run: cloneRun(run) };
+  }
+  wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
+  // The copy goes with the merge, as it does at settle — its commits are in
+  // the project now. A removal git refuses is not a failed bring-home: the
+  // work IS home, and Remove copy is what answers the files left behind.
+  if (await removeRunWorktree(wt.project, wt.path).catch(() => false)) {
+    wt.removed = true;
+    pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
+  } else {
+    pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
+  }
+  persist(true);
+  return { ok: true, merged: true, base: wt.base, commit: merged.commit, run: cloneRun(run) };
 }
 
 /**
