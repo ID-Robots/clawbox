@@ -471,11 +471,261 @@ describe("a round handed to the harness", () => {
     const origin2 = lib.getRun(started.id);
     expect(origin2?.review?.round).toBe(1);
     expect(origin2?.review?.fixRunId).toBe(fix?.id);
+    // The DEFAULT path, recorded as such: the findings went back into the
+    // session that wrote the code, which is what makes the round cheap and
+    // what the fallback below exists to fall back FROM.
+    expect(origin2?.review?.fixMode).toBe("resumed");
+    expect(origin2?.review?.fixDetail).toContain(started.id);
+    // And the round is on the fix run's own record, so its card can say which
+    // one it is without the loop's counter.
+    expect(fix?.reviewRound).toBe(1);
     expect(origin2?.progress.join("\n")).toMatch(/Review round 1 of 3 handed to the coding agent/);
     // The round's own commits are pushed on its way home — the run is told to
     // push and usually does, and an unpushed fix would have the loop re-read an
     // unchanged pull request until the rounds ran out.
     expect(review.pushBranch).toHaveBeenCalledWith(expect.any(String), runBranchName(started.id));
     expect(origin2?.pr?.phase).toBe("blocked");
+  });
+});
+
+/**
+ * The round that arrives after the session is gone.
+ *
+ * A round routinely arrives twenty minutes or more after the run settled — the
+ * install check alone takes that long — and by then a run that failed, was
+ * stopped, or gave up has no session left to re-enter. Resuming is still the
+ * DEFAULT and the right one: the run holds the code it wrote and why. This is
+ * the fallback, and before it existed the start was refused outright, the loop
+ * settled `needs_owner`, and the owner's round bought nothing.
+ */
+describe("a round whose run can no longer be resumed", () => {
+  let lib: Lib;
+  let base: string;
+  let home: string;
+  let root: string;
+  let binDir: string;
+  let restore: () => void;
+
+  const INIT = '{"type":"system","subtype":"init","session_id":"sess-fresh-1","model":"deepseek-v4-flash","permissionMode":"acceptEdits"}';
+  const ASSISTANT = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "t_edit", name: "Edit", input: { file_path: "index.html" } }] },
+  });
+  const TOOL_RESULTS = JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "t_edit", content: "ok" }] },
+  });
+  const RESULT = JSON.stringify({
+    type: "result", subtype: "success", is_error: false, num_turns: 2, total_cost_usd: 0.01,
+    result: "Read the branch and fixed the failing check.", session_id: "sess-fresh-1",
+  });
+
+  /** The origin as a run that FAILED leaves it: a session id on the record, and
+   *  nothing behind it that can be re-entered. */
+  function writeDeadRecord(): void {
+    const now = Date.now();
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify([{
+      id: RUN_ID,
+      task: "build the thing",
+      directory: home,
+      projectId: null,
+      source: "owner",
+      status: "failed",
+      resumable: false,
+      // Inherited by the round, like the provider and the model: a round is a
+      // continuation, not a new piece of work.
+      effort: "low",
+      startedAt: now - 1_800_000,
+      completedAt: now - 1_500_000,
+      sessionId: "sess-dead",
+      summary: null,
+      error: "the harness went away",
+      numTurns: 3,
+      filesTouched: ["index.html"],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: 1,
+      pr: {
+        phase: "review",
+        number: PR_NUMBER,
+        url: `https://github.com/o/r/pull/${PR_NUMBER}`,
+        branch: runBranchName(RUN_ID),
+        base: "beta",
+        checks: { total: 0, passed: 0, failed: 0, pending: 0 },
+        detail: null,
+        startedAt: now - 1_500_000,
+        endedAt: null,
+        reviewOk: true,
+        foundBy: "adopted",
+      },
+      review: {
+        prNumber: PR_NUMBER,
+        url: `https://github.com/o/r/pull/${PR_NUMBER}`,
+        base: "beta",
+        round: 0,
+        maxRounds: 3,
+        state: "polling",
+        checks: [],
+        unresolvedThreads: 0,
+        reviewDecision: null,
+        lastPolledAt: null,
+        roundStartedAt: now - 60_000,
+        detail: null,
+        fixRunId: null,
+        fixMode: null,
+        fixDetail: null,
+      },
+    }]));
+  }
+
+  beforeEach(async () => {
+    restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN");
+    base = fs.mkdtempSync(path.join(os.tmpdir(), "coding-review-fresh-"));
+    home = path.join(base, "home");
+    root = path.join(home, "clawbox");
+    binDir = path.join(home, ".local", "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(path.join(root, "data"), { recursive: true });
+    process.env.HOME = home;
+    process.env.CLAWBOX_ROOT = root;
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(binDir, "claude-ds"),
+      [
+        "#!/usr/bin/env bash",
+        readFirstTurn(path.join(base, "last-task.txt")),
+        `printf '%s\\n' "$@" > "${path.join(base, "last-argv.txt")}"`,
+        `echo '${INIT}'`, `echo '${ASSISTANT}'`, `echo '${TOOL_RESULTS}'`, `echo '${RESULT}'`, "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(root, "data", "config.json"),
+      JSON.stringify({
+        clawai_token: "claw_test_token",
+        clawai_tier: "flash",
+        coding_agent_enabled: true,
+        coding_agent_generate_images: false,
+        coding_agent_auto_pr: true,
+        coding_agent_review_rounds: 3,
+        // The owner's CURRENT effort, which the round must not pick up over the
+        // one the run it is fixing was working at.
+        coding_agent_effort: "max",
+      }),
+    );
+    review.pushBranch.mockResolvedValue({ ok: true });
+    review.readFailedCheckLogs.mockResolvedValue([
+      { check: { name: "build", state: "fail", url: null }, log: "error TS2322: Type 'string' is not assignable" },
+    ]);
+    review.readReviewSnapshot
+      .mockResolvedValueOnce(snap({ checks: [{ name: "build", state: "fail", url: null }] }))
+      .mockResolvedValue(snap());
+    github.mergePullRequest.mockResolvedValue({ ok: false, detail: "not in this test" });
+    writeDeadRecord();
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+  });
+
+  afterEach(async () => {
+    await lib._resetCodingAgentStateForTests();
+    restore();
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it("starts a FRESH run on the same branch, says why, and still spends one round", async () => {
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); }, { timeout: 20_000 });
+
+    const origin = lib.getRun(RUN_ID);
+    // ONE round against the owner's budget, whichever path was taken.
+    expect(origin?.review?.round).toBe(1);
+    // Which path, and why — the thing anyone reads first about a round that
+    // went badly, and the reason there is no owner setting for the choice.
+    expect(origin?.review?.fixMode).toBe("fresh");
+    expect(origin?.review?.fixDetail).toContain(RUN_ID);
+    expect(origin?.review?.fixDetail).toContain("failed");
+
+    const fix = lib.listRuns().find((r) => r.reviewLoopOf === RUN_ID);
+    expect(fix).toBeTruthy();
+    expect(origin?.review?.fixRunId).toBe(fix?.id);
+    // Linked on BOTH records: the origin points at the round, the round names
+    // the loop it belongs to and which round of it it is.
+    expect(fix?.reviewRound).toBe(1);
+    expect(fix?.progress.join("\n")).toMatch(new RegExp(`Review round 1 for ${RUN_ID}`));
+
+    // The same chain: the same folder, so the same branch and the same project.
+    expect(fix?.directory).toBe(origin?.directory);
+    expect(fix?.projectId).toBe(origin?.projectId);
+    // The same effort as the run it is fixing, NOT the owner's current one.
+    expect(fix?.effort).toBe("low");
+    // It opens nothing of its own, exactly as a resumed round does not.
+    expect(fix?.pr).toBeNull();
+
+    // The dead session was not re-entered: a resume replays what killed it.
+    const argv = fs.readFileSync(path.join(base, "last-argv.txt"), "utf-8");
+    expect(argv).not.toContain("sess-dead");
+    expect(argv).not.toContain("--resume");
+
+    // And it was told it is starting cold, with the findings it still has to fix.
+    const task = fs.readFileSync(path.join(base, "last-task.txt"), "utf-8");
+    expect(task).toMatch(/no memory of it/i);
+    expect(task).toContain("git diff origin/beta...HEAD");
+    expect(task).toContain(`#${PR_NUMBER}`);
+    expect(task).toContain("review round 1 of 3");
+    expect(task).toContain("### build");
+    expect(task).toContain("error TS2322");
+
+    // The round's commits are pushed on its way home, the same belt and braces
+    // a resumed round gets.
+    expect(review.pushBranch).toHaveBeenCalledWith(expect.any(String), runBranchName(RUN_ID));
+  });
+
+  it("seeds the round from the ORIGIN when the previous round's record is gone", async () => {
+    // `review.fixRunId` names a run the owner cleared out of the history. The
+    // seed has to fall back to the origin, which is the record the loop is
+    // standing in: `startRun` refuses a `resumeRunId` it cannot find with
+    // `not_found`, and this function reads that as a failure of the LOOP —
+    // so the pull request was handed back over a record that was merely gone.
+    const stored = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8"));
+    stored[0].review.round = 1;
+    stored[0].review.fixRunId = "run-vanished1";
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify(stored));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); }, { timeout: 20_000 });
+
+    const origin = lib.getRun(RUN_ID);
+    // The round happened — it is round TWO, because one was already spent.
+    expect(origin?.review?.round).toBe(2);
+    expect(origin?.review?.fixMode).toBe("fresh");
+    // Named after the ORIGIN, not after the record that is no longer there.
+    expect(origin?.review?.fixDetail).toContain(RUN_ID);
+    expect(origin?.review?.fixDetail).not.toContain("run-vanished1");
+    const fix = lib.listRuns().find((r) => r.reviewLoopOf === RUN_ID);
+    expect(fix?.reviewRound).toBe(2);
+  });
+
+  it("does the round even when the run never opened a session at all", async () => {
+    // The case that was not merely un-oriented but REFUSED: `startRun` throws
+    // `invalid` for a resume target with no session id, `startFixRun` read that
+    // as a failure of the loop rather than of the box, and the pull request was
+    // handed back with the owner's rounds untouched and nothing done.
+    const stored = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8"));
+    stored[0].sessionId = null;
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify(stored));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); }, { timeout: 20_000 });
+
+    const origin = lib.getRun(RUN_ID);
+    expect(origin?.review?.round).toBe(1);
+    expect(origin?.review?.fixMode).toBe("fresh");
+    expect(origin?.review?.fixDetail).toMatch(/never opened a session/i);
+    expect(lib.listRuns().some((r) => r.reviewLoopOf === RUN_ID)).toBe(true);
   });
 });

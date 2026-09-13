@@ -50,6 +50,7 @@ export type ProgressLabelKey =
   | "workflowRefused"
   | "reviewPass"
   | "reviewLoopTurn"
+  | "reviewLoopRound"
   | "reviewRound"
   | "pipelineReview"
   | "pipelineImprovement"
@@ -78,6 +79,7 @@ export type ProgressLabelKey =
   | "notCommitted"
   | "faviconCommitted"
   | "pullRequestOpened"
+  | "pullRequestAdopted"
   | "merged"
   | "notMerged"
   | "onDesktop"
@@ -263,8 +265,11 @@ export const RUNNER_STEP = {
 
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
-  /** On the FOLLOW-UP run: whose pull request it was started to fix. */
-  reviewLoopTurn: (id: string) => `Review round for ${id}`,
+  /** On the FOLLOW-UP run: whose pull request it was started to fix, and which
+   *  round of that loop it is — the round is what makes a fix run readable on
+   *  its own card, where the loop's own counter is not. */
+  reviewLoopTurn: (id: string, round: number | null) =>
+    (round ? `Review round ${round} for ${id}` : `Review round for ${id}`),
   /** On the ORIGIN run: which round of the loop has just gone out. */
   reviewRound: (round: number, max: number) => `Review round ${round} of ${max} handed to the coding agent`,
   startingFresh: (id: string) => `Starting fresh: ${id} did not fail in a way a resume can fix`,
@@ -284,6 +289,10 @@ export const RUNNER_STEP = {
   // way the template literal it replaced rendered it, so a record already on
   // disk still matches.
   pullRequestOpened: (num: number, base: string | null) => `Opened pull request #${num} into ${base}`,
+  /** The run opened its own pull request, and the settle found it on the run's
+   *  branch. Said out loud because "who opened this" is what decides whether
+   *  the loop was ever going to watch it — see PrFoundBy. */
+  pullRequestAdopted: (num: number, base: string | null) => `Picked up pull request #${num} into ${base}, opened by the run itself`,
   notMerged: (reason: string) => `Not merged: ${reason}`,
   /** The branch is pushed; the box is waiting for Vercel to build it. */
   /**
@@ -390,6 +399,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Workflow finished$/, labelKey: "workflowFinished", icon: "account_tree" },
   { re: /^Workflow refused$/, labelKey: "workflowRefused", icon: "block" },
   { re: /^Automatic review pass of (\S+)$/, labelKey: "reviewPass", icon: "rate_review", params: (m) => ({ id: m[1] }) },
+  // The numbered form first: the unnumbered one is what records written before
+  // the round was carried on the fix run still say, and it must go on matching.
+  { re: /^Review round (\d+) for (\S+)$/, labelKey: "reviewLoopRound", icon: "rate_review", params: (m) => ({ round: Number(m[1]), id: m[2] }) },
   { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
   { re: /^Delivery pipeline: reviewing the work$/, labelKey: "pipelineReview", icon: "rate_review" },
@@ -419,6 +431,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Not committed: (.+)$/, labelKey: "notCommitted", icon: "error", params: (m) => ({ reason: m[1] }) },
   { re: /^Added the generated favicon, committed as (\S+)$/, labelKey: "faviconCommitted", icon: "commit", params: (m) => ({ sha: m[1] }) },
   { re: /^Opened pull request #(\d+) into (.+)$/, labelKey: "pullRequestOpened", icon: "merge", params: (m) => ({ number: Number(m[1]), base: m[2] }) },
+  { re: /^Picked up pull request #(\d+) into (.+), opened by the run itself$/, labelKey: "pullRequestAdopted", icon: "merge", params: (m) => ({ number: Number(m[1]), base: m[2] }) },
   { re: /^Merged into the base branch$/, labelKey: "merged", icon: "merge" },
   { re: /^Not merged: (.+)$/, labelKey: "notMerged", icon: "error", params: (m) => ({ reason: m[1] }) },
   { re: /^Deploying a preview to Vercel$/, labelKey: "deployStartedPreview", icon: "cloud_upload" },

@@ -145,6 +145,7 @@ import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
   decideMerge,
   emptyChecks,
+  isPrFoundBy,
   isPrPending,
   isPrPhase,
   mergePullRequest,
@@ -157,6 +158,7 @@ import {
   runBranchName,
   startRunBranch,
   type PrChecks,
+  type PrFoundBy,
   type PrState,
 } from "@/lib/coding-pr";
 import {
@@ -172,9 +174,11 @@ import {
 import {
   buildReviewFeedback,
   clampReviewRounds,
+  decideReviewFixPath,
   decideReviewRound,
   DEFAULT_REVIEW_ROUNDS,
   describeProblems,
+  findOpenPullRequestForBranch,
   isReviewPending,
   MAX_REVIEW_ROUNDS,
   MIN_REVIEW_ROUNDS,
@@ -1178,6 +1182,17 @@ export interface CodingRun {
    */
   reviewLoopOf: string | null;
   /**
+   * Which round of that loop this follow-up run IS, 1-based. Null on every run
+   * that is not one.
+   *
+   * On the run's own record rather than only on the origin's, because the
+   * origin carries one counter and a loop has several runs: a fix run's card
+   * could say which pull request it belonged to but never which round, so two
+   * rounds of the same loop were indistinguishable in the list. The origin's
+   * `review.round` stays the loop's counter; this is one run's place in it.
+   */
+  reviewRound: number | null;
+  /**
    * What this run's PUSH became on Vercel, when the owner has attached a Vercel
    * project to the project this run works in (src/lib/vercel-link.ts).
    *
@@ -1795,6 +1810,25 @@ export interface StartRunInput {
   /** Internal: set only by the review loop, naming the run whose pull request
    *  this turn is fixing. See CodingRun.reviewLoopOf. */
   reviewLoopOf?: string | null;
+  /** Internal: set only by the review loop, which round this turn is. See
+   *  CodingRun.reviewRound. */
+  reviewRound?: number | null;
+  /**
+   * Internal: start a NEW session even though `resumeRunId` names a run.
+   *
+   * The review loop's fallback, and the only caller. `resumeRunId` carries the
+   * chain — the same folder, the same worktree and branch, the same project,
+   * provider and model — and normally carries the SESSION with it too. When the
+   * session is gone (the run gave up, was stopped, failed in a way a resume
+   * replays) the chain is still exactly what a fix run needs; only the memory
+   * is not. Without this the start is refused outright and the round is lost.
+   *
+   * Deliberate rather than inferred: `startRun` already falls back to a fresh
+   * session for a run that settled unresumably, and a caller that MEANT to
+   * resume must not silently get a cold one — see decideReviewFixPath, which
+   * applies the same test so the record cannot claim otherwise.
+   */
+  freshSession?: boolean;
   /** Internal: set only by the deployment watch, naming the run whose Vercel
    *  build this turn is fixing. See CodingRun.vercelFixOf. */
   vercelFixOf?: string | null;
@@ -3183,6 +3217,10 @@ function normalizePr(raw: unknown): PrState | null {
     // by this code counts, so a record from before the field merges nothing
     // on its own.
     reviewOk: v.reviewOk === true,
+    // Null, never a guess: a record from before the field says nothing about
+    // who opened its pull request, and "opened" would be this code claiming
+    // credit it has no evidence for.
+    foundBy: isPrFoundBy(v.foundBy) ? v.foundBy : null,
   };
 }
 
@@ -3347,6 +3385,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
     reviewLoopOf: typeof (raw as { reviewLoopOf?: unknown }).reviewLoopOf === "string"
       ? (raw as { reviewLoopOf: string }).reviewLoopOf
       : null,
+    reviewRound: (() => {
+      const n = (raw as { reviewRound?: unknown }).reviewRound;
+      return typeof n === "number" && Number.isInteger(n) && n > 0 ? n : null;
+    })(),
     // Only a deployment this code could have written counts; anything else on
     // a hand-edited record is no deployment at all, the way parsePauseReason
     // treats a reason it does not recognise.
@@ -6503,7 +6545,20 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     }
 
     const origin = finished.reviewOf === null ? finished : loadRuns().find((r) => r.id === finished.reviewOf);
-    if (!origin?.pr || origin.pr.phase !== "opening") return;
+    if (!origin) return;
+
+    // A run with NO pull request record of its own may still have opened one
+    // itself, because its task said to. That is the defect this branch fixes:
+    // `pr.number` was written on the auto-PR path and nowhere else, so a run
+    // that ran `gh pr create` in its own turn settled with `pr: null`,
+    // `review: null`, and the review loop never engaged at all. Nothing is
+    // OPENED down there — an open pull request on the run's own branch is
+    // adopted if GitHub has one, and otherwise this stays the no-op it was.
+    if (!origin.pr) {
+      await adoptRunPullRequest(origin, finished, ended, review);
+      return;
+    }
+    if (origin.pr.phase !== "opening") return;
     const branch = origin.pr.branch ?? runBranchName(origin.id);
 
     // A pause is not the end of the chain: the run resumes IN PLACE — the
@@ -6535,11 +6590,12 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
       settlePr(origin, "failed", "The run's branch was not recorded, so no pull request was opened.");
       return;
     }
-    // Held in a local because the `await` below drops the narrowing: `origin.pr`
+    // Held in locals because the `await`s below drop the narrowing: `origin.pr`
     // is a mutable property, so after any suspension TypeScript is right to
     // read `base` as nullable again — and the progress line below must name the
     // branch this pull request was actually opened into, not "null".
     const prBase = origin.pr.base;
+    const prBranch = origin.pr.branch;
 
     // Nothing was committed anywhere in the chain: there is no diff to review
     // and nothing to merge.
@@ -6548,16 +6604,38 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
       return;
     }
 
-    const opened = await openPullRequest({
-      directory: origin.directory,
-      branch: origin.pr.branch,
-      base: prBase,
-      title: firstLineOf(origin.task),
-      body: prBody(origin, finished),
-    });
-    if (!opened.ok) {
-      settlePr(origin, "failed", opened.detail);
-      return;
+    // ASKED BEFORE ONE IS OPENED: the run may have opened its own already, and
+    // `gh pr create` over a branch that has one fails. Failing there settled the
+    // pull request record "failed" and left the run's real pull request
+    // unwatched — the same silence the `pr: null` case above suffered from.
+    const mine = await findOpenPullRequestForBranch(origin.directory, prBranch);
+    let number: number;
+    let url: string | null;
+    let base = prBase;
+    let foundBy: PrFoundBy;
+    if (mine) {
+      number = mine.number;
+      url = mine.url;
+      // GitHub's answer for the base, not the record's intention: a run that
+      // aimed its own pull request somewhere else is the reason to ask at all,
+      // and the merge guard is about the branch it ACTUALLY targets.
+      base = mine.base ?? prBase;
+      foundBy = "adopted";
+    } else {
+      const created = await openPullRequest({
+        directory: origin.directory,
+        branch: prBranch,
+        base: prBase,
+        title: firstLineOf(origin.task),
+        body: prBody(origin, finished),
+      });
+      if (!created.ok) {
+        settlePr(origin, "failed", created.detail);
+        return;
+      }
+      number = created.number;
+      url = created.url;
+      foundBy = "opened";
     }
 
     // The review's verdict gates the merge as well as the checks: they answer
@@ -6565,56 +6643,144 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     // consent to merge. A review that was due and could not start is no
     // verdict either. Written on the record — see PrState.reviewOk.
     const reviewOk = finished.reviewOf !== null ? finished.status === "completed" : review !== "refused";
-    // The owner's rounds setting, read HERE and frozen on the loop for the
-    // reason every other run setting is frozen: a loop that had its cap raised
-    // or lowered under it would be a different promise from the one the run
-    // started under.
-    const maxRounds = await getReviewRounds();
-    origin.pr = {
-      ...origin.pr,
-      phase: maxRounds > 0 ? "review" : "waiting",
-      number: opened.number,
-      url: opened.url,
-      startedAt: Date.now(),
-      reviewOk,
-    };
-    pushProgress(origin, RUNNER_STEP.pullRequestOpened(opened.number, prBase));
-    if (maxRounds > 0) {
-      origin.review = {
-        prNumber: opened.number,
-        url: opened.url,
-        base: prBase,
-        round: 0,
-        maxRounds,
-        state: "polling",
-        checks: [],
-        unresolvedThreads: 0,
-        reviewDecision: null,
-        lastPolledAt: null,
-        roundStartedAt: Date.now(),
-        detail: null,
-        fixRunId: null,
-      };
-    }
-    persist(true);
-    console.error(`[coding-agent] ${origin.id} opened PR #${opened.number}`);
-
-    // Two watchers, never both: the review loop owns the pull request when the
-    // owner has rounds to spend, and the older checks-only watcher keeps a box
-    // that set the rounds to 0 behaving exactly as it did before the loop
-    // existed.
-    if (maxRounds > 0) watchReviewLoop(origin.id);
-    else watchPullRequest(origin.id);
-
-    // A THIRD watcher, and it runs beside either of those rather than instead
-    // of one: GitHub's checks and Vercel's build are different questions about
-    // the same push, and a box whose project is linked wants both answered.
-    // Fire-and-forget, and last, because a Vercel fault must never be able to
-    // stop a pull request that has already been opened.
-    void startDeployWatch(origin.id);
+    await beginPullRequestWatch(origin, { number, url, branch: prBranch, base, foundBy, reviewOk });
   } catch (err) {
     console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
   }
+}
+
+/**
+ * Put the pull request on the run, start the watcher it belongs to, and say so.
+ *
+ * ONE place for it, because there are now two ways in — the box opened it, or
+ * the run did and the settle adopted it — and they have to leave the same
+ * record behind. Written as a second copy each, the adopted pull request would
+ * sooner or later get a phase and no loop, which is the defect this branch
+ * exists to fix wearing a different hat.
+ */
+async function beginPullRequestWatch(origin: CodingRun, input: {
+  number: number;
+  url: string | null;
+  branch: string | null;
+  /** The branch it actually targets, as GitHub answered it. */
+  base: string | null;
+  foundBy: PrFoundBy;
+  reviewOk: boolean;
+}): Promise<void> {
+  // The owner's rounds setting, read HERE and frozen on the loop for the reason
+  // every other run setting is frozen: a loop that had its cap raised or
+  // lowered under it would be a different promise from the one the run started
+  // under.
+  const maxRounds = await getReviewRounds();
+  const now = Date.now();
+  origin.pr = {
+    phase: maxRounds > 0 ? "review" : "waiting",
+    number: input.number,
+    url: input.url,
+    branch: input.branch,
+    base: input.base,
+    // Whatever an earlier phase counted; the watcher overwrites it on its first
+    // poll, and an adopted pull request has nothing counted yet.
+    checks: origin.pr?.checks ?? emptyChecks(),
+    detail: null,
+    startedAt: now,
+    endedAt: null,
+    reviewOk: input.reviewOk,
+    foundBy: input.foundBy,
+  };
+  pushProgress(origin, input.foundBy === "adopted"
+    ? RUNNER_STEP.pullRequestAdopted(input.number, input.base)
+    : RUNNER_STEP.pullRequestOpened(input.number, input.base));
+  if (maxRounds > 0) {
+    origin.review = {
+      prNumber: input.number,
+      url: input.url,
+      base: input.base,
+      round: 0,
+      maxRounds,
+      state: "polling",
+      checks: [],
+      unresolvedThreads: 0,
+      reviewDecision: null,
+      lastPolledAt: null,
+      roundStartedAt: now,
+      detail: null,
+      fixRunId: null,
+      fixMode: null,
+      fixDetail: null,
+    };
+  }
+  persist(true);
+  console.error(`[coding-agent] ${origin.id} ${input.foundBy} PR #${input.number} into ${input.base}`);
+
+  // Two watchers, never both: the review loop owns the pull request when the
+  // owner has rounds to spend, and the older checks-only watcher keeps a box
+  // that set the rounds to 0 behaving exactly as it did before the loop
+  // existed.
+  if (maxRounds > 0) watchReviewLoop(origin.id);
+  else watchPullRequest(origin.id);
+
+  // A THIRD watcher, and it runs beside either of those rather than instead of
+  // one: GitHub's checks and Vercel's build are different questions about the
+  // same push, and a box whose project is linked wants both answered.
+  // Fire-and-forget, and last, because a Vercel fault must never be able to
+  // stop a pull request that has already been opened.
+  void startDeployWatch(origin.id);
+}
+
+/**
+ * Adopt a pull request the RUN opened for itself.
+ *
+ * Reached only for a run with no pull-request record at all: the auto-PR switch
+ * was off when it started, or the folder was not a repository yet. That run is
+ * still the ordinary way work reaches GitHub on this device — its task says to
+ * open a pull request and it runs `gh pr create` — and until this existed the
+ * box had no number on the record, so the review loop never engaged.
+ *
+ * The branch is the run's OWN and never a guess at whatever HEAD happens to be:
+ * `pr.branch` is gone by definition here, so the worktree's is the one branch
+ * this box knows belongs to this run alone. A run that shared a branch with its
+ * project is left alone, because `gh pr list --head` on a shared branch would
+ * answer with somebody else's pull request and the loop would push its rounds
+ * onto their work.
+ */
+async function adoptRunPullRequest(
+  origin: CodingRun,
+  finished: CodingRun,
+  ended: "stop" | "pause" | null,
+  review: ReviewPassOutcome,
+): Promise<void> {
+  // The same three gates the opening path applies, in the same order and for
+  // the same reasons: a pause is not the end of the chain, the owner's Stop
+  // means no more of this, and a run that did not finish has nothing to stand
+  // behind.
+  if (finished.status === "paused") return;
+  if (ended !== null || origin.status !== "completed") return;
+  // With the loop switched off there is nothing to adopt INTO. The older
+  // checks-only watcher exists to merge what this box opened, and pointing it
+  // at a pull request the box did not open would be a new behaviour under an
+  // owner setting that promises the opposite.
+  if ((await getReviewRounds()) <= 0) return;
+  const branch = origin.worktree?.branch;
+  if (!branch) return;
+
+  const mine = await findOpenPullRequestForBranch(origin.directory, branch);
+  if (!mine) return;
+
+  // Re-read: the `gh` call above is a subprocess, and the owner may have
+  // cleared the run or a second settle of the chain may have got here first.
+  const live = loadRuns().find((r) => r.id === origin.id);
+  if (!live || live.pr) return;
+  await beginPullRequestWatch(live, {
+    number: mine.number,
+    url: mine.url,
+    branch,
+    base: mine.base,
+    foundBy: "adopted",
+    // The same verdict the opening path records, from the same two facts: the
+    // review pass either ran over this chain and completed, or was never due.
+    reviewOk: finished.reviewOf !== null ? finished.status === "completed" : review !== "refused",
+  });
 }
 
 /** First line of the task, trimmed to something a PR title can hold. */
@@ -7415,6 +7581,22 @@ function watchReviewLoop(runId: string): void {
  * "started" — a run is out and the loop is now `working`. "retry" — the box
  * could not take a run right now, and the round was NOT spent. "failed" — the
  * loop is over and has already been settled.
+ *
+ * HOW THE FIXES GET DONE. By resuming, wherever the session is still there:
+ * the run holds the code it wrote and the reasons it wrote it that way, and a
+ * fresh context has to buy all of that back in tokens to arrive somewhere
+ * worse. The fallback exists because a round routinely arrives twenty minutes
+ * or more after the run settled — the install check alone takes that long — and
+ * a settled run's session is not always resumable by then. So the fallback is a
+ * run that starts cold but is otherwise the SAME chain: the same folder and
+ * worktree, so the same branch; the same project; the same provider, model and
+ * effort. Which of the two happened is recorded on the loop with its reason
+ * (see decideReviewFixPath), because that is the first thing anyone will want
+ * to know about a round that went badly.
+ *
+ * Either way it is one round against the owner's `coding_agent_review_rounds`
+ * budget. There is deliberately no setting for the choice: the box knows
+ * whether the session is there, and the owner cannot.
  */
 async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"started" | "retry" | "failed"> {
   const run = loadRuns().find((r) => r.id === runId);
@@ -7426,6 +7608,33 @@ async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"st
   // Only the failing checks' logs, and only when there are failing checks:
   // each one is a zip download from GitHub.
   const failedChecks = problems.failedChecks.length ? await readFailedCheckLogs(run.directory, snapshot.checks) : [];
+
+  // Re-read: the log fetch above can take minutes, and the owner may have
+  // stopped the run or the loop may have been settled under us.
+  const live = loadRuns().find((r) => r.id === runId);
+  if (!live?.review || live.review.state !== "polling") return "failed";
+
+  // WHICH RECORD THE ROUND IS SEEDED FROM, decided after that re-read so it
+  // cannot be a record the log fetch outlived.
+  //
+  // The freshest session, which after the first round is the previous round's
+  // own: it already remembers the fix it just pushed and what the reviewer said
+  // about it. Round one falls back to the ORIGIN — and so does a later round
+  // whose previous round is no longer on the record, because the owner cleared
+  // the history under the loop. That fallback is not cosmetic: `startRun`
+  // refuses a `resumeRunId` it cannot find with `not_found`, which this
+  // function reads as a failure of the LOOP and settles the pull request on.
+  const previousRound = live.review.fixRunId
+    ? loadRuns().find((r) => r.id === live.review?.fixRunId) ?? null
+    : null;
+  const seed = previousRound ?? live;
+  const fixPath = decideReviewFixPath({
+    id: seed.id,
+    sessionId: seed.sessionId,
+    status: seed.status,
+    resumable: seed.resumable,
+  });
+
   const task = buildReviewFeedback({
     prNumber: review.prNumber,
     url: review.url,
@@ -7437,32 +7646,42 @@ async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"st
     threads: problems.threads,
     conflicting: problems.conflicting,
     changesRequested: problems.changesRequested,
+    // A run starting cold is TOLD it is starting cold, and told to read the
+    // diff first. The findings are the same either way; what changes is that
+    // one of the two readers has never seen this branch.
+    fresh: fixPath.mode === "fresh",
   });
-
-  // Re-read: the log fetch above can take minutes, and the owner may have
-  // stopped the run or the loop may have been settled under us.
-  const live = loadRuns().find((r) => r.id === runId);
-  if (!live?.review || live.review.state !== "polling") return "failed";
 
   try {
     const fix = await startRun({
       task,
-      // The freshest session, which after the first round is the previous
-      // round's own: it already remembers the fix it just pushed and what the
-      // reviewer said about it. Falling back to the origin run for round one.
-      resumeRunId: live.review.fixRunId ?? live.id,
+      // Named on BOTH paths: it is what carries the chain — the folder and its
+      // worktree, so the branch the pull request is open from; the project; the
+      // provider and the model. On the fresh path the session is the only part
+      // deliberately left behind.
+      resumeRunId: seed.id,
+      ...(fixPath.mode === "fresh" ? { freshSession: true } : {}),
       source: live.source,
       reviewLoopOf: live.id,
+      reviewRound: round,
     });
     // Written only after the spawn succeeded, so a refused start leaves the
     // loop polling with its round unspent.
     const after = loadRuns().find((r) => r.id === runId);
     if (after?.review) {
-      after.review = { ...after.review, state: "working", round, fixRunId: fix.id, roundStartedAt: Date.now() };
+      after.review = {
+        ...after.review,
+        state: "working",
+        round,
+        fixRunId: fix.id,
+        roundStartedAt: Date.now(),
+        fixMode: fixPath.mode,
+        fixDetail: fixPath.detail,
+      };
       pushProgress(after, RUNNER_STEP.reviewRound(round, after.review.maxRounds));
       persist(true);
     }
-    console.error(`[coding-agent] ${fix.id} started as review round ${round} of ${runId}`);
+    console.error(`[coding-agent] ${fix.id} started as review round ${round} of ${runId} (${fixPath.mode}: ${fixPath.detail})`);
     return "started";
   } catch (err) {
     const kind = err instanceof CodingAgentError ? err.kind : null;
@@ -10128,7 +10347,15 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (resumeRunId) {
       if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
       if (previous.status === "running") throw new CodingAgentError("busy", "That run is still in progress; wait for it to finish before resuming it.");
-      if (!previous.sessionId) throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+      // A caller asking for a FRESH session is not asking to resume: it wants
+      // the chain — the folder, the worktree and its branch, the project, the
+      // provider and the model — and has already decided the session is gone.
+      // See StartRunInput.freshSession; the review loop's fallback is the only
+      // caller, and without this exemption a round over a run that never
+      // opened a session is refused rather than done cold.
+      if (!previous.sessionId && input.freshSession !== true) {
+        throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+      }
       // The session lives in the wrapper's state dir keyed by the folder it ran
       // in, so a resume always happens where the original run happened — which
       // for a run with a worktree is the worktree. A settle removes the worktree
@@ -10154,7 +10381,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // simply finished — and continuing it is what carries the built-up context
       // into a follow-up ("fix these review findings", the automatic review
       // pass). A stopped run, or a failure that is not a ceiling, starts fresh.
-      resumeSessionId = previous.resumable || previous.status === "completed" ? previous.sessionId : null;
+      resumeSessionId = input.freshSession === true
+        ? null
+        : previous.resumable || previous.status === "completed" ? previous.sessionId : null;
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
       ({ directory, projectId } = await resolveWorkingDirectory(input));
@@ -10164,6 +10393,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Read once, here: a run keeps the settings it started with even if the
     // owner changes them while it works.
     const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+    // A REVIEW ROUND inherits the effort of the run it is fixing, the way it
+    // already inherits that run's provider and model. A round is a
+    // continuation, not a new piece of work: thinking harder or softer about
+    // the fix than about the code being fixed is a difference nobody asked for,
+    // and on the fresh path — where the run has no memory to lean on — the
+    // owner's current setting could be the weaker of the two.
+    if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
     await assertProviderReady(settings.provider);
     const run = newRunRecord({
       task,
@@ -10175,13 +10411,14 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       deliverable: requireDeliverable(input),
       reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
       reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
+      reviewRound: typeof input.reviewRound === "number" && input.reviewRound > 0 ? Math.floor(input.reviewRound) : null,
       vercelFixOf: typeof input.vercelFixOf === "string" ? input.vercelFixOf : null,
       team: input.team ?? null,
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
     });
     if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
-    else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf));
+    else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf, run.reviewRound));
     else if (run.vercelFixOf) pushProgress(run, RUNNER_STEP.deployFixTurn(run.vercelFixOf));
     else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
     else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
@@ -10232,6 +10469,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
           startedAt: Date.now(),
           endedAt: null,
           reviewOk: true,
+          // Nothing has been found or opened yet — see PrFoundBy.
+          foundBy: null,
         };
         pushProgress(run, RUNNER_STEP.workingOnBranch(branch, base));
       } else {
@@ -10264,6 +10503,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
             // No verdict yet; the one that counts is written when the pull
             // request opens, which is the only way into "waiting".
             reviewOk: true,
+            foundBy: null,
           };
           pushProgress(run, RUNNER_STEP.workingOnBranch(branched.branch, branched.base));
         } else {
@@ -10280,6 +10520,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
             startedAt: Date.now(),
             endedAt: Date.now(),
             reviewOk: false,
+            foundBy: null,
           };
           pushProgress(run, RUNNER_STEP.noPullRequest(branched.detail));
         }
@@ -10478,6 +10719,7 @@ function newRunRecord(fields: {
   settings: RunSettings;
   reviewOf?: string | null;
   reviewLoopOf?: string | null;
+  reviewRound?: number | null;
   vercelFixOf?: string | null;
   team?: RunTeam | null;
   readOnly?: boolean;
@@ -10532,6 +10774,7 @@ function newRunRecord(fields: {
     pauseReason: null,
     reviewOf: fields.reviewOf ?? null,
     reviewLoopOf: fields.reviewLoopOf ?? null,
+    reviewRound: fields.reviewRound ?? null,
     vercel: null,
     vercelFixOf: fields.vercelFixOf ?? null,
     pipeline: fields.pipeline ?? null,

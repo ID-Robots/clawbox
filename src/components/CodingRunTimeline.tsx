@@ -54,6 +54,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   // with this key; a second string for the same sentence would drift.
   reviewPass: "codingAgent.reviewPassTitle",
   reviewLoopTurn: "codingAgent.stepReviewLoopTurn",
+  reviewLoopRound: "codingAgent.stepReviewLoopRound",
   reviewRound: "codingAgent.stepReviewRound",
   resuming: "codingAgent.stepResuming",
   reattached: "codingAgent.stepReattached",
@@ -71,6 +72,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   notCommitted: "codingAgent.stepNotCommitted",
   faviconCommitted: "codingAgent.stepFaviconCommitted",
   pullRequestOpened: "codingAgent.stepPullRequestOpened",
+  pullRequestAdopted: "codingAgent.stepPullRequestAdopted",
   merged: "codingAgent.stepMerged",
   notMerged: "codingAgent.stepNotMerged",
   onDesktop: "codingAgent.stepOnDesktop",

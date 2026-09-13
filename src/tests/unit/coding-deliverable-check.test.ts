@@ -55,6 +55,7 @@ function pr(over: Partial<PrState> = {}): PrState {
     base: "beta",
     checks: { total: 0, passed: 0, failed: 0, pending: 0 },
     detail: null,
+    foundBy: "opened",
     startedAt: 1,
     endedAt: null,
     reviewOk: true,
