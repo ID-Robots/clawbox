@@ -181,6 +181,33 @@ const NO_LIVE_RUN = async (ctx) => {
 };
 const ONLINE = (ctx) => (ctx.online === false ? "the box reports it is offline" : null);
 
+/**
+ * The media fence, with the race NO_LIVE_RUN cannot close: a run can start
+ * between that probe and this request, and then `resolveMediaTarget` is past
+ * the `no_run` gate and answers one of its LATER refusals instead. Reporting
+ * that as a failure would be the sweep blaming the box for its own timing —
+ * the exact thing `unproven` exists for. Those three answers are reachable
+ * only when a run IS active, so each of them is evidence the precondition
+ * evaporated rather than evidence of breakage.
+ *
+ * The body deliberately carries no `path`, which is a second line of defence
+ * rather than the first: with a run live, `resolveMediaTarget` refuses a
+ * missing path with `bad_request` BEFORE it reserves a slot or calls the
+ * generator, so this request cannot spend the owner's allowance even if it
+ * loses the race. The NO_LIVE_RUN probe stays anyway, because that ordering is
+ * a fact about the route's internals and not a promise made to this script.
+ */
+const RUN_STARTED_MEANWHILE = { bad_request: "a path", switched_off: "pictures switched off", cap: "its picture cap" };
+
+function mediaFenceRefused(res) {
+  const code = res.json?.code ?? res.json?.kind;
+  if (res.status === 403 && code === "no_run") return true;
+  if (Object.hasOwn(RUN_STARTED_MEANWHILE, code ?? "")) {
+    return { unproven: `a coding run started while this was being asked — the route answered about ${RUN_STARTED_MEANWHILE[code]} instead, which only happens past the no_run gate` };
+  }
+  return `expected 403 no_run, got ${res.status} ${truncate(res.text)}`;
+}
+
 const AREAS = [
   ["identity", [
     { name: "system/info reports the machine", path: "/setup-api/system/info", expect: ok("hostname", "platform", "memoryTotal") },
@@ -228,7 +255,7 @@ const AREAS = [
   ]],
   ["media", [
     { name: "a bodyless picture request is refused", path: "/setup-api/coding-agent/media/image", method: "POST", body: {}, expect: refuses(400, "bad_request") },
-    { name: "no run means no picture", path: "/setup-api/coding-agent/media/image", method: "POST", body: { prompt: "a feature sweep never gets this far" }, needs: NO_LIVE_RUN, expect: refuses(403, "no_run") },
+    { name: "no run means no picture", path: "/setup-api/coding-agent/media/image", method: "POST", body: { prompt: "a feature sweep never gets this far" }, needs: NO_LIVE_RUN, expect: mediaFenceRefused },
   ]],
   ["local-model", [
     { name: "the local model inventory answers", path: "/setup-api/local-models", expect: ok("models") },
