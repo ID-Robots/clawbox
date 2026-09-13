@@ -56,6 +56,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     numTurns: 7,
     reviewOf: null,
     reviewLoopOf: null,
+    reviewRound: null,
     vercel: null,
     vercelFixOf: null,
     team: null,

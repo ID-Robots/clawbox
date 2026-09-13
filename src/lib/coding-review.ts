@@ -233,6 +233,65 @@ export async function readFailedCheckLogs(dir: string, checks: readonly ReviewCh
 }
 
 /**
+ * An open pull request whose HEAD is this branch, whoever opened it.
+ *
+ * WHY THIS EXISTS. The loop used to watch only a pull request the box had
+ * opened itself, because `pr.number` is written on the auto-PR path and nowhere
+ * else. A run whose task says to open its own — which is most delegated work on
+ * this device — pushed, ran `gh pr create` in its own turn, and settled with
+ * `pr: null` and `review: null` on the record: no number to poll, so the whole
+ * loop silently never engaged. Observed on a real run with the review pass and
+ * auto-PR both switched on and zero rounds worked. Asking GitHub which pull
+ * request is open on the branch is the answer that does not care who opened it.
+ *
+ * ONLY ever called with a branch the RUN owns (`clawbox/<runId>`, or its
+ * worktree's). A run that worked straight on a shared branch would match
+ * whatever pull request happens to be open from it — somebody else's — and
+ * adopting that would have the box pushing rounds onto a stranger's work.
+ *
+ * Best-effort by construction, which is also what makes it safe on the old `gh`
+ * this box carries: every failure answers null — no remote, no sign-in, a `gh`
+ * too old for `--head` refusing the flag outright — and null reads as "there is
+ * nothing to adopt", leaving the auto-PR path to open one exactly as it always
+ * did. Nothing here can turn into a worse outcome than the behaviour it
+ * replaces.
+ */
+export async function findOpenPullRequestForBranch(
+  dir: string,
+  branch: string,
+): Promise<{ number: number; base: string | null; url: string | null } | null> {
+  if (!branch.trim()) return null;
+  const listed = await run(
+    "gh",
+    ["pr", "list", "--head", branch, "--state", "open", "--json", "number,baseRefName,url", "--limit", "10"],
+    path.resolve(dir),
+  );
+  if (!ok(listed)) return null;
+  let rows: unknown;
+  try {
+    rows = JSON.parse(out(listed) || "[]");
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(rows)) return null;
+  const open = rows.flatMap((raw) => {
+    if (typeof raw !== "object" || raw === null) return [];
+    const row = raw as { number?: unknown; baseRefName?: unknown; url?: unknown };
+    if (typeof row.number !== "number" || !Number.isInteger(row.number) || row.number <= 0) return [];
+    return [{
+      number: row.number,
+      base: typeof row.baseRefName === "string" && row.baseRefName ? row.baseRefName : null,
+      url: typeof row.url === "string" && row.url ? row.url : null,
+    }];
+  });
+  if (!open.length) return null;
+  // The LOWEST number when a branch somehow has more than one: the oldest is
+  // the one the run opened, and picking deterministically is what keeps two
+  // settles of the same chain from adopting two different pull requests.
+  return open.reduce((lowest, row) => (row.number < lowest.number ? row : lowest));
+}
+
+/**
  * Push whatever the follow-up turn committed.
  *
  * The run is told to push itself, and usually does; this is the safety net for
