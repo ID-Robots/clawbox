@@ -657,11 +657,49 @@ export function projectTrashDir(root: string): string {
   return path.join(path.resolve(root), TRASH_DIR_NAME);
 }
 
-/** Every trash folder on this box — one per root that exists. */
-function trashDirs(roots: ProjectRoots): string[] {
+/** Every project root on this box, absolute, spelled as the owner spelled it. */
+function configuredRoots(roots: ProjectRoots): string[] {
   return [roots.ownerFolder, roots.codeProjects]
     .filter((r): r is string => typeof r === "string" && !!r)
-    .map(projectTrashDir);
+    .map((r) => path.resolve(r));
+}
+
+/**
+ * `realpath`, or null when there is simply nothing there yet.
+ *
+ * ENOENT is the ONLY error this swallows. A trash the box cannot resolve for
+ * any other reason — a permission denied on the way down, a link loop — is not
+ * an empty trash, and treating it as one would understate the shelf and let the
+ * count bound pass silently. See `trashPurgedByOneMore` for where that lands.
+ */
+async function realpathOrNull(target: string): Promise<string | null> {
+  try {
+    return await fs.promises.realpath(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/**
+ * The PHYSICAL trash folder one root keeps, whether or not it is there yet.
+ *
+ * The trash itself when it exists, and otherwise the one the root's OWN real
+ * path names. The second half is the whole point: a trash that does not exist
+ * cannot be resolved, and falling back to the lexical path made a symlinked
+ * root answer with a spelling of its own. Two spellings of one folder then
+ * survived the dedupe below, and `readTrashEntries` read the same shelf twice
+ * the moment a concurrent `moveProjectToTrash` created it between the two
+ * `readdir`s — every entry counted twice again, which is exactly the defect the
+ * dedupe exists to prevent. Canonicalising the ROOT answers before the folder
+ * is there, because a root is a folder that already exists.
+ */
+async function physicalTrashDir(root: string): Promise<string> {
+  const lexical = projectTrashDir(root);
+  const real = await realpathOrNull(lexical);
+  if (real) return real;
+  const realRoot = await realpathOrNull(root);
+  return realRoot ? path.join(realRoot, TRASH_DIR_NAME) : lexical;
 }
 
 /**
@@ -676,16 +714,18 @@ function trashDirs(roots: ProjectRoots): string[] {
  * prune took recoverable projects BEFORE their time. That is the same consent
  * defect the count bound exists to state, arriving by the back door.
  *
- * By REAL path, like the listing's own dedupe, so a link between the roots
- * counts once too. A trash that does not exist yet cannot be resolved and falls
- * back to its own path — two of those are either the same string, and dedupe,
- * or two genuinely different folders that are both empty.
+ * Keyed by real path, like the listing's own dedupe; the LEXICAL path is what
+ * is handed back, so the entries carry the spelling the rest of the file uses
+ * and an error names a folder the owner can recognise.
+ *
+ * Exported for the test that states the invariant directly — the harm it
+ * prevents is a double COUNT, which is only visible through a race.
  */
-async function physicalTrashDirs(roots: ProjectRoots): Promise<string[]> {
+export async function physicalTrashDirs(roots: ProjectRoots): Promise<string[]> {
   const byReal = new Map<string, string>();
-  for (const dir of trashDirs(roots)) {
-    const real = await fs.promises.realpath(dir).catch(() => dir);
-    if (!byReal.has(real)) byReal.set(real, dir);
+  for (const root of configuredRoots(roots)) {
+    const real = await physicalTrashDir(root);
+    if (!byReal.has(real)) byReal.set(real, projectTrashDir(root));
   }
   return [...byReal.values()];
 }
@@ -840,9 +880,22 @@ async function readTrashEntries(roots: ProjectRoots): Promise<TrashEntry[]> {
  * that is what the dialog has to put in front of the owner before they agree to
  * anything — the count bound is not a detail of housekeeping when it is the
  * thing that makes "kept for 30 days" untrue.
+ *
+ * A shelf that cannot be READ is `trash_failed` and not an empty shelf. The
+ * difference matters here and nowhere else: this number is what `trash_full`
+ * refuses on, so a swallowed error would hand the owner a removal that purges
+ * somebody else's recoverable project without ever having said so.
  */
 export async function trashPurgedByOneMore(roots: ProjectRoots, now = Date.now()): Promise<{ count: number; early: string[] }> {
-  const entries = await readTrashEntries(roots);
+  let entries: TrashEntry[];
+  try {
+    entries = await readTrashEntries(roots);
+  } catch (err) {
+    throw new ProjectDeleteError(
+      "trash_failed",
+      `This ClawBox could not read its list of removed projects, so nothing was removed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   return { count: entries.length, early: selectTrashPrune(entries, now, 1).early.map((e) => e.name) };
 }
 
@@ -854,7 +907,11 @@ export async function trashPurgedByOneMore(roots: ProjectRoots, now = Date.now()
  * the delete that has already happened.
  */
 export async function pruneProjectTrash(roots: ProjectRoots, now = Date.now()): Promise<TrashPruneOutcome> {
-  const { expired, early } = selectTrashPrune(await readTrashEntries(roots), now, 0);
+  // The one place an unreadable shelf IS an empty one: the delete has already
+  // landed, and a prune that cannot see the trash simply takes nothing. The
+  // preview's reader refuses instead — see `trashPurgedByOneMore`.
+  const shelf = await readTrashEntries(roots).catch(() => [] as TrashEntry[]);
+  const { expired, early } = selectTrashPrune(shelf, now, 0);
 
   const removed: string[] = [];
   for (const entry of [...expired, ...early]) {

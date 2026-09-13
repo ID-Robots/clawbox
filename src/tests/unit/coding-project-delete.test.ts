@@ -319,6 +319,10 @@ describe("the trash and its retention rule", () => {
 
     // Expired, and reported as expired — nobody was promised those.
     expect(await lib.pruneProjectTrash(roots(), now)).toEqual({ removed: [old], expired: [old], early: [] });
+    // Reported gone AND gone. `rm` runs with `force`, so it succeeds on a path
+    // that is not there: a prune reaching into the wrong root would still fill
+    // `removed` in, and only the disk can say it took the right folder.
+    expect(fs.existsSync(path.join(trash, old))).toBe(false);
     expect(fs.existsSync(path.join(trash, fresh))).toBe(true);
   });
 
@@ -433,10 +437,99 @@ describe("the trash and its retention rule", () => {
     const oldest = stamped(`p${lib.MAX_TRASH_ENTRIES - 1}`, now, (lib.MAX_TRASH_ENTRIES - 1) * 60_000);
 
     expect(await lib.trashPurgedByOneMore(roots(), now)).toEqual({ count: lib.MAX_TRASH_ENTRIES, early: [oldest] });
-    // And the prune reaches into the root the doomed entry actually lives in.
+    // Exactly full is not over-full: the shelf is at the bound, nothing has
+    // arrived, and the prune takes nothing.
     const pruned = await lib.pruneProjectTrash(roots(), now);
     expect(pruned.removed).toEqual([]);
     expect(fs.readdirSync(ownerTrash).length + fs.readdirSync(codeTrash).length).toBe(lib.MAX_TRASH_ENTRIES);
+
+    // And NOW the prune has something to reach for, in the root the doomed
+    // entry actually lives in: an expired entry in the CODE PROJECTS trash,
+    // removed from there. Without this the fixture is all fresh, the plan is
+    // empty, and `rm(entry.dir, entry.name)` never runs at all — a prune with
+    // the owner's trash hard-coded into it would pass unnoticed, because `rm`
+    // with `force` succeeds on a path that is not there.
+    const stale = stamped("stale", now, 31 * day);
+    fs.mkdirSync(path.join(codeTrash, stale));
+    const second = await lib.pruneProjectTrash(roots(), now);
+    expect(second.removed).toEqual([stale]);
+    expect(second.expired).toEqual([stale]);
+    expect(fs.existsSync(path.join(codeTrash, stale))).toBe(false);
+    // The full shelf beside it is untouched: expiry made room, so nothing went
+    // early.
+    expect(second.early).toEqual([]);
+    expect(fs.readdirSync(ownerTrash).length + fs.readdirSync(codeTrash).length).toBe(lib.MAX_TRASH_ENTRIES);
+  });
+
+  it("names ONE trash for a symlinked root, before that trash exists", async () => {
+    // The gap the lexical fallback left. A trash that is not there yet cannot
+    // be resolved, and answering with each root's own spelling handed back two
+    // paths for one physical folder. The ROOT can always be resolved — it is a
+    // folder that exists by definition — so the canonical answer is available
+    // at the moment it is needed.
+    const code = path.join(root, "data", "code-projects");
+    const linked = path.join(root, "LinkedProjects");
+    fs.symlinkSync(code, linked);
+    expect(fs.existsSync(lib.projectTrashDir(code))).toBe(false);
+
+    const dirs = await lib.physicalTrashDirs({ ownerFolder: linked, codeProjects: code, checkout: root });
+    expect(dirs).toHaveLength(1);
+    // Two genuinely different roots still answer twice — the dedupe is about
+    // one folder with two names, not about tidying the list.
+    expect(await lib.physicalTrashDirs(roots())).toHaveLength(2);
+  });
+
+  it("counts a symlinked root's shelf ONCE when the trash appears mid-read", async () => {
+    // The harm the dedupe prevents, end to end. Two spellings of one trash are
+    // both read, and a `moveProjectToTrash` landing in the gap between naming
+    // the folders and reading them creates the shelf they BOTH point at. Every
+    // entry is then counted twice: the shelf reports full at half the stated
+    // bound, `trash_full` refuses early, and the prune takes recoverable
+    // projects before their time.
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const code = path.join(root, "data", "code-projects");
+    const linked = path.join(root, "LinkedProjects");
+    fs.symlinkSync(code, linked);
+    const trash = lib.projectTrashDir(code);
+    const half = Math.floor(lib.MAX_TRASH_ENTRIES / 2);
+
+    const readdir = fs.promises.readdir;
+    const spy = vi.spyOn(fs.promises, "readdir").mockImplementation(((dir: fs.PathLike, options: unknown) => {
+      // The concurrent removal, at the one instant that used to matter: after
+      // the folders to read have been named and before the first is read.
+      if (!fs.existsSync(trash)) {
+        fs.mkdirSync(trash, { recursive: true });
+        for (let i = 0; i < half; i += 1) fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
+      }
+      return (readdir as unknown as (d: fs.PathLike, o: unknown) => Promise<unknown>)(dir, options);
+    }) as unknown as typeof fs.promises.readdir);
+
+    try {
+      expect(await lib.trashPurgedByOneMore({ ownerFolder: linked, codeProjects: code, checkout: root }, now))
+        .toEqual({ count: half, early: [] });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("refuses with trash_failed when the shelf cannot be read, rather than calling it empty", async () => {
+    // ENOENT is "no trash yet" and is the only error that means that. Anything
+    // else — a permission denied on the way down, the link loop below — is a
+    // shelf the box cannot SEE, and reading it as empty would hand the owner a
+    // removal that purges somebody else's recoverable project without the
+    // `trash_full` refusal that exists to ask them first.
+    const a = path.join(root, "loop-a");
+    const b = path.join(root, "loop-b");
+    fs.symlinkSync(b, a);
+    fs.symlinkSync(a, b);
+
+    expect(await refusal(() => lib.trashPurgedByOneMore({ ...roots(), ownerFolder: a })))
+      .toBe("trash_failed");
+    // The prune is the other side of that judgement: by the time it runs the
+    // folder has already moved, and a shelf it cannot read is not a reason to
+    // fail a removal that has happened.
+    expect(await lib.pruneProjectTrash({ ...roots(), ownerFolder: a }))
+      .toEqual({ removed: [], expired: [], early: [] });
   });
 
   it("reads a name it did not write as having no time, so the prune skips it", () => {
