@@ -76,8 +76,12 @@ export interface VercelAuth {
  *  - `rate`      429 — asked too often; the watcher backs off rather than ends
  *  - `upstream`  a 5xx, or an answer this box could not read
  *  - `refused`   any other 4xx: a request Vercel rejected on its merits
+ *  - `wrong_target` the one kind that is not an HTTP status: Vercel made a
+ *    deployment on a target this box did not ask for. It is here rather than
+ *    folded into `upstream` because it is the only failure whose consequence
+ *    is something ALREADY PUBLIC — see `createDeployment`.
  */
-export type VercelErrorKind = "network" | "auth" | "not_found" | "rate" | "upstream" | "refused";
+export type VercelErrorKind = "network" | "auth" | "not_found" | "rate" | "upstream" | "refused" | "wrong_target";
 
 export interface VercelFailure {
   ok: false;
@@ -666,11 +670,19 @@ export async function createDeployment(
     // accepts for a project named that way.
     name: input.projectName?.trim() || input.projectId,
     project: input.projectId,
-    // `preview` is Vercel's default and is sent explicitly all the same: the
-    // difference between the two targets is the whole of what the owner's two
-    // buttons mean, and leaving it implied is how a production deploy becomes a
-    // preview after an API default changes.
-    target: input.target,
+    // A PREVIEW IS THE ABSENCE OF THIS FIELD. `POST /v13/deployments` accepts
+    // `production`, `staging` or a custom environment identifier and nothing
+    // else; the literal `"preview"` is not a value it defines. Sending it was
+    // usually refused outright — so the preview button and the pipeline's
+    // preview stage simply did not work — and once, on the same account twenty
+    // minutes earlier, it was ACCEPTED and coerced into a deployment with
+    // `target: "production"` aliased onto the project's own production domain:
+    // published to production by the stage the owner reads as "deploy a
+    // preview", with the production gate, the production rate limit and the
+    // owner's confirmation all bypassed. So the field is sent only when
+    // production is what is actually meant, and the guard below refuses to call
+    // anything else a preview.
+    ...(input.target === "production" ? { target: "production" } : {}),
     ...(input.meta ? { meta: input.meta } : {}),
   };
 
@@ -708,5 +720,19 @@ export async function createDeployment(
   if (!answered.ok) return answered;
   const deployment = parseDeployment(answered.data);
   if (!deployment) return failure("upstream", "Vercel did not say which deployment it created.");
+  if (input.target !== "production" && deployment.target === "production") {
+    // LOUDLY, and never silently folded back into the caller's idea of what it
+    // asked for: a preview is a throwaway address nobody but the owner has, and
+    // a "preview" that came back on the production target is in front of that
+    // project's users right now. The record must not say preview about it, the
+    // pipeline must not go on to verify it as one, and the owner has to be told
+    // where to look. Nothing here can take the deployment back — that is the
+    // owner's to do on Vercel — so the honest answer is a refusal that says so.
+    console.error(`[vercel] deployment ${deployment.id} came back on the PRODUCTION target although a preview was asked for`);
+    return failure(
+      "wrong_target",
+      `Vercel made deployment ${deployment.id} on its PRODUCTION target although this ClawBox asked for a preview, so this ClawBox will not treat it as one. That build may be on the project's production domain: check it on Vercel.`,
+    );
+  }
   return { ok: true, deployment };
 }

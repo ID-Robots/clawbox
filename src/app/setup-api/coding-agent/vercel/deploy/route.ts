@@ -423,4 +423,4 @@ export async function POST(request: Request): Promise<NextResponse> {
 }
 
 /** Refusals that came from VERCEL rather than from this box. */
-const UPSTREAM_CODES = new Set(["network", "auth", "rate", "upstream", "refused"]);
+const UPSTREAM_CODES = new Set(["network", "auth", "rate", "upstream", "refused", "wrong_target"]);

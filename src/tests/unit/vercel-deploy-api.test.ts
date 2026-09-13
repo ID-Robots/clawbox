@@ -6,10 +6,13 @@
  *  - a GIT-CONNECTED project deploys a REF and uploads nothing; a project with
  *    no repository uploads its files and names them by hash. Which one is read
  *    from Vercel's own project record, never guessed;
- *  - the TARGET is sent explicitly, both times — the difference between the
- *    owner's two buttons is the whole of what it means, and leaving `preview`
- *    implied is how a production deploy becomes a preview after an API default
- *    changes;
+ *  - a PREVIEW carries no `target` field at all and production carries
+ *    `target: "production"`. `POST /v13/deployments` does not define the value
+ *    `"preview"`: sending it is usually refused, and has been seen to be
+ *    accepted and turned into a PRODUCTION deployment on the project's own
+ *    domain — so "the preview request has no target key" is pinned literally;
+ *  - an answer that came back on the production target is never treated as a
+ *    preview, whatever was asked for;
  *  - a caller that names both a ref and files, or neither, is REFUSED rather
  *    than having one of them silently win;
  *  - the token goes in the Authorization header and never into a sentence,
@@ -150,10 +153,10 @@ describe("a project with no repository", () => {
   const FILES = [{ file: "index.html", sha: "a".repeat(40), size: 12 }];
 
   it("names the uploaded files by hash and asks Vercel not to stop and ask", async () => {
-    fakeApi(() => answer(200, { ...CREATED, target: "preview" }));
+    fakeApi(() => answer(200, { ...CREATED, target: null }));
     const made = await createDeployment(AUTH, { projectId: "prj_acme", target: "preview", files: FILES });
     expect(made.ok).toBe(true);
-    expect(calls[0].body).toMatchObject({ project: "prj_acme", target: "preview", files: FILES, projectSettings: {} });
+    expect(calls[0].body).toMatchObject({ project: "prj_acme", files: FILES, projectSettings: {} });
     // Headless: there is nobody to confirm a framework guess to, so a
     // deployment that waited for one would build for ever.
     expect(calls[0].url.searchParams.get("skipAutoDetectionConfirmation")).toBe("1");
@@ -166,6 +169,45 @@ describe("a project with no repository", () => {
     expect(calls[0].url.pathname).toBe("/v2/files");
     expect(calls[0].headers["x-vercel-digest"]).toBe("b".repeat(40));
     expect(calls[0].auth).toBe(`Bearer ${TOKEN}`);
+  });
+});
+
+describe("the target field", () => {
+  const FILES = [{ file: "index.html", sha: "a".repeat(40), size: 12 }];
+
+  it("sends NO target key at all for a preview", async () => {
+    fakeApi(() => answer(200, { ...CREATED, target: null }));
+    const made = await createDeployment(AUTH, { projectId: "prj_acme", target: "preview", files: FILES });
+    expect(made.ok).toBe(true);
+    // Not "target is undefined" — the KEY is absent. Vercel refuses the literal
+    // string "preview" outright, and has been seen to accept it and publish to
+    // production; a preview is the absence of the field.
+    expect(Object.keys(calls[0].body as object)).not.toContain("target");
+  });
+
+  it("sends target: production, and only that, for a production deploy", async () => {
+    fakeApi(() => answer(200, CREATED));
+    const made = await createDeployment(AUTH, { projectId: "prj_acme", target: "production", files: FILES });
+    expect(made.ok).toBe(true);
+    expect((calls[0].body as { target?: unknown }).target).toBe("production");
+  });
+
+  it("refuses to call an answer that came back on PRODUCTION a preview", async () => {
+    // The state that published to a live domain under the words "deploy a
+    // preview". Nothing here can take that deployment back, so the answer is a
+    // refusal that names it and says where to look.
+    fakeApi(() => answer(200, { ...CREATED, target: "production" }));
+    const made = await createDeployment(AUTH, { projectId: "prj_acme", target: "preview", files: FILES });
+    expect(made.ok).toBe(false);
+    expect(made.ok === false && made.kind).toBe("wrong_target");
+    expect(made.ok === false && made.detail).toContain("dpl_new");
+    expect(made.ok === false && made.detail).toContain("production");
+  });
+
+  it("accepts a production deployment that came back on production", async () => {
+    fakeApi(() => answer(200, CREATED));
+    const made = await createDeployment(AUTH, { projectId: "prj_acme", target: "production", files: FILES });
+    expect(made.ok).toBe(true);
   });
 });
 
@@ -196,7 +238,7 @@ describe("the token", () => {
 
 describe("the account a deployment is made under", () => {
   it("scopes by the team the caller named, over the one on the credential", async () => {
-    fakeApi(() => answer(200, CREATED));
+    fakeApi(() => answer(200, { ...CREATED, target: null }));
     await createDeployment({ token: TOKEN, teamId: "team_default" }, {
       projectId: "p", teamId: "team_named", target: "preview", files: [{ file: "a", sha: "e".repeat(40), size: 1 }],
     });
