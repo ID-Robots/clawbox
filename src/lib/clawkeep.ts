@@ -1182,16 +1182,30 @@ function mapSnapshotsError(resp: SnapshotsResponse): ClawKeepError {
     case "unpaired":
     case "no_token":
     case "not_paired":
-      // Same answer as the pre-flight check, IF the daemon ever says so: today
-      // `clawkeep snapshots` classifies nothing — `cli.py::_emit_err` prints
-      // `{"ok":false,"error":…}` with no `kind` for `TokenError` too, so these
-      // cases are unreached and the token vanishing mid-session still falls to
-      // `default:` (502). Kept as the mapping to use when the daemon starts
-      // classifying its errors — which needs a `no_token` kind that
-      // `api.ApiError` does not have either (its union is auth | quota_full |
-      // tier | server | network | other), so making this branch live is a
-      // daemon-side change, not just a wiring one.
+      // Still unreached, and for a narrower reason than before: `_emit_err` now
+      // carries whatever `kind` the exception has, but `token.TokenError` and
+      // `cfg_mod.ConfigError` have none — `api.ApiError`'s union is
+      // auth | quota_full | tier | server | network | other — so a token
+      // vanishing mid-session still falls to `default:` (502). Kept as the
+      // mapping to use when the daemon gives those two a kind of their own.
       return new ClawKeepNotPairedError();
+    case "quota_full":
+      // The portal answers 402 to `POST /credentials` while the account is over
+      // quota, and `snapshots` mints credentials before it lists anything — so
+      // the READ is refused over a limit a read cannot exceed. That is a portal
+      // defect and not this function's to fix; what IS this function's is to
+      // stop hiding the reason. Same sentence, status and code the backup path
+      // has always answered (see backupExitError): being told "the account is
+      // full" is what makes "Could not list cloud backups" actionable.
+      return new ClawKeepError(
+        "The ClawKeep account is out of space — free some snapshots or upgrade the plan",
+        507,
+        "quota_full",
+      );
+    case "tier":
+      // The other half of `_classify` that had nowhere to land. Same pairing as
+      // backupExitError's EXIT_TIER.
+      return new ClawKeepError("This ClawKeep plan does not allow that", 402, "tier_limit");
     case "auth":
     case "unauthorized":
     case "revoked":

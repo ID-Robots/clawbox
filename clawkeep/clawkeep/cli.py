@@ -91,8 +91,28 @@ def _load_cfg_and_token(config_path: str | None) -> tuple[cfg_mod.Config, str]:
 def _emit_err(e: Exception, rc: int) -> int:
     """JSON error envelope on stdout. The TS bridge reads stdout; stderr is
     a fallback for non-JSON failures, so emit JSON even when something
-    upstream of the JSON-friendly code path raised."""
-    print(json.dumps({"ok": False, "error": str(e)}))
+    upstream of the JSON-friendly code path raised.
+
+    `kind` is carried across the process boundary whenever the exception has
+    one. `api.ApiError` classifies every portal failure precisely so callers
+    "can branch … without parsing English error strings" (its own docstring),
+    and this envelope dropped the classification on the floor: every
+    credential-minting subcommand — `snapshots`, `label`, `lock`, `unlock`,
+    `delete`, `prune` — is refused with a 402 while the account is over quota,
+    and the bridge saw only an unclassified failure and answered 502 "Could not
+    list cloud backups". The owner was told to remove old snapshots by a box
+    that could not say why it was asking. `_delete_main` already emits
+    `kind: "locked"` by hand, so the field is part of the wire contract
+    already; this makes every other failure use it.
+
+    Only a string `kind` is emitted, so an exception carrying something else
+    under that attribute cannot change the envelope's shape.
+    """
+    body: dict[str, object] = {"ok": False, "error": str(e)}
+    kind = getattr(e, "kind", None)
+    if isinstance(kind, str) and kind:
+        body["kind"] = kind
+    print(json.dumps(body))
     return rc
 
 
