@@ -221,6 +221,40 @@ export async function openPullRequest(input: {
 }
 
 /**
+ * Rewrite an open pull request's body.
+ *
+ * Used to keep the review pass's evidence current across review rounds: a round
+ * that fixed what a screenshot showed has new screenshots, and a body frozen at
+ * the moment the pull request opened would go on describing the defect.
+ *
+ * Reads the body back first and hands the CALLER the rewrite, so the one thing
+ * this cannot do is flatten a word a person wrote — `withEvidenceSection`
+ * replaces only its own marked block. A pull request whose body cannot be read
+ * is left exactly as it is.
+ */
+export async function updatePullRequestBody(input: {
+  directory: string;
+  number: number;
+  rewrite: (body: string) => string;
+}): Promise<{ ok: true; changed: boolean } | { ok: false; detail: string }> {
+  const dir = path.resolve(input.directory);
+  const viewed = await run("gh", ["pr", "view", String(input.number), "--json", "body"], dir);
+  if (!ok(viewed)) return { ok: false, detail: failureDetail(viewed, "Reading the pull request body", "Try again.") };
+  let body: string;
+  try {
+    const parsed = JSON.parse(out(viewed)) as { body?: unknown };
+    body = typeof parsed.body === "string" ? parsed.body : "";
+  } catch {
+    return { ok: false, detail: "Could not read GitHub's answer about the pull request body." };
+  }
+  const next = input.rewrite(body);
+  if (next === body) return { ok: true, changed: false };
+  const edited = await run("gh", ["pr", "edit", String(input.number), "--body", next], dir);
+  if (!ok(edited)) return { ok: false, detail: failureDetail(edited, "Updating the pull request body", "Try again.") };
+  return { ok: true, changed: true };
+}
+
+/**
  * The project page's "Create PR": a pull request for whatever branch the
  * project is on, against the remote's default branch.
  *

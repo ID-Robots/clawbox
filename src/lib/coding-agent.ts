@@ -143,6 +143,12 @@ import {
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
+  collectVisualEvidence,
+  renderEvidenceSection,
+  visualCheckBrief,
+  withEvidenceSection,
+} from "@/lib/coding-review-visual";
+import {
   decideMerge,
   emptyChecks,
   isPrFoundBy,
@@ -150,6 +156,7 @@ import {
   isPrPhase,
   mergePullRequest,
   openPullRequest,
+  updatePullRequestBody,
   // Aliased: this module's own MAX_WAIT_MS is the 120-second status-request
   // limit, a different ceiling for a different wait.
   MAX_WAIT_MS as PR_MAX_WAIT_MS,
@@ -4565,7 +4572,7 @@ const HEADLESS_BRIEF_TEMPLATE = [
   // itself how to wait.
   "Sub-agents and workflows run in the background: launch independent ones together and keep working while they run; when nothing is left but waiting, end your turn with one line saying what is still out — you are restarted with each result as it arrives. Never poll for them, and never read their transcripts or session files.",
   "Verify your work where you can (run the build or the tests you have).",
-  "For live web verification, start your app as a background child in this working folder and use browser_open on http://127.0.0.1:PORT (an unprivileged port). Only a listener owned by this run is allowed; other local services stay blocked. Verify the real API-backed UI, not a static shim. Stop test servers when finished; Team workers have their remaining process group cleaned up automatically.",
+  "For live web verification, start your app as a background child in this working folder and use browser_open on http://127.0.0.1:PORT (an unprivileged port). Only a listener owned by this run is allowed; other local services stay blocked. `node \"$CLAWBOX_PREVIEW\" --ttl 900` does this for you when the project has no server of its own — it builds, serves the folder on an ephemeral loopback port and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim. Stop test servers when finished; Team workers have their remaining process group cleaned up automatically.",
   "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open its live app with browser_open, or use browser_view_local for a standalone HTML file and read the description of what actually renders before you report done.",
   "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
   "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
@@ -5145,6 +5152,15 @@ function dropRunSecrets(runId: string): void {
  * (scripts/claude-ds unsets the whole of the other wiring); this side's job is
  * to name one of them and to pass no stale override that could contradict it.
  */
+/**
+ * scripts/clawbox-preview.mjs — the bounded loopback preview server a run uses
+ * to LOOK at what it built. In the checkout, like every other script the device
+ * hands a run.
+ */
+export function previewScriptPath(): string {
+  return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
+}
+
 export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; provider?: CodingProvider; model?: string | null; secrets?: Record<string, string> } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
@@ -5184,6 +5200,12 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
+  // How a run turns its own folder into a page the device browser can open.
+  // Named here rather than written into the brief as a literal path so the
+  // review pass and the brief cannot disagree about where the script is — and
+  // it is a CLAWBOX_ name, which setSecret refuses, so the owner's secret store
+  // cannot point a run's preview at something else. See previewScriptPath.
+  env.CLAWBOX_PREVIEW = previewScriptPath();
   // The owner's secrets, LAST and never over the top of anything above.
   //
   // Resolved by the caller (`prepareRunSecrets`) because it is a disk read and
@@ -6799,7 +6821,26 @@ function prBody(origin: CodingRun, last: CodingRun): string {
   ];
   if (last.reviewOf) lines.push(`Reviewed by run \`${last.id}\` (automatic review pass).`);
   if (origin.summary) lines.push("", "**Summary**", origin.summary);
-  return lines.join("\n");
+  // What the review pass actually SAW, when it looked. The reviewing run first,
+  // because its screenshots are of the finished work; the origin run's own
+  // verification shots after. A body with nothing to show gains nothing.
+  return withEvidenceSection(lines.join("\n"), visualEvidenceSection(last, origin));
+}
+
+/**
+ * The evidence block for a pull request, or null when no picture was kept.
+ *
+ * Read from disk at the moment the body is written, like the artifacts listing
+ * the run page draws: nothing about a screenshot is persisted on the record, so
+ * this is the only place the two could ever disagree, and it does not.
+ */
+function visualEvidenceSection(last: CodingRun, origin: CodingRun): string | null {
+  try {
+    return renderEvidenceSection(collectVisualEvidence([last.id, origin.id]));
+  } catch (err) {
+    console.error("[coding-agent] could not read the run's visual evidence:", err instanceof Error ? err.message : err);
+    return null;
+  }
 }
 
 /** Record a terminal PR phase on the run and persist it. */
@@ -7746,9 +7787,35 @@ async function resumeReviewAfterFix(finished: CodingRun, ended: "stop" | "pause"
 
   const current = loadRuns().find((r) => r.id === origin.id);
   if (!current?.review || current.review.state !== "working") return;
+  // The round may have looked at the work again — and if it did, the body's
+  // evidence block describes a state that no longer exists. Refreshed before
+  // the next poll, best-effort: a pull request whose body could not be rewritten
+  // is still a pull request, and this must never stop the loop.
+  await refreshPrEvidence(current, finished);
   current.review = { ...current.review, state: "polling", roundStartedAt: Date.now() };
   persist(true);
   watchReviewLoop(current.id);
+}
+
+/**
+ * Bring an open pull request's "What the review pass saw" block up to date with
+ * whatever the latest round archived. Only that block is touched.
+ */
+async function refreshPrEvidence(origin: CodingRun, last: CodingRun): Promise<void> {
+  const number = origin.pr?.number;
+  if (typeof number !== "number") return;
+  const section = visualEvidenceSection(last, origin);
+  if (!section) return;
+  try {
+    const updated = await updatePullRequestBody({
+      directory: origin.directory,
+      number,
+      rewrite: (body) => withEvidenceSection(body, section),
+    });
+    if (!updated.ok) console.error(`[coding-agent] ${origin.id} PR #${number} evidence not updated: ${updated.detail}`);
+  } catch (err) {
+    console.error(`[coding-agent] ${origin.id} PR #${number} evidence not updated:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -7759,7 +7826,7 @@ async function resumeReviewAfterFix(finished: CodingRun, ended: "stop" | "pause"
 // Bench cycle 1 (2026-09-05): two review passes reported "tests pass" for a
 // suite they had not run in the pass — the claim was the earlier session's.
 // So the pass runs the verification itself, first, and reports only its own.
-const REVIEW_PASS_TASK =
+export const REVIEW_PASS_TASK =
   "Automatic review pass. Start by running the project's own verification — its tests or build — in THIS pass"
   + " and quote the result. Then adversarially review the work you just delivered in this folder: read the diff"
   + " of your last commit (git show HEAD; if there is no commit, review the working tree), and hunt for real"
@@ -7768,6 +7835,19 @@ const REVIEW_PASS_TASK =
   + " Report only what you ran in this pass: a result from the earlier session is not yours to claim."
   + " Do not restyle or refactor working code, and do not invent work: if nothing real is found, say so in one"
   + " line and finish. Update report.md in your evidence folder with what you checked, found, and fixed.";
+
+/**
+ * The whole task a review pass is given: the fixed review text plus the visual
+ * check this run's own diff earns.
+ *
+ * The two are joined HERE rather than in the constant because the second half
+ * depends on what the run touched — and the decision is the device's, made from
+ * the file list the runner already holds, so a pass is never left to guess
+ * whether the work it is reviewing has a face (see coding-review-visual.ts).
+ */
+export function reviewPassTask(finished: Pick<CodingRun, "filesTouched">): string {
+  return `${REVIEW_PASS_TASK}\n\n${visualCheckBrief(finished.filesTouched, previewScriptPath())}`;
+}
 
 /**
  * What became of the review pass after a run settled: a review run is now
@@ -7806,7 +7886,7 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   if (!finished.reviewPass) return "skipped";
   try {
     const review = await startRun({
-      task: REVIEW_PASS_TASK,
+      task: reviewPassTask(finished),
       resumeRunId: finished.id,
       source: finished.source,
       reviewOf: finished.id,

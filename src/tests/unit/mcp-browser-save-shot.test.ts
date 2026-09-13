@@ -109,6 +109,34 @@ describe("saveShot", () => {
     expect(fs.readdirSync(evidence)).toHaveLength(MAX_SHOTS_PER_RUN);
   });
 
+  it("writes down what the picture showed, so the words outlive the transcript", async () => {
+    const h = await browserTools();
+    expect((await h.call("browser_screenshot")).isError).toBe(false);
+    // A dotfile, so it is never listed as an artifact — and the pull-request
+    // body is built from it (src/lib/coding-review-visual.ts).
+    const notes = JSON.parse(fs.readFileSync(path.join(evidence, ".shot-notes.json"), "utf8")) as Record<string, string>;
+    expect(notes).toEqual({ "shot-001.png": "A page." });
+  });
+
+  it("records no note for a frame it did not keep, and none when there were no words", async () => {
+    fs.mkdirSync(evidence, { recursive: true });
+    for (let i = 1; i <= MAX_SHOTS_PER_RUN; i++) {
+      fs.writeFileSync(path.join(evidence, `shot-${String(i).padStart(3, "0")}.png`), "kept");
+    }
+    expect((await (await browserTools()).call("browser_screenshot")).isError).toBe(false);
+    expect(fs.existsSync(path.join(evidence, ".shot-notes.json"))).toBe(false);
+
+    fs.rmSync(evidence, { recursive: true, force: true });
+    apiPost.mockImplementation(async (_route: string, body: { action: string }) => {
+      if (body.action === "launch") return { sessionId: "browser-1" };
+      if (body.action === "screenshot") return { url: "https://example.test/", screenshot: PNG.toString("base64"), descriptionError: "the vision model did not answer" };
+      return {};
+    });
+    expect((await (await browserTools()).call("browser_screenshot")).isError).toBe(false);
+    expect(fs.existsSync(path.join(evidence, "shot-001.png"))).toBe(true);
+    expect(fs.existsSync(path.join(evidence, ".shot-notes.json"))).toBe(false);
+  });
+
   it("archives nothing outside a run", async () => {
     delete process.env.CLAWBOX_RUN_DIR;
     delete process.env.CLAWBOX_RUN_ARTIFACTS_DIR;
