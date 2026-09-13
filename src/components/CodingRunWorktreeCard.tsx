@@ -65,12 +65,31 @@ function shortSha(sha: string): string {
 }
 
 /**
+ * One argument of a shell command, safe to paste.
+ *
+ * The plain word is left plain — these commands are READ by the owner before
+ * they are run, and `git checkout 'main'` reads worse than `git checkout main`
+ * for no gain. Anything else is single-quoted, which makes every character
+ * literal to the shell, with the one sequence single quotes cannot hold
+ * (`'`) closed, escaped and reopened. A project folder is named by the owner
+ * and may perfectly well be `~/My Projects/the site`; nothing this box copies
+ * to a clipboard may turn a folder name into shell syntax.
+ */
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
  * The same merge, by hand. Deliberately the commands and not a diff: the
  * clipboard is where a person takes a thing to run, and a run's diff can be
  * megabytes.
  */
 export function mergeByHandCommands(wt: { project: string; base: string; branch: string }): string {
-  return [`cd ${wt.project}`, `git checkout ${wt.base}`, `git merge ${wt.branch}`].join("\n");
+  return [
+    `cd ${shellArg(wt.project)}`,
+    `git checkout ${shellArg(wt.base)}`,
+    `git merge ${shellArg(wt.branch)}`,
+  ].join("\n");
 }
 
 export default function CodingRunWorktreeCard({

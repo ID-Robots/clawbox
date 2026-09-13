@@ -149,6 +149,31 @@ describe("a run whose work is not in the project", () => {
   });
 });
 
+describe("the commands the card copies", () => {
+  it("leaves a plain path plain, so the owner can read what they are about to run", () => {
+    expect(mergeByHandCommands({ project: "/home/clawbox/Projects/site", base: "main", branch: "clawbox/run-k3x9q2ab" }))
+      .toBe("cd /home/clawbox/Projects/site\ngit checkout main\ngit merge clawbox/run-k3x9q2ab");
+  });
+
+  it("quotes a folder the owner named with a space, so `cd` reaches one folder and not two", () => {
+    expect(mergeByHandCommands({ project: "/home/clawbox/My Projects/the site", base: "main", branch: "clawbox/run-1" }))
+      .toContain("cd '/home/clawbox/My Projects/the site'");
+  });
+
+  it("closes, escapes and reopens the one character single quotes cannot hold", () => {
+    // Nothing this box copies to a clipboard may turn a folder NAME into shell
+    // syntax: everything after the path has to stay an argument.
+    const out = mergeByHandCommands({ project: "/home/clawbox/it's mine; touch /tmp/pwned", base: "main", branch: "clawbox/run-1" });
+    expect(out.split("\n")[0]).toBe("cd '/home/clawbox/it'\\''s mine; touch /tmp/pwned'");
+  });
+
+  it("quotes a branch name with a space in it too", () => {
+    const out = mergeByHandCommands({ project: "/p", base: "my branch", branch: "clawbox/run 1" });
+    expect(out).toContain("git checkout 'my branch'");
+    expect(out).toContain("git merge 'clawbox/run 1'");
+  });
+});
+
 describe("a run whose work IS in the project", () => {
   it("says where it went, and offers only the copy", () => {
     draw({ result: { kind: "merged", reason: null, detail: null, base: "main", commit: "9f1c0ab3d4e5f60718293a4b5c6d7e8f90a1b2c3" } });
