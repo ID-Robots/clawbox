@@ -670,7 +670,10 @@ function configuredRoots(roots: ProjectRoots): string[] {
  * ENOENT is the ONLY error this swallows. A trash the box cannot resolve for
  * any other reason — a permission denied on the way down, a link loop — is not
  * an empty trash, and treating it as one would understate the shelf and let the
- * count bound pass silently. See `trashPurgedByOneMore` for where that lands.
+ * count bound pass silently. `readTrashEntries` holds the same line for the
+ * READ, which is the half that catches an unreadable folder: resolving a path
+ * needs no permission to read what it points at. See `trashPurgedByOneMore` for
+ * where both land.
  */
 async function realpathOrNull(target: string): Promise<string | null> {
   try {
@@ -859,10 +862,24 @@ function selectTrashPrune(entries: readonly TrashEntry[], now: number, incoming:
  * ACROSS EVERY ROOT, because the count bound the owner is promised is one
  * number for the box. Reading only one root would let a box with two roots keep
  * twice what the dialog says it keeps.
+ *
+ * ENOENT IS THE ONLY ERROR READ AS "NOTHING THERE". It is the ordinary state of
+ * a box that has removed nothing, and the one this must not make a fuss about.
+ * Every other errno means a shelf that IS there and cannot be read — a trash
+ * folder the owner took the permissions off, a file put where the folder goes,
+ * an offline mount — and answering zero for it is how the count bound gets
+ * skipped: `trash_full` refuses on this number, so an unreadable shelf reported
+ * as empty deletes somebody else's recoverable project without ever asking.
+ * `realpath` is no guard against that on its own, because it resolves a folder
+ * it has no permission to READ. The two callers then decide what to do with the
+ * error, and they decide differently on purpose.
  */
 async function readTrashEntries(roots: ProjectRoots): Promise<TrashEntry[]> {
   const perDir = await Promise.all((await physicalTrashDirs(roots)).map(async (dir) => {
-    const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return [];
+      throw err;
+    });
     return entries
       .filter((e) => e.isDirectory())
       .map((e) => ({ name: e.name, at: trashEntryTime(e.name), dir }));
