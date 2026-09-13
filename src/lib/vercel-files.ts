@@ -26,8 +26,11 @@
  *
  * SYMLINKS ARE NEVER FOLLOWED. A link in the folder is skipped, not resolved:
  * a run can write one, and `data/` — which holds this box's credential stores —
- * is one `ln -s` away from being uploaded to the internet otherwise. `lstat`
- * everywhere, and the walk never leaves the folder it was given.
+ * is one `ln -s` away from being uploaded to the internet otherwise. The walk
+ * skips one by its dirent and never leaves the folder it was given, and every
+ * file is read through ONE descriptor opened `O_NOFOLLOW`, which is what
+ * refuses a link in git's listing — and what closes the window a path checked
+ * once and opened again leaves for a run still working in that folder.
  */
 
 import crypto from "crypto";
