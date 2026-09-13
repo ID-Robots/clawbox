@@ -23,6 +23,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -66,7 +67,7 @@ function installWrapper(body: string): void {
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
     path.join(binDir, "claude-ds"),
-    ["#!/usr/bin/env bash", "cat > /dev/null", body].join("\n"),
+    ["#!/usr/bin/env bash", readFirstTurn(), body].join("\n"),
     { mode: 0o755 },
   );
 }

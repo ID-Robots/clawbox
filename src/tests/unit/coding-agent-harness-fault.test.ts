@@ -25,6 +25,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 import {
   HARNESS_FAULT_CONFIG_KEY,
   HARNESS_FAULT_TTL_MS,
@@ -79,7 +80,7 @@ function installWrapper(body: string): void {
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
     path.join(binDir, "claude-ds"),
-    ["#!/usr/bin/env bash", "cat > /dev/null", body].join("\n"),
+    ["#!/usr/bin/env bash", readFirstTurn(), body].join("\n"),
     { mode: 0o755 },
   );
 }

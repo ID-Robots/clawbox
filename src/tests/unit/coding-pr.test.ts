@@ -10,6 +10,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 import {
   decideMerge,
   emptyChecks,
@@ -253,7 +254,7 @@ describe("the pull request across the owner's gestures", () => {
 
   /** A stand-in for the wrapper: prints the stream-json `body` asks for. */
   function installFakeWrapper(lines: string[]): void {
-    fs.writeFileSync(path.join(binDir, "claude-ds"), ["#!/usr/bin/env bash", "cat > /dev/null", ...lines].join("\n"), { mode: 0o755 });
+    fs.writeFileSync(path.join(binDir, "claude-ds"), ["#!/usr/bin/env bash", readFirstTurn(), ...lines].join("\n"), { mode: 0o755 });
   }
   /** One edit, then wait for `flag` before finishing — the window a pause lands in. */
   const waitingBody = (flag: string) => [
