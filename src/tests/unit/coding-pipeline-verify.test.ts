@@ -189,6 +189,55 @@ describe("redirects", () => {
   });
 });
 
+describe("a deployment nobody may look at", () => {
+  function redirect(to: string, status = 307): Response {
+    return new Response(null, { status, headers: { location: to } });
+  }
+
+  it("reads Vercel's own login wall as BLOCKED rather than as work that is wrong", async () => {
+    // Deployment Protection is on by default for team accounts: every
+    // deployment URL redirects to vercel.com/login and answers 200 with a
+    // complete HTML page. Judged as "the page does not show what was asked
+    // for", that spends the owner's improvement rounds asking a coding harness
+    // to change a setting in their Vercel account.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(redirect("https://vercel.com/login?next=%2Fsso"))
+      .mockResolvedValueOnce(answer("<h1>Log in to Vercel</h1>"));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x-abc.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(false);
+    expect(out.blocked).toBe(true);
+    expect(out.reason).toContain("Deployment Protection");
+    // And the expectations are never even consulted: the page was not shown.
+    expect(out.expectations).toEqual([]);
+  });
+
+  it("leaves a redirect to the project's OWN other origin alone", async () => {
+    // A deployment that sends its visitors to its custom domain is an ordinary
+    // deployment, not a wall, and must still be checked on its merits.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(redirect("https://shop.example.com/"))
+      .mockResolvedValueOnce(answer("<h1>Invoice</h1>"));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await lib.verifyDeployment({
+      runId: "run-abcd1234", deploymentUrl: "https://x-abc.vercel.app", path: "/", expect: ["Invoice"], task: "t",
+    });
+    expect(out.ok).toBe(true);
+    expect(out.blocked).toBeFalsy();
+  });
+
+  it("names the wall only when the address actually LEFT the deployment", () => {
+    expect(lib.protectionWall("https://x.vercel.app/", "https://x.vercel.app/login")).toBeNull();
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com/login")).toContain("Deployment Protection");
+    expect(lib.protectionWall("https://x.vercel.app/", "https://api.vercel.com/x")).toContain("Deployment Protection");
+    // Not a Vercel host merely because the string is in it.
+    expect(lib.protectionWall("https://x.vercel.app/", "https://vercel.com.evil.example/")).toBeNull();
+    expect(lib.protectionWall("nonsense", "https://vercel.com/login")).toBeNull();
+  });
+});
+
 describe("the hard gates", () => {
   it("a non-2xx is a failure naming the status", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => answer("nope", 500)));

@@ -391,6 +391,11 @@ export async function verifyDeployment(input: VerifyInput): Promise<PipelineVeri
   if (!fetched.ok) return refuse(url, fetched.reason, { status: fetched.status ?? null });
   const { status, body, finalUrl } = fetched;
 
+  // BEFORE the status and the body are judged: a page this box was never shown
+  // cannot be read as a page that is wrong. See `protectionWall`.
+  const wall = protectionWall(url, finalUrl);
+  if (wall) return { ...refuse(url, wall, { status }), blocked: true };
+
   if (status < 200 || status >= 300) {
     return refuse(url, `The page answered ${status}, so the deployment is not serving what was asked for.`, { status });
   }
@@ -459,6 +464,37 @@ export async function verifyDeployment(input: VerifyInput): Promise<PipelineVeri
     screenshot: shot.file,
     checkedAt: Date.now(),
   };
+}
+
+/**
+ * Vercel's own login page, in front of a deployment nobody may look at.
+ *
+ * Vercel's Deployment Protection — on by default for team accounts — puts every
+ * DEPLOYMENT URL behind `vercel.com/login` while leaving the production domain
+ * open. The verification follows the redirect and gets HTTP 200 with a complete
+ * HTML page, and the vision model then correctly and uselessly reports a login
+ * screen: the check is honest, the ROUTING is wrong. Read as "the work is
+ * wrong" it spends the owner's improvement rounds asking a coding harness to
+ * fix a setting in somebody's Vercel account.
+ *
+ * The signal is deliberately narrow: the address LEFT the deployment's own
+ * origin and landed on Vercel's. A deployment that redirects to its own custom
+ * domain, or anywhere else, is still checked as before — only Vercel's own host
+ * means "this box was never shown the page".
+ */
+export function protectionWall(requested: string, landedOn: string): string | null {
+  let asked: URL;
+  let landed: URL;
+  try {
+    asked = new URL(requested);
+    landed = new URL(landedOn);
+  } catch {
+    return null;
+  }
+  if (landed.origin === asked.origin) return null;
+  const host = landed.hostname.toLowerCase();
+  if (host !== "vercel.com" && !host.endsWith(".vercel.com")) return null;
+  return `That deployment is behind Vercel's Deployment Protection: ${asked.origin} redirected to Vercel's own login page, so this ClawBox was never shown the deployed page. That is a setting on the Vercel project rather than anything in this work — turn protection off for preview deployments, or give this ClawBox a bypass — so the pipeline stopped here instead of sending the work back.`;
 }
 
 /** One line for the run's progress feed and the stage's evidence. */

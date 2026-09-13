@@ -7753,7 +7753,7 @@ function reopenPullRequestStep(run: CodingRun): void {
  * it settles, so the two never both send one and never both stay silent.
  */
 function announceGatedRun(run: CodingRun): void {
-  if (pipelineHoldsNotice(run)) return;
+  if (pipelineOwnsRun(run)) return;
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -8041,15 +8041,24 @@ async function startCompletionAttempt(
 const pipelineAdvancing = store.pipelineAdvancing;
 
 /**
- * True while a live pipeline owes the owner the last word about this run.
+ * True while a live pipeline still owns this run — its own, or the one
+ * belonging to the origin a review pass was started for.
  *
- * The same predicate `deliverableGateApplies` is, and for the same reason:
- * "Coding agent finished run-x" over a run that is about to deploy to
- * production is exactly the claim the gate exists to stop making. `finishRun`
- * holds the notice on it and the pipeline sends it when it settles, so no run
- * falls between them.
+ * TWO THINGS ARE HELD ON IT, and they are the same question asked twice:
+ *
+ *  - THE FINISH NOTICE. The same predicate `deliverableGateApplies` is, and for
+ *    the same reason: "Coding agent finished run-x" over a run that is about to
+ *    deploy to production is exactly the claim the gate exists to stop making.
+ *    `finishRun` holds the notice on it and the pipeline sends it when it
+ *    settles, so no run falls between them.
+ *  - THE RUN'S WORKTREE. `settleRunWorktree` steps aside while a run is LIVE in
+ *    the tree, which a pipeline BETWEEN stages is not: a deployment is building
+ *    or a verification is fetching, and nothing holds the folder. So the settle
+ *    merged the copy home and deleted it while the pipeline still needed it —
+ *    the improvement lap re-spawns into that very folder and the deploy uploads
+ *    it. `settlePipelineRun` is what settles the tree once the chain is over.
  */
-function pipelineHoldsNotice(run: CodingRun): boolean {
+function pipelineOwnsRun(run: CodingRun): boolean {
   if (isPipelineLive(run.pipeline)) return true;
   // A turn INSIDE a pipeline's chain holds it too. The automatic review pass is
   // a run record of its own, and nobody asked for it: announcing it would put
@@ -8096,11 +8105,33 @@ function advancePipeline(runId: string, work: () => Promise<void>): void {
   trackSettleWork(queuePipelineWork(runId, work));
 }
 
-/** The project this pipeline deploys — never the run's own worktree copy. */
+/** The project this pipeline belongs to — never the run's own worktree copy. */
 async function pipelineProject(run: CodingRun): Promise<{ scope: string; directory: string } | null> {
   const directory = projectDirectoryOf(run);
   const scope = await projectScopeFor({ projectId: run.projectId, directory });
   return scope ? { scope, directory } : null;
+}
+
+/**
+ * The folder a deployment is actually made FROM.
+ *
+ * The project decides the SCOPE — the Vercel link, the token, the rate limit
+ * are the project's and never a worktree's — but the bytes are the run's. A
+ * run's commits live on `clawbox/<runId>` in its own copy of the project and
+ * NOWHERE else until the settle merges them home, which happens after the
+ * pipeline rather than before it. A git-connected Vercel project clones the
+ * BRANCH, so the distinction does not arise there; an upload deploy sends the
+ * folder's bytes, and the project checkout is the code as it was BEFORE the run.
+ * On the commonest first-time shape — a Vercel project with no repository —
+ * that meant the pipeline deployed the pre-run placeholder and then verified
+ * THAT, and would have shipped it had the expectations happened to match.
+ */
+function pipelineDeployDirectory(run: CodingRun, projectDirectory: string): string {
+  const wt = run.worktree;
+  if (!wt || wt.removed || wt.path === projectDirectory) return projectDirectory;
+  // A copy the record still claims but the disk no longer has: the project is
+  // the honest fallback, and it is what every run without a copy deploys.
+  return fs.existsSync(wt.path) ? wt.path : projectDirectory;
 }
 
 /**
@@ -8379,6 +8410,14 @@ async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | 
   try {
     releaseSlot = await assertCanSpawn(null);
     tools = await requireSpawnTools();
+    // The copy of the project this lap works in. A live pipeline holds it now
+    // (`settleRunWorktree` steps aside for one), but a pipeline already in
+    // flight when that hold shipped, or a tree the weekly sweep took, has none
+    // — and the lap would die on a missing folder with the whole task still to
+    // do. Put back from its branch exactly as the owner's own Resume does; a
+    // restore that fails leaves the record alone and `realDirectory` below says
+    // the sentence the owner needs.
+    if (run.worktree) run.worktree = await reopenWorktree(run);
     run.directory = await realDirectory(run.directory);
     // Nobody else may be working in this folder. A pipelined run can ALSO have
     // the pull-request review loop going — GitHub's checks are a different
@@ -8484,7 +8523,8 @@ async function startPipelineDeploy(run: CodingRun, target: DeployTarget): Promis
 
   const outcome = await runDeployment({
     scope: project.scope,
-    directory: project.directory,
+    // The run's own copy, where its work is — see `pipelineDeployDirectory`.
+    directory: pipelineDeployDirectory(run, project.directory),
     target,
     // The run's OWN branch: its commits are on `clawbox/<runId>` and nowhere
     // else, and without this the deploy falls back to the project's current
@@ -8519,13 +8559,21 @@ async function startPipelineDeploy(run: CodingRun, target: DeployTarget): Promis
 }
 
 /**
- * Deploy refusals that are the OWNER'S SETUP rather than the work.
+ * Deploy refusals that are NOT the work's fault.
  *
  * They stop the pipeline (`blocked`) instead of sending the code back for
  * improvement, because no amount of editing this folder fixes a token that is
  * not there — and spending the owner's improvement rounds on it would be the
  * box burning their allowance on something it has already been told it cannot
  * fix.
+ *
+ * Most of them are the owner's SETUP. The last two are THIS BOX'S OWN doing,
+ * and they belong here for the same reason: `refused` is a Vercel 4xx about the
+ * shape of the request this box sent, and `wrong_target` is Vercel having
+ * deployed somewhere this box did not ask for. A run once spent three
+ * improvement turns and four review passes re-reviewing correct HTML because
+ * the box was sending a field Vercel does not accept — a sentence the harness
+ * could not act on from the folder, and an allowance nobody got anything for.
  */
 const DEPLOY_BLOCKERS = new Set([
   "not_linked",
@@ -8538,6 +8586,8 @@ const DEPLOY_BLOCKERS = new Set([
   "no_remote",
   "ignores_unreadable",
   "rate_limited",
+  "refused",
+  "wrong_target",
 ]);
 
 /**
@@ -8614,8 +8664,12 @@ async function runPipelineVerification(run: CodingRun, stage: PipelineStage): Pr
     }
     persist(true);
   }
-  return verification.ok
-    ? { kind: "passed", detail: verificationSummary(verification) }
+  if (verification.ok) return { kind: "passed", detail: verificationSummary(verification) };
+  // A page this box was never shown is `blocked` and not `failed`: the work is
+  // not what is in the way, so the pipeline stops here rather than spending the
+  // owner's improvement rounds on a setting in their Vercel account.
+  return verification.blocked
+    ? { kind: "blocked", reason: verificationSummary(verification) }
     : { kind: "failed", reason: verificationSummary(verification) };
 }
 
@@ -8660,6 +8714,14 @@ async function settlePipelineRun(runId: string): Promise<void> {
   }
   persist(true);
   console.error(`[coding-agent] ${run.id} pipeline ${pipeline.status} at the ${stageNoun(pipeline.stage)} stage`);
+  // The copy of the project the pipeline was holding. `settleRunWorktree`
+  // stepped aside for every stage, and `reviewAndShip`'s own call to it
+  // returned several stages ago — on the asynchronous paths (a deployment
+  // settling on its watcher, a verification this driver made itself) this is
+  // the last act of the chain, so it is where the tree is decided. Idempotent:
+  // on the synchronous paths `reviewAndShip` reaches it straight afterwards and
+  // finds the record already settled.
+  await settleRunWorktree(run);
   announcePipeline(run);
 }
 
@@ -9208,7 +9270,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // "Coding agent finished run-x" now would be exactly the claim the pipeline
   // exists to stop making. `settlePipelineRun` sends it when the pipeline is
   // actually over.
-  if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineHoldsNotice(run)) {
+  if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
     });
@@ -9745,6 +9807,10 @@ function liveRunsIn(directory: string): CodingRun[] {
  * In order:
  *   - somebody is still working in it (the automatic review pass, another go
  *     at the deliverable, the owner's own Resume) — leave it alone;
+ *   - a live DELIVERY PIPELINE owns the run — leave it alone too. Between
+ *     stages it holds no live run at all, and the copy is what the improvement
+ *     lap re-spawns into and what an upload deploy sends; `settlePipelineRun`
+ *     comes back here when the chain is actually over;
  *   - the branch holds nothing — remove the tree AND the branch, which is
  *     the common ending for a run that investigated and changed nothing;
  *   - a pull request owns the branch — keep the tree, because the review loop
@@ -9762,6 +9828,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
   if (!wt || wt.removed) return;
   try {
     if (liveRunsIn(wt.path).length > 0) return;
+    if (pipelineOwnsRun(run)) return;
     if (!fs.existsSync(wt.path)) {
       wt.removed = true;
       persist(true);
