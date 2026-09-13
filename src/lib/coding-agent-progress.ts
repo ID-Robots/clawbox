@@ -95,6 +95,8 @@ export type ProgressLabelKey =
   // The Vercel deployment of the run's push (src/lib/vercel.ts), on a project
   // the owner has linked: what the box watched, how the build went, and the
   // production promotion — which is only ever the owner's own doing.
+  | "deployStartedPreview"
+  | "deployStartedProduction"
   | "deployWatching"
   | "deployReady"
   | "deployFailed"
@@ -251,6 +253,14 @@ export const RUNNER_STEP = {
   pullRequestOpened: (num: number, base: string | null) => `Opened pull request #${num} into ${base}`,
   notMerged: (reason: string) => `Not merged: ${reason}`,
   /** The branch is pushed; the box is waiting for Vercel to build it. */
+  /**
+   * A deployment the OWNER or the assistant asked for, rather than one Vercel
+   * started by itself off a push. Two sentences rather than one with the target
+   * in it, so the word "production" is translated rather than travelling
+   * through the feed as an English parameter.
+   */
+  deployStarted: (target: "preview" | "production") =>
+    target === "production" ? "Deploying to production on Vercel" : "Deploying a preview to Vercel",
   deployWatching: (branch: string) => `Watching Vercel for a deployment of ${branch}`,
   deployReady: (url: string) => `Deployed to ${url}`,
   deployFailed: (reason: string) => `The Vercel deployment failed: ${reason}`,
@@ -360,6 +370,8 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Opened pull request #(\d+) into (.+)$/, labelKey: "pullRequestOpened", icon: "merge", params: (m) => ({ number: Number(m[1]), base: m[2] }) },
   { re: /^Merged into the base branch$/, labelKey: "merged", icon: "merge" },
   { re: /^Not merged: (.+)$/, labelKey: "notMerged", icon: "error", params: (m) => ({ reason: m[1] }) },
+  { re: /^Deploying a preview to Vercel$/, labelKey: "deployStartedPreview", icon: "cloud_upload" },
+  { re: /^Deploying to production on Vercel$/, labelKey: "deployStartedProduction", icon: "rocket_launch" },
   { re: /^Watching Vercel for a deployment of (.+)$/, labelKey: "deployWatching", icon: "cloud_sync", params: (m) => ({ branch: m[1] }) },
   { re: /^Deployed to (\S+)$/, labelKey: "deployReady", icon: "cloud_done", params: (m) => ({ url: m[1] }) },
   { re: /^The Vercel deployment failed: (.+)$/, labelKey: "deployFailed", icon: "cloud_off", params: (m) => ({ reason: m[1] }) },

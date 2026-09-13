@@ -7095,6 +7095,66 @@ export function recordDeployPromotion(runId: string, promotion: VercelPromotion)
 }
 
 /**
+ * Record a deployment this box was ASKED for on a run, and follow it.
+ *
+ * The sibling of `recordDeployPromotion`, and written to the same rule: the
+ * Vercel CALL is the route's, and this module only ever records and watches.
+ * What is different is that a manual deploy REPLACES the run's deployment
+ * record rather than adding to it — a run has one deployment on its page, and
+ * the newest is the one the owner is looking at — so a caller has to know it is
+ * safe to do that, which is `isVercelPending`: a watch still in flight is
+ * refused by the route rather than overwritten here, because the record that
+ * would be lost is the one telling the owner a build is running.
+ *
+ * Arming the existing watcher is the whole point of going through this module
+ * at all: the run's card then shows building → ready → failed with the URL,
+ * through the code that already does that, rather than through a second
+ * mechanism that would have to be kept in step with it.
+ *
+ * Answers the run, or null when the record is gone.
+ */
+export function recordManualDeployment(runId: string, input: {
+  deployment: VercelDeployment;
+  projectId: string;
+  teamId: string | null;
+  target: "preview" | "production";
+  /** The branch Vercel was asked to build, when it was a git deployment. */
+  branch: string | null;
+}): CodingRun | null {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run) return null;
+  const now = Date.now();
+  run.vercel = {
+    // Never `looking`: this deployment EXISTS — the box just created it — so
+    // there is nothing to search a project's page for, and the watch asks
+    // about it by id from its first tick.
+    phase: "building",
+    projectId: input.projectId,
+    teamId: input.teamId,
+    deploymentId: input.deployment.id,
+    readyState: input.deployment.readyState,
+    url: input.deployment.url,
+    inspectorUrl: input.deployment.inspectorUrl,
+    target: input.deployment.target ?? input.target,
+    branch: input.branch ?? input.deployment.branch,
+    sha: input.deployment.sha,
+    startedAt: now,
+    endedAt: null,
+    detail: null,
+    fixRunId: null,
+    // A deployment the owner asked for is not a push the box is nursing: a
+    // build that fails here is theirs to read, and spending one of the run's
+    // turns on a log they are already looking at is not what they pressed.
+    feedbackSent: true,
+    promotion: null,
+  };
+  pushProgress(run, RUNNER_STEP.deployStarted(input.target));
+  persist(true);
+  watchDeployment(run.id);
+  return run;
+}
+
+/**
  * The review loop: what happens to a pull request AFTER it is opened.
  *
  * Runs whose pull request is watched by the loop right now, so a restart, a
