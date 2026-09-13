@@ -50,6 +50,7 @@ describe("GET /setup-api/wifi/status", () => {
   it("returns 500 when getWifiStatus returns error", async () => {
     mockGetWifiStatus.mockResolvedValue({
       error: "Network interface not found",
+      errorCode: "unavailable",
     });
 
     const res = await wifiStatusGet();
@@ -57,6 +58,46 @@ describe("GET /setup-api/wifi/status", () => {
 
     expect(res.status).toBe(500);
     expect(body.error).toBe("Network interface not found");
+  });
+
+  // Found by the device feature sweep: this route answered 500 "WiFi interface
+  // not available" on a machine with no WiFi NIC, which is not a failure of the
+  // route but an answer about the hardware. `wifi_status` (mcp/tools/system.ts)
+  // does NOT catch this call the way it catches the ethernet one, so the whole
+  // tool threw and the agent could not say whether the box was online even with
+  // a working cable.
+  it("answers absent WiFi hardware as a structured 200, not a 500", async () => {
+    mockGetWifiStatus.mockResolvedValue({
+      error: "No WiFi interface named wlP1p1s0 on this machine",
+      errorCode: "no_interface",
+    });
+
+    const res = await wifiStatusGet();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.available).toBe(false);
+    expect(body.reason).toBe("no_interface");
+    expect(body.connected).toBe(false);
+    // Every field a caller reads is present and null rather than missing.
+    expect(body.ssid).toBeNull();
+    expect(body.ip).toBeNull();
+    expect(body.signalDbm).toBeNull();
+    expect(body.pingMs).toBeNull();
+    // No `error` key on a 200 — the absence is reported as a fact, not as a
+    // failure a caller might re-raise.
+    expect(body.error).toBeUndefined();
+  });
+
+  it("says the hardware IS there on the ordinary answer", async () => {
+    mockGetWifiStatus.mockResolvedValue({
+      "GENERAL.STATE": "30 (disconnected)",
+    } as unknown as Awaited<ReturnType<typeof getWifiStatus>>);
+
+    const body = await (await wifiStatusGet()).json();
+    // Otherwise "this machine has no WiFi" and "a server that predates the
+    // distinction" are the same answer.
+    expect(body.available).toBe(true);
   });
 
   it("returns 500 when getWifiStatus throws", async () => {

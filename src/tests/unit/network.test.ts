@@ -336,6 +336,36 @@ describe("network", () => {
       const result = await network.getWifiStatus();
 
       expect(result.error).toBe("WiFi interface not available");
+      expect(result.errorCode).toBe("unavailable");
+    });
+
+    // Found by the device feature sweep: "this machine has no WiFi NIC" and
+    // "nmcli broke" came back as the same sentence, so the route turned both
+    // into an HTTP 500 and nothing downstream could tell absent hardware from a
+    // broken tool. nmcli exits 10 for "the connection, device, or access point
+    // does not exist", and for `device show <iface>` there is only one thing
+    // that can be about. Measured: promisified execFile puts that on
+    // `err.code` as a NUMBER, and a missing binary puts the string "ENOENT"
+    // there — which must stay `unavailable`.
+    it("tells an absent interface apart from a broken nmcli", async () => {
+      const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
+      setupExecFileMock({ "nmcli": notFound });
+
+      network = await import("@/lib/network");
+      const result = await network.getWifiStatus();
+
+      expect(result.errorCode).toBe("no_interface");
+      expect(result.error).toContain("No WiFi interface");
+    });
+
+    it("keeps a missing nmcli and a timeout as a real failure", async () => {
+      for (const code of ["ENOENT", "ETIMEDOUT", 1, 2, undefined]) {
+        vi.resetModules();
+        setupExecFileMock({ "nmcli": Object.assign(new Error("nope"), { code }) });
+        network = await import("@/lib/network");
+        const result = await network.getWifiStatus();
+        expect({ code, errorCode: result.errorCode }).toEqual({ code, errorCode: "unavailable" });
+      }
     });
 
     it("handles lines without colon", async () => {

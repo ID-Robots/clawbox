@@ -50,6 +50,28 @@ export async function GET() {
       readLinkQuality(),
     ]);
     if (status.error) {
+      // A machine with no WiFi NIC is not a failure of this route — it is an
+      // answer, and one every caller has to be able to read: `wifi_status`
+      // (mcp/tools/system.ts) does NOT catch this call the way it catches the
+      // ethernet one, so a 500 here threw the whole tool and the agent could not
+      // say whether the box was online even with a working cable. Only a real
+      // nmcli failure — not installed, not answering, timed out — is a 500.
+      if (status.errorCode === "no_interface") {
+        const body = {
+          connected: false,
+          available: false,
+          reason: "no_interface",
+          interface: IFACE,
+          ssid: null,
+          ip: null,
+          gateway: null,
+          signalDbm: null,
+          bitrateMbps: null,
+          pingMs: null,
+        };
+        cache = { body, at: Date.now() };
+        return NextResponse.json(body);
+      }
       return NextResponse.json({ error: status.error }, { status: 500 });
     }
     const state = status["GENERAL.STATE"] || "";
@@ -60,6 +82,9 @@ export async function GET() {
     const pingMs = connected ? await pingGateway(gateway) : null;
     const body = {
       connected,
+      // Says the hardware IS there, so "no WiFi on this machine" and a server
+      // that predates the distinction are not the same answer.
+      available: true,
       ssid: connected ? ssid : null,
       ip, gateway,
       signalDbm: connected ? quality.signalDbm : null,

@@ -614,6 +614,25 @@ export async function getEthernetStatus(): Promise<EthernetStatus> {
   }
 }
 
+/**
+ * nmcli's exit code for "the connection, device, or access point does not
+ * exist" (`man nmcli`, EXIT_STATUS). For `device show <iface>` there is only
+ * one thing it can be about: this machine has no such interface.
+ *
+ * It is what lets {@link getWifiStatus} tell "no WiFi hardware" apart from
+ * "nmcli broke" — an nmcli that is not installed (ENOENT), a NetworkManager
+ * that is not answering, a timeout. Both used to answer the same sentence, so
+ * the route turned the first into an HTTP 500 and the MCP `wifi_status` tool
+ * threw on it: on a box with no WiFi NIC the agent could not say whether the
+ * device was online at all, even with a working cable.
+ */
+const NMCLI_EXIT_NOT_FOUND = 10;
+
+/**
+ * The interface's nmcli fields, or a sentinel bag with `error` — and, since the
+ * device sweep of 2026-09-13, `errorCode`, so a caller can tell the two
+ * failures apart without matching on the English.
+ */
 export async function getWifiStatus(): Promise<Record<string, string>> {
   try {
     const { stdout } = await exec("nmcli", [
@@ -633,7 +652,14 @@ export async function getWifiStatus(): Promise<Record<string, string>> {
       }
     }
     return info;
-  } catch {
-    return { error: "WiFi interface not available" };
+  } catch (err) {
+    const code = (err as { code?: number | string })?.code;
+    if (code === NMCLI_EXIT_NOT_FOUND) {
+      return {
+        error: `No WiFi interface named ${IFACE} on this machine`,
+        errorCode: "no_interface",
+      };
+    }
+    return { error: "WiFi interface not available", errorCode: "unavailable" };
   }
 }
