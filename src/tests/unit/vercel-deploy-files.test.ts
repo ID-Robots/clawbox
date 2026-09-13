@@ -162,6 +162,9 @@ describe("a folder that is not a repository", () => {
     if (!got.ok) return;
     expect(names(got.files)).toEqual(["index.html"]);
     expect(JSON.stringify(got.files)).not.toContain("hunter2hunter2");
+    // Reported here too: a rule that is silent on one path and spoken on the
+    // other is a rule nobody can check.
+    expect(got.skipped.sort()).toEqual([".env", ".env.production", "deploy.pem"]);
   });
 });
 

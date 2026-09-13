@@ -175,22 +175,29 @@ function excluded(rel: string): boolean {
   return !NEVER_UPLOADED_FILE_RE.test(parts[parts.length - 1] ?? "");
 }
 
-/** Every ordinary file under `dir`, relative and posix-spelled. The fallback. */
-async function walk(dir: string, base = "", out: string[] = []): Promise<string[]> {
+/**
+ * Every ordinary file under `dir`, relative and posix-spelled. The fallback.
+ *
+ * `left` collects what the credential floor kept out, so the walk REPORTS its
+ * exclusions the way the git path does — an owner whose `.env` did not go up is
+ * entitled to know, and a rule that is silent on one path and spoken on the
+ * other is a rule nobody can check.
+ */
+async function walk(dir: string, base = "", out: string[] = [], left: string[] = []): Promise<string[]> {
   const entries = await fsp.readdir(path.join(dir, base), { withFileTypes: true });
   for (const entry of entries) {
     if (out.length > MAX_DEPLOY_FILES) return out;
     if (NEVER_UPLOADED.has(entry.name)) continue;
-    if (entry.isFile() && NEVER_UPLOADED_FILE_RE.test(entry.name)) continue;
-
     const rel = base ? `${base}/${entry.name}` : entry.name;
     // A link is never followed and never uploaded — see the header.
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      await walk(dir, rel, out);
+      await walk(dir, rel, out, left);
       continue;
     }
-    if (entry.isFile()) out.push(rel);
+    if (!entry.isFile()) continue;
+    if (NEVER_UPLOADED_FILE_RE.test(entry.name)) { left.push(rel); continue; }
+    out.push(rel);
   }
   return out;
 }
@@ -233,7 +240,7 @@ export async function collectDeployFiles(dir: string): Promise<CollectResult> {
       };
     } else {
       usedGit = false;
-      names = await walk(dir);
+      names = await walk(dir, "", [], excludedByRule);
     }
   } catch (err) {
     return { ok: false, code: "unreadable", detail: err instanceof Error ? err.message : String(err) };
