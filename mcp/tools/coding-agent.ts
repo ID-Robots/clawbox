@@ -233,6 +233,17 @@ const MESSAGE_RULES: ErrorRule[] = [
     message: `That run already has ${MAX_QUEUED_RUN_MESSAGES} messages waiting for it.`,
     next: "Do not retry. Wait for it to read them — coding_agent_status shows its progress — before sending another.",
   },
+  // The schema below bounds the LENGTH and nothing else, so a control
+  // character reaches the device and comes back as this 400. Without a rule
+  // the model was told only "the device rejected an argument", which is the
+  // one refusal here it can fix by itself.
+  {
+    status: 400,
+    match: /"code":\s*"not_plain_text"/,
+    code: "BAD_ARGUMENT",
+    message: "That message is not plain text: it carries a control character.",
+    next: "Rewrite it as plain text — newlines and tabs are the only control characters allowed — and send again.",
+  },
 ];
 
 interface RunPayload {

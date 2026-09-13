@@ -461,6 +461,17 @@ describe("coding_run_message", () => {
     expect(full.error.next).toMatch(/Wait for it to read them/);
   });
 
+  it("tells the model to rewrite a message that carried a control character", async () => {
+    // The schema bounds the length only, so this refusal is the device's — and
+    // it is the one the model can act on without asking anybody.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "plain text only", code: "not_plain_text" })));
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.next).toMatch(/plain text/i);
+  });
+
   it("advises shortening a message the device called too long", async () => {
     apiPost.mockRejectedValue(new ApiError(413, JSON.stringify({ error: "too long", code: "too_long" })));
     const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
