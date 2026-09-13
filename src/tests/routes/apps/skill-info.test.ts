@@ -20,6 +20,7 @@ vi.mock("fs/promises", () => ({
 // keeps its implementation, and this factory only runs once per file.
 vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  openclawSkillsAgentArgs: vi.fn(async () => []),
   getSkillsDir: vi.fn(() => "/home/clawbox/.openclaw/workspace"),
   openclawIsAbsent: vi.fn(() => false),
   readSkillEnabled: vi.fn(async () => true),
@@ -112,6 +113,23 @@ describe("/setup-api/apps/skill-info", () => {
     const res = await GET(get("?appId=test-skill"));
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "Skill list unavailable", code: "skills_unavailable" });
+  });
+
+  // Regression: on a box whose owner added a second agent, `openclaw skills
+  // list` refuses with a cli_error rather than guessing an owner, so every
+  // skill-info request answered 503 — installed or not. The scan names the
+  // agent the config resolves, and only when the config holds more than one.
+  it("names the agent the CLI refuses to guess, and only then", async () => {
+    const { openclawSkillsAgentArgs } = await import("@/lib/openclaw-config");
+    await GET(get());
+    expect(exec.mock.calls[0][1]).toEqual(["skills", "list", "--json"]);
+
+    vi.mocked(openclawSkillsAgentArgs).mockResolvedValue(["--agent", "main"]);
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    refreshSkillsCache();
+    await GET(get());
+    const last = exec.mock.calls[exec.mock.calls.length - 1][1];
+    expect(last).toEqual(["skills", "list", "--agent", "main", "--json"]);
   });
 
   it("serves a stale list at once and refreshes it behind the caller", async () => {

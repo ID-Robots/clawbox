@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { findOpenclawBin, getSkillsDir, openclawIsAbsent } from "@/lib/openclaw-config";
+import { findOpenclawBin, getSkillsDir, openclawIsAbsent, openclawSkillsAgentArgs } from "@/lib/openclaw-config";
 
 /**
  * The skill list behind GET /setup-api/apps/skill-info.
@@ -112,7 +112,10 @@ let scanEpoch = 0;
 
 async function scanSkills(): Promise<SkillInfo[]> {
   const bin = findOpenclawBin();
-  const { stdout } = await execFileAsync(bin, ["skills", "list", "--json"], {
+  // `--agent` only when the box has more than one, which is the only case the
+  // CLI refuses to guess in — see openclawSkillsAgentArgs.
+  const agent = await openclawSkillsAgentArgs();
+  const { stdout } = await execFileAsync(bin, ["skills", "list", ...agent, "--json"], {
     timeout: 30_000,
     env: { ...process.env, PATH: `${path.dirname(bin)}:${process.env.PATH}` },
   });
