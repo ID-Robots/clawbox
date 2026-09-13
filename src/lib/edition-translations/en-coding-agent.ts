@@ -547,6 +547,26 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.worktreeRemove": "Remove copy",
   "codingAgent.worktreeRemoveFailed": "Could not remove the run's copy of the project.",
 
+  // ── Telling a run something while it works ────────────────────────────────
+  //
+  // A delegated run cannot ask a question, and until this box could not be
+  // told anything either. "Queued" and "Delivered" are kept apart because they
+  // are different promises: one is "the run has it", the other is "it gets it
+  // at its next step".
+  "codingAgent.message.title": "Tell the agent",
+  "codingAgent.message.hint": "Send a correction or something it should know. It carries on from where it is \u2014 it does not start over.",
+  "codingAgent.message.placeholder": "Tell the agent\u2026",
+  "codingAgent.message.send": "Send",
+  "codingAgent.message.sending": "Sending\u2026",
+  "codingAgent.message.queued": "Queued",
+  "codingAgent.message.delivered": "Delivered",
+  "codingAgent.message.failed": "Could not send that message to the run.",
+  "codingAgent.message.errorEmpty": "Type something to send.",
+  "codingAgent.message.errorTooLong": "That message is too long: at most {max} characters.",
+  "codingAgent.message.errorNotPlainText": "A message must be plain text.",
+  "codingAgent.message.errorQueueFull": "This run already has {n} messages waiting for it. Wait for it to read them.",
+  "codingAgent.message.errorSettled": "That run has finished, so there is nothing left to tell it.",
+
   // ── First-run setup wizard ────────────────────────────────────────────────
   //
   // Switching the coding agent on is consent for a delegated shell, so the

@@ -174,6 +174,10 @@ const NO_CAPABILITIES: Posture = {
  */
 const PROBE_GATED_COMMON = [
   "coding_agent_run", "coding_agent_status", "coding_agent_stop",
+  // Steering a live run is the same gate as starting and stopping one: it
+  // reaches the same delegated shell, and a box whose coding agent is off has
+  // no run to tell anything to.
+  "coding_run_message",
   // The owner's secret store, read-only and names-only: registered under the
   // coding agent's own gate, because what it answers about is what a RUN will
   // find in its environment.

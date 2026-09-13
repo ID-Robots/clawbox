@@ -957,6 +957,21 @@ export const fr: Record<string, string> = {
   "codingAgent.worktreeRemove": "Retirer la copie",
   "codingAgent.worktreeRemoveFailed": "Impossible de retirer la copie du projet de cette exécution.",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "Dire quelque chose à l'agent",
+  "codingAgent.message.hint": "Envoyez une correction ou une information utile. Il continue là où il en est — il ne recommence pas.",
+  "codingAgent.message.placeholder": "Dire quelque chose à l'agent…",
+  "codingAgent.message.send": "Envoyer",
+  "codingAgent.message.sending": "Envoi…",
+  "codingAgent.message.queued": "En attente",
+  "codingAgent.message.delivered": "Remis",
+  "codingAgent.message.failed": "Impossible d'envoyer ce message à l'exécution.",
+  "codingAgent.message.errorEmpty": "Saisissez quelque chose à envoyer.",
+  "codingAgent.message.errorTooLong": "Ce message est trop long : {max} caractères au maximum.",
+  "codingAgent.message.errorNotPlainText": "Un message doit être du texte brut.",
+  "codingAgent.message.errorQueueFull": "Cette exécution a déjà {n} messages en attente. Attendez qu'elle les lise.",
+  "codingAgent.message.errorSettled": "Cette exécution est terminée : il n'y a plus rien à lui dire.",
+
   "codingAgent.wizardTitle": "Configurer l'agent de code",
   "codingAgent.wizardIntro": "L'agent de code permet à votre assistant de confier une tâche entière à Claude Code sur cette box : il lit et écrit des fichiers dans un dossier, y exécute des commandes et rend compte. La configuration tient en quatre étapes.",
   "codingAgent.wizardEnable": "Activer",

@@ -953,6 +953,21 @@ export const sv: Record<string, string> = {
   "codingAgent.worktreeRemove": "Ta bort kopian",
   "codingAgent.worktreeRemoveFailed": "Det gick inte att ta bort körningens kopia av projektet.",
 
+  // Telling a run something while it works (coding-run-messages.ts).
+  "codingAgent.message.title": "Säg något till agenten",
+  "codingAgent.message.hint": "Skicka en rättelse eller något den bör veta. Den fortsätter där den är — den börjar inte om.",
+  "codingAgent.message.placeholder": "Säg något till agenten…",
+  "codingAgent.message.send": "Skicka",
+  "codingAgent.message.sending": "Skickar…",
+  "codingAgent.message.queued": "I kö",
+  "codingAgent.message.delivered": "Levererat",
+  "codingAgent.message.failed": "Kunde inte skicka meddelandet till körningen.",
+  "codingAgent.message.errorEmpty": "Skriv något att skicka.",
+  "codingAgent.message.errorTooLong": "Meddelandet är för långt: högst {max} tecken.",
+  "codingAgent.message.errorNotPlainText": "Ett meddelande måste vara ren text.",
+  "codingAgent.message.errorQueueFull": "Den här körningen har redan {n} meddelanden som väntar. Vänta tills den har läst dem.",
+  "codingAgent.message.errorSettled": "Den körningen är klar, så det finns inget mer att säga till den.",
+
   "codingAgent.wizardTitle": "Ställ in kodagenten",
   "codingAgent.wizardIntro": "Med kodagenten lämnar din assistent över en hel uppgift till Claude Code på den här boxen: den läser och skriver filer i en mapp, kör kommandon där och rapporterar tillbaka. Det tar fyra steg att ställa in.",
   "codingAgent.wizardEnable": "Aktivera",

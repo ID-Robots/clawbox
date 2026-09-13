@@ -110,7 +110,7 @@ function installWrapper(body: string): void {
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
     path.join(binDir, "claude-ds"),
-    ["#!/usr/bin/env bash", 'STDIN="$(cat)"', body].join("\n"),
+    ["#!/usr/bin/env bash", 'STDIN="$(head -n 1)"', body].join("\n"),
     { mode: 0o755 },
   );
 }

@@ -12,6 +12,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 
 // Starts a real process (bash / git): vitest's 5 s test and 10 s hook
 // defaults are not enough on a loaded CI runner. See
@@ -43,7 +44,7 @@ function writeConfig(cfg: Record<string, unknown>): void {
 /** A wrapper that runs `body` and exits. `$PWD` is the folder the run was given. */
 function installWrapper(body: string): void {
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(binDir, "claude-ds"), ["#!/usr/bin/env bash", "cat > /dev/null", body].join("\n"), { mode: 0o755 });
+  fs.writeFileSync(path.join(binDir, "claude-ds"), ["#!/usr/bin/env bash", readFirstTurn(), body].join("\n"), { mode: 0o755 });
 }
 
 const result = (text: string) => JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: text, session_id: "sess-1" });

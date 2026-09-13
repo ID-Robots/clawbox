@@ -22,6 +22,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 import {
   MAX_PAUSE_MESSAGE_CHARS,
   PAUSE_METER_NOUN,
@@ -63,7 +64,7 @@ function installWaitingWrapper(flag: string): void {
     path.join(binDir, "claude-ds"),
     [
       "#!/usr/bin/env bash",
-      "cat > /dev/null",
+      readFirstTurn(),
       `echo '${INIT}'`,
       `while [ ! -f "${flag}" ]; do sleep 0.05; done`,
       "exit 0",

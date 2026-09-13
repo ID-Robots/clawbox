@@ -21,6 +21,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { decodeHarnessStdin, readFirstTurn } from "@/tests/helpers/fake-harness";
 
 // Starts real processes through @/lib/coding-agent rather than importing
 // child_process itself, and CI has flaked on it both ways in one day — a
@@ -55,6 +56,9 @@ let restore: () => void;
 const argvFile = () => path.join(base, "argv.txt");
 const envFile = () => path.join(base, "env.txt");
 const stdinFile = () => path.join(base, "stdin.txt");
+/** What the harness was TOLD, whichever shape the runner wrote it in — a
+ *  streaming spawn sends one JSON line per user turn, a plain one the text. */
+const stdinText = () => decodeHarnessStdin(fs.readFileSync(stdinFile(), "utf-8"));
 /** One line per spawn — argv.txt is overwritten by each and cannot tell one from two. */
 const spawnsFile = () => path.join(base, "spawns.txt");
 const runsFile = () => path.join(root, "data", "coding-agent-runs.json");
@@ -80,7 +84,7 @@ function installFakeWrapper(body: string): void {
       "#!/usr/bin/env bash",
       `printf '%s\\n' "$@" > "${argvFile()}"`,
       `env > "${envFile()}"`,
-      `cat > "${stdinFile()}"`,
+      readFirstTurn(stdinFile()),
       "echo 'claude-ds: ClawBox AI (deepseek-v4-flash) — state in /tmp/x' >&2",
       body,
     ].join("\n"),
@@ -461,7 +465,7 @@ describe("a run", () => {
     // No positional task: it went over stdin — with one line about what the
     // folder holds, so a named file is Read and not first Globbed for
     // (bench s-01, 2026-09-05: a discovery turn over a two-file folder).
-    expect(fs.readFileSync(stdinFile(), "utf-8")).toBe("Add a dark mode toggle\n\n[ClawBox harness: this folder contains: index.html, project.json]");
+    expect(stdinText()).toBe("Add a dark mode toggle\n\n[ClawBox harness: this folder contains: index.html, project.json]");
 
     const env = Object.fromEntries(
       fs.readFileSync(envFile(), "utf-8").split("\n").filter((l) => l.includes("=")).map((l) => {
@@ -665,12 +669,12 @@ describe("a run", () => {
     installFakeWrapper(`echo '${INIT}'\necho '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":60,"session_id":"sess-abc-123"}'\nexit 0`);
     makeProject("site");
     const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
-    const firstStdin = fs.readFileSync(stdinFile(), "utf-8");
+    const firstStdin = stdinText();
     expect(firstStdin).not.toContain("evidence folder"); // a fresh run gets the bare task
 
     installFakeWrapper(HAPPY_BODY);
     const resumed = await finished((await lib.startRun({ task: "finish it", resumeRunId: first.id, source: "agent" })).id);
-    const stdin = fs.readFileSync(stdinFile(), "utf-8");
+    const stdin = stdinText();
     expect(stdin).toContain("finish it");
     expect(stdin).toContain(resumed.id); // the NEW run's folder…
     expect(stdin).not.toContain(first.id); // …not the previous run's
@@ -707,7 +711,7 @@ describe("a run", () => {
       expect(review.progress.join("\n")).toContain(`Automatic review pass of ${first.id}`);
       const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
       expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
-      const task = fs.readFileSync(stdinFile(), "utf-8");
+      const task = stdinText();
       expect(task).toContain("Automatic review pass");
       // The pass runs the verification itself and claims only what it ran.
       expect(task).toMatch(/Start by running the project's own verification/);
@@ -846,7 +850,7 @@ describe("a run", () => {
       const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
       expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
       // The session already holds the task; the resume says what happened instead.
-      expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("resumed in the same session");
+      expect(stdinText()).toContain("resumed in the same session");
     });
 
     it("resumes a paused run exactly once when two resumes arrive together", async () => {
@@ -927,7 +931,7 @@ describe("a run", () => {
       const done = await finished(draft.id);
       expect(done.status).toBe("completed");
       expect(done.progress.join("\n")).toContain("Started from a draft");
-      expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("later please");
+      expect(stdinText()).toContain("later please");
     });
 
     it("starts a draft exactly once when two starts arrive together", async () => {

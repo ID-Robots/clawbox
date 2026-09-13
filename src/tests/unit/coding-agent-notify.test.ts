@@ -102,6 +102,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     deliverableCheck: null,
     attempts: [],
     completionAttempts: 3,
+    messages: [],
     ...over,
   };
 }

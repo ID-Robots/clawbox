@@ -42,8 +42,19 @@ export interface RunLifecycleRoute {
   noun?: "run" | "draft";
   /** Where the id travels: the JSON body (POST) or `?runId=` (DELETE). */
   idFrom?: "body" | "query";
-  /** The action itself, once the run exists and the caller may touch it. Answers the response. */
-  act: (id: string) => Promise<NextResponse> | NextResponse;
+  /**
+   * The action itself, once the run exists and the caller may touch it.
+   * Answers the response.
+   *
+   * `body` is the JSON this factory has ALREADY read off the request — a
+   * stream can only be consumed once, so an action that needs a second field
+   * (the message route's `text`) has to be handed it rather than re-reading
+   * it. Undefined for a route whose id travels in the query.
+   *
+   * `request` is the original, for an action with a fence of its own to apply
+   * after this factory's — the message route's same-origin check.
+   */
+  act: (id: string, body: unknown, request: Request) => Promise<NextResponse> | NextResponse;
 }
 
 /** Build the handler: requireSession → id → 404 → owner gate → act → error mapping. */
@@ -53,10 +64,10 @@ export function runLifecycleRoute({ verb, noun = "run", idFrom = "body", act }: 
     if (unauthorized) return unauthorized;
 
     let id: string;
+    let body: unknown;
     if (idFrom === "query") {
       id = (new URL(request.url).searchParams.get("runId") ?? "").trim();
     } else {
-      let body: unknown;
       try {
         body = await request.json();
       } catch {
@@ -75,7 +86,7 @@ export function runLifecycleRoute({ verb, noun = "run", idFrom = "body", act }: 
         const whose = noun === "draft" ? "That draft is the owner's" : "That run was started by the owner";
         return NextResponse.json({ error: `${whose}; only they can ${verb} it.`, kind: "owner_only" }, { status: 403 });
       }
-      return await act(id);
+      return await act(id, body, request);
     } catch (err) {
       if (err instanceof CodingAgentError) {
         return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });

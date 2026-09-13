@@ -235,6 +235,22 @@ import {
   unitActive,
   buildScopeArgv,
 } from "@/lib/coding-run-unit";
+import {
+  appendRunMessage,
+  noteStreamInputRefused,
+  noteStreamInputWorked,
+  normalizeRunMessage,
+  parseRunMessages,
+  queuedMessages,
+  runMessageProgressLine,
+  runMessageTurn,
+  runMessagesNote,
+  RunMessageError,
+  streamInputAvailable,
+  streamJsonUserTurn,
+  STREAM_INPUT_REFUSED,
+  type RunMessage,
+} from "@/lib/coding-run-messages";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -1420,6 +1436,21 @@ export interface CodingRun {
    * not change the promise that run was started under.
    */
   completionAttempts: number;
+  /**
+   * Things the owner (or the assistant) has told this run while it works, and
+   * whether the harness has had each of them yet.
+   *
+   * A delegated run cannot be asked a question and could not, until now, be
+   * told anything either: the only gestures on a live run were Stop and Pause.
+   * A queue on the record rather than a pipe in memory, because the answer to
+   * "did it get my message?" has to survive the web server restarting — a
+   * scoped run outlives it, and its queue must outlive it too.
+   *
+   * Empty on every record written before this field. See
+   * src/lib/coding-run-messages.ts for the bounds and the two ways one is
+   * delivered.
+   */
+  messages: RunMessage[];
 }
 
 /**
@@ -3248,6 +3279,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
     deliverableCheck: parseDeliverableVerdict((raw as { deliverableCheck?: unknown }).deliverableCheck),
     attempts: parseAttempts((raw as { attempts?: unknown }).attempts),
     completionAttempts: completionAttemptsFrom((raw as { completionAttempts?: unknown }).completionAttempts),
+    // Re-validated rather than trusted, like every other list here: this text
+    // is written to the harness's stdin and drawn on the run's page, and the
+    // file it comes from is one a restore or a hand edit can have touched.
+    messages: parseRunMessages((raw as { messages?: unknown }).messages),
   };
 }
 
@@ -3369,6 +3404,22 @@ interface LiveRun {
    * automatic retry apply (directly, with no scope) and is what tells readiness.
    */
   scopeRefused: boolean;
+  /**
+   * This spawn was given `--input-format stream-json`, so its stdin stays open
+   * and a message queued while it works can be written as the next user turn.
+   * False for a plain spawn, and for a run this server only REATTACHED to —
+   * that process's pipes died with the server that opened them, so its queue
+   * can only be delivered at the next attempt or resume.
+   */
+  streamInput: boolean;
+  /** Whether this process still holds the harness's stdin open. */
+  stdinOpen: boolean;
+  /**
+   * The harness turned `--input-format stream-json` away before it ever spoke.
+   * Makes the one automatic retry apply — running plain, which is the whole
+   * difference — the way `scopeRefused` does for a scope systemd refused.
+   */
+  streamInputRefused: boolean;
   /**
    * This run was found alive-on-paper but its scope was gone: the box restarted
    * while it worked. Read by finishRun, which would otherwise report the
@@ -3620,6 +3671,11 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     unitWatch: null,
     stderrPath: null,
     scopeRefused: false,
+    // The pipes died with the server that opened them: a reattached run's
+    // queue waits for the next attempt or resume.
+    streamInput: false,
+    stdinOpen: false,
+    streamInputRefused: false,
     lostToRestart,
     openSubagents: new Map<string, ActiveSubagent>(),
     billedMessageIds: new Set<string>(),
@@ -3784,6 +3840,9 @@ function cloneRun(run: CodingRun): CodingRun {
     // — or be able to write — the loop's own later rounds.
     review: run.review ? { ...run.review, checks: run.review.checks.map((c) => ({ ...c })) } : null,
     pauseReason: run.pauseReason ? { ...run.pauseReason } : null,
+    // Copied entry by entry: a route holding a clone must not be able to mark
+    // a message delivered that the harness has never seen.
+    messages: run.messages.map((m) => ({ ...m })),
   };
 }
 
@@ -4538,7 +4597,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -4568,6 +4627,13 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", brief,
   ];
+  // The task still travels on stdin either way; what this changes is the
+  // SHAPE of what is written there and whether the pipe is closed behind it.
+  // With it, the CLI goes on reading stdin for the life of the process, which
+  // is what lets the owner tell a run something while it works
+  // (src/lib/coding-run-messages.ts). Only valid alongside `-p` and
+  // `--output-format stream-json`, both of which are above.
+  if (opts.streamInput) args.push("--input-format", "stream-json");
   // Ultracode travels as a flag, the fixed levels through the wrapper's env
   // pin (see EFFORT_LEVELS). The wrapper would add the flag itself from the
   // owner's stored setting, but a run records the effort it STARTED with, and
@@ -4929,6 +4995,9 @@ export function killRunGroup(pgid: number | null): boolean {
  */
 function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   if (state) {
+    // Nothing more can be written to a harness that has gone: a message that
+    // arrives after this waits for the next attempt or the owner's Resume.
+    closeRunStdin(state);
     clearInterval(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
     if (state.streamTimer) clearInterval(state.streamTimer);
@@ -5591,6 +5660,9 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // proof that scopes work on this box — enough to retire a refusal the box
     // learned earlier and has been reporting ever since.
     if (!state.sawInit && state.unit) noteScopeWorked();
+    // And the same proof for streaming input: the harness accepted the flag
+    // and is talking, so a refusal this box learned earlier is history.
+    if (!state.sawInit && state.streamInput) noteStreamInputWorked();
     state.sawInit = true;
     return;
   }
@@ -5853,6 +5925,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         };
       }
     }
+    // The CLI has finished a turn. Under streaming input it is now waiting on
+    // stdin: hand it whatever the owner has queued, or close the pipe so it
+    // can exit and the run can settle.
+    afterTurn(run, state);
   }
 }
 
@@ -7727,6 +7803,18 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         noteScopeRefused(tail);
         console.error(`[coding-agent] ${run.id}: systemd refused the run's scope; running directly from now on`);
       }
+      // The same shape for streaming input: the harness turned
+      // `--input-format stream-json` away before it ever spoke, so this box's
+      // Claude Code cannot be told anything mid-run. Remembered (for half an
+      // hour) so later spawns go plain, and the retry below runs plain too —
+      // which is the whole difference. Only when nothing was heard from the
+      // harness at all: once it has spoken, the flag was accepted and any
+      // failure is its own.
+      if (state.streamInput && !state.sawInit && STREAM_INPUT_REFUSED.test(state.stderr)) {
+        state.streamInputRefused = true;
+        noteStreamInputRefused();
+        console.error(`[coding-agent] ${run.id}: the harness refused streaming input; messages will wait for a boundary`);
+      }
       run.error = ULTRACODE_REFUSED.test(state.stderr)
         // The CLI refuses the flag before the first turn when dynamic
         // workflows are off for this install or the plan does not allow
@@ -7775,7 +7863,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // A scope systemd refused counts here too: the harness never started, so
     // nothing happened that a second attempt could trip over — and this one goes
     // without the scope, which is the whole difference.
-    && (isTransientFailure(run.error) || state.scopeRefused)
+    // A refused `--input-format` counts here for the reason a refused scope
+    // does: the harness never started, so nothing happened that a second
+    // attempt could trip over — and this one goes without the flag.
+    && (isTransientFailure(run.error) || state.scopeRefused || state.streamInputRefused)
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
@@ -8118,7 +8209,12 @@ function spawnRun(
   // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
   // the pass: in each case the flash reviewer would be a second look.
   const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, run: { id: run.id, directory: run.directory, media: run.media } }));
+  // Streaming input unless this box's harness has been caught refusing the
+  // flag (coding-run-messages.ts). It is what keeps the harness's stdin open
+  // for the life of the run, so a message the owner sends at minute three can
+  // be written as the next user turn instead of waiting for a boundary.
+  const streamInput = streamInputAvailable();
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -8187,6 +8283,11 @@ function spawnRun(
     unitWatch: null,
     stderrPath: null,
     scopeRefused: false,
+    streamInput,
+    // Set once the first turn has actually been written below; a spawn whose
+    // stdin threw never had an open pipe to close.
+    stdinOpen: false,
+    streamInputRefused: false,
     lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
     billedMessageIds: new Set<string>(),
@@ -8254,19 +8355,124 @@ function spawnRun(
   child.on("exit", settleSoon);
   child.on("close", settleSoon);
 
+  // A resumed conversation remembers the PREVIOUS run's evidence folder and
+  // was seen writing there (run-qqj1io65: screenshots filed under the old
+  // run, Write into its own folder refused). The env and --add-dir already
+  // name the new folder; the session's memory needs telling too.
+  const firstTurn = stdinText ?? (resumeSessionId
+    ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder.]`
+    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)}]`);
   try {
     child.stdin?.on("error", () => {
       // EPIPE when the wrapper dies before reading the task; `exit` reports it.
+      state.stdinOpen = false;
     });
-    // A resumed conversation remembers the PREVIOUS run's evidence folder and
-    // was seen writing there (run-qqj1io65: screenshots filed under the old
-    // run, Write into its own folder refused). The env and --add-dir already
-    // name the new folder; the session's memory needs telling too.
-    child.stdin?.end(stdinText ?? (resumeSessionId
-      ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder.]`
-      : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)}]`));
+    if (streamInput) {
+      // One JSON line, and the pipe stays open. The CLI answers the turn and
+      // then waits for more — which is what `afterTurn` closes, once there is
+      // nothing left to say.
+      state.stdinOpen = true;
+      child.stdin?.write(streamJsonUserTurn(firstTurn));
+      // Anything queued before the process existed — a message sent to a
+      // draft, or one that raced the start — goes in right behind the task
+      // rather than waiting for the first turn to end.
+      flushRunMessages(run, state);
+    } else {
+      // No pipe to write to later, so anything already queued rides out with
+      // the task itself — the boundary delivery, applied at the one boundary
+      // every spawn is. A start, the owner's Resume and another attempt at the
+      // deliverable all arrive here, so none of them needs its own copy.
+      const waiting = queuedMessages(run.messages);
+      const note = runMessagesNote(run.messages);
+      if (child.stdin) {
+        child.stdin.end(note ? `${firstTurn}\n\n${note}` : firstTurn);
+        // Only once the bytes are on the pipe: with no stdin at all nothing
+        // was said, and the queue is still the box's to deliver.
+        noteMessagesDelivered(run, waiting);
+      }
+    }
   } catch {
     // reported through the exit path
+    state.stdinOpen = false;
+  }
+}
+
+/**
+ * Mark these messages delivered and say so in the run's feed.
+ *
+ * The two go together on purpose: "delivered" is a claim the owner reads on
+ * the card, and the feed line is what makes the same fact visible in the
+ * transcript preview and on the timeline.
+ */
+function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]): void {
+  const now = Date.now();
+  let marked = 0;
+  for (const message of messages) {
+    if (message.deliveredAt !== null) continue;
+    message.deliveredAt = now;
+    // pushProgress scrubs the owner's secrets out of the line and caps it,
+    // like every other step in the feed.
+    pushProgress(run, runMessageProgressLine(message.text));
+    marked += 1;
+  }
+  if (marked > 0) persist();
+}
+
+/**
+ * Write every message still queued on this run to a live STREAMING harness, as
+ * its next user turn(s), and answer how many went.
+ *
+ * A no-op on a run whose stdin this process does not hold — a plain spawn, one
+ * reattached after a restart, or one whose harness has already been told to
+ * finish. Those queues ride out with the next spawn's own stdin instead, which
+ * is why nothing here is an error.
+ */
+function flushRunMessages(run: CodingRun, state: LiveRun): number {
+  const stdin = state.child?.stdin;
+  if (!state.streamInput || !state.stdinOpen || !stdin || stdin.destroyed || stdin.writableEnded) return 0;
+  const waiting = queuedMessages(run.messages);
+  if (!waiting.length) return 0;
+  const sent: RunMessage[] = [];
+  for (const message of waiting) {
+    try {
+      stdin.write(streamJsonUserTurn(runMessageTurn(message.text)));
+    } catch {
+      // The pipe went while we were writing. What is left stays queued, which
+      // is the honest record: the harness did not get it.
+      state.stdinOpen = false;
+      break;
+    }
+    sent.push(message);
+  }
+  // Marked only once the bytes are on the pipe — "delivered" is a claim the
+  // owner reads, and a message still in the queue is one the box owes them.
+  noteMessagesDelivered(run, sent);
+  return sent.length;
+}
+
+/**
+ * A turn has ended and the CLI is waiting for more input.
+ *
+ * Either give it what is queued — the point of the whole feature — or close
+ * its stdin, which is what makes a streaming harness exit so the run can
+ * settle. Closing is safe at any turn: a plain spawn has had its stdin closed
+ * since the first byte and still runs its extra segments when a background
+ * helper reports, so EOF is not what ends the process — waiting for input is.
+ */
+function afterTurn(run: CodingRun, state: LiveRun): void {
+  if (!state.streamInput || !state.stdinOpen) return;
+  if (flushRunMessages(run, state) > 0) return;
+  closeRunStdin(state);
+}
+
+/** Let the harness know nothing more is coming. Idempotent. */
+function closeRunStdin(state: LiveRun): void {
+  if (!state.stdinOpen) return;
+  state.stdinOpen = false;
+  try {
+    state.child?.stdin?.end();
+  } catch {
+    // The child is already gone; its exit is what reports that.
   }
 }
 
@@ -8933,6 +9139,8 @@ function newRunRecord(fields: {
     deliverableCheck: null,
     attempts: [],
     completionAttempts: fields.settings.completionAttempts,
+    // Nobody has told it anything yet.
+    messages: [],
   };
 }
 
@@ -9043,6 +9251,51 @@ export function stopRun(id: string): CodingRun {
   }
   requestEnd(run, state, "stop");
   return cloneRun(run);
+}
+
+/**
+ * Tell a run that is still going something.
+ *
+ * The message is QUEUED on the record first and delivered second, always in
+ * that order: a run in its own systemd scope outlives this web server, and an
+ * answer of "sent" that lived only in a pipe would be a promise the box could
+ * not keep across a restart. What "delivered" then means depends on what the
+ * harness took at spawn:
+ *
+ *  - a STREAMING harness gets it as its next user turn, within the second;
+ *  - anything else — a plain spawn, a run reattached after a restart, a paused
+ *    or drafted one — gets it at its next boundary: the spawn of another
+ *    attempt at the deliverable, or the owner's own Resume.
+ *
+ * Either way the caller is told which, so no surface has to guess whether the
+ * run has actually heard it.
+ *
+ * The bar is `holdsResumableSession` and not merely "is it running": a paused
+ * run and a drafted one both go back in and take their queue with them, and so
+ * does one that GAVE UP — its session is intact, Resume is the button its own
+ * page offers, and "tell it what it missed, then resume" is the whole reason
+ * that button exists. Anything genuinely over is refused, because a queue
+ * nothing will ever read is worse than a plain "no".
+ */
+export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean } {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (!holdsResumableSession(run.status)) {
+    throw new RunMessageError(
+      "settled",
+      "That run is over, so there is nothing left to tell it. Start a new run instead.",
+    );
+  }
+  // Both of these throw a RunMessageError with a stable code — the text's own
+  // rules, then the queue's bound — which the route answers verbatim.
+  const message = normalizeRunMessage(text);
+  run.messages = appendRunMessage(run.messages, message, Date.now());
+  // Written before anything is attempted: a delivery that fails must still
+  // leave the message on the record, waiting.
+  persist(true);
+  const state = live.get(id);
+  const delivered = state ? flushRunMessages(run, state) > 0 : false;
+  return { run: cloneRun(run), delivered };
 }
 
 /**

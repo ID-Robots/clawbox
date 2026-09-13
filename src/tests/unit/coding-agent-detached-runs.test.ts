@@ -20,6 +20,7 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 
 // Starts real processes (bash, setpriv, git): vitest's 5 s test default is not
 // enough on a loaded runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -65,7 +66,7 @@ function installWrapper(body: string): void {
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
     path.join(binDir, "claude-ds"),
-    ["#!/usr/bin/env bash", "cat > /dev/null", body].join("\n"),
+    ["#!/usr/bin/env bash", readFirstTurn(), body].join("\n"),
     { mode: 0o755 },
   );
 }

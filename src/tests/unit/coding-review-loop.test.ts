@@ -20,6 +20,7 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { isPrPending, runBranchName } from "@/lib/coding-pr-state";
 import type { ReviewSnapshot } from "@/lib/coding-review-state";
+import { readFirstTurn } from "@/tests/helpers/fake-harness";
 
 // The same ceiling the other coding-agent suites carry: the awaited reset in
 // teardown can spend the settle drain's own budget plus the removal's retry
@@ -376,7 +377,7 @@ describe("a round handed to the harness", () => {
       path.join(binDir, "claude-ds"),
       [
         "#!/usr/bin/env bash",
-        `cat > "${path.join(base, "last-task.txt")}"`,
+        readFirstTurn(path.join(base, "last-task.txt")),
         `printf '%s\\n' "$@" > "${path.join(base, "last-argv.txt")}"`,
         `echo '${INIT}'`, `echo '${ASSISTANT}'`, `echo '${TOOL_RESULTS}'`, `echo '${RESULT}'`, "exit 0",
       ].join("\n"),

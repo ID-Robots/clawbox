@@ -45,7 +45,7 @@ import { capText } from "../../../mcp/lib/guard";
 
 // `coding_secret_list` registers under the same switch: it is about what a
 // RUN will find in its environment, and it answers names alone.
-const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop", "coding_secret_list"];
+const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop", "coding_run_message", "coding_secret_list"];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
   const h = captureRegistrar(edition);
@@ -410,6 +410,83 @@ describe("coding_agent_stop", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toMatch(/has not exited yet/);
+  });
+});
+
+describe("coding_run_message", () => {
+  it("posts the message and says the harness has it when the device did", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: true });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs, not spaces" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(apiPost).toHaveBeenCalledWith(
+      "/setup-api/coding-agent/message",
+      { runId: "run-k3x9q2ab", text: "use tabs, not spaces" },
+      expect.anything(),
+    );
+    expect(out.text).toMatch(/current session/);
+    expect(out.text).toMatch(/do not poll/i);
+  });
+
+  it("says it is only QUEUED when the device could not hand it over mid-turn", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/queued/i);
+    expect(out.text).toMatch(/next step/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("explains an owner-started run instead of reporting a rejected token", async () => {
+    apiPost.mockRejectedValue(new ApiError(403, JSON.stringify({ error: "owner's run", kind: "owner_only" })));
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/Do not retry/);
+  });
+
+  it("tells a settled run and a full queue apart — they need different next steps", async () => {
+    apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({ error: "finished", code: "settled" })));
+    const settled = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(settled.isError).toBe(true);
+    if (!settled.isError) return;
+    expect(settled.error.next).toMatch(/coding_agent_status/);
+
+    apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({ error: "full", code: "queue_full" })));
+    const full = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(full.isError).toBe(true);
+    if (!full.isError) return;
+    expect(full.error.next).toMatch(/Wait for it to read them/);
+  });
+
+  it("tells the model to rewrite a message that carried a control character", async () => {
+    // The schema bounds the length only, so this refusal is the device's — and
+    // it is the one the model can act on without asking anybody.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "plain text only", code: "not_plain_text" })));
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.next).toMatch(/plain text/i);
+  });
+
+  it("advises shortening a message the device called too long", async () => {
+    apiPost.mockRejectedValue(new ApiError(413, JSON.stringify({ error: "too long", code: "too_long" })));
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("TOO_LARGE");
+    expect(out.error.next).toMatch(/Shorten it/);
+  });
+
+  it("does not claim delivery when the device answered without taking it", async () => {
+    apiPost.mockResolvedValue({});
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "hi" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("ENDPOINT_DOWN");
   });
 });
 

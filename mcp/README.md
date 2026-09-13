@@ -573,7 +573,7 @@ tells the run to link them and ship them.
 ### Coding agent (both editions, only while the owner's switch is on)
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
-`coding_secret_list`
+`coding_run_message` · `coding_secret_list`
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
@@ -743,7 +743,16 @@ STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 `coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
 polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`
-as an alias from its launch shape). The summary it returns is model-authored and labelled as information,
+as an alias from its launch shape). `coding_run_message` is how a run that is
+still going is STEERED rather than stopped: the text is queued on the run's
+record (at most 20 waiting, 4,000 characters each, plain text) and delivered
+either as the harness's next user turn — the runs spawn with Claude Code's
+`--input-format stream-json` — or, on a box whose harness refuses that, folded
+into the continuation of its next attempt or the owner's Resume. The tool says
+which of the two happened. The owner's own input is on the run's page in the
+Coding Agent app; a run the OWNER started answers the MCP bearer 403 here, as
+it does for stop and resume, and a browser request from another site is
+refused 403 `cross_origin` (a header-less caller such as this server is not). The summary it returns is model-authored and labelled as information,
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
 to the approved senders (`src/lib/coding-agent-notify.ts`).
