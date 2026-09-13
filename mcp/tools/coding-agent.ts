@@ -46,6 +46,9 @@ import {
 // Pure too: the store's own bounds, so the output cap below is derived from
 // what the device can actually hold rather than from a round number.
 import { MAX_SECRETS } from "../../src/lib/project-secrets-shape";
+// Pure too: the bounds a message has to clear, so this tool's schema and the
+// device's refusal cannot disagree about what may be sent.
+import { MAX_QUEUED_RUN_MESSAGES, MAX_RUN_MESSAGE_CHARS } from "../../src/lib/coding-run-messages";
 // Pure too: what a run was held to and how to say it, so this tool cannot
 // describe a bar the server never set.
 import {
@@ -193,6 +196,42 @@ const STOP_RULES: ErrorRule[] = [
     code: "CONFLICT",
     message: "That run was started by the owner, so only they can stop it.",
     next: "Do not retry. Tell the user the run is theirs to stop in the Coding Agent app on the ClawBox.",
+  },
+];
+
+/**
+ * Telling a live run something. The device answers a stable `code` per
+ * refusal, and each of them needs a different next step from the model: a
+ * message it can shorten, a queue it must wait on, and a run that is simply
+ * over.
+ */
+const MESSAGE_RULES: ErrorRule[] = [
+  ...STATUS_RULES,
+  {
+    status: 403,
+    code: "CONFLICT",
+    message: "That run was started by the owner, so only they can send it a message.",
+    next: "Do not retry. Tell the user they can type a message to the run on its page in the Coding Agent app.",
+  },
+  {
+    status: 413,
+    code: "TOO_LARGE",
+    message: `That message is too long for one send (at most ${MAX_RUN_MESSAGE_CHARS} characters).`,
+    next: "Shorten it to the one thing the run needs to know and send again.",
+  },
+  {
+    status: 409,
+    match: /"code":\s*"settled"/,
+    code: "CONFLICT",
+    message: "That run has already finished, so there is nothing left to tell it.",
+    next: "Do not retry. Call coding_agent_status for what it did, and start a new run if more work is needed.",
+  },
+  {
+    status: 409,
+    match: /"code":\s*"queue_full"/,
+    code: "CONFLICT",
+    message: `That run already has ${MAX_QUEUED_RUN_MESSAGES} messages waiting for it.`,
+    next: "Do not retry. Wait for it to read them — coding_agent_status shows its progress — before sending another.",
   },
 ];
 
@@ -759,6 +798,38 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         return text(`Asked run ${run_id} to stop; it has not exited yet. Call coding_agent_status in a moment to confirm.`);
       }
       return text(`Stopped run ${run_id} (${status}). Its files and progress are kept; call coding_agent_status for details.`);
+    },
+  );
+
+  reg.tool(
+    "coding_run_message",
+    "Tell a coding run that is still working something — a correction, a constraint you or the user forgot, an answer to something it guessed at. The run cannot ask questions, so this is the only way to steer one without stopping it and starting over. Use it when the user changes their mind mid-run, or when you realise the brief was wrong; do NOT use it to ask the run how it is going (coding_agent_status answers that) and do not send a running commentary — each message costs the run a turn. Plain text, one point per message. It is queued at once and reaches the run either in its current session or at its next step, and the answer says which.",
+    {
+      run_id: zText(40, "The run id, e.g. \"run-k3x9q2ab\"."),
+      text: zText(
+        MAX_RUN_MESSAGE_CHARS,
+        "What to tell the run, in plain text. Write it as guidance about the task it is already on, not as a new task — it carries on from where it is rather than starting over.",
+      ),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ run_id, text: message }: { run_id: string; text: string }) => {
+      const res = await apiPost<{ queued?: boolean; delivered?: boolean }>(
+        "/setup-api/coding-agent/message",
+        { runId: run_id, text: message },
+        { timeoutMs: 15_000, rules: MESSAGE_RULES },
+      );
+      if (!res.queued) {
+        throw new ToolError(
+          "ENDPOINT_DOWN",
+          "The ClawBox did not take the message for that run.",
+          "Call coding_agent_status to see whether the run is still going, and tell the user rather than retrying more than once.",
+        );
+      }
+      // The two endings mean different things to whoever is waiting, so they
+      // are said apart: one is "it has it", the other is "it will get it".
+      return res.delivered
+        ? text(`Run ${run_id} has been given the message and will take it into account in its current session. Tell the user it is passed on, then stop — do not poll for a reaction.`)
+        : text(`The message is queued for run ${run_id}. This ClawBox could not hand it over mid-turn, so the run receives it at its next step — when it goes back in for another attempt, or when the owner resumes it. Tell the user that, and do not send it again.`);
     },
   );
 
