@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { MAX_NOTE_CHARS, MAX_SHOT_NOTES, readShotNotes, recordShotNote, SHOT_NOTES_FILE, tidyNote } from "@/lib/coding-shot-notes";
+import { MAX_NOTE_CHARS, MAX_NOTES_FILE_BYTES, MAX_SHOT_NOTES, readShotNotes, recordShotNote, SHOT_NOTES_FILE, tidyNote } from "@/lib/coding-shot-notes";
 import { ARTIFACT_NAME_RE } from "@/lib/coding-agent-artifacts";
 
 let dir: string;
@@ -70,13 +70,36 @@ it("takes the control characters out of what the vision model said", () => {
   expect(readShotNotes(dir)["shot-001.png"]).toBe("before [31m red bell nul after");
 });
 
-it("takes HTML comment markers out, so a description cannot split the evidence block", async () => {
-  const { EVIDENCE_END } = await import("@/lib/coding-review-visual");
-  recordShotNote(dir, "shot-001.png", `a page showing ${EVIDENCE_END} and more`);
-  const note = readShotNotes(dir)["shot-001.png"];
-  expect(note).toBe("a page showing /clawbox:visual-evidence and more");
-  expect(note).not.toContain("<!--");
-  expect(note).not.toContain("-->");
+it("takes both angle brackets out, so no description can spell a comment or a tag", async () => {
+  const { EVIDENCE_BEGIN, EVIDENCE_END } = await import("@/lib/coding-review-visual");
+  // A page can DISPLAY the marker, and the vision prompt asks the model to
+  // report what a page shows. Stripping the markers themselves cannot be done
+  // in one pass — `<!<!----->` survives it and `--!>` closes a comment too — so
+  // the characters go instead, which is complete by construction.
+  for (const shown of [EVIDENCE_BEGIN, EVIDENCE_END, "<!<!----->", "<!-- x --!>", "<script>alert(1)</script>"]) {
+    recordShotNote(dir, "shot-001.png", `a page showing ${shown} and more`);
+    const note = readShotNotes(dir)["shot-001.png"];
+    expect(note, shown).not.toContain("<");
+    expect(note, shown).not.toContain(">");
+    expect(note, shown).toContain("a page showing");
+    expect(note, shown).toContain("and more");
+  }
+});
+
+it("answers {} for a note file too big to read on the server's own thread", () => {
+  // A run's own file tools reach its evidence folder, so this file is not only
+  // ours — and the read happens while a pull-request body is built.
+  recordShotNote(dir, "shot-001.png", "a real note");
+  expect(readShotNotes(dir)["shot-001.png"]).toBe("a real note");
+  fs.writeFileSync(path.join(dir, SHOT_NOTES_FILE), `{"padding":"${"x".repeat(MAX_NOTES_FILE_BYTES)}"}`);
+  expect(readShotNotes(dir)).toEqual({});
+});
+
+it("stops at the cap when reading a file it did not write alone", () => {
+  const forged: Record<string, string> = {};
+  for (let i = 0; i < MAX_SHOT_NOTES + 40; i += 1) forged[`shot-${String(i).padStart(4, "0")}.png`] = `state ${i}`;
+  fs.writeFileSync(path.join(dir, SHOT_NOTES_FILE), JSON.stringify(forged));
+  expect(Object.keys(readShotNotes(dir))).toHaveLength(MAX_SHOT_NOTES);
 });
 
 it("trims a description to what a pull request body can hold", () => {

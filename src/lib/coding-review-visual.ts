@@ -159,6 +159,32 @@ export const EVIDENCE_BEGIN = "<!-- clawbox:visual-evidence -->";
 export const EVIDENCE_END = "<!-- /clawbox:visual-evidence -->";
 
 /**
+ * Trim the evidence to MAX_EVIDENCE_ROWS, spending the budget RUN BY RUN in the
+ * order it was collected in.
+ *
+ * `collectVisualEvidence` puts the REVIEWING run first because its screenshots
+ * are of the finished work — and a plain `slice(-MAX_EVIDENCE_ROWS)` over the
+ * concatenated list then threw away exactly those: an origin run with twelve
+ * verification shots and a review pass with two produced a "What the review pass
+ * saw" block containing none of what the review pass saw. So each run in turn
+ * takes what is left of the budget, keeping its own NEWEST rows.
+ */
+function withinRowBudget(evidence: readonly VisualEvidence[]): VisualEvidence[] {
+  if (evidence.length <= MAX_EVIDENCE_ROWS) return [...evidence];
+  const rows: VisualEvidence[] = [];
+  let budget = MAX_EVIDENCE_ROWS;
+  for (let i = 0; i < evidence.length && budget > 0;) {
+    let end = i;
+    while (end < evidence.length && evidence[end].runId === evidence[i].runId) end += 1;
+    const kept = evidence.slice(i, end).slice(-budget);
+    rows.push(...kept);
+    budget -= kept.length;
+    i = end;
+  }
+  return rows;
+}
+
+/**
  * The pull-request section, or null when there is nothing to show.
  *
  * The pictures themselves stay on the device — a run's evidence folder is not
@@ -169,7 +195,7 @@ export const EVIDENCE_END = "<!-- /clawbox:visual-evidence -->";
  */
 export function renderEvidenceSection(evidence: readonly VisualEvidence[]): string | null {
   if (evidence.length === 0) return null;
-  const rows = evidence.slice(-MAX_EVIDENCE_ROWS);
+  const rows = withinRowBudget(evidence);
   const dropped = evidence.length - rows.length;
   const lines = [
     EVIDENCE_BEGIN,

@@ -42,31 +42,56 @@ function notesPath(dir: string): string {
  * the two places this text ends up: a file on disk and a pull-request body.
  *
  * The description is network data — whatever the vision model made of whatever
- * page the run opened — so three things come off it before it is kept:
+ * page the run opened, and a page can perfectly well DISPLAY the thing this has
+ * to survive — so three things come off it before it is kept:
  *
  *  - CONTROL CHARACTERS. `\s` folds whitespace and leaves the rest, so an ANSI
  *    escape read off a page survived into a file the owner may well `cat` in the
  *    in-app terminal.
- *  - HTML COMMENT MARKERS. The evidence block in a pull-request body is delimited
- *    by comments (`EVIDENCE_BEGIN`/`EVIDENCE_END` in coding-review-visual.ts); a
- *    description of a page that happened to show one would have split the block
- *    and made the next round's replacement rewrite the wrong span.
+ *  - ANGLE BRACKETS, both of them, and not the comment markers they spell. The
+ *    evidence block in a pull-request body is delimited by HTML comments
+ *    (`EVIDENCE_BEGIN`/`EVIDENCE_END` in coding-review-visual.ts), so a
+ *    description carrying one would split the block and make the next round's
+ *    replacement rewrite the wrong span. Stripping the MARKERS cannot be done in
+ *    one pass — removing `<!--` from `<!<!----->` leaves another one behind, and
+ *    `--!>` closes a comment too — and a sanitiser that needs a fixpoint loop is
+ *    a sanitiser with a bug waiting in it. With neither `<` nor `>` present no
+ *    comment and no tag can be formed at all, which is complete by construction;
+ *    a written description loses nothing a reader needs.
  *  - LENGTH. One line under a picture, not a transcript.
  */
 export function tidyNote(text: string): string {
   return text
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
-    .replace(/<!--|-->/g, "")
+    .replace(/[<>]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_NOTE_CHARS);
 }
 
+/**
+ * The most this file may be before it is read at all.
+ *
+ * `recordShotNote` cannot write more than MAX_SHOT_NOTES entries of a bounded
+ * name and a bounded note — a few tens of kilobytes — but the run's own file
+ * tools reach its evidence folder, so the file on disk is not only ours. This
+ * read happens on the web server's thread while a pull-request body is built,
+ * and `readFileSync` + `JSON.parse` of an arbitrarily large file is the whole
+ * event loop. Four times the worst honest size, and past it the answer is "no
+ * evidence" rather than a stall.
+ */
+export const MAX_NOTES_FILE_BYTES = 4 * MAX_SHOT_NOTES * (100 + MAX_NOTE_CHARS);
+
 /** Picture name → what it showed. `{}` for a run that captured nothing. */
 export function readShotNotes(dir: string): Record<string, string> {
+  const file = notesPath(dir);
   let raw: string;
   try {
-    raw = fs.readFileSync(notesPath(dir), "utf8");
+    // Asked of the file, then read: a file that grew between the two is still
+    // bounded by what one read returns, and the point is the pathological case
+    // (a run that wrote megabytes), not a byte-exact ceiling.
+    if (fs.statSync(file).size > MAX_NOTES_FILE_BYTES) return {};
+    raw = fs.readFileSync(file, "utf8");
   } catch {
     return {};
   }
@@ -77,7 +102,11 @@ export function readShotNotes(dir: string): Record<string, string> {
     for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (!SHOT_NAME_RE.test(name) || typeof value !== "string") continue;
       const note = tidyNote(value);
-      if (note) out[name] = note;
+      if (!note) continue;
+      out[name] = note;
+      // The same ceiling the writer keeps, applied to a file the writer may not
+      // have been the only author of.
+      if (Object.keys(out).length >= MAX_SHOT_NOTES) break;
     }
     return out;
   } catch {

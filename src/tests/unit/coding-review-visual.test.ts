@@ -183,6 +183,20 @@ describe("the evidence a pull request carries", () => {
     expect(section).toContain(lib.EVIDENCE_END);
   });
 
+  it("never spends the whole budget on the run that came second", () => {
+    // collectVisualEvidence puts the REVIEWING run first because its shots are
+    // of the finished work; a plain tail-slice threw away exactly those.
+    const review = [1, 2].map((i) => ({ runId: RUN_ID, name: `shot-00${i}.png`, description: `review ${i}` }));
+    const origin = Array.from({ length: 15 }, (_, i) => ({ runId: ORIGIN_ID, name: `shot-${String(i).padStart(3, "0")}.png`, description: `origin ${i}` }));
+    const section = lib.renderEvidenceSection([...review, ...origin])!;
+    expect(section).toContain("review 1");
+    expect(section).toContain("review 2");
+    // The remaining budget goes to the origin run's NEWEST shots.
+    expect(section).toContain("origin 14");
+    expect(section).not.toContain("origin 0\n");
+    expect(section).toContain(`…and ${17 - lib.MAX_EVIDENCE_ROWS} earlier screenshots.`);
+  });
+
   it("keeps the newest rows and says how many it left out", () => {
     const many = Array.from({ length: lib.MAX_EVIDENCE_ROWS + 3 }, (_, i) => ({
       runId: RUN_ID,
