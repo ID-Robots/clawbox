@@ -188,6 +188,18 @@ function stubFetch(
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ run: { ...RUN, status: "stopped" } });
     }
+    if (url === "/setup-api/coding-agent/merge" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as { runId: string };
+      posts.push({ url, body });
+      // The merge landed: the copy is gone and the record says where the work
+      // went, which is what the card redraws from.
+      runs = (runs as { id: string; worktree?: Record<string, unknown> | null }[]).map(
+        (r) => (r.id === body.runId && r.worktree
+          ? { ...r, worktree: { ...r.worktree, removed: true, result: { kind: "merged", reason: null, detail: null, base: "main", commit: "9f1c0ab3d4e5f60718293a4b5c6d7e8f90a1b2c3" } } }
+          : r),
+      );
+      return json({ merged: true, base: "main", commit: "9f1c0ab3d4e5f60718293a4b5c6d7e8f90a1b2c3", run: (runs as { id: string }[]).find((r) => r.id === body.runId) });
+    }
     if (url === "/setup-api/coding-agent/worktree" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as { runId: string };
       posts.push({ url, body });
@@ -1362,6 +1374,41 @@ describe("CodingAgentApp", () => {
         expect(posts).toContainEqual({ url: "/setup-api/coding-agent/worktree", body: { runId: RUN.id } });
       });
       // Once it is gone the card goes with it: there is nothing left to remove.
+      await waitFor(() => { expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull(); });
+    });
+
+    /**
+     * The run page's half of the bring-home gesture. The card itself is
+     * covered in coding-run-worktree-card.test.tsx; what is pinned here is
+     * that the run page hands it the record, that pressing the button reaches
+     * the merge route with this run's id, and that the card follows the
+     * re-read record afterwards.
+     */
+    it("offers to bring a settled run's unmerged work home, and follows the record afterwards", async () => {
+      const worktree = {
+        path: "/home/clawbox/Projects/site/.clawbox/worktrees/run-k3x9q2ab",
+        branch: "clawbox/run-k3x9q2ab",
+        base: "main",
+        project: "/home/clawbox/Projects/site",
+        removed: false,
+        branchRemoved: false,
+        result: { kind: "unmerged", reason: "dirty", detail: "the project folder has uncommitted changes of its own" },
+      };
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, worktree }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
+      await screen.findByTestId("coding-agent-run-page");
+      const card = await screen.findByTestId("coding-agent-run-worktree");
+      expect(card.getAttribute("data-state")).toBe("dirty");
+      expect(card.textContent).toContain(translations.en["codingAgent.bringHomeDirty"]
+        .replaceAll("{branch}", worktree.branch).replaceAll("{base}", worktree.base));
+
+      fireEvent.click(screen.getByTestId(`coding-agent-bring-home-${RUN.id}`));
+      await waitFor(() => {
+        expect(posts).toContainEqual({ url: "/setup-api/coding-agent/merge", body: { runId: RUN.id } });
+      });
+      // The copy went with the merge, so the whole card goes with it.
       await waitFor(() => { expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull(); });
     });
 
