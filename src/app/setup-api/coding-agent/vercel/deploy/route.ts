@@ -23,7 +23,7 @@ import {
   MAX_PRODUCTION_DEPLOYS,
   type ProjectDeployEntry,
 } from "@/lib/vercel-deploy-store";
-import { readDeployment } from "@/lib/vercel";
+import { readDeployment, readProject } from "@/lib/vercel";
 import { readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
 import {
   decideDeployment,
@@ -121,15 +121,47 @@ function failed(err: unknown, what: string) {
   return NextResponse.json({ error: err instanceof Error ? err.message : what }, { status: 500 });
 }
 
-/** What the GET and every write answer, so no surface reads a stale half. */
-function payload(scope: string, entry: ProjectDeployEntry | null, autoProduction: boolean) {
+/**
+ * What the GET and every write answer, so no surface reads a stale half.
+ *
+ * `linked` is here and not only on the link route because the deploy surfaces
+ * have to decide whether to draw a button at all, and a card that offered
+ * Deploy on a project with no Vercel project attached would be offering a
+ * refusal. It is a config read, not an upstream call.
+ */
+async function payload(scope: string, entry: ProjectDeployEntry | null, autoProduction: boolean) {
   const allowance = productionAllowance(entry);
   return {
     scope,
+    linked: (await readVercelLink(scope)) !== null,
     deploy: entry?.latest ?? null,
     autoProduction,
     production: { left: allowance.left, max: MAX_PRODUCTION_DEPLOYS, nextAt: allowance.nextAt },
   };
+}
+
+/**
+ * The Vercel project itself — its name and the domain a production deploy
+ * lands on — for the sentence the owner is asked before pressing it.
+ *
+ * Behind `?domain=1` and never on the poll, exactly as the link route's
+ * `check=1` is: this is one call to another company's API, it is wanted once
+ * when a card mounts, and a deployment that is building must not cost one every
+ * few seconds. A failure is null rather than a refusal — the confirmation then
+ * names the project and not the domain, which is a worse sentence and not a
+ * broken page.
+ */
+async function projectFacts(scope: string): Promise<{ name: string | null; productionDomain: string | null } | null> {
+  const link = await readVercelLink(scope);
+  if (!link) return null;
+  try {
+    const auth = await resolveVercelAuth(link, scope);
+    const project = await readProject(auth, link.projectId);
+    if (!project.ok) return null;
+    return { name: project.name, productionDomain: project.productionDomain };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -196,7 +228,10 @@ export async function GET(request: Request): Promise<NextResponse> {
     });
     if (!project.ok) return project.refusal;
     const entry = await refreshed(project.scope, await readProjectDeploy(project.scope));
-    return NextResponse.json(payload(project.scope, entry, await readAutoProduction(project.scope)));
+    return NextResponse.json({
+      ...(await payload(project.scope, entry, await readAutoProduction(project.scope))),
+      project: url.searchParams.has("domain") ? await projectFacts(project.scope) : null,
+    });
   } catch (err) {
     return failed(err, "Could not read this ClawBox's deployments");
   }
@@ -229,7 +264,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
     if (!project.ok) return project.refusal;
     await setAutoProduction(project.scope, body.autoProduction);
     const entry = await readProjectDeploy(project.scope);
-    return NextResponse.json(payload(project.scope, entry, await readAutoProduction(project.scope)));
+    return NextResponse.json(await payload(project.scope, entry, await readAutoProduction(project.scope)));
   } catch (err) {
     return failed(err, "Could not change that switch");
   }
@@ -365,7 +400,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
     return NextResponse.json({
       ok: true,
-      ...payload(scope, entry, await readAutoProduction(scope)),
+      ...(await payload(scope, entry, await readAutoProduction(scope))),
       // What the caller cannot see from the record, and needs in order to say
       // something true about the deploy: whether the folder's own ignore rules
       // decided what went up, and what was left out.

@@ -275,15 +275,65 @@ export async function verifyToken(auth: VercelAuth): Promise<VercelResult<{ user
 export async function readProject(
   auth: VercelAuth,
   projectId: string,
-): Promise<VercelResult<{ id: string; name: string | null; gitLink: VercelGitLink | null }>> {
-  const answered = await json<{ id?: unknown; name?: unknown; link?: unknown }>(
+): Promise<VercelResult<{ id: string; name: string | null; gitLink: VercelGitLink | null; productionDomain: string | null }>> {
+  const answered = await json<{ id?: unknown; name?: unknown; link?: unknown; targets?: unknown; alias?: unknown }>(
     auth,
     `/v9/projects/${encodeURIComponent(projectId)}`,
   );
   if (!answered.ok) return answered;
   const id = typeof answered.data?.id === "string" ? answered.data.id : projectId;
   const name = typeof answered.data?.name === "string" ? answered.data.name : null;
-  return { ok: true, id, name, gitLink: parseGitLink(answered.data?.link) };
+  return {
+    ok: true,
+    id,
+    name,
+    gitLink: parseGitLink(answered.data?.link),
+    productionDomain: parseProductionDomain(answered.data),
+  };
+}
+
+/**
+ * The address a production deployment of this project lands on.
+ *
+ * Read from the project record this box already fetches rather than from
+ * `/v9/projects/:id/domains`, because it is wanted for ONE sentence — the
+ * question the owner is asked before a production deploy — and a second
+ * upstream call to word a confirmation is a cost paid on a page that may never
+ * see the button pressed.
+ *
+ * Null is an honest answer and the card says the project's name instead: a
+ * project that has never had a production deployment has no alias yet, and
+ * inventing `<name>.vercel.app` would put a domain in a confirmation sentence
+ * that may belong to somebody else's project.
+ */
+export function parseProductionDomain(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  const host = (x: unknown): string | null => {
+    if (typeof x !== "string") return null;
+    const trimmed = x.trim();
+    // A domain and nothing else — this ends up in a sentence and, on the
+    // card, in an `href`. The same alphabet `deploymentUrl` admits for a bare
+    // host, for the same reason.
+    return trimmed && /^[A-Za-z0-9.-]+$/.test(trimmed) ? trimmed : null;
+  };
+  const targets = typeof v.targets === "object" && v.targets !== null ? (v.targets as Record<string, unknown>) : null;
+  const production = targets && typeof targets.production === "object" && targets.production !== null
+    ? (targets.production as Record<string, unknown>)
+    : null;
+  const fromTarget = Array.isArray(production?.alias)
+    ? production.alias.map(host).find((x): x is string => x !== null) ?? null
+    : null;
+  if (fromTarget) return fromTarget;
+  // The project's own alias list: entries are `{ domain }` on some answers and
+  // bare strings on others, so both are read — the `parseDeployment` rule.
+  if (Array.isArray(v.alias)) {
+    for (const entry of v.alias) {
+      const found = host(typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>).domain : entry);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 /**

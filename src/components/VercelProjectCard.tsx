@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
+import VercelDeployPanel from "./VercelDeployPanel";
 import type { VercelLink } from "@/lib/vercel-state";
 
 /** The readiness the route answers, as this card reads it. */
@@ -238,6 +239,10 @@ export default function VercelProjectCard({ query, t }: VercelProjectCardProps) 
               </button>
             )}
           </div>
+          {/* The buttons that actually deploy, under the link that says where
+              to. Keyed by the project the card is about, so a different project
+              is a fresh panel rather than one holding the last one's state. */}
+          {link && <VercelDeployPanel key={query} query={query} t={t} />}
         </>
       )}
 
