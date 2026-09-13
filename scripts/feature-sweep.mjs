@@ -380,7 +380,10 @@ function baseUrl(host) {
   try {
     url = new URL(/^https?:\/\//.test(host) ? host : `http://${host}`);
   } catch {
-    throw new Error(`--host is not a usable address: ${host}`);
+    // Deliberately does NOT echo what was typed: a malformed address that
+    // fails to parse can still contain `user:password@`, and main() writes a
+    // usage error straight to stderr without going near redact().
+    throw new Error("--host is not a usable address — expected a host, host:port, or a full http(s):// URL");
   }
   if (url.username || url.password) {
     throw new Error("--host must not carry a username or password: this box authenticates with the MCP bearer");
