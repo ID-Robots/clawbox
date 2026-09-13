@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
+import { CodingAgentError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable? } → start a coding run.
+ * deliverable?, pipeline? } → start a coding run.
  *
  * `provider` and `model` are the per-run override of the owner's default
  * account (Settings → Coding Agent). They are validated together, by the one
@@ -35,7 +35,7 @@ export async function POST(request: Request) {
 
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
-    provider?: unknown; model?: unknown; deliverable?: unknown;
+    provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
   };
   try {
     body = await request.json();
@@ -78,6 +78,13 @@ export async function POST(request: Request) {
       // `command` deliverable is allowed; it is derived above from the owner's
       // cookie, never from the body.
       deliverable: body.deliverable,
+      // Unvalidated for the same reason and by the same rule: `startRun` reads
+      // it through `readPipelineInput`, which throws `invalid` with a stable
+      // code rather than repairing, so a caller learns its request was refused
+      // instead of getting a pipeline that checks something else. Absent, the
+      // PROJECT's own default decides — which is why `undefined` has to survive
+      // this line rather than being normalised to null.
+      pipeline: body.pipeline,
     });
     return NextResponse.json({ started: true, run }, { status: 202 });
   } catch (err) {
@@ -86,7 +93,7 @@ export async function POST(request: Request) {
       // caller can tell "that pair is not on this box" from "that folder is not
       // allowed" — both are `kind: "invalid"`, and the MCP tool advises on the
       // wrong argument without it. Anything else answers exactly as before.
-      const code = err instanceof ProviderChoiceError ? { code: err.code } : {};
+      const code = err instanceof ProviderChoiceError || err instanceof PipelineChoiceError ? { code: err.code } : {};
       return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
     }
     console.error("[coding-agent/run] failed to start:", err instanceof Error ? err.message : err);

@@ -588,36 +588,48 @@ export type PipelineInputRefusal =
   | "too_many_expect"
   | "bad_production";
 
-export class PipelineInputError extends Error {
-  constructor(readonly code: PipelineInputRefusal, message: string) {
-    super(message);
-    this.name = "PipelineInputError";
-  }
-}
-
 export interface PipelineInput {
   verify: PipelineVerify;
   production: boolean;
 }
+
+/**
+ * What a caller asked for: nothing, a refusal, or a pipeline.
+ *
+ * A RESULT rather than a throw, the shape `readDeliverableInput` answers in and
+ * for its reason: this is read inside `startRun`, whose caller maps a refusal
+ * to a 400 with the code beside it, and an exception type would have to be
+ * caught and translated at every door instead.
+ */
+export type PipelineInputResult =
+  | null
+  | { ok: false; code: PipelineInputRefusal; error: string }
+  | { ok: true; pipeline: PipelineInput };
 
 /** What a caller gets when they ask for a pipeline and say nothing else. */
 export function defaultPipelineInput(): PipelineInput {
   return { verify: { path: "/", expect: [] }, production: true };
 }
 
+function refusePipelineInput(code: PipelineInputRefusal, error: string): PipelineInputResult {
+  return { ok: false, code, error };
+}
+
 /**
  * Read a caller's pipeline request.
  *
- * Throws with a stable code rather than repairing, the rule this codebase holds
- * every caller-facing parser to: a bar this box cannot honour is refused at the
- * door, so the caller learns what was wrong instead of getting a pipeline that
- * checks something else. `true` is the shorthand for "the usual one".
+ * Refuses with a stable code rather than repairing, the rule this codebase
+ * holds every caller-facing parser to: a bar this box cannot honour is refused
+ * at the door, so the caller learns what was wrong instead of getting a
+ * pipeline that checks something else. `true` is the shorthand for "the usual
+ * one"; `null`/`undefined` means the caller said nothing at all, which is what
+ * lets the project's own default decide.
  */
-export function readPipelineInput(raw: unknown): PipelineInput | null {
+export function readPipelineInput(raw: unknown): PipelineInputResult {
   if (raw === undefined || raw === null || raw === false) return null;
-  if (raw === true) return defaultPipelineInput();
+  if (raw === true) return { ok: true, pipeline: defaultPipelineInput() };
   if (typeof raw !== "object" || Array.isArray(raw)) {
-    throw new PipelineInputError("not_an_object", "A delivery pipeline is either `true` or an object saying what to check.");
+    return refusePipelineInput("not_an_object", "A delivery pipeline is either true or an object saying what to check.");
   }
   const v = raw as Record<string, unknown>;
   if (v.enabled === false) return null;
@@ -625,14 +637,14 @@ export function readPipelineInput(raw: unknown): PipelineInput | null {
   let path = "/";
   if (v.path !== undefined && v.path !== null) {
     if (typeof v.path !== "string") {
-      throw new PipelineInputError("bad_path", "The path to check is a string like \"/\" or \"/invoices\".");
+      return refusePipelineInput("bad_path", "The path to check is a string like \"/\" or \"/invoices\".");
     }
     const trimmed = v.path.trim();
     if (trimmed && !trimmed.startsWith("/")) {
-      throw new PipelineInputError("bad_path", "The path to check has to start with \"/\" — it is a path on the deployment, not a whole address.");
+      return refusePipelineInput("bad_path", "The path to check has to start with \"/\" — it is a path on the deployment, not a whole address.");
     }
     if (trimmed.length > MAX_VERIFY_PATH_CHARS) {
-      throw new PipelineInputError("bad_path", `That path is longer than ${MAX_VERIFY_PATH_CHARS} characters.`);
+      return refusePipelineInput("bad_path", `That path is longer than ${MAX_VERIFY_PATH_CHARS} characters.`);
     }
     path = trimmed || "/";
   }
@@ -640,17 +652,17 @@ export function readPipelineInput(raw: unknown): PipelineInput | null {
   const expect: string[] = [];
   if (v.expect !== undefined && v.expect !== null) {
     if (!Array.isArray(v.expect)) {
-      throw new PipelineInputError("bad_expect", "What to look for is a list of strings the page must contain.");
+      return refusePipelineInput("bad_expect", "What to look for is a list of strings the page must contain.");
     }
     if (v.expect.length > MAX_EXPECTATIONS) {
-      throw new PipelineInputError("too_many_expect", `A verification checks at most ${MAX_EXPECTATIONS} things.`);
+      return refusePipelineInput("too_many_expect", `A verification checks at most ${MAX_EXPECTATIONS} things.`);
     }
     for (const item of v.expect) {
       if (typeof item !== "string" || !item.trim()) {
-        throw new PipelineInputError("bad_expect", "Each thing to look for is a non-empty string.");
+        return refusePipelineInput("bad_expect", "Each thing to look for is a non-empty string.");
       }
       if (item.length > MAX_EXPECTATION_CHARS) {
-        throw new PipelineInputError("bad_expect", `Each thing to look for is at most ${MAX_EXPECTATION_CHARS} characters.`);
+        return refusePipelineInput("bad_expect", `Each thing to look for is at most ${MAX_EXPECTATION_CHARS} characters.`);
       }
       expect.push(item.trim());
     }
@@ -659,12 +671,12 @@ export function readPipelineInput(raw: unknown): PipelineInput | null {
   let production = true;
   if (v.production !== undefined && v.production !== null) {
     if (typeof v.production !== "boolean") {
-      throw new PipelineInputError("bad_production", "Whether to go to production is on or off.");
+      return refusePipelineInput("bad_production", "Whether to go to production is on or off.");
     }
     production = v.production;
   }
 
-  return { verify: { path, expect }, production };
+  return { ok: true, pipeline: { verify: { path, expect }, production } };
 }
 
 function parseEvidence(raw: unknown): PipelineEvidence[] {

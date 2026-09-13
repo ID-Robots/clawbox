@@ -243,6 +243,8 @@ import {
   stageNoun,
   stepFor,
   stopPipeline,
+  type PipelineInput,
+  type PipelineInputRefusal,
   type PipelineStage,
   type PipelineState,
   type PipelineVerify,
@@ -2230,6 +2232,20 @@ export class ProviderChoiceError extends CodingAgentError {
  * has written down as never-allowed must not become allowable through this door
  * just because the current build grants `Bash(*)` and leans on the tool list.
  */
+/**
+ * A pipeline request this box will not accept.
+ *
+ * `ProviderChoiceError`'s sibling and for its reason: both are `invalid`, and a
+ * caller that cannot tell "that is not a path" from "that folder is off limits"
+ * has no idea which argument to fix. The code travels beside the 400.
+ */
+export class PipelineChoiceError extends CodingAgentError {
+  constructor(readonly code: PipelineInputRefusal, message: string) {
+    super("invalid", message);
+    this.name = "PipelineChoiceError";
+  }
+}
+
 export function allowRuleContext(): AllowRuleContext {
   return {
     denyRules: [...fileDenyRules(), ...BASH_KILL_DENYLIST, ...BASH_DENYLIST],
@@ -10134,11 +10150,16 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
 async function attachPipeline(run: CodingRun, input: StartRunInput, settings: RunSettings): Promise<void> {
   if (run.reviewOf || run.reviewLoopOf || run.vercelFixOf || run.readOnly || run.team) return;
   const asked = readPipelineInput(input.pipeline);
-  let wanted = asked;
+  // Refused at the door, with the code beside the sentence, for the reason
+  // `requireDeliverable` refuses: a caller whose request was quietly dropped
+  // would believe the box was shipping.
+  if (asked && !asked.ok) throw new PipelineChoiceError(asked.code, asked.error);
+
   const explicit = asked !== null;
+  let wanted: PipelineInput | null = asked?.pipeline ?? null;
   if (input.pipeline === undefined || input.pipeline === null) {
-    const scope = await projectScopeFor(run);
-    wanted = (await readPipelineDefault(scope)) ? defaultPipelineInput() : null;
+    const fromProject = await projectScopeFor(run);
+    wanted = (await readPipelineDefault(fromProject)) ? defaultPipelineInput() : null;
   }
   if (!wanted) return;
 
