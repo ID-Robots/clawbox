@@ -27,7 +27,12 @@ import { runChild, failureDetail, type ChildResult } from "./child-run";
 const CALL_TIMEOUT_MS = 60_000;
 export const WORKTREES_DIR = path.join(".clawbox", "worktrees");
 
-function git(dir: string, args: string[]): Promise<ChildResult> {
+/**
+ * One `git -C <dir>` with the coding agent's own environment. Exported
+ * because the RUN worktrees (coding-run-worktree.ts) are the same plumbing on
+ * the same checkouts and must not grow a second copy of it.
+ */
+export function gitIn(dir: string, args: string[]): Promise<ChildResult> {
   return runChild("git", ["-C", dir, ...args], {
     timeoutMs: CALL_TIMEOUT_MS,
     env: {
@@ -40,6 +45,7 @@ function git(dir: string, args: string[]): Promise<ChildResult> {
   });
 }
 
+const git = gitIn;
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
 
@@ -51,7 +57,7 @@ const out = (r: ChildResult) => r.stdout.trim();
  * checkout runs under the folder's lock, in the order it was asked.
  */
 const dirLocks = new Map<string, Promise<void>>();
-async function withDirLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+export async function withDirLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const key = path.resolve(dir);
   const previous = dirLocks.get(key) ?? Promise.resolve();
   let release: () => void = () => {};
@@ -153,7 +159,7 @@ export function isGeneratedArtifact(relPath: string): boolean {
  * `git add -A` cannot sweep a `.pyc` into its branch and make an
  * unmergeable binary out of it (team-6rgz8cyx, 2026-09-06).
  */
-async function excludeWorktrees(dir: string): Promise<void> {
+export async function excludeWorktrees(dir: string): Promise<void> {
   const gitDir = await git(dir, ["rev-parse", "--git-dir"]);
   if (!ok(gitDir)) return;
   const exclude = path.resolve(dir, out(gitDir), "info", "exclude");

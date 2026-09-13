@@ -159,6 +159,12 @@ interface Run {
    *  the server an app serves itself on, most often. Never true of a run
    *  that was stopped or failed: those have their group ended for them. */
   leftover?: boolean;
+  /**
+   * The run's own copy of the project — a git worktree on a branch of its own
+   * — or absent/null when it worked in the project folder itself, which is
+   * every run this box made before worktrees existed.
+   */
+  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean; branchRemoved?: boolean } | null;
   /** WHY a paused run is paused. Absent on a record written before it was
    *  kept, which reads the same as an ordinary pause: nothing to explain. */
   pauseReason?: CodingPauseReason | null;
@@ -296,7 +302,10 @@ const SIDEBAR_MIN_WIDTH = 860;
  *  A run with no id belongs to the project whose folder it worked in. */
 function runBelongsTo(r: Run, pr: Project): boolean {
   if (r.projectId) return pr.kind === "codeProject" && r.projectId === pr.folder;
-  return r.directory === pr.directory;
+  // A run with a copy of its own works two folders deeper, so the folder it
+  // BELONGS to is the copy's project — matching `directory` alone would file
+  // every such run under nothing.
+  return (r.worktree?.project ?? r.directory) === pr.directory;
 }
 
 interface GitInfo {
@@ -691,7 +700,12 @@ export default function CodingAgentApp() {
     const command = livePreviewCommand({
       transcriptPath: run.transcriptPath ?? null,
       sessionId: run.sessionId ?? null,
-      directory: run.directory,
+      // A run whose own copy of the project has been removed has no folder to
+      // `cd` into, and `claude-ds --resume` finds nothing for a session keyed
+      // to it. Answered as "no folder", which makes the builder fall back to
+      // replaying the transcript — what happened, in a folder that exists.
+      // Resume is the control that brings the copy back.
+      directory: run.worktree?.removed ? null : run.directory,
       live: run.status === "running",
     });
     if (!command) return;
@@ -907,7 +921,7 @@ export default function CodingAgentApp() {
    */
   const runAction = async (
     id: string,
-    action: "pause" | "resume" | "start" | "stop" | "draft" | "kill",
+    action: "pause" | "resume" | "start" | "stop" | "draft" | "kill" | "worktree",
     failText: string,
     opts: { method?: "POST" | "DELETE" } = {},
   ) => {
@@ -2176,6 +2190,31 @@ export default function CodingAgentApp() {
                     </button>
                   </div>
                 )}
+                {/* The run's own copy of the project, while it is still on
+                    disk. A settle removes it when the branch was merged home
+                    or the run left nothing on it; anything else — a merge
+                    that conflicted, a project since moved to another branch,
+                    a pull request still open — stays, because those are
+                    commits nothing else has. The button takes the FILES and
+                    leaves the branch, which is why the card says where the
+                    work remains. */}
+                {run.worktree && !run.worktree.removed && isSettled(run.status) && (
+                  <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-worktree">
+                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">account_tree</span>
+                    <span className="text-[11px] text-[var(--text-secondary)] break-all">
+                      {t("codingAgent.worktreeKept", { branch: run.worktree.branch })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => runAction(run.id, "worktree", t("codingAgent.worktreeRemoveFailed"))}
+                      disabled={busy === run.id}
+                      data-testid={`coding-agent-worktree-remove-${run.id}`}
+                      className={`${BTN_SECONDARY} ml-auto`}
+                    >
+                      {t("codingAgent.worktreeRemove")}
+                    </button>
+                  </div>
+                )}
                 {/* WHY it is paused, when the answer is not "somebody asked".
                     A run refused because one of this box's allowances is spent
                     settles exactly like an owner's pause, and read the generic
@@ -2228,7 +2267,7 @@ export default function CodingAgentApp() {
                   the timeline alone is the record. */}
               {isLive(run.status) && (() => {
                 const command = run.transcriptPath
-                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
+                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.worktree?.removed ? null : run.directory, live: true })
                   : null;
                 const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
                 const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next });

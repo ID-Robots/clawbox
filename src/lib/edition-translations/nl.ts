@@ -950,6 +950,12 @@ export const nl: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "Pogingen voor het resultaat van een run",
   "codingAgent.completionAttemptsHint": "Een run geldt pas als klaar wanneer wat hij moest opleveren er echt is — de bestanden die je assistent noemde, of een pull request als pull requests aan staan. Is het er niet, dan zet ClawBox de run voort in zijn eigen sessie met een notitie over wat ontbreekt. De eerste poging van de run zelf telt als één poging.",
   "codingAgent.completionAttemptsFailed": "Het aantal pogingen kon niet worden gewijzigd.",
+  "codingAgent.maxParallelRunsLabel": "Runs tegelijk",
+  "codingAgent.maxParallelRunsHint": "Een run in een git-project werkt in een eigen kopie daarvan op een eigen branch, dus runs kunnen elkaars halfafgemaakte bestanden niet meer overschrijven; een map die geen git-repository is krijgt geen kopie, en daar werkt nog steeds één run tegelijk. Hoeveel runs zinvol zijn, hangt af van het geheugen van deze ClawBox: twee runs passen ruim, vier is veel op een klein bord.",
+  "codingAgent.maxParallelRunsFailed": "Kon niet wijzigen hoeveel runs tegelijk mogen lopen.",
+  "codingAgent.worktreeKept": "De eigen kopie van deze run staat nog op schijf. Het werk staat op branch {branch}, dus de kopie verwijderen raakt het niet kwijt.",
+  "codingAgent.worktreeRemove": "Kopie verwijderen",
+  "codingAgent.worktreeRemoveFailed": "Kon de kopie van het project niet verwijderen.",
 
   "codingAgent.wizardTitle": "Codeagent instellen",
   "codingAgent.wizardIntro": "Met de codeagent geeft je assistent een hele taak door aan Claude Code op deze box: hij leest en schrijft bestanden in één map, voert daar opdrachten uit en rapporteert terug. Instellen kost vier stappen.",

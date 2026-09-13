@@ -960,6 +960,12 @@ export const zh: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "对一次运行交付物的尝试次数",
   "codingAgent.completionAttemptsHint": "只有当它本该交付的东西真的在那里时，一次运行才算完成——助手指名的文件，或在拉取请求开启时的一个拉取请求。如果不在，ClawBox 会在同一会话中继续这次运行，并说明缺少什么。运行自己的第一次尝试也算一次。",
   "codingAgent.completionAttemptsFailed": "无法更改尝试次数。",
+  "codingAgent.maxParallelRunsLabel": "同时运行的数量",
+  "codingAgent.maxParallelRunsHint": "在 git 项目里的运行会在项目的专属副本里、在自己的分支上工作，因此不同的运行不会再覆盖彼此写到一半的文件；不是 git 仓库的文件夹没有副本，那里仍然一次只跑一个。允许几个取决于这台 ClawBox 的内存：两个比较宽裕，在小板子上四个就偏多了。",
+  "codingAgent.maxParallelRunsFailed": "无法更改同时运行的数量。",
+  "codingAgent.worktreeKept": "这次运行的专属副本还在磁盘上。它的工作在分支 {branch} 上，所以删除副本不会丢失。",
+  "codingAgent.worktreeRemove": "删除副本",
+  "codingAgent.worktreeRemoveFailed": "无法删除这次运行的项目副本。",
 
   "codingAgent.wizardTitle": "设置编程助手",
   "codingAgent.wizardIntro": "编程助手让助理把整项任务交给这台设备上的 Claude Code：它在一个文件夹内读写文件、执行命令，并汇报结果。设置只需四步。",

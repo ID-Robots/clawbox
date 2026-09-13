@@ -188,6 +188,16 @@ function stubFetch(
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ run: { ...RUN, status: "stopped" } });
     }
+    if (url === "/setup-api/coding-agent/worktree" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as { runId: string };
+      posts.push({ url, body });
+      // The route answers the re-read record; the card redraws from THAT
+      // rather than waiting for the next poll.
+      runs = (runs as { id: string; worktree?: { removed: boolean } | null }[]).map(
+        (r) => (r.id === body.runId && r.worktree ? { ...r, worktree: { ...r.worktree, removed: true } } : r),
+      );
+      return json({ run: (runs as { id: string }[]).find((r) => r.id === body.runId) });
+    }
     if (url === "/setup-api/code" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ success: true });
@@ -1322,6 +1332,55 @@ describe("CodingAgentApp", () => {
       await screen.findByTestId("coding-agent-run-page");
       expect(await screen.findByTestId("coding-agent-run-leftover")).toBeInTheDocument();
       expect(screen.getByTestId(`coding-agent-kill-${RUN.id}`)).toBeInTheDocument();
+    });
+
+    /**
+     * A run's own copy of the project, when the settle left it on disk — a
+     * merge that conflicted, a project the owner had moved, a pull request
+     * still open. The card names the BRANCH, because that is where the work
+     * remains once the files are gone, and the button is the owner's answer to
+     * a copy they no longer need.
+     */
+    it("offers to remove a settled run's copy of the project, and says where its work stays", async () => {
+      const worktree = {
+        path: "/home/clawbox/Projects/site/.clawbox/worktrees/run-k3x9q2ab",
+        branch: "clawbox/run-k3x9q2ab",
+        base: "main",
+        project: "/home/clawbox/Projects/site",
+        removed: false,
+      };
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, worktree }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
+      await screen.findByTestId("coding-agent-run-page");
+      const card = await screen.findByTestId("coding-agent-run-worktree");
+      expect(card.textContent).toContain("clawbox/run-k3x9q2ab");
+
+      fireEvent.click(screen.getByTestId(`coding-agent-worktree-remove-${RUN.id}`));
+      await waitFor(() => {
+        expect(posts).toContainEqual({ url: "/setup-api/coding-agent/worktree", body: { runId: RUN.id } });
+      });
+      // Once it is gone the card goes with it: there is nothing left to remove.
+      await waitFor(() => { expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull(); });
+    });
+
+    it("shows no such card for a run that worked in the project folder itself, or one still going", async () => {
+      const worktree = {
+        path: "/home/clawbox/Projects/site/.clawbox/worktrees/run-live0001",
+        branch: "clawbox/run-live0001",
+        base: "main",
+        project: "/home/clawbox/Projects/site",
+        removed: false,
+      };
+      const live = { ...RUN, id: "run-live0001", status: "running", completedAt: null, worktree };
+      stubFetch({ enabled: true, readiness: READY }, [live, { ...RUN, worktree: null }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      // A live run's copy is not the owner's to remove — Stop is that gesture.
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-live0001"));
+      await screen.findByTestId("coding-agent-run-page");
+      expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull();
     });
 
     it("says when there is nothing to show yet", async () => {

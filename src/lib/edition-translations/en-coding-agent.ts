@@ -540,6 +540,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "Attempts at a run's deliverable",
   "codingAgent.completionAttemptsHint": "A run only counts as finished when what it had to deliver is actually there \u2014 the files your assistant named, or a pull request when pull requests are on. When it is not, ClawBox carries the run on in its own session with a note saying what is missing. The run's own first go counts as one attempt.",
   "codingAgent.completionAttemptsFailed": "Could not change the number of attempts.",
+  "codingAgent.maxParallelRunsLabel": "Coding runs at once",
+  "codingAgent.maxParallelRunsHint": "A run in a git project works in its own copy of it on a branch of its own, so runs can no longer overwrite each other's half-finished files; a folder that is not a git repository has no copy, and one run at a time still works there. How many make sense is a question about this ClawBox's memory: two is comfortable, four is a lot on a small board.",
+  "codingAgent.maxParallelRunsFailed": "Could not change how many runs may go at once.",
+  "codingAgent.worktreeKept": "This run's own copy of the project is still on disk. Its work is on the branch {branch}, so removing the copy does not lose it.",
+  "codingAgent.worktreeRemove": "Remove copy",
+  "codingAgent.worktreeRemoveFailed": "Could not remove the run's copy of the project.",
 
   // ── First-run setup wizard ────────────────────────────────────────────────
   //

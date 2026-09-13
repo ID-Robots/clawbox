@@ -61,6 +61,7 @@ function stubFetch(
     reviewRounds?: number;
     autoMerge?: boolean;
     completionAttempts?: number;
+    maxParallelRuns?: number;
   },
   opts: {
     resolveTo?: string;
@@ -81,6 +82,9 @@ function stubFetch(
     /** A server from before the deliverable gate: no attempts field, so the
      *  control must not be drawn at all. */
     noCompletionAttempts?: boolean;
+    /** A server from before worktrees: no runs-at-once field, so that control
+     *  must not be drawn either. */
+    noMaxParallelRuns?: boolean;
   } = {},
 ) {
   posts = [];
@@ -96,6 +100,7 @@ function stubFetch(
   let reviewRounds = status.reviewRounds ?? 3;
   let autoMerge = status.autoMerge ?? false;
   let completionAttempts = status.completionAttempts ?? 3;
+  let maxParallelRuns = status.maxParallelRuns ?? 2;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -118,6 +123,7 @@ function stubFetch(
     ...(opts.noRealBrowser ? {} : { realBrowser }),
     ...(opts.noReviewLoop ? {} : { reviewRounds, minReviewRounds: 0, maxReviewRounds: 6, autoMerge }),
     ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
+    ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -181,6 +187,12 @@ function stubFetch(
       }
       if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
       if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
+      if (typeof body.maxParallelRuns === "number") {
+        if (body.maxParallelRuns < 1 || body.maxParallelRuns > 4) {
+          return json({ error: "The number of runs at once must be between 1 and 4.", kind: "invalid" }, 400);
+        }
+        maxParallelRuns = body.maxParallelRuns;
+      }
       return json(payload());
     }
     return json({ error: "unexpected" }, 404);
@@ -871,5 +883,34 @@ describe("the attempts at a run's deliverable", () => {
     await screen.findByRole("switch", { name: SWITCH });
     expect(screen.queryByTestId("coding-agent-completion-attempts")).toBeNull();
     expect(screen.queryByText(translations.en["codingAgent.completionAttemptsLabel"])).toBeNull();
+  });
+});
+
+/**
+ * How many runs may be going at once.
+ *
+ * A number rather than a switch because each run works in a copy of the
+ * project on a branch of its own: what bounds it is this box's memory, not the
+ * filesystem. Hidden on a server that answers with no field, like the two
+ * above.
+ */
+describe("the runs-at-once control", () => {
+  it("shows what the device answered with, offers only the range it named, and saves a new value", async () => {
+    stubFetch({ enabled: true, readiness: READY, maxParallelRuns: 2 });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByTestId("coding-agent-max-parallel-runs") as HTMLSelectElement;
+    expect(select.value).toBe("2");
+    expect(Array.from(select.querySelectorAll("option")).map((o) => (o as HTMLOptionElement).value)).toEqual(["1", "2", "3", "4"]);
+
+    fireEvent.change(select, { target: { value: "3" } });
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { maxParallelRuns: 3 } }); });
+    await waitFor(() => { expect((screen.getByTestId("coding-agent-max-parallel-runs") as HTMLSelectElement).value).toBe("3"); });
+  });
+
+  it("shows no control at all on a server that predates it", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { noMaxParallelRuns: true });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(screen.queryByTestId("coding-agent-max-parallel-runs")).toBeNull();
   });
 });

@@ -314,6 +314,31 @@ export async function register() {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }
   try {
+    // Run worktrees nothing needs any more (src/lib/coding-run-worktree.ts).
+    // At most weekly — the module keeps the date, so this fires on the first
+    // boot after the week is up rather than on every restart — and after the
+    // boot rush, because it is a `git worktree list` per project and nothing
+    // on the box is waiting for its answer.
+    //
+    // A boot hook rather than a cron entry for the reason the memory schedule
+    // is one: a timer rebuilt at every boot cannot be duplicated or orphaned
+    // by an update.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { sweepCodingWorktrees } = require('./lib/coding-agent')
+    const sweep = setTimeout(() => {
+      void sweepCodingWorktrees()
+        .then((removed: number) => {
+          if (removed > 0) console.log(`[instrumentation] Swept ${removed} stale coding worktree(s)`)
+        })
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Coding worktree sweep failed:', err instanceof Error ? err.message : err)
+        })
+    }, 60_000)
+    sweep.unref?.()
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the coding worktree sweep:', err instanceof Error ? err.message : err)
+  }
+  try {
     // A question asked in chat outlives the process that asked it: the button
     // is still sitting in the owner's Telegram. Nothing listens for the answer
     // unless something starts listening, so a box that reboots with an

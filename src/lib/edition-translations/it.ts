@@ -961,6 +961,12 @@ export const it: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "Tentativi per la consegna di un'esecuzione",
   "codingAgent.completionAttemptsHint": "Un'esecuzione conta come finita solo quando ciò che doveva consegnare c'è davvero: i file indicati dal tuo assistente, o una pull request se le pull request sono attive. Se manca, ClawBox porta avanti l'esecuzione nella sua stessa sessione dicendo cosa manca. Il primo tentativo dell'esecuzione conta come uno.",
   "codingAgent.completionAttemptsFailed": "Non è stato possibile cambiare il numero di tentativi.",
+  "codingAgent.maxParallelRunsLabel": "Esecuzioni contemporanee",
+  "codingAgent.maxParallelRunsHint": "Un'esecuzione in un progetto git lavora in una copia propria, su un ramo proprio, così non possono più sovrascriversi i file lasciati a metà; una cartella che non è un repository git non ha copia, e lì lavora ancora un'esecuzione alla volta. Quante abbiano senso dipende dalla memoria di questa ClawBox: due esecuzioni ci stanno comodamente, quattro sono molte su una scheda piccola.",
+  "codingAgent.maxParallelRunsFailed": "Non è stato possibile cambiare quante esecuzioni possono procedere insieme.",
+  "codingAgent.worktreeKept": "La copia di questa esecuzione è ancora sul disco. Il suo lavoro è sul ramo {branch}, quindi rimuovere la copia non lo perde.",
+  "codingAgent.worktreeRemove": "Rimuovi copia",
+  "codingAgent.worktreeRemoveFailed": "Non è stato possibile rimuovere la copia del progetto.",
 
   "codingAgent.wizardTitle": "Configura l'agente di codice",
   "codingAgent.wizardIntro": "L'agente di codice consente al tuo assistente di affidare un'intera attività a Claude Code su questa box: legge e scrive file in una cartella, vi esegue comandi e riferisce. La configurazione richiede quattro passaggi.",

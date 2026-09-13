@@ -950,6 +950,12 @@ export const fr: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "Tentatives pour le livrable d'une exécution",
   "codingAgent.completionAttemptsHint": "Une exécution ne compte comme terminée que lorsque ce qu'elle devait livrer est vraiment là — les fichiers nommés par votre assistant, ou une pull request si les pull requests sont activées. Sinon, ClawBox poursuit l'exécution dans sa propre session en indiquant ce qui manque. Le premier essai de l'exécution compte pour une tentative.",
   "codingAgent.completionAttemptsFailed": "Impossible de changer le nombre de tentatives.",
+  "codingAgent.maxParallelRunsLabel": "Exécutions simultanées",
+  "codingAgent.maxParallelRunsHint": "Une exécution dans un projet git travaille dans sa propre copie, sur sa propre branche : elles ne peuvent plus écraser les fichiers à moitié écrits des autres. Un dossier qui n'est pas un dépôt git n'a pas de copie, et une seule exécution à la fois y travaille encore. Combien en autoriser est une question de mémoire de cette ClawBox : deux passent bien, quatre font beaucoup sur une petite carte.",
+  "codingAgent.maxParallelRunsFailed": "Impossible de changer le nombre d'exécutions simultanées.",
+  "codingAgent.worktreeKept": "La copie propre à cette exécution est encore sur le disque. Son travail est sur la branche {branch} : retirer la copie ne le perd pas.",
+  "codingAgent.worktreeRemove": "Retirer la copie",
+  "codingAgent.worktreeRemoveFailed": "Impossible de retirer la copie du projet de cette exécution.",
 
   "codingAgent.wizardTitle": "Configurer l'agent de code",
   "codingAgent.wizardIntro": "L'agent de code permet à votre assistant de confier une tâche entière à Claude Code sur cette box : il lit et écrit des fichiers dans un dossier, y exécute des commandes et rend compte. La configuration tient en quatre étapes.",

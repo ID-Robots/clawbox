@@ -7,6 +7,8 @@ import {
   getCodingAgentStatus,
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
+  MAX_MAX_PARALLEL_RUNS,
+  MIN_MAX_PARALLEL_RUNS,
   setCodingAgentEnabled,
   setCodingProvider,
   setDefaultDirectory,
@@ -15,6 +17,7 @@ import {
   setAutoMerge,
   setAutoPr,
   setCompletionAttempts,
+  setMaxParallelRuns,
   setGenerateAudio,
   setGenerateImages,
   setRealBrowser,
@@ -79,6 +82,10 @@ function forbidden() {
  * POST { autoMerge: boolean } → may the box squash-merge a pull request its
  * own review loop cleared? Off by default, and never into `main`. See
  * @/lib/coding-review-state for the decision.
+ * POST { maxParallelRuns: number } → how many coding runs may be going at
+ * once. Each run works in a git worktree of its own, so the limit is a
+ * question about the box's memory rather than about the filesystem; the range
+ * is refused rather than clamped, like the review rounds.
  * POST { completionAttempts: number } → how many goes a run with a deliverable
  * gets at it, its own first turn counted as one. Only ever spent by a run that
  * HAS a deliverable — one the caller named, or the pull request the auto-PR
@@ -148,6 +155,7 @@ export async function POST(request: Request) {
     reviewRounds?: unknown;
     autoMerge?: unknown;
     completionAttempts?: unknown;
+    maxParallelRuns?: unknown;
     generateImages?: unknown;
     generateAudio?: unknown;
     realBrowser?: unknown;
@@ -162,6 +170,7 @@ export async function POST(request: Request) {
   const hasReviewRounds = typeof fields.reviewRounds === "number";
   const hasAutoMerge = typeof fields.autoMerge === "boolean";
   const hasCompletionAttempts = typeof fields.completionAttempts === "number";
+  const hasMaxParallelRuns = typeof fields.maxParallelRuns === "number";
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
@@ -178,7 +187,7 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -188,6 +197,7 @@ export async function POST(request: Request) {
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
           + "{ realBrowser: boolean }, { reviewRounds: number }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
+          + "{ maxParallelRuns: number }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -195,6 +205,21 @@ export async function POST(request: Request) {
   }
   if (typeof fields.defaultDirectory === "string" && fields.defaultDirectory.length > MAX_DIRECTORY_CHARS) {
     return NextResponse.json({ error: "The folder path is too long.", kind: "invalid" }, { status: 400 });
+  }
+  // Checked BEFORE the first setter runs, the way the folder length above is.
+  // The setters below apply one at a time, so a value refused halfway through
+  // answers 400 over settings that have already been saved — a body carrying
+  // both `effort` and a runs-at-once number this box does not offer would move
+  // the effort and then report a failure. The setter keeps its own throw: it is
+  // the library's door, and the MCP path does not come through here.
+  if (hasMaxParallelRuns
+    && (!Number.isInteger(fields.maxParallelRuns)
+      || (fields.maxParallelRuns as number) < MIN_MAX_PARALLEL_RUNS
+      || (fields.maxParallelRuns as number) > MAX_MAX_PARALLEL_RUNS)) {
+    return NextResponse.json(
+      { error: `The number of runs at once must be a whole number between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`, kind: "invalid" },
+      { status: 400 },
+    );
   }
 
   try {
@@ -256,6 +281,18 @@ export async function POST(request: Request) {
     if (hasCompletionAttempts) {
       const saved = await setCompletionAttempts(fields.completionAttempts);
       console.error(`[coding-agent] attempts at a run's deliverable set to ${saved} by the owner`);
+    }
+    if (hasMaxParallelRuns) {
+      await setMaxParallelRuns(fields.maxParallelRuns);
+      // The number is deliberately NOT in the line. It is a whole number
+      // between 1 and 4 by the time it is saved — the setter throws `invalid`
+      // for anything else — but CodeQL cannot see that, and it does not
+      // recognise `logSafe` as a sanitiser either, so `js/log-injection`
+      // stands over any shape that carries the request's value into the log.
+      // The answer this route returns is the re-read status, which says the
+      // saved number, and `data/config.json` holds it; the log line is here to
+      // record that the owner changed it, which it still does.
+      console.error("[coding-agent] the number of coding runs at once was changed by the owner");
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);

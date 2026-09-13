@@ -951,6 +951,12 @@ export const ja: Record<string, string> = {
   "codingAgent.completionAttemptsLabel": "成果物への試行回数",
   "codingAgent.completionAttemptsHint": "実行が「完了」と数えられるのは、出すべきものが実際にそろったときだけです—アシスタントが挙げたファイル、またはプルリクエストが有効ならプルリクエストです。そろっていなければ、ClawBox は何が足りないかを伝えて同じセッションのまま実行を続けます。実行自身の最初の一度も 1 回の試行として数えます。",
   "codingAgent.completionAttemptsFailed": "試行回数を変更できませんでした。",
+  "codingAgent.maxParallelRunsLabel": "同時に動かす実行の数",
+  "codingAgent.maxParallelRunsHint": "git プロジェクトでの実行は、そのプロジェクトの自分専用のコピーで、自分専用のブランチの上で作業します。互いの書きかけのファイルを上書きすることはもうありません。git リポジトリではないフォルダにはコピーがなく、そこでは今までどおり一度に一つだけ実行されます。いくつが妥当かはこの ClawBox のメモリ次第で、2 なら余裕があり、小さなボードでは 4 は多めです。",
+  "codingAgent.maxParallelRunsFailed": "同時に動かせる実行の数を変更できませんでした。",
+  "codingAgent.worktreeKept": "この実行専用のコピーはまだディスクに残っています。作業内容はブランチ {branch} にあるので、コピーを削除しても失われません。",
+  "codingAgent.worktreeRemove": "コピーを削除",
+  "codingAgent.worktreeRemoveFailed": "この実行のプロジェクトのコピーを削除できませんでした。",
 
   "codingAgent.wizardTitle": "コーディングエージェントの設定",
   "codingAgent.wizardIntro": "コーディングエージェントを使うと、アシスタントがタスク全体をこのボックス上の Claude Code に任せられます。指定した 1 つのフォルダー内でファイルを読み書きし、コマンドを実行して、結果を報告します。設定は 4 ステップです。",
