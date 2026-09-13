@@ -389,14 +389,24 @@ export async function POST(request: Request): Promise<NextResponse> {
     const entry = await recordProjectDeploy(scope, deploy);
     // And on the RUN, when there is one: the same deployment, followed by the
     // watcher that already draws building → ready → failed on a run's card.
+    //
+    // It CANNOT be allowed to fail the answer. By this line the deployment is
+    // real and building on somebody's account; a 500 here would have the caller
+    // retry and deploy it a second time, which for `production` means building
+    // a live domain twice because a disk write on the Jetson hiccupped. The
+    // project record above is what the card reads either way.
     if (runId) {
-      recordManualDeployment(runId, {
-        deployment: made.deployment,
-        projectId: made.projectId,
-        teamId: made.teamId,
-        target,
-        branch: made.gitRef,
-      });
+      try {
+        recordManualDeployment(runId, {
+          deployment: made.deployment,
+          projectId: made.projectId,
+          teamId: made.teamId,
+          target,
+          branch: made.gitRef,
+        });
+      } catch (err) {
+        console.error(`[vercel-deploy] ${runId} not recorded on the run:`, err instanceof Error ? err.message : err);
+      }
     }
     return NextResponse.json({
       ok: true,

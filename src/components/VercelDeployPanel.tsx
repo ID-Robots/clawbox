@@ -25,7 +25,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BTN_DANGER, BTN_SECONDARY, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
-import { isProjectDeployPending, type DeployTarget, type ProjectDeploy, type VercelPhase } from "@/lib/vercel-state";
+import {
+  isProjectDeployPending,
+  VERCEL_POLL_INTERVAL_MS,
+  type DeployTarget,
+  type ProjectDeploy,
+  type VercelPhase,
+} from "@/lib/vercel-state";
 
 /** What the route answers. */
 export interface DeployPayload {
@@ -67,8 +73,16 @@ const PHASE_TONE: Record<VercelPhase, string> = {
   abandoned: "text-amber-300",
 };
 
-/** How often the panel asks what became of a deployment that is still building. */
-const POLL_MS = 5_000;
+/**
+ * How often the panel asks what became of a deployment that is still building.
+ *
+ * The SAME number the run watcher polls Vercel on, imported rather than chosen
+ * again: it is one fact — how often this box asks another company's API about a
+ * build — and two of them drift into a card that costs more than the watcher it
+ * sits beside. Only while a deployment is pending and only while the card is
+ * open, so a project page nobody is looking at costs nothing.
+ */
+const POLL_MS = VERCEL_POLL_INTERVAL_MS;
 
 export default function VercelDeployPanel({ query, t, runId, compact, onDeployed }: VercelDeployPanelProps) {
   const [data, setData] = useState<DeployPayload | null>(null);

@@ -265,6 +265,18 @@ describe("a deploy pressed on a run", () => {
   });
 });
 
+describe("a deployment that is already real", () => {
+  it("still answers 200 when the RUN record could not be written", async () => {
+    // By that line the deployment is building on somebody's account. A 500
+    // here would have the caller retry and deploy it a second time — for
+    // production, building a live domain twice because a disk write hiccupped.
+    recordManualDeployment.mockImplementation(() => { throw new Error("disk full"); });
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { target: "preview", runId: "run-1" } }));
+    expect(res.status).toBe(200);
+    expect(recordProjectDeploy).toHaveBeenCalled();
+  });
+});
+
 describe("what Vercel refused", () => {
   it("is a 502 with Vercel's own kind, not a 500", async () => {
     deployProject.mockResolvedValue({ ok: false, code: "auth", detail: "insufficient scope" });
