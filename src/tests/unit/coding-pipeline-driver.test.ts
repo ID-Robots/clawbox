@@ -655,3 +655,19 @@ describe("what an improvement lap is told", () => {
     expect(stdinLog().filter((s) => s.includes("delivery pipeline sent this work back"))).toHaveLength(0);
   });
 });
+
+describe("only one watcher on a run's deployment", () => {
+  it("does not arm the git-integration watch beside a live pipeline", async () => {
+    installHarness();
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "waiting_owner");
+    // The one deployment on the record is the PIPELINE's own, not a watch
+    // armed by the pull-request step for Vercel's git integration.
+    expect(runDeployment).toHaveBeenCalledTimes(1);
+    expect(run.vercel?.deploymentId).toBe("dpl_1");
+    expect(run.vercel?.phase).toBe("ready");
+  });
+});

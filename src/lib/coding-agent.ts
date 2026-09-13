@@ -6855,6 +6855,13 @@ async function startDeployWatch(runId: string): Promise<void> {
   try {
     const run = loadRuns().find((r) => r.id === runId);
     if (!run || run.vercel) return;
+    // A DELIVERY PIPELINE deploys this work itself, a moment from now, and
+    // records THAT deployment on the same `run.vercel` field. Two watchers
+    // there is not a duplicate, it is a wrong answer: whichever settles first
+    // closes the pipeline's deploy stage, so Vercel's own git integration
+    // finding nothing to build inside its grace period would fail a stage
+    // whose deployment had not been made yet.
+    if (isPipelineLive(run.pipeline)) return;
     const scope = await projectScopeFor(run);
     if (!scope) return;
     const link = await readVercelLink(scope);
