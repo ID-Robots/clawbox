@@ -46,6 +46,7 @@
 
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import { BOX_SCOPE, isValidSecretScope } from "@/lib/project-secrets";
+import { readProjectSwitch, setProjectSwitch } from "@/lib/project-switch";
 import {
   isDeployTarget,
   isVercelPhase,
@@ -317,32 +318,18 @@ export function productionAllowance(entry: ProjectDeployEntry | null, now = Date
  * must fail in too — the reasoning `clawbox_improvement_program` is written
  * with: every failure of this read has to fail towards the agent not being able
  * to ship to production.
+ *
+ * The behaviour itself lives in ./project-switch, shared with the delivery
+ * pipeline's own per-project switch: two standing permissions that must fail
+ * the same way cannot be two implementations of the same paragraph.
  */
-export async function readAutoProduction(scope: string | null | undefined): Promise<boolean> {
-  if (typeof scope !== "string" || !scope) return false;
-  const raw = await configGet(VERCEL_AUTO_PRODUCTION_CONFIG_KEY);
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
-  if (!Object.prototype.hasOwnProperty.call(raw, scope)) return false;
-  return (raw as Record<string, unknown>)[scope] === true;
+export function readAutoProduction(scope: string | null | undefined): Promise<boolean> {
+  return readProjectSwitch(VERCEL_AUTO_PRODUCTION_CONFIG_KEY, scope);
 }
 
 /** Turn it on or off for one project. Answers what it now is. */
 export function setAutoProduction(scope: string, enabled: boolean): Promise<boolean> {
-  return queue(async () => {
-    const raw = await configGet(VERCEL_AUTO_PRODUCTION_CONFIG_KEY);
-    const before = typeof raw === "object" && raw !== null && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : {};
-    const next = empty() as Record<string, unknown>;
-    for (const [key, value] of Object.entries(before)) {
-      // Only the trues are kept: an "off" is the absence of an entry, so the
-      // stored map cannot grow one row per project the owner ever looked at.
-      if (key !== BOX_SCOPE && key !== scope && isValidSecretScope(key) && value === true) next[key] = true;
-    }
-    if (enabled) next[scope] = true;
-    await configSet(VERCEL_AUTO_PRODUCTION_CONFIG_KEY, next);
-    return enabled;
-  });
+  return setProjectSwitch(VERCEL_AUTO_PRODUCTION_CONFIG_KEY, scope, enabled);
 }
 
 /** A fresh record for a deployment that has just been created. */

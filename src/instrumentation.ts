@@ -309,6 +309,17 @@ export async function register() {
         } catch (err) {
           console.error('[instrumentation] Could not resume the pull request watches:', err instanceof Error ? err.message : err)
         }
+        // Delivery pipelines the restart interrupted. AFTER the two above, and
+        // deliberately doing less than either: a stage waiting on a run or on a
+        // deployment is picked back up by the reconciliation and the deployment
+        // watches respectively, so what is left is a verification that was in
+        // flight and a stage nothing at all is behind. Its own try, so one boot
+        // step that throws does not take an unrelated one with it.
+        try {
+          codingAgent.resumePipelines()
+        } catch (err) {
+          console.error('[instrumentation] Could not resume the delivery pipelines:', err instanceof Error ? err.message : err)
+        }
       })
   } catch (err) {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)

@@ -58,6 +58,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     reviewLoopOf: null,
     vercel: null,
     vercelFixOf: null,
+    pipeline: null,
     team: null,
     readOnly: false,
     extraBrief: null,
