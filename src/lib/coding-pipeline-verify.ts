@@ -477,11 +477,17 @@ export async function verifyDeployment(input: VerifyInput): Promise<PipelineVeri
  * wrong" it spends the owner's improvement rounds asking a coding harness to
  * fix a setting in somebody's Vercel account.
  *
- * The signal is deliberately narrow: the address LEFT the deployment's own
- * origin and landed on Vercel's. A deployment that redirects to its own custom
- * domain, or anywhere else, is still checked as before — only Vercel's own host
- * means "this box was never shown the page".
+ * The signal is deliberately narrow, and narrow in TWO ways rather than one:
+ * the address LEFT the deployment's own origin, AND it landed on the sign-in
+ * page Vercel's protection actually sends people to (`vercel.com/login` or
+ * `vercel.com/sso-api`). A deployment that redirects to its own custom domain,
+ * or to anything else on vercel.com that is not that gate, is still fetched and
+ * judged on its merits — `blocked` ends a pipeline, so it is the one verdict
+ * that must not be reached by resemblance.
  */
+const PROTECTION_HOSTS = new Set(["vercel.com", "www.vercel.com"]);
+const PROTECTION_PATHS = ["/login", "/sso-api"];
+
 export function protectionWall(requested: string, landedOn: string): string | null {
   let asked: URL;
   let landed: URL;
@@ -492,9 +498,12 @@ export function protectionWall(requested: string, landedOn: string): string | nu
     return null;
   }
   if (landed.origin === asked.origin) return null;
-  const host = landed.hostname.toLowerCase();
-  if (host !== "vercel.com" && !host.endsWith(".vercel.com")) return null;
-  return `That deployment is behind Vercel's Deployment Protection: ${asked.origin} redirected to Vercel's own login page, so this ClawBox was never shown the deployed page. That is a setting on the Vercel project rather than anything in this work — turn protection off for preview deployments, or give this ClawBox a bypass — so the pipeline stopped here instead of sending the work back.`;
+  if (!PROTECTION_HOSTS.has(landed.hostname.toLowerCase())) return null;
+  // The path, by SEGMENT: `/login` and `/login/sso` are the gate, `/logins-are-
+  // fun` is a page like any other.
+  const path = landed.pathname.replace(/\/+$/, "").toLowerCase() || "/";
+  if (!PROTECTION_PATHS.some((gate) => path === gate || path.startsWith(`${gate}/`))) return null;
+  return `That deployment is behind Vercel's Deployment Protection: ${asked.origin} redirected to Vercel's own sign-in page (${landed.origin}${landed.pathname}), so this ClawBox was never shown the deployed page. That is a setting on the Vercel project rather than anything in this work — turn protection off for preview deployments, or give this ClawBox a bypass — so the pipeline stopped here instead of sending the work back.`;
 }
 
 /** One line for the run's progress feed and the stage's evidence. */
