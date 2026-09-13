@@ -26,11 +26,17 @@
  *
  * SYMLINKS ARE NEVER FOLLOWED. A link in the folder is skipped, not resolved:
  * a run can write one, and `data/` — which holds this box's credential stores —
- * is one `ln -s` away from being uploaded to the internet otherwise. The walk
- * skips one by its dirent and never leaves the folder it was given, and every
- * file is read through ONE descriptor opened `O_NOFOLLOW`, which is what
- * refuses a link in git's listing — and what closes the window a path checked
- * once and opened again leaves for a run still working in that folder.
+ * is one `ln -s` away from being uploaded to the internet otherwise. Three
+ * things hold that, and each covers what the others cannot:
+ *
+ *  - the walk skips a link by its dirent and never leaves the folder it was
+ *    given;
+ *  - the path is contained in TWO stages, the `coding-agent-media.ts` pattern:
+ *    as typed, and then by the realpath'd PARENT — which is what catches a
+ *    FOLDER symlink planted inside the project;
+ *  - and every file is read through ONE descriptor opened `O_NOFOLLOW`, which
+ *    refuses a link in git's listing and closes the window that checking a path
+ *    and then opening it again leaves for a run still working in that folder.
  */
 
 import crypto from "crypto";
@@ -170,12 +176,46 @@ export async function collectDeployFiles(dir: string): Promise<CollectResult> {
   const files: DeployFileBody[] = [];
   const skipped: string[] = [];
   let bytes = 0;
+  const root = path.resolve(dir);
+  // The folder's own real location, resolved once: every parent below is
+  // compared with THIS rather than with the name the caller typed.
+  let realRoot: string;
+  try {
+    realRoot = await fsp.realpath(root);
+  } catch (err) {
+    return { ok: false, code: "unreadable", detail: err instanceof Error ? err.message : String(err) };
+  }
+  /** Parents already vetted — one realpath per directory, not per file. */
+  const vettedParents = new Map<string, boolean>();
+
   for (const rel of names) {
-    // `path.resolve` then a containment check, the pattern every path-taking
-    // module here uses: git prints what git has, and a repository can hold a
-    // path with `..` in it only if somebody put one there on purpose.
+    // TWO STAGES, the `coding-agent-media.ts` pattern. First the path AS
+    // TYPED: git prints what git has, and a repository can hold a path with
+    // `..` in it only if somebody put one there on purpose.
     const abs = path.resolve(dir, rel);
-    if (abs !== path.resolve(dir) && !abs.startsWith(path.resolve(dir) + path.sep)) {
+    if (abs !== root && !abs.startsWith(root + path.sep)) {
+      skipped.push(rel);
+      continue;
+    }
+    // Then the realpath'd PARENT. `O_NOFOLLOW` below refuses a link at the
+    // FINAL component only, so a folder symlink planted inside the project —
+    // which a run can write — would otherwise satisfy the lexical check above
+    // while the bytes came from wherever it points. Neither the walk (which
+    // skips a link by its dirent) nor git (which records a link as a blob
+    // rather than descending into it) produces such a path today; this is the
+    // second stage that means it does not have to stay true.
+    const parent = path.dirname(abs);
+    let parentOk = vettedParents.get(parent);
+    if (parentOk === undefined) {
+      try {
+        const realParent = await fsp.realpath(parent);
+        parentOk = realParent === realRoot || realParent.startsWith(realRoot + path.sep);
+      } catch {
+        parentOk = false;
+      }
+      vettedParents.set(parent, parentOk);
+    }
+    if (!parentOk) {
       skipped.push(rel);
       continue;
     }

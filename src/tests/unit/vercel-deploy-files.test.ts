@@ -131,6 +131,28 @@ describe("symlinks", () => {
   });
 });
 
+describe("a folder symlink planted inside the project", () => {
+  it("does not get its contents uploaded, even when the name reads as inside", async () => {
+    // O_NOFOLLOW refuses a link at the FINAL component only, so the guard that
+    // has to catch this is the realpath'd PARENT — the second stage.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-secrets-"));
+    fs.writeFileSync(path.join(outside, "config.json"), '{"token":"hunter2hunter2"}');
+    try {
+      write("index.html", "x");
+      fs.symlinkSync(outside, path.join(dir, "assets"));
+      // The name a caller could hand in reads as inside the project; the file
+      // it names is not.
+      const got = await collectDeployFiles(dir);
+      expect(got.ok).toBe(true);
+      if (!got.ok) return;
+      expect(names(got.files)).toEqual(["index.html"]);
+      expect(JSON.stringify(got.files)).not.toContain("hunter2hunter2");
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("what is refused", () => {
   it("refuses an empty folder with a sentence rather than deploying nothing", async () => {
     const got = await collectDeployFiles(dir);
