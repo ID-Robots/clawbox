@@ -9,11 +9,31 @@
  * shown, and the shape of that disagreement is a dialog that promises one thing
  * and a handler that does another.
  *
- * NOTHING HERE IS IRREVERSIBLE. There is no `rm -rf` in this file. A removed
- * project is MOVED — into `data/deleted-projects/<folder>--<timestamp>` — and
- * the answer says where it went, so the owner can carry it back with `mv` if the
- * click was a mistake. The whole point is that the destructive-sounding button
- * is not actually destructive for a month: see RETENTION below.
+ * NOTHING HERE IS IRREVERSIBLE. There is no `rm -rf` of a project in this file.
+ * A removed project is MOVED — into `<its own root>/.deleted-projects/<folder>--<timestamp>`
+ * — and the answer says where it went, so the owner can carry it back with `mv`
+ * if the click was a mistake. The whole point is that the destructive-sounding
+ * button is not actually destructive for a month: see RETENTION below.
+ *
+ * THE TRASH SITS IN THE PROJECT'S OWN ROOT, and that is a SAFETY property
+ * rather than a filing preference. A project is a folder directly inside its
+ * root, so a folder beside it in that same root is on the same filesystem as it
+ * — which makes `rename` atomic, and the move therefore all-or-nothing.
+ *
+ * When the trash lived under `data/` that was not true: the owner's project
+ * folder can be a different mount (a USB disk, an NFS home), `rename` answered
+ * EXDEV, and the fallback was copy-then-remove — a recursive copy with a live
+ * window in the middle. An audit lost a file down exactly that window: a run
+ * started during the copy and wrote into the original after that part of it had
+ * been copied, so the remove took the only version there was. The fallback is
+ * GONE, and with it the fifty lines that existed to make a half-finished copy
+ * survivable. A `rename` that still fails is now a refusal with the project
+ * untouched (`trash_failed`); only a project folder that is ITSELF a mount
+ * point can produce one, and refusing there loses nothing.
+ *
+ * It is a DOT folder because `readFolderNames` skips those: the trash must not
+ * come back as a row in the projects listing with a Delete button of its own.
+ * `resolveProjectTarget` refuses the name outright for the same reason.
  *
  * THE TWO ROOTS, and why the check is "DIRECTLY inside". A project is a folder
  * directly inside the owner's project folder, or a code project under
@@ -28,7 +48,10 @@
  * RETENTION IS TWO BOUNDS, AND BOTH ARE THE OWNER'S BUSINESS. A folder in the
  * trash is kept for UP TO thirty days, and only while it is among the
  * `MAX_TRASH_ENTRIES` (10) most recently removed. The prune runs after each
- * successful delete, oldest first, and applies both.
+ * successful delete, oldest first, and applies both. The count is counted ACROSS
+ * the roots, not per root: "this box keeps the 10 most recently removed
+ * projects" is what the dialog says, and a per-root bound would make that
+ * sentence wrong by a factor of the number of roots.
  *
  * The count bound is not housekeeping detail: it is the bound that makes "kept
  * for 30 days" FALSE. An eleventh removal deletes the oldest for good, possibly
@@ -56,7 +79,7 @@ import { gitIn, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import type { ChildResult } from "@/lib/child-run";
 import { isLive } from "@/lib/coding-agent-status";
 import { getDefaultDirectory, listRuns, projectDirectoryOf, type CodingProjectKind, type CodingRun } from "@/lib/coding-agent";
-import { beginProjectRemoval } from "@/lib/coding-project-removal-lock";
+import { beginProjectRemoval, runStartingIn } from "@/lib/coding-project-removal-lock";
 import { deleteVercelLink, readVercelLink } from "@/lib/vercel-link";
 import { deleteSecretsForScope, listSecrets } from "@/lib/project-secrets";
 
@@ -119,21 +142,6 @@ export { beginProjectRemoval, isProjectBeingRemoved } from "@/lib/coding-project
 
 // ─── The roots ───────────────────────────────────────────────────────────────
 
-/** Where code projects live. The same join `listProjects` makes. */
-export function codeProjectsRoot(): string {
-  return path.join(DATA_DIR, "code-projects");
-}
-
-/**
- * ClawBox's own checkout. `DATA_DIR` is `<clawbox>/data`, so its parent is the
- * product's own repository — the same derivation `protectedCheckout()` makes in
- * coding-agent.ts for the worktree guard, spelled again here rather than
- * exported from a 10,000-line module for one line.
- */
-export function protectedCheckoutRoot(): string {
-  return path.dirname(DATA_DIR);
-}
-
 /** The two places a project may be, and the one place it may never be. */
 export interface ProjectRoots {
   /** The owner's project folder, or null when none is set. */
@@ -145,8 +153,13 @@ export interface ProjectRoots {
 export async function projectRoots(): Promise<ProjectRoots> {
   return {
     ownerFolder: await getDefaultDirectory(),
-    codeProjects: codeProjectsRoot(),
-    checkout: protectedCheckoutRoot(),
+    // The same join `listProjects` makes.
+    codeProjects: path.join(DATA_DIR, "code-projects"),
+    // `DATA_DIR` is `<clawbox>/data`, so its parent is the product's own
+    // repository — the derivation `protectedCheckout()` makes in coding-agent.ts
+    // for the worktree guard, spelled again rather than exported from a
+    // 10,000-line module for one line.
+    checkout: path.dirname(DATA_DIR),
   };
 }
 
@@ -208,6 +221,14 @@ function requireFolderName(folder: unknown): string {
   if (!FOLDER_RE.test(name) || name === "." || name === "..") {
     throw new ProjectDeleteError("invalid", "A project is one folder name, not a path.");
   }
+  // The trash lives in the same root as the projects, so its own name is a
+  // folder directly inside a root and would otherwise pass every check below.
+  // Removing it would move the box's whole shelf of recoverable projects into
+  // itself. The listing never offers it (`readFolderNames` skips dot names);
+  // this is the floor under a caller that names it anyway.
+  if (name === TRASH_DIR_NAME) {
+    throw new ProjectDeleteError("invalid", "That is where this ClawBox keeps removed projects, not a project.");
+  }
   return name;
 }
 
@@ -219,6 +240,15 @@ export interface ProjectTarget {
   directory: string;
   /** The same folder with every symlink resolved. This is what gets moved. */
   real: string;
+  /**
+   * The root this project sits directly inside — carried rather than re-derived.
+   *
+   * It is where the trash goes, and therefore the whole of the same-filesystem
+   * guarantee. Settled HERE, by the one function that has already proved the
+   * folder is directly inside it, so no later step has to ask again and get a
+   * different answer.
+   */
+  root: string;
 }
 
 /**
@@ -340,7 +370,7 @@ export async function resolveProjectTarget(
     );
   }
 
-  return { folder, kind: found.kind, directory: found.directory, real };
+  return { folder, kind: found.kind, directory: found.directory, real, root: base };
 }
 
 // ─── Is anybody still in there? ──────────────────────────────────────────────
@@ -608,9 +638,56 @@ export async function directorySize(directory: string): Promise<DirectorySize> {
 
 // ─── The trash ───────────────────────────────────────────────────────────────
 
-/** Where a removed project goes. Under `data/`, like every other store. */
-export function projectTrashDir(): string {
-  return path.join(DATA_DIR, "deleted-projects");
+/**
+ * The trash folder's name, inside whichever root the project lived in.
+ *
+ * A DOT name, so `readFolderNames` (coding-agent.ts) leaves it out of the
+ * projects listing — otherwise the owner's deleted projects would arrive back
+ * as a project called `.deleted-projects` with a Delete button on it.
+ */
+export const TRASH_DIR_NAME = ".deleted-projects";
+
+/**
+ * Where a removed project goes: beside it, in its own root.
+ *
+ * Same root means same filesystem means an atomic `rename` — see the header.
+ * The root, not `DATA_DIR`, is the whole point of the argument.
+ */
+export function projectTrashDir(root: string): string {
+  return path.join(path.resolve(root), TRASH_DIR_NAME);
+}
+
+/** Every trash folder on this box — one per root that exists. */
+function trashDirs(roots: ProjectRoots): string[] {
+  return [roots.ownerFolder, roots.codeProjects]
+    .filter((r): r is string => typeof r === "string" && !!r)
+    .map(projectTrashDir);
+}
+
+/**
+ * The trash folders to read, one per PHYSICAL folder.
+ *
+ * DEDUPED, and not as defensive tidying. The two roots can be the same folder:
+ * config.json is a file the owner can edit, so the project folder can be
+ * pointed at `data/code-projects` by hand — or linked there — which is the
+ * arrangement `listProjects` already defends against by describing each real
+ * folder once. Reading one trash twice counted every entry twice: the shelf
+ * reported full at half the stated bound, so `trash_full` refused early and the
+ * prune took recoverable projects BEFORE their time. That is the same consent
+ * defect the count bound exists to state, arriving by the back door.
+ *
+ * By REAL path, like the listing's own dedupe, so a link between the roots
+ * counts once too. A trash that does not exist yet cannot be resolved and falls
+ * back to its own path — two of those are either the same string, and dedupe,
+ * or two genuinely different folders that are both empty.
+ */
+async function physicalTrashDirs(roots: ProjectRoots): Promise<string[]> {
+  const byReal = new Map<string, string>();
+  for (const dir of trashDirs(roots)) {
+    const real = await fs.promises.realpath(dir).catch(() => dir);
+    if (!byReal.has(real)) byReal.set(real, dir);
+  }
+  return [...byReal.values()];
 }
 
 /** How long a removed project is kept before the prune takes it. */
@@ -641,31 +718,21 @@ export function trashEntryTime(name: string): number | null {
 }
 
 /**
- * Move the folder into the trash and answer where it went.
+ * Move the folder into its root's trash and answer where it went.
  *
- * `rename` first, which is atomic and instant on one filesystem. The owner's
- * project folder can perfectly well be a different mount from `data/` (a USB
- * disk, an NFS home), and `rename` answers EXDEV for that — so the fallback is
- * copy-then-remove, and its failure mode is handled in the safe direction: a
- * copy that did not finish is cleaned up and the refusal is raised with the
- * ORIGINAL still in place. A half-copied project that reported success is the
- * one outcome this function must never produce.
+ * ONE `rename`, and nothing else. The trash is a folder in the same root as the
+ * project, so the two are on the same filesystem and the rename is atomic: the
+ * project is either where it was or where it went, never spread across both and
+ * never half of each.
+ *
+ * There is deliberately NO copy-then-remove fallback. It existed because the
+ * trash used to live under `data/`, which can be a different mount from the
+ * owner's project folder — and it was the one path in this feature that could
+ * lose a file outright (see the header). A `rename` that fails now is refused
+ * with the project untouched, which is the honest answer and costs nothing.
  */
-export async function moveProjectToTrash(real: string, at: number): Promise<{ trashPath: string; trashName: string }> {
-  const trash = projectTrashDir();
-  // A folder cannot be moved inside itself, and the trash is under `data/` — so
-  // a target that HOLDS `data/` would be asking for exactly that. The checkout
-  // guard in `resolveProjectTarget` catches every route to this that a project
-  // root can produce; this is the floor under it, because `moveProjectToTrash`
-  // is exported and the alternative to refusing is a `rename` that answers
-  // EINVAL — or, where the trash sits on its own mount, an `fs.cp` copying a
-  // folder into its own descendant until something gives.
-  if (contains(path.resolve(real), trash)) {
-    throw new ProjectDeleteError(
-      "protected_checkout",
-      "That folder holds this ClawBox's own data, so it cannot be moved aside into it.",
-    );
-  }
+export async function moveProjectToTrash(real: string, root: string, at: number): Promise<{ trashPath: string; trashName: string }> {
+  const trash = projectTrashDir(root);
   await fs.promises.mkdir(trash, { recursive: true }).catch(() => {});
   const base = path.basename(real);
   const stamp = stampFor(at);
@@ -682,49 +749,14 @@ export async function moveProjectToTrash(real: string, at: number): Promise<{ tr
 
   try {
     await fs.promises.rename(real, trashPath);
-    return { trashPath, trashName };
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "EXDEV") {
-      throw new ProjectDeleteError(
-        "trash_failed",
-        `This ClawBox could not move that folder aside: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  // THE TWO HALVES OF THE FALLBACK ARE CAUGHT SEPARATELY, and that is the point
-  // of the shape below rather than one `try` around both.
-  //
-  // A failed COPY is clean: nothing has left the project folder, so the partial
-  // copy is swept up and the refusal says nothing was removed — which is true.
-  try {
-    // `verbatimSymlinks`, so a link inside the project is copied as the link it
-    // is rather than as a second copy of whatever it points at — which is both
-    // what "put this folder back" means and what stops a link to `/` turning a
-    // 4 MB project into a full disk.
-    await fs.promises.cp(real, trashPath, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
-  } catch (err) {
-    await fs.promises.rm(trashPath, { recursive: true, force: true }).catch(() => {});
+    // EXDEV lands here like any other errno. The only arrangement that still
+    // produces it is a project folder that is itself a mount point, and the
+    // right answer to that is the same as for a permission error: say so, and
+    // leave the folder exactly where it is.
     throw new ProjectDeleteError(
       "trash_failed",
       `This ClawBox could not move that folder aside, so nothing was removed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  // A failed REMOVE is not. `fs.rm` deletes as it walks — the same fact
-  // `apps/uninstall` words for its own skill directory — so a mount point, a
-  // sub-folder this process cannot write, or an NFS hiccup part-way leaves the
-  // original GUTTED and the copy beside it the only whole one there is. Sweeping
-  // the copy up here, as the single `try` around both used to, would delete the
-  // only surviving copy and then report "nothing was removed". So the copy is
-  // KEPT and named, and the refusal says what actually happened.
-  try {
-    await fs.promises.rm(real, { recursive: true, force: true });
-  } catch (err) {
-    throw new ProjectDeleteError(
-      "trash_failed",
-      `This ClawBox copied ${path.basename(real)} to ${trashPath} but could not remove the original, which may now be incomplete.`
-      + ` The copy is whole and has been kept. (${err instanceof Error ? err.message : String(err)})`,
     );
   }
   return { trashPath, trashName };
@@ -734,6 +766,8 @@ export async function moveProjectToTrash(real: string, at: number): Promise<{ tr
 interface TrashEntry {
   name: string;
   at: number;
+  /** Which root's trash it is in — there is one per root, and the bounds span both. */
+  dir: string;
 }
 
 /** What a prune would take, and WHY — the two reasons said apart. */
@@ -757,16 +791,6 @@ export interface TrashPruneOutcome extends TrashPrunePlan {
   removed: string[];
 }
 
-/** The trash as it stands, oldest first, entries this module named and no others. */
-async function readTrashEntries(): Promise<TrashEntry[]> {
-  const entries = await fs.promises.readdir(projectTrashDir(), { withFileTypes: true }).catch(() => []);
-  return entries
-    .filter((e) => e.isDirectory())
-    .map((e) => ({ name: e.name, at: trashEntryTime(e.name) }))
-    .filter((e): e is TrashEntry => e.at !== null)
-    .sort((a, b) => a.at - b.at);
-}
-
 /**
  * Which entries the rule takes, given the shelf and how many more are arriving.
  *
@@ -779,28 +803,47 @@ async function readTrashEntries(): Promise<TrashEntry[]> {
  * Age first, then the count bound on whatever is left, oldest first. An arriving
  * entry is by definition the newest, so it is never among the early ones.
  */
-export function planTrashPrune(entries: readonly TrashEntry[], now: number, incoming = 0): TrashPrunePlan {
+function selectTrashPrune(entries: readonly TrashEntry[], now: number, incoming: number): { expired: TrashEntry[]; early: TrashEntry[] } {
   const expired = entries.filter((e) => now - e.at >= TRASH_RETENTION_MS);
-  const expiredNames = new Set(expired.map((e) => e.name));
-  const keeping = entries.filter((e) => !expiredNames.has(e.name));
+  // By IDENTITY and not by name: two roots can each hold a `shop--<stamp>`, and
+  // a name-keyed set would drop one of them out of the count.
+  const doomed = new Set<TrashEntry>(expired);
+  const keeping = entries.filter((e) => !doomed.has(e));
   const overflow = Math.max(0, keeping.length + incoming - MAX_TRASH_ENTRIES);
-  return {
-    expired: expired.map((e) => e.name),
-    early: keeping.slice(0, overflow).map((e) => e.name),
-  };
+  return { expired, early: keeping.slice(0, overflow) };
+}
+
+/**
+ * The trash as it stands, oldest first, entries this module named and no others.
+ *
+ * ACROSS EVERY ROOT, because the count bound the owner is promised is one
+ * number for the box. Reading only one root would let a box with two roots keep
+ * twice what the dialog says it keeps.
+ */
+async function readTrashEntries(roots: ProjectRoots): Promise<TrashEntry[]> {
+  const perDir = await Promise.all((await physicalTrashDirs(roots)).map(async (dir) => {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+    return entries
+      .filter((e) => e.isDirectory())
+      .map((e) => ({ name: e.name, at: trashEntryTime(e.name), dir }));
+  }));
+  return perDir
+    .flat()
+    .filter((e): e is TrashEntry => e.at !== null)
+    .sort((a, b) => a.at - b.at);
 }
 
 /**
  * What removing one more project would take out of the trash early.
  *
- * The preview's half of `planTrashPrune`. Answers the names alone, because that
- * is what the dialog has to put in front of the owner before they agree to
+ * The preview's half of the arithmetic above. Answers the names alone, because
+ * that is what the dialog has to put in front of the owner before they agree to
  * anything — the count bound is not a detail of housekeeping when it is the
  * thing that makes "kept for 30 days" untrue.
  */
-export async function trashPurgedByOneMore(now = Date.now()): Promise<{ count: number; early: string[] }> {
-  const entries = await readTrashEntries();
-  return { count: entries.length, early: planTrashPrune(entries, now, 1).early };
+export async function trashPurgedByOneMore(roots: ProjectRoots, now = Date.now()): Promise<{ count: number; early: string[] }> {
+  const entries = await readTrashEntries(roots);
+  return { count: entries.length, early: selectTrashPrune(entries, now, 1).early.map((e) => e.name) };
 }
 
 /**
@@ -810,21 +853,24 @@ export async function trashPurgedByOneMore(now = Date.now()): Promise<{ count: n
  * the header. Never throws: a prune that could not run is not a reason to fail
  * the delete that has already happened.
  */
-export async function pruneProjectTrash(now = Date.now()): Promise<TrashPruneOutcome> {
-  const trash = projectTrashDir();
-  const plan = planTrashPrune(await readTrashEntries(), now);
+export async function pruneProjectTrash(roots: ProjectRoots, now = Date.now()): Promise<TrashPruneOutcome> {
+  const { expired, early } = selectTrashPrune(await readTrashEntries(roots), now, 0);
 
   const removed: string[] = [];
-  for (const name of [...plan.expired, ...plan.early]) {
+  for (const entry of [...expired, ...early]) {
     // This is the one `rm -r` in the file, and it is bounded three ways: the
-    // folder is inside the trash this module owns, it carries a name this module
+    // folder is inside a trash this module owns, it carries a name this module
     // wrote, and it is past one of the two bounds stated in the header.
-    const ok = await fs.promises.rm(path.join(trash, name), { recursive: true, force: true })
+    const ok = await fs.promises.rm(path.join(entry.dir, entry.name), { recursive: true, force: true })
       .then(() => true)
       .catch(() => false);
-    if (ok) removed.push(name);
+    if (ok) removed.push(entry.name);
   }
-  return { ...plan, removed: removed.sort() };
+  return {
+    expired: expired.map((e) => e.name),
+    early: early.map((e) => e.name),
+    removed: removed.sort(),
+  };
 }
 
 // ─── What the dialog is shown, and what the button does ──────────────────────
@@ -885,7 +931,7 @@ export async function previewProjectDelete(input: { folder: unknown; kind?: unkn
   ]);
   const liveRuns = liveRunsInProject(target);
   const runCount = listRuns().filter((run) => belongsToProject(run, target)).length;
-  const shelf = await trashPurgedByOneMore();
+  const shelf = await trashPurgedByOneMore(roots);
 
   return {
     folder: target.folder,
@@ -998,8 +1044,7 @@ export async function deleteProject(input: {
   // from here to the move is inside the claim.
   const release = beginProjectRemoval(target.real);
   try {
-    const live = liveRunsInProject(target);
-    if (live.length) throw new ProjectDeleteError("live_run", liveRunMessage(target.folder, live));
+    assertNobodyWorkingIn(target);
 
     const force = input.force === true;
     const unsaved = await unsavedWorkIn(target.real);
@@ -1009,20 +1054,18 @@ export async function deleteProject(input: {
     // rather than warned about: those folders are inside the thirty days they
     // were promised, and the owner has to say yes to losing them by name.
     const deletedAt = typeof input.now === "number" && Number.isFinite(input.now) ? input.now : Date.now();
-    const shelf = await trashPurgedByOneMore(deletedAt);
+    const shelf = await trashPurgedByOneMore(roots, deletedAt);
     if (shelf.early.length && input.purgeOldest !== true) {
       throw new ProjectDeleteError("trash_full", trashFullMessage(shelf.early));
     }
 
     // THE LAST LOOK, immediately before the move and after every await above.
     // A run whose record landed while the git checks were running would not
-    // have been seen by the first check, and the copy-then-remove below is
-    // exactly where that costs a file.
-    const lateRuns = liveRunsInProject(target);
-    if (lateRuns.length) throw new ProjectDeleteError("live_run", liveRunMessage(target.folder, lateRuns));
+    // have been seen by the first check.
+    assertNobodyWorkingIn(target);
 
     const runsKept = listRuns().filter((run) => belongsToProject(run, target)).length;
-    const { trashPath, trashName } = await moveProjectToTrash(target.real, deletedAt);
+    const { trashPath, trashName } = await moveProjectToTrash(target.real, target.root, deletedAt);
 
     // ONLY AFTER THE MOVE LANDED. The link and the secrets are the folder's
     // references, and taking them down first would leave a project that is still
@@ -1039,7 +1082,7 @@ export async function deleteProject(input: {
     const sharedWith = await otherProjectWithSameScope(target, roots);
     const vercelLinkRemoved = sharedWith ? false : await deleteVercelLink(target.folder).catch(() => false);
     const secretsRemoved = sharedWith ? [] : await deleteSecretsForScope(target.folder).catch(() => [] as string[]);
-    const pruned = await pruneProjectTrash(deletedAt)
+    const pruned = await pruneProjectTrash(roots, deletedAt)
       .catch(() => ({ removed: [] as string[], expired: [] as string[], early: [] as string[] }));
 
     return {
@@ -1069,6 +1112,33 @@ export async function deleteProject(input: {
 }
 
 /**
+ * Refuse if anybody is working in this project — or is about to be.
+ *
+ * TWO QUESTIONS, and the second is the one an audit got past. `listRuns` knows
+ * about runs that have been WRITTEN to the store; it knows nothing about a run
+ * that cleared `assertDirectoryFree` a moment ago and is still several awaits
+ * from `insertRun`. That run has already been told it may have this folder, so
+ * a removal that only asked the store moved the project out from under it —
+ * and no amount of re-checking the store later would have found it, because it
+ * is not in the store yet. `runStartingIn` is the claim that start leaves
+ * behind; see coding-project-removal-lock.ts for why the two cannot miss each
+ * other.
+ *
+ * Both spellings of the folder are asked about, because a run records the
+ * directory it works in symlink-resolved and the listing shows it as typed.
+ */
+function assertNobodyWorkingIn(target: ProjectTarget): void {
+  const live = liveRunsInProject(target);
+  if (live.length) throw new ProjectDeleteError("live_run", liveRunMessage(target.folder, live));
+  if (runStartingIn(target.real) || runStartingIn(target.directory)) {
+    throw new ProjectDeleteError(
+      "live_run",
+      `A coding run is starting in ${target.folder} right now. Wait for it to appear, then stop it.`,
+    );
+  }
+}
+
+/**
  * The OTHER project that answers to the same secret scope, if there is one.
  *
  * A folder project and a code project may both be called `shop`, and
@@ -1081,7 +1151,14 @@ async function otherProjectWithSameScope(target: ProjectTarget, roots: ProjectRo
   if (!otherBase) return null;
   const candidate = path.join(path.resolve(otherBase), target.folder);
   if (path.resolve(candidate) === target.real) return null;
-  const entry = await fs.promises.lstat(candidate).catch(() => null);
+  // `stat` and not `lstat`: a link in the other root pointing at a real project
+  // folder is still a project the owner uses, and its secrets are still filed
+  // under this scope. Every error this can answer — no such entry, a dangling
+  // link, a loop — means "nothing of the sort is there", which is the same
+  // `null`. The direction of the doubt is deliberate: a false POSITIVE only
+  // leaves credentials in place, while a false negative deletes the working
+  // project's own.
+  const entry = await fs.promises.stat(candidate).catch(() => null);
   return entry?.isDirectory() ? candidate : null;
 }
 

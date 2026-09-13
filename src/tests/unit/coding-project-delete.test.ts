@@ -245,7 +245,7 @@ describe("the trash and its retention rule", () => {
     fs.writeFileSync(path.join(project, "index.html"), "hi");
 
     const at = Date.parse("2026-09-13T12:00:00.000Z");
-    const moved = await lib.moveProjectToTrash(project, at);
+    const moved = await lib.moveProjectToTrash(project, owner, at);
 
     expect(moved.trashName).toBe("shop--20260913T120000Z");
     expect(fs.existsSync(project)).toBe(false);
@@ -253,13 +253,19 @@ describe("the trash and its retention rule", () => {
     expect(lib.trashEntryTime(moved.trashName)).toBe(at);
   });
 
-  it("refuses to move a folder that holds the trash, rather than asking the kernel to", async () => {
-    // `moveProjectToTrash` is exported, so the checkout guard upstream is not
-    // the only way in. A folder holding `data/` would be a move into its own
-    // descendant; refused by name instead of as an errno.
-    expect(await refusal(() => lib.moveProjectToTrash(root, Date.parse("2026-09-13T12:00:00.000Z"))))
-      .toBe("protected_checkout");
-    expect(fs.existsSync(path.join(root, "data"))).toBe(true);
+  it("puts the trash in the project's OWN root, which is what makes the rename atomic", async () => {
+    // The whole safety argument of this module: a project is directly inside
+    // its root, so a folder beside it in that root is on the same filesystem,
+    // so `rename` cannot be a copy. If this ever moves back under `data/` the
+    // cross-device fallback — and the file it lost — come back with it.
+    const project = path.join(owner, "shop");
+    fs.mkdirSync(project);
+    const moved = await lib.moveProjectToTrash(project, owner, Date.parse("2026-09-13T12:00:00.000Z"));
+
+    expect(path.dirname(moved.trashPath)).toBe(lib.projectTrashDir(owner));
+    expect(path.dirname(path.dirname(moved.trashPath))).toBe(owner);
+    // Same filesystem, stated as the kernel sees it rather than as a hope.
+    expect(fs.statSync(moved.trashPath).dev).toBe(fs.statSync(owner).dev);
   });
 
   it("never writes over an entry that is already there", async () => {
@@ -268,52 +274,34 @@ describe("the trash and its retention rule", () => {
       const project = path.join(owner, "shop");
       fs.mkdirSync(project);
       fs.writeFileSync(path.join(project, "n"), String(n));
-      const moved = await lib.moveProjectToTrash(project, at);
+      const moved = await lib.moveProjectToTrash(project, owner, at);
       expect(fs.readFileSync(path.join(moved.trashPath, "n"), "utf8")).toBe(String(n));
     }
-    expect(fs.readdirSync(lib.projectTrashDir()).sort()).toEqual(["shop--20260913T120000Z", "shop-2--20260913T120000Z"]);
+    expect(fs.readdirSync(lib.projectTrashDir(owner)).sort()).toEqual(["shop--20260913T120000Z", "shop-2--20260913T120000Z"]);
   });
 
-  describe("the cross-device fallback", () => {
-    /** Force the EXDEV branch: a different mount is the only real way in. */
-    function renameFailsExdev() {
-      vi.spyOn(fs.promises, "rename").mockRejectedValue(Object.assign(new Error("EXDEV"), { code: "EXDEV" }));
-    }
+  it("refuses a rename it cannot do, leaving the project exactly where it was", async () => {
+    // There is no copy-then-remove any more. EXDEV — which only a project
+    // folder that is itself a mount point can still produce — is answered the
+    // same way as any other errno: nothing is removed, and the message says so.
+    // The old fallback is the exact path an audit lost a file down.
+    const project = path.join(owner, "shop");
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, "index.html"), "hi");
+    vi.spyOn(fs.promises, "rename").mockRejectedValue(Object.assign(new Error("EXDEV"), { code: "EXDEV" }));
+    const cp = vi.spyOn(fs.promises, "cp");
 
-    it("keeps the ORIGINAL when the copy fails, and sweeps the partial copy up", async () => {
-      const project = path.join(owner, "shop");
-      fs.mkdirSync(project);
-      fs.writeFileSync(path.join(project, "index.html"), "hi");
-      renameFailsExdev();
-      vi.spyOn(fs.promises, "cp").mockRejectedValue(new Error("ENOSPC: no space left on device"));
+    await expect(lib.moveProjectToTrash(project, owner, Date.parse("2026-09-13T12:00:00.000Z")))
+      .rejects.toMatchObject({ code: "trash_failed", message: expect.stringContaining("nothing was removed") });
+    expect(fs.readFileSync(path.join(project, "index.html"), "utf8")).toBe("hi");
+    expect(fs.readdirSync(lib.projectTrashDir(owner))).toEqual([]);
+    // The point of the change, not a detail of it: no copy is ever attempted.
+    expect(cp).not.toHaveBeenCalled();
+  });
 
-      await expect(lib.moveProjectToTrash(project, Date.parse("2026-09-13T12:00:00.000Z")))
-        .rejects.toMatchObject({ code: "trash_failed", message: expect.stringContaining("nothing was removed") });
-      expect(fs.readFileSync(path.join(project, "index.html"), "utf8")).toBe("hi");
-      expect(fs.readdirSync(lib.projectTrashDir())).toEqual([]);
-    });
-
-    it("keeps the COPY when the original cannot be removed, and says so", async () => {
-      // `fs.rm` deletes as it walks, so a remove that fails part-way leaves the
-      // original gutted and the copy the only whole one. Deleting the copy here
-      // — which one `try` around both halves did — loses the folder outright
-      // while reporting that nothing was removed.
-      const project = path.join(owner, "shop");
-      fs.mkdirSync(project);
-      fs.writeFileSync(path.join(project, "index.html"), "hi");
-      renameFailsExdev();
-      const realRm = fs.promises.rm.bind(fs.promises);
-      vi.spyOn(fs.promises, "rm").mockImplementation(async (target, opts) => {
-        if (path.resolve(String(target)) === path.resolve(project)) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
-        return realRm(target, opts);
-      });
-
-      await expect(lib.moveProjectToTrash(project, Date.parse("2026-09-13T12:00:00.000Z")))
-        .rejects.toMatchObject({ code: "trash_failed", message: expect.stringContaining("copy is whole and has been kept") });
-      const kept = fs.readdirSync(lib.projectTrashDir());
-      expect(kept).toEqual(["shop--20260913T120000Z"]);
-      expect(fs.readFileSync(path.join(lib.projectTrashDir(), kept[0], "index.html"), "utf8")).toBe("hi");
-    });
+  it("refuses the trash folder's own name as a project", async () => {
+    // It is a folder directly inside a root, so every path guard passes it.
+    expect(await refusal(() => lib.resolveProjectTarget({ folder: lib.TRASH_DIR_NAME }, roots()))).toBe("invalid");
   });
 
   /** A trash entry named the way this module names one, `ms` ago. */
@@ -322,7 +310,7 @@ describe("the trash and its retention rule", () => {
 
   it("prunes on age, oldest first, and leaves what is still in date", async () => {
     const now = Date.parse("2026-09-13T12:00:00.000Z");
-    const trash = lib.projectTrashDir();
+    const trash = lib.projectTrashDir(owner);
     fs.mkdirSync(trash, { recursive: true });
     const old = stamped("old", now, 31 * day);
     const fresh = stamped("fresh", now, 2 * day);
@@ -330,13 +318,13 @@ describe("the trash and its retention rule", () => {
     fs.mkdirSync(path.join(trash, fresh));
 
     // Expired, and reported as expired — nobody was promised those.
-    expect(await lib.pruneProjectTrash(now)).toEqual({ removed: [old], expired: [old], early: [] });
+    expect(await lib.pruneProjectTrash(roots(), now)).toEqual({ removed: [old], expired: [old], early: [] });
     expect(fs.existsSync(path.join(trash, fresh))).toBe(true);
   });
 
   it("prunes on the count bound too, and never touches a folder it did not name", async () => {
     const now = Date.parse("2026-09-13T12:00:00.000Z");
-    const trash = lib.projectTrashDir();
+    const trash = lib.projectTrashDir(owner);
     fs.mkdirSync(trash, { recursive: true });
     for (let i = 0; i < lib.MAX_TRASH_ENTRIES + 3; i += 1) {
       fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
@@ -345,7 +333,7 @@ describe("the trash and its retention rule", () => {
     // prune must leave it alone however full the trash is.
     fs.mkdirSync(path.join(trash, "keep-me-please"));
 
-    const pruned = await lib.pruneProjectTrash(now);
+    const pruned = await lib.pruneProjectTrash(roots(), now);
     expect(pruned.removed).toHaveLength(3);
     // Reported as EARLY, not expired: these were inside their thirty days and
     // went only because the shelf was full. That distinction is what the dialog
@@ -358,7 +346,7 @@ describe("the trash and its retention rule", () => {
 
   it("says which entry ONE MORE removal would delete early, before it happens", async () => {
     const now = Date.parse("2026-09-13T12:00:00.000Z");
-    const trash = lib.projectTrashDir();
+    const trash = lib.projectTrashDir(owner);
     fs.mkdirSync(trash, { recursive: true });
     // Exactly full, all well inside their thirty days.
     for (let i = 0; i < lib.MAX_TRASH_ENTRIES; i += 1) {
@@ -366,32 +354,89 @@ describe("the trash and its retention rule", () => {
     }
     const oldest = stamped(`p${lib.MAX_TRASH_ENTRIES - 1}`, now, (lib.MAX_TRASH_ENTRIES - 1) * 60_000);
 
-    expect(await lib.trashPurgedByOneMore(now)).toEqual({ count: lib.MAX_TRASH_ENTRIES, early: [oldest] });
+    expect(await lib.trashPurgedByOneMore(roots(), now)).toEqual({ count: lib.MAX_TRASH_ENTRIES, early: [oldest] });
     // Nothing has been touched: this is a question, not an act.
     expect(fs.readdirSync(trash)).toHaveLength(lib.MAX_TRASH_ENTRIES);
   });
 
   it("warns about nothing while the shelf has room", async () => {
     const now = Date.parse("2026-09-13T12:00:00.000Z");
-    const trash = lib.projectTrashDir();
+    const trash = lib.projectTrashDir(owner);
     fs.mkdirSync(trash, { recursive: true });
     for (let i = 0; i < lib.MAX_TRASH_ENTRIES - 1; i += 1) {
       fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
     }
-    expect(await lib.trashPurgedByOneMore(now)).toEqual({ count: lib.MAX_TRASH_ENTRIES - 1, early: [] });
+    expect(await lib.trashPurgedByOneMore(roots(), now)).toEqual({ count: lib.MAX_TRASH_ENTRIES - 1, early: [] });
   });
 
   it("counts an EXPIRED entry as room rather than as an early loss", async () => {
     // A full shelf where one entry is already past its thirty days: the
     // arriving folder takes that one's place, and nothing goes early.
     const now = Date.parse("2026-09-13T12:00:00.000Z");
-    const trash = lib.projectTrashDir();
+    const trash = lib.projectTrashDir(owner);
     fs.mkdirSync(trash, { recursive: true });
     fs.mkdirSync(path.join(trash, stamped("ancient", now, 40 * day)));
     for (let i = 0; i < lib.MAX_TRASH_ENTRIES - 1; i += 1) {
       fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
     }
-    expect((await lib.trashPurgedByOneMore(now)).early).toEqual([]);
+    expect((await lib.trashPurgedByOneMore(roots(), now)).early).toEqual([]);
+  });
+
+  it("counts one shelf ONCE when both roots are the same folder", async () => {
+    // config.json is a file the owner can edit, so the project folder can be
+    // pointed at `data/code-projects` by hand — the arrangement `listProjects`
+    // already defends against by describing each real folder once. There is
+    // then ONE trash, and reading it per-root counted every entry twice: the
+    // shelf reported full at half the stated bound, so `trash_full` refused
+    // early and the prune took recoverable projects before their time. That is
+    // the same consent defect the count bound was stated to fix, arriving by
+    // the back door.
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const code = path.join(root, "data", "code-projects");
+    const both = { ownerFolder: code, codeProjects: code, checkout: root };
+    const trash = lib.projectTrashDir(code);
+    fs.mkdirSync(trash, { recursive: true });
+    const half = Math.floor(lib.MAX_TRASH_ENTRIES / 2);
+    for (let i = 0; i < half; i += 1) fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
+
+    // Half a shelf is half a shelf, and nothing is at risk on it.
+    expect(await lib.trashPurgedByOneMore(both, now)).toEqual({ count: half, early: [] });
+    // And the prune takes nothing, rather than reporting each entry twice.
+    expect(await lib.pruneProjectTrash(both, now)).toEqual({ removed: [], expired: [], early: [] });
+    expect(fs.readdirSync(trash)).toHaveLength(half);
+
+    // The same folder reached by a LINK counts once too — two spellings that
+    // `path.resolve` cannot tell apart, which is why the dedupe is by real path
+    // the way `listProjects` dedupes its own listing.
+    const linked = path.join(root, "LinkedProjects");
+    fs.symlinkSync(code, linked);
+    expect(await lib.trashPurgedByOneMore({ ...both, ownerFolder: linked }, now))
+      .toEqual({ count: half, early: [] });
+  });
+
+  it("counts the shelf ACROSS both roots, because the promise is one number for the box", async () => {
+    // There is a trash per root now. If the bounds were applied per root, a box
+    // with two roots would keep twice what "the {max} most recently removed
+    // projects" says it keeps — the dialog's sentence would be wrong by a
+    // factor, which is the same class of untruth the count bound was stated to
+    // fix in the first place.
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const ownerTrash = lib.projectTrashDir(owner);
+    const codeTrash = lib.projectTrashDir(path.join(root, "data", "code-projects"));
+    fs.mkdirSync(ownerTrash, { recursive: true });
+    fs.mkdirSync(codeTrash, { recursive: true });
+    // Exactly full BETWEEN them, half in each.
+    for (let i = 0; i < lib.MAX_TRASH_ENTRIES; i += 1) {
+      const where = i % 2 === 0 ? ownerTrash : codeTrash;
+      fs.mkdirSync(path.join(where, stamped(`p${i}`, now, i * 60_000)));
+    }
+    const oldest = stamped(`p${lib.MAX_TRASH_ENTRIES - 1}`, now, (lib.MAX_TRASH_ENTRIES - 1) * 60_000);
+
+    expect(await lib.trashPurgedByOneMore(roots(), now)).toEqual({ count: lib.MAX_TRASH_ENTRIES, early: [oldest] });
+    // And the prune reaches into the root the doomed entry actually lives in.
+    const pruned = await lib.pruneProjectTrash(roots(), now);
+    expect(pruned.removed).toEqual([]);
+    expect(fs.readdirSync(ownerTrash).length + fs.readdirSync(codeTrash).length).toBe(lib.MAX_TRASH_ENTRIES);
   });
 
   it("reads a name it did not write as having no time, so the prune skips it", () => {

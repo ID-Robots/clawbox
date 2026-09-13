@@ -27,9 +27,9 @@ import { BTN_DANGER, BTN_SECONDARY, INSET_SURFACE } from "./coding-agent-ui";
  * shown in the box's own words with no control beside it, because there is no
  * flag that makes any of them untrue.
  *
- * AFTERWARDS it says WHERE THE FOLDER WENT. The removal is a move into
- * `data/deleted-projects/`, and the path is the whole point: it is what makes
- * the red button honest.
+ * AFTERWARDS it says WHERE THE FOLDER WENT. The removal is a move into a
+ * `.deleted-projects/` folder in the project's own root, and the path is the
+ * whole point: it is what makes the red button honest.
  */
 
 /** The shape the preview route answers with. */
@@ -129,24 +129,34 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
     return said === key ? fallback : said;
   }, [t]);
 
+  /**
+   * Read the preview. Its own function because it is needed TWICE: once when
+   * the dialog opens, and again after a `trash_full` refusal — see `remove`.
+   *
+   * `alive` is the effect's cancellation, passed in rather than captured, so
+   * the refresh below can call this with nothing to cancel.
+   */
+  const loadPreview = useCallback(async (alive: () => boolean = () => true) => {
+    const params = new URLSearchParams({ folder, kind });
+    try {
+      const res = await fetch(`/setup-api/coding-agent/projects/delete?${params}`, { cache: "no-store" });
+      const body = await res.json().catch(() => null) as (ProjectDeletePreview & { error?: string; code?: string }) | null;
+      if (!alive()) return;
+      if (!res.ok || !body) {
+        setBlocked({ code: body?.code ?? "failed", message: body?.error ?? t("codingAgent.delete.previewFailed") });
+        return;
+      }
+      setPreview(body);
+    } catch {
+      if (alive()) setBlocked({ code: "failed", message: t("codingAgent.delete.previewFailed") });
+    }
+  }, [folder, kind, t]);
+
   useEffect(() => {
     let live = true;
-    const params = new URLSearchParams({ folder, kind });
-    void fetch(`/setup-api/coding-agent/projects/delete?${params}`, { cache: "no-store" })
-      .then(async (res) => {
-        const body = await res.json().catch(() => null) as (ProjectDeletePreview & { error?: string; code?: string }) | null;
-        if (!live) return;
-        if (!res.ok || !body) {
-          setBlocked({ code: body?.code ?? "failed", message: body?.error ?? t("codingAgent.delete.previewFailed") });
-          return;
-        }
-        setPreview(body);
-      })
-      .catch(() => {
-        if (live) setBlocked({ code: "failed", message: t("codingAgent.delete.previewFailed") });
-      });
+    void loadPreview(() => live);
     return () => { live = false; };
-  }, [folder, kind, t]);
+  }, [loadPreview]);
 
   const remove = useCallback(async () => {
     setBusy(true);
@@ -165,6 +175,18 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
       const body = await res.json().catch(() => null) as (ProjectDeleteOutcome & { error?: string; code?: string }) | null;
       if (!res.ok || !body) {
         setFailure({ code: body?.code ?? "failed", message: body?.error ?? t("codingAgent.delete.failed") });
+        // `trash_full` is the ONE refusal the owner can clear from inside this
+        // dialog, and only if the dialog can show them what they would be
+        // agreeing to. It fires when the shelf filled up since the preview was
+        // read — so that preview is stale by definition, and with an empty
+        // `wouldPurge` the consent checkbox is not even rendered: the owner
+        // would be left pressing an enabled button that posts the same refused
+        // state for ever. Re-read it, and drop any consent they had given,
+        // because it was consent to a DIFFERENT list of folders.
+        if (body?.code === "trash_full") {
+          setPurgeOldest(false);
+          await loadPreview();
+        }
         return;
       }
       setDone(body);
@@ -174,7 +196,7 @@ export default function CodingProjectDeleteDialog({ folder, kind, name, onClose,
     } finally {
       setBusy(false);
     }
-  }, [folder, kind, typed, force, purgeOldest, onDeleted, t]);
+  }, [folder, kind, typed, force, purgeOldest, onDeleted, t, loadPreview]);
 
   const unsaved = preview?.unsaved;
   // The ONE refusal a flag can clear. Everything else the preview reports keeps
