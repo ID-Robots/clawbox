@@ -7505,21 +7505,36 @@ async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"st
   const problems = reviewProblems(snapshot);
   const round = review.round + 1;
 
-  // The freshest session, which after the first round is the previous round's
-  // own: it already remembers the fix it just pushed and what the reviewer said
-  // about it. Falling back to the origin run for round one.
-  const resumeRunId = review.fixRunId ?? run.id;
-  const candidate = loadRuns().find((r) => r.id === resumeRunId) ?? null;
-  const fixPath = decideReviewFixPath(candidate && {
-    id: candidate.id,
-    sessionId: candidate.sessionId,
-    status: candidate.status,
-    resumable: candidate.resumable,
-  });
-
   // Only the failing checks' logs, and only when there are failing checks:
   // each one is a zip download from GitHub.
   const failedChecks = problems.failedChecks.length ? await readFailedCheckLogs(run.directory, snapshot.checks) : [];
+
+  // Re-read: the log fetch above can take minutes, and the owner may have
+  // stopped the run or the loop may have been settled under us.
+  const live = loadRuns().find((r) => r.id === runId);
+  if (!live?.review || live.review.state !== "polling") return "failed";
+
+  // WHICH RECORD THE ROUND IS SEEDED FROM, decided after that re-read so it
+  // cannot be a record the log fetch outlived.
+  //
+  // The freshest session, which after the first round is the previous round's
+  // own: it already remembers the fix it just pushed and what the reviewer said
+  // about it. Round one falls back to the ORIGIN — and so does a later round
+  // whose previous round is no longer on the record, because the owner cleared
+  // the history under the loop. That fallback is not cosmetic: `startRun`
+  // refuses a `resumeRunId` it cannot find with `not_found`, which this
+  // function reads as a failure of the LOOP and settles the pull request on.
+  const previousRound = live.review.fixRunId
+    ? loadRuns().find((r) => r.id === live.review?.fixRunId) ?? null
+    : null;
+  const seed = previousRound ?? live;
+  const fixPath = decideReviewFixPath({
+    id: seed.id,
+    sessionId: seed.sessionId,
+    status: seed.status,
+    resumable: seed.resumable,
+  });
+
   const task = buildReviewFeedback({
     prNumber: review.prNumber,
     url: review.url,
@@ -7537,11 +7552,6 @@ async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"st
     fresh: fixPath.mode === "fresh",
   });
 
-  // Re-read: the log fetch above can take minutes, and the owner may have
-  // stopped the run or the loop may have been settled under us.
-  const live = loadRuns().find((r) => r.id === runId);
-  if (!live?.review || live.review.state !== "polling") return "failed";
-
   try {
     const fix = await startRun({
       task,
@@ -7549,7 +7559,7 @@ async function startFixRun(runId: string, snapshot: ReviewSnapshot): Promise<"st
       // worktree, so the branch the pull request is open from; the project; the
       // provider and the model. On the fresh path the session is the only part
       // deliberately left behind.
-      resumeRunId,
+      resumeRunId: seed.id,
       ...(fixPath.mode === "fresh" ? { freshSession: true } : {}),
       source: live.source,
       reviewLoopOf: live.id,

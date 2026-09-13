@@ -681,6 +681,33 @@ describe("a round whose run can no longer be resumed", () => {
     expect(review.pushBranch).toHaveBeenCalledWith(expect.any(String), runBranchName(RUN_ID));
   });
 
+  it("seeds the round from the ORIGIN when the previous round's record is gone", async () => {
+    // `review.fixRunId` names a run the owner cleared out of the history. The
+    // seed has to fall back to the origin, which is the record the loop is
+    // standing in: `startRun` refuses a `resumeRunId` it cannot find with
+    // `not_found`, and this function reads that as a failure of the LOOP —
+    // so the pull request was handed back over a record that was merely gone.
+    const stored = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8"));
+    stored[0].review.round = 1;
+    stored[0].review.fixRunId = "run-vanished1";
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify(stored));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); }, { timeout: 20_000 });
+
+    const origin = lib.getRun(RUN_ID);
+    // The round happened — it is round TWO, because one was already spent.
+    expect(origin?.review?.round).toBe(2);
+    expect(origin?.review?.fixMode).toBe("fresh");
+    // Named after the ORIGIN, not after the record that is no longer there.
+    expect(origin?.review?.fixDetail).toContain(RUN_ID);
+    expect(origin?.review?.fixDetail).not.toContain("run-vanished1");
+    const fix = lib.listRuns().find((r) => r.reviewLoopOf === RUN_ID);
+    expect(fix?.reviewRound).toBe(2);
+  });
+
   it("does the round even when the run never opened a session at all", async () => {
     // The case that was not merely un-oriented but REFUSED: `startRun` throws
     // `invalid` for a resume target with no session id, `startFixRun` read that
