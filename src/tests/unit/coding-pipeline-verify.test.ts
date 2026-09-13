@@ -27,7 +27,7 @@ vi.mock("@/lib/cdp-probe", () => ({ findPlaywrightChromium }));
  * real browser in a unit suite is neither available on CI nor the subject.
  */
 const routeHandler = vi.hoisted(() => ({ current: null as ((route: unknown) => Promise<void>) | null }));
-const gotoCalls = vi.hoisted(() => ({ urls: [] as string[] }));
+const gotoCalls = vi.hoisted(() => ({ urls: [] as string[], states: [] as string[], waitUntil: "" }));
 const pageOptions = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }));
 vi.mock("playwright", () => ({
   chromium: {
@@ -35,7 +35,11 @@ vi.mock("playwright", () => ({
       newPage: async (options: Record<string, unknown>) => ({
         __options: (pageOptions.last = options),
         route: async (_glob: string, handler: (route: unknown) => Promise<void>) => { routeHandler.current = handler; },
-        goto: async (url: string) => { gotoCalls.urls.push(url); },
+        goto: async (url: string, options: Record<string, unknown>) => {
+          gotoCalls.urls.push(url);
+          gotoCalls.waitUntil = options?.waitUntil as string;
+        },
+        waitForLoadState: async (state: string) => { gotoCalls.states.push(state); },
         screenshot: async () => Buffer.from("not-really-a-png"),
       }),
       close: async () => {},
@@ -68,6 +72,8 @@ beforeEach(async () => {
   findPlaywrightChromium.mockReturnValue(null);
   routeHandler.current = null;
   gotoCalls.urls = [];
+  gotoCalls.states = [];
+  gotoCalls.waitUntil = "";
   pageOptions.last = null;
   hostIsPublic.mockReset();
   hostIsPublic.mockResolvedValue(true);
@@ -374,6 +380,16 @@ describe("what the RENDERER may reach", () => {
     // inside it and never touch the handler above.
     await guard();
     expect(pageOptions.last).toMatchObject({ serviceWorkers: "block" });
+  });
+
+  it("waits for a single-page app to draw itself before photographing it", async () => {
+    // A picture taken at DOMContentLoaded is a blank page for anything that
+    // renders from its own script — which the vision model would honestly judge
+    // as "not what was asked for", spending the owner's improvement rounds on
+    // working code.
+    await guard();
+    expect(gotoCalls.waitUntil).toBe("load");
+    expect(gotoCalls.states).toContain("networkidle");
   });
 
   it("photographs the address the fetch SETTLED on, not the one it started from", async () => {

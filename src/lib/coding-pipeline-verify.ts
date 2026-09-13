@@ -66,6 +66,8 @@ export const VERIFY_FETCH_TIMEOUT_MS = 30_000;
 export const VERIFY_MAX_BODY_BYTES = 2 * 1024 * 1024;
 /** The screenshot's own budget, above Playwright's navigation and below the stage's. */
 export const VERIFY_SCREENSHOT_TIMEOUT_MS = 45_000;
+/** How long the picture waits for a single-page app to draw itself. */
+export const VERIFY_SETTLE_TIMEOUT_MS = 5_000;
 /** How much of the page's own text the judgement is given beside the picture. */
 export const VERIFY_MAX_TASK_CHARS = 600;
 
@@ -224,9 +226,19 @@ async function screenshotPage(runId: string, url: string): Promise<{ file: strin
         if (origins.size >= 128) origins.delete(origins.keys().next().value!);
         origins.set(parsed.origin, check);
       }
-      await (await check ? route.continue() : route.abort("blockedbyclient"));
+      if (await check) await route.continue();
+      else await route.abort("blockedbyclient");
     });
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });
+    await page.goto(url, { waitUntil: "load", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });
+    // `load` and then a short wait for the network to go quiet, rather than
+    // `domcontentloaded` as the browser route uses. The difference matters here
+    // and not there: a single-page app renders nothing until its own script has
+    // run and fetched, so a picture taken at DOMContentLoaded is a BLANK PAGE —
+    // which the vision model would honestly judge as "not what was asked for",
+    // sending working code back round and spending the owner's improvement
+    // rounds on nothing. Best-effort: a page that keeps a socket open (a poll, a
+    // websocket) never goes idle, and the picture is worth having anyway.
+    await page.waitForLoadState("networkidle", { timeout: VERIFY_SETTLE_TIMEOUT_MS }).catch(() => {});
     const shot = await page.screenshot({ type: "png", timeout: VERIFY_SCREENSHOT_TIMEOUT_MS });
     const name = `verify-${Date.now().toString(36)}.png`;
     await fs.writeFile(path.join(ensureArtifactsDir(runId), name), shot, { mode: 0o600 });
