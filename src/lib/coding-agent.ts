@@ -3389,19 +3389,20 @@ function readAll(): CodingRun[] {
  */
 function keepSettledRecords(list: CodingRun[]): void {
   const onDisk = new Map(readAll().map((r) => [r.id, r]));
-  for (let i = 0; i < list.length; i += 1) {
-    const mine = list[i];
+  for (const mine of list) {
     if (!isLive(mine.status)) continue;
     const theirs = onDisk.get(mine.id);
     if (!theirs || !isSettled(theirs.status)) continue;
     console.error(
       `[coding-agent] ${mine.id} is recorded as ${theirs.status} on disk; keeping that over this process's "${mine.status}"`,
     );
-    // The in-memory record is the one every reader here holds, so the repair
-    // has to reach the array itself and not just the bytes on their way out.
-    // Whatever this process still has in `live` for it is left alone: if it
-    // really is driving that run, its own settle writes the truth next.
-    list[i] = theirs;
+    // Over the record IN PLACE rather than replacing it in the array: the
+    // repair has to reach every reader here, not just the bytes on their way
+    // out, and `live` and a settle already in flight hold this very object. A
+    // fresh one swapped into the array would leave them mutating an orphan.
+    // Nothing in `live` is torn down — if this process really is driving that
+    // run, its own settle writes the truth over this next.
+    Object.assign(mine, theirs);
   }
 }
 
