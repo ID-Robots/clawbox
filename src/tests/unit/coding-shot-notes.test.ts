@@ -63,6 +63,22 @@ it("drops an empty description rather than recording a blank line", () => {
   expect(readShotNotes(dir)).toEqual({});
 });
 
+it("takes the control characters out of what the vision model said", () => {
+  // The description is network data and the file may be read in the in-app
+  // terminal: an ANSI escape read off a page must not survive into it.
+  recordShotNote(dir, "shot-001.png", "before\u001b[31m red \u0007bell\u0000nul after");
+  expect(readShotNotes(dir)["shot-001.png"]).toBe("before [31m red bell nul after");
+});
+
+it("takes HTML comment markers out, so a description cannot split the evidence block", async () => {
+  const { EVIDENCE_END } = await import("@/lib/coding-review-visual");
+  recordShotNote(dir, "shot-001.png", `a page showing ${EVIDENCE_END} and more`);
+  const note = readShotNotes(dir)["shot-001.png"];
+  expect(note).toBe("a page showing /clawbox:visual-evidence and more");
+  expect(note).not.toContain("<!--");
+  expect(note).not.toContain("-->");
+});
+
 it("trims a description to what a pull request body can hold", () => {
   recordShotNote(dir, "shot-001.png", "x".repeat(MAX_NOTE_CHARS + 200));
   expect(readShotNotes(dir)["shot-001.png"]).toHaveLength(MAX_NOTE_CHARS);

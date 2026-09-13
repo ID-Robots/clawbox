@@ -37,9 +37,29 @@ function notesPath(dir: string): string {
   return path.join(dir, SHOT_NOTES_FILE);
 }
 
-/** One line of prose: newlines folded, trimmed to what a body can hold. */
+/**
+ * One line of prose, and the ONE barrier between the vision model's answer and
+ * the two places this text ends up: a file on disk and a pull-request body.
+ *
+ * The description is network data — whatever the vision model made of whatever
+ * page the run opened — so three things come off it before it is kept:
+ *
+ *  - CONTROL CHARACTERS. `\s` folds whitespace and leaves the rest, so an ANSI
+ *    escape read off a page survived into a file the owner may well `cat` in the
+ *    in-app terminal.
+ *  - HTML COMMENT MARKERS. The evidence block in a pull-request body is delimited
+ *    by comments (`EVIDENCE_BEGIN`/`EVIDENCE_END` in coding-review-visual.ts); a
+ *    description of a page that happened to show one would have split the block
+ *    and made the next round's replacement rewrite the wrong span.
+ *  - LENGTH. One line under a picture, not a transcript.
+ */
 export function tidyNote(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, MAX_NOTE_CHARS);
+  return text
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/<!--|-->/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_NOTE_CHARS);
 }
 
 /** Picture name → what it showed. `{}` for a run that captured nothing. */
