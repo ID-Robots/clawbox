@@ -17,6 +17,7 @@ import {
   deleteRunBranch,
   linkSharedNodeModules,
   listRunWorktrees,
+  mergeRunBranch,
   removeRunWorktree,
   restoreRunWorktree,
   runWorktreePath,
@@ -240,5 +241,85 @@ describe("a run's worktree", () => {
     await removeRunWorktree(dir, made.path);
     expect(await deleteRunBranch(dir, made.branch)).toBe(true);
     expect(await branchExists(dir, made.branch)).toBe(false);
+  });
+});
+
+/**
+ * Bringing a run's branch home, and the three ways the owner's own project can
+ * stand in the way.
+ *
+ * Each refusal is a FACT about the owner's checkout, not a fault: the merge is
+ * deliberately conservative because that folder is theirs. What is pinned here
+ * is that the reason comes back named — the card words a different next step
+ * for each — and that nothing of the owner's is touched on the way out.
+ */
+describe("merging a run's branch home", () => {
+  /** A run's worktree with one commit on its branch. */
+  async function withWork(runId: string) {
+    const made = await addRunWorktree({ projectDir: dir, runId, protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    fs.writeFileSync(path.join(made.path, "feature.js"), "export const feature = 1;\n");
+    git(made.path, "add", "-A");
+    git(made.path, "commit", "-q", "-m", "the run's work");
+    return made;
+  }
+
+  const merge = (branch: string, base: string) =>
+    mergeRunBranch({ projectDir: dir, branch, base, message: "Coding agent: bring it home" });
+
+  it("merges the branch into the project's base branch and names the merge commit", async () => {
+    const made = await withWork("run-merge0001");
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true });
+    if (!out.ok) return;
+    expect(out.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(git(dir, "rev-parse", "HEAD")).toBe(out.commit);
+    expect(fs.existsSync(path.join(dir, "feature.js"))).toBe(true);
+  });
+
+  it("answers merged: false with no commit when the branch holds nothing", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-empty0001", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    expect(await merge(made.branch, made.base)).toEqual({ ok: true, merged: false, commit: null });
+  });
+
+  it("refuses `dirty` over the owner's own uncommitted work, and leaves every byte of it alone", async () => {
+    const made = await withWork("run-dirty0001");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>mine, not committed</h1>\n");
+    fs.writeFileSync(path.join(dir, "scratch.txt"), "untracked\n");
+    const head = git(dir, "rev-parse", "HEAD");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    // Not stashed, not discarded, not committed for them: exactly as it was.
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toContain("mine, not committed");
+    expect(fs.readFileSync(path.join(dir, "scratch.txt"), "utf8")).toBe("untracked\n");
+    expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+  });
+
+  it("refuses `not_on_base` when the project has moved to another branch, and never moves it back", async () => {
+    const made = await withWork("run-moved0001");
+    git(dir, "checkout", "-q", "-b", "release");
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: false, reason: "not_on_base" });
+    if (out.ok) return;
+    expect(out.detail).toContain("release");
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("release");
+  });
+
+  it("refuses `conflict` and aborts rather than guessing, leaving the project on its own commit", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-clash0001", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    fs.writeFileSync(path.join(made.path, "index.html"), "<h1>the run's line</h1>\n");
+    git(made.path, "add", "-A");
+    git(made.path, "commit", "-q", "-m", "the run's edit");
+    // The project edits the same line and COMMITS it, so the tree is clean and
+    // the merge gets far enough to conflict.
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>the owner's line</h1>\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "the owner's edit");
+    const head = git(dir, "rev-parse", "HEAD");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "conflict" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toContain("the owner's line");
   });
 });

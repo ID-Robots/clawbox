@@ -951,6 +951,17 @@ export const es: Record<string, string> = {
   "codingAgent.worktreeKept": "La copia propia de esta ejecución sigue en el disco. Su trabajo está en la rama {branch}, así que quitar la copia no lo pierde.",
   "codingAgent.worktreeRemove": "Quitar copia",
   "codingAgent.worktreeRemoveFailed": "No se pudo quitar la copia del proyecto de la ejecución.",
+  "codingAgent.bringHomeDirty": "El trabajo de esta ejecución está en la rama {branch} y no en el proyecto: la carpeta del proyecto tiene cambios sin confirmar propios y ClawBox no escribe por encima. Confirma o guarda tus propios cambios y luego trae el trabajo al proyecto.",
+  "codingAgent.bringHomeNotOnBase": "El trabajo de esta ejecución está en la rama {branch} y no en el proyecto: el proyecto está en una rama distinta de {base} y ClawBox no adivina dónde va el trabajo. Vuelve a poner el proyecto en {base} y luego trae el trabajo al proyecto.",
+  "codingAgent.bringHomeConflict": "El trabajo de esta ejecución está en la rama {branch} y no en el proyecto: entra en conflicto con los cambios propios del proyecto y ClawBox no resuelve un conflicto a ciegas. Fusiona {branch} a mano, o trae el trabajo cuando el conflicto haya desaparecido.",
+  "codingAgent.bringHomeFailed": "El trabajo de esta ejecución está en la rama {branch} y no en el proyecto: git rechazó la fusión. Inténtalo de nuevo o fusiona {branch} a mano.",
+  "codingAgent.bringHomeUnknown": "El trabajo de esta ejecución está en la rama {branch} y no está en el proyecto. Tráelo al proyecto o fusiona {branch} a mano.",
+  "codingAgent.bringHome": "Traer el trabajo al proyecto",
+  "codingAgent.bringHomeWorking": "Trayéndolo al proyecto…",
+  "codingAgent.bringHomeError": "No se pudo traer el trabajo de la ejecución al proyecto.",
+  "codingAgent.bringHomeCopy": "Copiar los comandos de git",
+  "codingAgent.bringHomeCopied": "Copiado",
+  "codingAgent.worktreeMergedInto": "El trabajo de esta ejecución se fusionó en {base}. Su copia del proyecto sigue en el disco.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "Decirle algo al agente",

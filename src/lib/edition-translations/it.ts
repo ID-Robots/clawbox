@@ -967,6 +967,17 @@ export const it: Record<string, string> = {
   "codingAgent.worktreeKept": "La copia di questa esecuzione è ancora sul disco. Il suo lavoro è sul ramo {branch}, quindi rimuovere la copia non lo perde.",
   "codingAgent.worktreeRemove": "Rimuovi copia",
   "codingAgent.worktreeRemoveFailed": "Non è stato possibile rimuovere la copia del progetto.",
+  "codingAgent.bringHomeDirty": "Il lavoro di questa esecuzione è sul ramo {branch} e non nel progetto: la cartella del progetto ha modifiche non committate proprie e ClawBox non ci scrive sopra. Fai un commit o metti da parte le tue modifiche, poi porta il lavoro nel progetto.",
+  "codingAgent.bringHomeNotOnBase": "Il lavoro di questa esecuzione è sul ramo {branch} e non nel progetto: il progetto è su un ramo diverso da {base} e ClawBox non indovina dove va il lavoro. Riporta il progetto su {base}, poi porta il lavoro nel progetto.",
+  "codingAgent.bringHomeConflict": "Il lavoro di questa esecuzione è sul ramo {branch} e non nel progetto: va in conflitto con le modifiche proprie del progetto e ClawBox non risolve un conflitto a caso. Unisci {branch} a mano, oppure porta il lavoro nel progetto quando il conflitto non c'è più.",
+  "codingAgent.bringHomeFailed": "Il lavoro di questa esecuzione è sul ramo {branch} e non nel progetto: git ha rifiutato l'unione. Riprova, oppure unisci {branch} a mano.",
+  "codingAgent.bringHomeUnknown": "Il lavoro di questa esecuzione è sul ramo {branch} e non è nel progetto. Portalo nel progetto, oppure unisci {branch} a mano.",
+  "codingAgent.bringHome": "Porta il lavoro nel progetto",
+  "codingAgent.bringHomeWorking": "Lo sto portando nel progetto…",
+  "codingAgent.bringHomeError": "Non è stato possibile portare il lavoro dell'esecuzione nel progetto.",
+  "codingAgent.bringHomeCopy": "Copia i comandi git",
+  "codingAgent.bringHomeCopied": "Copiato",
+  "codingAgent.worktreeMergedInto": "Il lavoro di questa esecuzione è stato unito in {base}. La sua copia del progetto è ancora sul disco.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "Di' qualcosa all'agente",

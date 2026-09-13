@@ -60,6 +60,18 @@ const AS_BOX = ["-c", "user.name=ClawBox Coding Agent", "-c", "user.email=coding
 /** Why a run works in the project folder itself rather than in a worktree of its own. */
 export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "failed";
 
+/**
+ * Why a run's branch could not be brought home into the project.
+ *
+ * Named rather than inlined because it now travels: the settle records it on
+ * the run (`RunWorktree.result`), the route answers it as a stable `code`, and
+ * the card words each one in the owner's language with the next step that
+ * clears it. Three of the four are the owner's own project standing in the
+ * way and are fixable from the desk; `failed` is git refusing for a reason
+ * only its own sentence can give.
+ */
+export type MergeHomeBlocker = "not_on_base" | "dirty" | "conflict" | "failed";
+
 export interface RunWorktreeAdded {
   ok: true;
   /** Absolute path of the tree the run works in. */
@@ -251,7 +263,10 @@ export function mergeRunBranch(input: {
   branch: string;
   base: string;
   message: string;
-}): Promise<{ ok: true; merged: boolean } | { ok: false; reason: "not_on_base" | "dirty" | "conflict" | "failed"; detail: string }> {
+}): Promise<
+  | { ok: true; merged: boolean; commit: string | null }
+  | { ok: false; reason: MergeHomeBlocker; detail: string }
+> {
   return withDirLock(input.projectDir, async () => {
     const dir = path.resolve(input.projectDir);
     const on = await currentBranch(dir);
@@ -259,12 +274,18 @@ export function mergeRunBranch(input: {
       return { ok: false, reason: "not_on_base", detail: `the project is on ${on}, not on ${input.base}` };
     }
     const ahead = await commitsAhead(dir, input.branch, input.base);
-    if (ahead === 0) return { ok: true, merged: false };
+    if (ahead === 0) return { ok: true, merged: false, commit: null };
     const dirty = await gitIn(dir, ["status", "--porcelain", "--untracked-files=normal"]);
     if (!ok(dirty)) return { ok: false, reason: "failed", detail: failureDetail(dirty, "Reading the project before the merge") };
     if (out(dirty)) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
     const merged = await gitIn(dir, [...AS_BOX, "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
-    if (ok(merged)) return { ok: true, merged: true };
+    if (ok(merged)) {
+      // The merge commit, for the record and for the card's "the work is now
+      // in <base>, as <sha>". Best-effort: a rev-parse that will not answer
+      // does not turn a landed merge into a failed one.
+      const head = await gitIn(dir, ["rev-parse", "HEAD"]);
+      return { ok: true, merged: true, commit: ok(head) && out(head) ? out(head) : null };
+    }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await gitIn(dir, ["merge", "--abort"]);
     return {

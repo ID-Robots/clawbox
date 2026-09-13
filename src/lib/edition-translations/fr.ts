@@ -956,6 +956,17 @@ export const fr: Record<string, string> = {
   "codingAgent.worktreeKept": "La copie propre à cette exécution est encore sur le disque. Son travail est sur la branche {branch} : retirer la copie ne le perd pas.",
   "codingAgent.worktreeRemove": "Retirer la copie",
   "codingAgent.worktreeRemoveFailed": "Impossible de retirer la copie du projet de cette exécution.",
+  "codingAgent.bringHomeDirty": "Le travail de cette exécution est sur la branche {branch} et pas dans le projet : le dossier du projet a des modifications non validées qui lui sont propres, et ClawBox n'écrit pas par-dessus. Validez ou mettez de côté vos propres modifications, puis ramenez le travail dans le projet.",
+  "codingAgent.bringHomeNotOnBase": "Le travail de cette exécution est sur la branche {branch} et pas dans le projet : le projet est sur une autre branche que {base}, et ClawBox ne devine pas où va le travail. Remettez le projet sur {base}, puis ramenez le travail dans le projet.",
+  "codingAgent.bringHomeConflict": "Le travail de cette exécution est sur la branche {branch} et pas dans le projet : il entre en conflit avec les modifications propres au projet, et ClawBox ne résout pas un conflit au jugé. Fusionnez {branch} à la main, ou ramenez le travail une fois le conflit réglé.",
+  "codingAgent.bringHomeFailed": "Le travail de cette exécution est sur la branche {branch} et pas dans le projet : git a refusé la fusion. Réessayez, ou fusionnez {branch} à la main.",
+  "codingAgent.bringHomeUnknown": "Le travail de cette exécution est sur la branche {branch} et n'est pas dans le projet. Ramenez-le dans le projet, ou fusionnez {branch} à la main.",
+  "codingAgent.bringHome": "Ramener le travail dans le projet",
+  "codingAgent.bringHomeWorking": "Rapatriement en cours…",
+  "codingAgent.bringHomeError": "Impossible de ramener le travail de l'exécution dans le projet.",
+  "codingAgent.bringHomeCopy": "Copier les commandes git",
+  "codingAgent.bringHomeCopied": "Copié",
+  "codingAgent.worktreeMergedInto": "Le travail de cette exécution a été fusionné dans {base}. Sa copie du projet est encore sur le disque.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "Dire quelque chose à l'agent",

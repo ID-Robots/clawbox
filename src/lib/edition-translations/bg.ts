@@ -942,6 +942,17 @@ export const bg: Record<string, string> = {
   "codingAgent.worktreeKept": "Собственото копие на това изпълнение все още е на диска. Работата му е в клона {branch}, така че премахването на копието не я губи.",
   "codingAgent.worktreeRemove": "Премахване на копието",
   "codingAgent.worktreeRemoveFailed": "Копието на проекта не можа да бъде премахнато.",
+  "codingAgent.bringHomeDirty": "Работата на това изпълнение е в клона {branch}, а не в проекта: папката на проекта има собствени некомитнати промени и ClawBox не пише върху тях. Комитни или скрий собствените си промени и после прибери работата в проекта.",
+  "codingAgent.bringHomeNotOnBase": "Работата на това изпълнение е в клона {branch}, а не в проекта: проектът е на друг клон, различен от {base}, и ClawBox не гадае къде е мястото на работата. Върни проекта на {base} и после прибери работата в проекта.",
+  "codingAgent.bringHomeConflict": "Работата на това изпълнение е в клона {branch}, а не в проекта: тя влиза в конфликт със собствените промени на проекта, а ClawBox не разрешава конфликт наслуки. Слей {branch} на ръка или прибери работата, щом конфликтът го няма.",
+  "codingAgent.bringHomeFailed": "Работата на това изпълнение е в клона {branch}, а не в проекта: git отказа сливането. Опитай пак или слей {branch} на ръка.",
+  "codingAgent.bringHomeUnknown": "Работата на това изпълнение е в клона {branch} и не е в проекта. Прибери я в проекта или слей {branch} на ръка.",
+  "codingAgent.bringHome": "Прибиране на работата в проекта",
+  "codingAgent.bringHomeWorking": "Прибира се в проекта…",
+  "codingAgent.bringHomeError": "Работата на изпълнението не можа да бъде прибрана в проекта.",
+  "codingAgent.bringHomeCopy": "Копиране на git командите",
+  "codingAgent.bringHomeCopied": "Копирано",
+  "codingAgent.worktreeMergedInto": "Работата на това изпълнение беше слята в {base}. Собственото копие на проекта все още е на диска.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "Кажете нещо на агента",

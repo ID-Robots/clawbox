@@ -20,6 +20,7 @@ import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
 import CodingRunMessageBox from "./CodingRunMessageBox";
+import CodingRunWorktreeCard, { type RunWorktreeView } from "./CodingRunWorktreeCard";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import type { VercelState } from "@/lib/vercel-state";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
@@ -166,7 +167,7 @@ interface Run {
    * — or absent/null when it worked in the project folder itself, which is
    * every run this box made before worktrees existed.
    */
-  worktree?: { path: string; branch: string; base: string; project: string; removed: boolean; branchRemoved?: boolean } | null;
+  worktree?: RunWorktreeView | null;
   /** WHY a paused run is paused. Absent on a record written before it was
    *  kept, which reads the same as an ordinary pause: nothing to explain. */
   pauseReason?: CodingPauseReason | null;
@@ -2197,29 +2198,24 @@ export default function CodingAgentApp() {
                   </div>
                 )}
                 {/* The run's own copy of the project, while it is still on
-                    disk. A settle removes it when the branch was merged home
-                    or the run left nothing on it; anything else — a merge
-                    that conflicted, a project since moved to another branch,
-                    a pull request still open — stays, because those are
-                    commits nothing else has. The button takes the FILES and
-                    leaves the branch, which is why the card says where the
-                    work remains. */}
+                    disk — and, the reason the card is its own component now,
+                    WHERE ITS WORK IS. A settle removes the copy when the branch
+                    was merged home or the run left nothing on it; anything else
+                    — a project with uncommitted changes of its own, one since
+                    moved to another branch, a merge that conflicted, a pull
+                    request still open — stays. For the first three the work is
+                    on a branch and not in the project, and the card offers to
+                    bring it home rather than leaving Remove copy as the only
+                    move. */}
                 {run.worktree && !run.worktree.removed && isSettled(run.status) && (
-                  <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-2.5 flex items-center gap-2 flex-wrap" data-testid="coding-agent-run-worktree">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">account_tree</span>
-                    <span className="text-[11px] text-[var(--text-secondary)] break-all">
-                      {t("codingAgent.worktreeKept", { branch: run.worktree.branch })}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => runAction(run.id, "worktree", t("codingAgent.worktreeRemoveFailed"))}
-                      disabled={busy === run.id}
-                      data-testid={`coding-agent-worktree-remove-${run.id}`}
-                      className={`${BTN_SECONDARY} ml-auto`}
-                    >
-                      {t("codingAgent.worktreeRemove")}
-                    </button>
-                  </div>
+                  <CodingRunWorktreeCard
+                    runId={run.id}
+                    worktree={run.worktree}
+                    pullRequestOpen={Boolean(run.pr && run.pr.phase !== "failed")}
+                    busy={busy === run.id}
+                    onRemove={() => runAction(run.id, "worktree", t("codingAgent.worktreeRemoveFailed"))}
+                    onChanged={() => { void load(); }}
+                  />
                 )}
                 {/* WHY it is paused, when the answer is not "somebody asked".
                     A run refused because one of this box's allowances is spent

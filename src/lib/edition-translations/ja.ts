@@ -957,6 +957,17 @@ export const ja: Record<string, string> = {
   "codingAgent.worktreeKept": "この実行専用のコピーはまだディスクに残っています。作業内容はブランチ {branch} にあるので、コピーを削除しても失われません。",
   "codingAgent.worktreeRemove": "コピーを削除",
   "codingAgent.worktreeRemoveFailed": "この実行のプロジェクトのコピーを削除できませんでした。",
+  "codingAgent.bringHomeDirty": "この実行の作業はブランチ {branch} にあり、プロジェクトには入っていません。プロジェクトフォルダにコミットされていない変更があり、ClawBox はその上に書き込みません。ご自身の変更をコミットするか stash してから、作業をプロジェクトに取り込んでください。",
+  "codingAgent.bringHomeNotOnBase": "この実行の作業はブランチ {branch} にあり、プロジェクトには入っていません。プロジェクトが {base} とは別のブランチにあり、ClawBox は作業の行き先を推測しません。プロジェクトを {base} に戻してから、作業をプロジェクトに取り込んでください。",
+  "codingAgent.bringHomeConflict": "この実行の作業はブランチ {branch} にあり、プロジェクトには入っていません。プロジェクト自身の変更と衝突しており、ClawBox は当て推量で衝突を解決しません。{branch} を手動でマージするか、衝突が解消してから作業を取り込んでください。",
+  "codingAgent.bringHomeFailed": "この実行の作業はブランチ {branch} にあり、プロジェクトには入っていません。git がマージを拒否しました。もう一度試すか、{branch} を手動でマージしてください。",
+  "codingAgent.bringHomeUnknown": "この実行の作業はブランチ {branch} にあり、プロジェクトには入っていません。作業を取り込むか、{branch} を手動でマージしてください。",
+  "codingAgent.bringHome": "作業をプロジェクトに取り込む",
+  "codingAgent.bringHomeWorking": "プロジェクトに取り込んでいます…",
+  "codingAgent.bringHomeError": "この実行の作業をプロジェクトに取り込めませんでした。",
+  "codingAgent.bringHomeCopy": "git コマンドをコピー",
+  "codingAgent.bringHomeCopied": "コピーしました",
+  "codingAgent.worktreeMergedInto": "この実行の作業は {base} にマージされました。専用のプロジェクトのコピーはまだディスクに残っています。",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "エージェントに伝える",

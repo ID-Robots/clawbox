@@ -955,6 +955,17 @@ export const de: Record<string, string> = {
   "codingAgent.worktreeKept": "Die eigene Kopie dieses Laufs liegt noch auf der Festplatte. Seine Arbeit liegt auf dem Branch {branch} — beim Entfernen der Kopie geht sie also nicht verloren.",
   "codingAgent.worktreeRemove": "Kopie entfernen",
   "codingAgent.worktreeRemoveFailed": "Die Kopie des Projekts konnte nicht entfernt werden.",
+  "codingAgent.bringHomeDirty": "Die Arbeit dieses Laufs liegt auf dem Branch {branch} und nicht im Projekt: Der Projektordner hat eigene, nicht committete Änderungen, und ClawBox schreibt nicht darüber. Committen oder stashen Sie Ihre eigenen Änderungen und holen Sie die Arbeit dann ins Projekt.",
+  "codingAgent.bringHomeNotOnBase": "Die Arbeit dieses Laufs liegt auf dem Branch {branch} und nicht im Projekt: Das Projekt ist auf einem anderen Branch als {base}, und ClawBox rät nicht, wohin die Arbeit gehört. Wechseln Sie das Projekt zurück auf {base} und holen Sie die Arbeit dann ins Projekt.",
+  "codingAgent.bringHomeConflict": "Die Arbeit dieses Laufs liegt auf dem Branch {branch} und nicht im Projekt: Sie steht im Konflikt mit den eigenen Änderungen des Projekts, und ClawBox löst einen Konflikt nicht auf Verdacht auf. Mergen Sie {branch} von Hand, oder holen Sie die Arbeit ins Projekt, sobald der Konflikt weg ist.",
+  "codingAgent.bringHomeFailed": "Die Arbeit dieses Laufs liegt auf dem Branch {branch} und nicht im Projekt: Git hat den Merge abgelehnt. Versuchen Sie es erneut, oder mergen Sie {branch} von Hand.",
+  "codingAgent.bringHomeUnknown": "Die Arbeit dieses Laufs liegt auf dem Branch {branch} und ist nicht im Projekt. Holen Sie sie ins Projekt, oder mergen Sie {branch} von Hand.",
+  "codingAgent.bringHome": "Arbeit ins Projekt holen",
+  "codingAgent.bringHomeWorking": "Wird ins Projekt geholt…",
+  "codingAgent.bringHomeError": "Die Arbeit des Laufs konnte nicht ins Projekt geholt werden.",
+  "codingAgent.bringHomeCopy": "Git-Befehle kopieren",
+  "codingAgent.bringHomeCopied": "Kopiert",
+  "codingAgent.worktreeMergedInto": "Die Arbeit dieses Laufs wurde in {base} gemergt. Die eigene Kopie des Projekts liegt noch auf der Festplatte.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "Dem Agenten etwas sagen",
