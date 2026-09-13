@@ -249,6 +249,17 @@ export interface PipelineState {
   verify: PipelineVerify;
   /** Does this pipeline go to production at all, or stop at a verified preview? */
   production: boolean;
+  /**
+   * When the OWNER approved the production deployment, for a pipeline that
+   * stopped to ask.
+   *
+   * On the record rather than in the call that resumes it, because the stage is
+   * re-entered by `resumePipelines` after a restart as well: a consent that
+   * lived only in a route handler's stack would leave the pipeline asking the
+   * per-project switch again and parking a second time, in front of an owner
+   * who has already pressed the button.
+   */
+  productionApprovedAt: number | null;
   /** The stage that ended it, and why, for the one sentence a caller needs. */
   failure: { stage: PipelineStage; reason: string } | null;
   /**
@@ -349,6 +360,7 @@ export function newPipeline(input: {
     verify: { path: input.verify.path, expect: [...input.verify.expect] },
     production: input.production,
     failure: null,
+    productionApprovedAt: null,
     lastVerification: null,
   };
 }
@@ -769,6 +781,9 @@ export function parsePipeline(raw: unknown): PipelineState | null {
     verify: { path, expect },
     production: p.production !== false,
     failure,
+    productionApprovedAt: typeof p.productionApprovedAt === "number" && Number.isFinite(p.productionApprovedAt)
+      ? p.productionApprovedAt
+      : null,
     lastVerification: parseVerification(p.lastVerification),
   };
 }

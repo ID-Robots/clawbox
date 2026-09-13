@@ -247,6 +247,7 @@ import {
   type PipelineInputRefusal,
   type PipelineStage,
   type PipelineState,
+  type PipelineTransition,
   type PipelineVerify,
   type StageOutcome,
 } from "@/lib/coding-pipeline";
@@ -8041,7 +8042,16 @@ const pipelineAdvancing = store.pipelineAdvancing;
  * falls between them.
  */
 function pipelineHoldsNotice(run: CodingRun): boolean {
-  return isPipelineLive(run.pipeline);
+  if (isPipelineLive(run.pipeline)) return true;
+  // A turn INSIDE a pipeline's chain holds it too. The automatic review pass is
+  // a run record of its own, and nobody asked for it: announcing it would put
+  // "Coding agent finished run-x" on the desktop in the middle of a flow that
+  // is still deploying — the same claim, about a run the owner never started.
+  if (run.reviewOf) {
+    const origin = loadRuns().find((r) => r.id === run.reviewOf);
+    return isPipelineLive(origin?.pipeline);
+  }
+  return false;
 }
 
 /** Queue an advance behind whatever else is advancing this run's pipeline. */
@@ -8180,9 +8190,26 @@ async function applyPipelineStage(
 ): Promise<void> {
   const run = loadRuns().find((r) => r.id === runId);
   if (!run?.pipeline || !isPipelineLive(run.pipeline)) return;
-  let transition = decidePipeline(run.pipeline, stage, outcome);
+  const transition = decidePipeline(run.pipeline, stage, outcome);
   persist(true);
+  await drivePipeline(runId, transition, review);
+}
 
+/**
+ * Carry on for as long as the machine says to.
+ *
+ * Its own function because the owner's production button enters a stage
+ * DIRECTLY rather than by re-deciding one that already passed — re-deciding
+ * `verify_preview` would overwrite what the check actually found with the
+ * sentence "the owner approved it", which is the one thing on that step worth
+ * keeping.
+ */
+async function drivePipeline(
+  runId: string,
+  first: PipelineTransition,
+  review?: ReviewPassOutcome,
+): Promise<void> {
+  let transition = first;
   // One consumption of the review outcome: it describes the pass that was
   // started by the settle we are in, and a later lap gets its own.
   let pendingReview = review;
@@ -8387,7 +8414,9 @@ async function startPipelineDeploy(run: CodingRun, target: DeployTarget): Promis
     return { kind: "blocked", reason: "This run is not in one of this ClawBox's projects, so there is nothing to deploy." };
   }
 
-  if (target === "production" && !(await readAutoProduction(project.scope))) {
+  // The owner's own press counts as the permission for THIS pipeline — it is
+  // the same consent the per-project switch gives standing, made once.
+  if (target === "production" && pipeline.productionApprovedAt === null && !(await readAutoProduction(project.scope))) {
     return {
       kind: "waiting_owner",
       reason: "The preview is verified. This ClawBox does not deploy this project to production by itself, so it is waiting for you to press the button.",
@@ -8609,11 +8638,20 @@ export async function approvePipelineProduction(runId: string): Promise<CodingRu
     throw new CodingAgentError("invalid", `That pipeline is not waiting for you: it is ${pipeline.status}.`);
   }
   pipeline.status = "running";
+  // Recorded, because `resumePipelines` re-enters this stage after a restart
+  // and would otherwise ask the per-project switch again and park a second
+  // time in front of an owner who has already pressed the button.
+  pipeline.productionApprovedAt = Date.now();
   const step = stepFor(pipeline, "deploy_production");
   step.state = "pending";
   step.detail = null;
+  addEvidence(pipeline, "deploy_production", {
+    kind: "note",
+    ref: null,
+    detail: "The owner approved the production deployment.",
+  });
   persist(true);
-  await applyPipelineStage(runId, "verify_preview", { kind: "passed", detail: "The owner approved the production deployment." });
+  await drivePipeline(runId, { action: "enter", stage: "deploy_production" });
   return getRun(runId) ?? cloneRun(run);
 }
 
