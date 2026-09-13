@@ -1,0 +1,148 @@
+/**
+ * What of a project folder goes up in an uploaded deployment.
+ *
+ * The property that matters most: **the ignore rule is git's, not ours.** A
+ * deploy of a folder the coding agent has been working in is a deploy of
+ * somebody's real project, and the thing that must never be uploaded is the
+ * thing they already told git not to track — `.env`, a key, a database dump.
+ * So where the folder is a repository, `git ls-files --cached --others
+ * --exclude-standard` IS the list; a second matcher written here would be a
+ * worse copy of a rule the folder already states, and being wrong about it is a
+ * credential on somebody else's servers.
+ *
+ * And three more:
+ *  - a SYMLINK is never followed and never uploaded. A run can write one, and
+ *    `data/` — which holds this box's credential stores — is one `ln -s` away
+ *    from the internet otherwise;
+ *  - `.git`, `node_modules` and `.clawbox` are skipped whatever git says,
+ *    because a repository whose ignores do not cover them still must not
+ *    upload its own history or a second copy of itself;
+ *  - a folder with no repository still deploys, on the weaker rule, and says so
+ *    (`usedGit: false`) rather than letting a caller assume otherwise.
+ */
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { execFileSync } from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { collectDeployFiles, sha1Of, MAX_DEPLOY_FILES } from "@/lib/vercel-files";
+
+let dir: string;
+
+function write(rel: string, body: string) {
+  const abs = path.join(dir, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, body);
+}
+
+function gitInit() {
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+}
+
+function names(files: { file: string }[]): string[] {
+  return files.map((f) => f.file).sort();
+}
+
+beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-deploy-")); });
+afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+describe("a folder that is a git repository", () => {
+  it("uploads what git tracks and what git does not ignore — and nothing it does", async () => {
+    gitInit();
+    write("index.html", "<h1>hi</h1>");
+    write("src/app.js", "console.log(1)");
+    write(".gitignore", "secret.env\ndist/\n");
+    write("secret.env", "API_KEY=hunter2hunter2");
+    write("dist/bundle.js", "built");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.usedGit).toBe(true);
+    expect(names(got.files)).toEqual([".gitignore", "index.html", "src/app.js"]);
+    // The whole point: the credential the owner told git to ignore is not in
+    // the payload, under any name.
+    expect(JSON.stringify(got.files)).not.toContain("hunter2hunter2");
+  });
+
+  it("skips .git, node_modules and .clawbox even when the repository does not ignore them", async () => {
+    gitInit();
+    write("index.html", "x");
+    write("node_modules/left-pad/index.js", "pad");
+    write(".clawbox/worktrees/run-1/index.html", "a copy of the project");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(names(got.files)).toEqual(["index.html"]);
+  });
+
+  it("hashes each file the way Vercel addresses it", async () => {
+    gitInit();
+    write("index.html", "hello");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok && got.files[0].sha).toBe(sha1Of(Buffer.from("hello")));
+    expect(got.ok && got.files[0].size).toBe(5);
+  });
+});
+
+describe("a folder that is not a repository", () => {
+  it("still deploys, on the weaker rule, and says the rule was weaker", async () => {
+    write("index.html", "x");
+    write("node_modules/a/b.js", "dep");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    // An owner is entitled to know their own ignore rules were not what decided.
+    expect(got.usedGit).toBe(false);
+    expect(names(got.files)).toEqual(["index.html"]);
+  });
+});
+
+describe("symlinks", () => {
+  it("are never followed and never uploaded, on either path", async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-secrets-"));
+    fs.writeFileSync(path.join(outside, "config.json"), '{"token":"hunter2hunter2"}');
+    try {
+      write("index.html", "x");
+      fs.symlinkSync(path.join(outside, "config.json"), path.join(dir, "stolen.json"));
+      fs.symlinkSync(outside, path.join(dir, "stolen-dir"));
+      const walked = await collectDeployFiles(dir);
+      expect(walked.ok && names(walked.files)).toEqual(["index.html"]);
+
+      // And with git, which lists a symlink as an ordinary path.
+      gitInit();
+      const listed = await collectDeployFiles(dir);
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return;
+      expect(listed.usedGit).toBe(true);
+      expect(names(listed.files)).toEqual(["index.html"]);
+      expect(JSON.stringify(listed.files)).not.toContain("hunter2hunter2");
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("what is refused", () => {
+  it("refuses an empty folder with a sentence rather than deploying nothing", async () => {
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(false);
+    expect(got.ok === false && got.code).toBe("empty");
+  });
+
+  it("refuses a folder with more files than this box uploads", async () => {
+    // Cheaper than making MAX_DEPLOY_FILES real files: one folder, many names,
+    // and the walk's own count is what trips.
+    for (let i = 0; i <= MAX_DEPLOY_FILES + 1; i++) write(`f${i}.txt`, "x");
+    const got = await collectDeployFiles(dir);
+    expect(got.ok).toBe(false);
+    expect(got.ok === false && got.code).toBe("too_many_files");
+  });
+
+  it("says which folder could not be read rather than throwing", async () => {
+    const got = await collectDeployFiles(path.join(dir, "not-there"));
+    expect(got.ok).toBe(false);
+    expect(got.ok === false && got.code).toBe("unreadable");
+  });
+});
