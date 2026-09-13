@@ -113,7 +113,7 @@ import {
 } from "@/lib/coding-provider";
 import { getAnthropicConnection, type AnthropicSource } from "@/lib/coding-anthropic";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
-import { isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
+import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
 import { APP_ID_RE } from "@/lib/code-projects";
@@ -9124,6 +9124,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // together both saw room for one. The same answer `teamSpawnSlot` already
   // gives with its `starting` count.
   const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider);
+  // Held beside the slot, and for the same span and the same reason: the folder
+  // this run is starting in is claimed the moment `assertDirectoryFree` passes
+  // and let go only once the record is visible, so a removal cannot slip
+  // between the two. Reassigned rather than awaited into, because which branch
+  // below resolves the folder depends on whether this is a resume.
+  let releaseDirectory: () => void = () => {};
   try {
     const tools = await requireSpawnTools();
 
@@ -9138,7 +9144,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // branch first; the tree is the only thing that was removed.
       inheritedWorktree = await reopenWorktree(previous);
       directory = await realDirectory(previous.directory);
-      assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory);
       projectId = previous.projectId;
       // A session poisoned by an authentication or transport failure REPLAYS
       // that failure on every resume — Claude Code persists it in the session,
@@ -9160,7 +9166,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
       ({ directory, projectId } = await resolveWorkingDirectory(input));
-      assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory);
     }
 
     // Read once, here: a run keeps the settings it started with even if the
@@ -9304,6 +9310,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     spawnOrSettle(run, resumeSessionId, tools, settings);
     return cloneRun(run);
   } finally {
+    releaseDirectory();
     releaseSlot();
   }
 }
@@ -9735,6 +9742,9 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // Held from the gate to the flip below, like every other start — see
   // `startingRuns`.
   const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  // Held beside the slot — see `startRun`. A resume reaches the same folder a
+  // removal may be about to take, and by the same synchronous claim.
+  let releaseDirectory: () => void = () => {};
   try {
     const tools = await requireSpawnTools();
     // The folder must still be there. A team worker's worktree is removed when
@@ -9753,7 +9763,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
     } catch {
       throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
     }
-    assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id);
     // The one place a run's permission rules are RE-READ rather than kept.
     //
     // Everything else about a run is frozen on its record precisely so the tools
@@ -9814,6 +9824,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
     spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
     return cloneRun(run);
   } finally {
+    releaseDirectory();
     releaseSlot();
   }
 }
@@ -9875,11 +9886,14 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // Held from the gate to the flip below, like every other start — see
   // `startingRuns`.
   const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  // Held beside the slot — see `startRun`. A draft that starts reaches the same
+  // folder a removal may be about to take, and by the same synchronous claim.
+  let releaseDirectory: () => void = () => {};
   try {
     const tools = await requireSpawnTools();
     // The folder must still be there — it was only checked when drafted.
     run.directory = await realDirectory(run.directory);
-    assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id);
     // The copy of the project is made at START and not when the draft was
     // written: a draft may sit for days, and a worktree made for one that is
     // never started would be a branch and a folder nobody asked for.
@@ -9911,6 +9925,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     spawnOrSettle(run, null, tools, settings);
     return cloneRun(run);
   } finally {
+    releaseDirectory();
     releaseSlot();
   }
 }
@@ -10045,17 +10060,14 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
  * inside ClawBox's own checkout), where two runs really would edit each
  * other's half-written files and each settle would commit the other's.
  */
-function assertDirectoryFree(directory: string, exceptRunId?: string): void {
+function assertDirectoryFree(directory: string, exceptRunId?: string): () => void {
   // A project the owner is REMOVING right now, before the run store is asked.
   //
   // This is the run half of a mutual exclusion, and the removal holds the other
-  // (`beginProjectRemoval` in src/lib/coding-project-delete.ts). The gap it
-  // closes: a removal checks for live runs, then spends four git processes and
-  // — on a cross-device move — a whole recursive copy before the folder
-  // actually goes. A run that started inside that window found nothing live,
-  // began writing, and the copy-then-remove deleted a file written after it was
-  // copied: gone from the original and never in the trash. Synchronous on both
-  // sides, so the two cannot each decide the other is not there.
+  // (`beginProjectRemoval` in src/lib/coding-project-removal-lock.ts). The gap
+  // it closes: a removal checks for live runs, then spends four git processes
+  // before the folder actually goes. A run that started inside that window
+  // found nothing live and began writing into a folder on its way out.
   if (isProjectBeingRemoved(directory)) {
     throw new CodingAgentError(
       "busy",
@@ -10069,6 +10081,17 @@ function assertDirectoryFree(directory: string, exceptRunId?: string): void {
       `Another coding run (${busy.id}) is already working in that folder. Wait for it or stop it first.`,
     );
   }
+  // CLAIMED HERE, with no await between the read above and this write, and held
+  // by the caller until the record is visible to `loadRuns()`.
+  //
+  // The other half of the same exclusion. This check passes synchronously and
+  // then the caller spends six awaits before `insertRun` — so a removal that
+  // looked at the run store during that window saw nothing live and moved the
+  // folder out from under a run already committed to starting in it. Re-reading
+  // the store later cannot find it either; only a claim can. See the module
+  // header of coding-project-removal-lock.ts for why write-then-read on both
+  // sides is what makes this sound.
+  return beginRunStart(directory);
 }
 
 /**

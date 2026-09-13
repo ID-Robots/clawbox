@@ -216,14 +216,55 @@ describe("the refusals", () => {
     expect(fs.existsSync(project)).toBe(true);
   });
 
-  it("refuses a folder that is not directly inside either root", async () => {
-    // A folder one level deeper than a project. `isInside` would call it
-    // contained; "directly inside" is what the guard actually asks.
+  it("does not recognise a folder NESTED in a project as a project entry", async () => {
+    // Named for what this actually reaches. A folder name is one path segment
+    // joined to a root, so `packages` is looked for at `<owner>/packages` and
+    // `data/code-projects/packages` — neither of which exists — and the answer
+    // is `not_found` before the containment check is ever asked. The
+    // `outside_roots` verdict itself is covered by the `isDirectlyInside` unit
+    // tests and by the no-project-folder-set case; it is not reachable here.
     const project = repo("shop", { pushed: true });
     fs.mkdirSync(path.join(project, "packages"), { recursive: true });
     const res = await DELETE(del({ folder: "packages", confirm: "packages" }, owned()));
     expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: "not_found" });
     expect(fs.existsSync(path.join(project, "packages"))).toBe(true);
+  });
+
+  it("refuses while a run is STARTING in the project, before its record exists", async () => {
+    // THE RACE THIS FEATURE LOST A FILE TO.
+    //
+    // `assertDirectoryFree` passes synchronously and then `startRun` spends six
+    // awaits — the spawn tools, the folder, the settings, the worktree, the
+    // auto-PR read, the secrets — before `insertRun` makes the run visible. A
+    // removal that looked at the run store during that window saw NOTHING live
+    // and moved the folder out from under a run already committed to starting
+    // in it. Re-reading the store immediately before the move does not find it
+    // either: it is not in the store yet.
+    //
+    // So the start leaves a CLAIM, and the removal reads it. `listRuns` stays
+    // empty here on purpose — that is precisely the state that fooled the old
+    // guard, and a test that put a run in the store would be testing the check
+    // that already worked.
+    const project = repo("shop", { pushed: true });
+    listRuns.mockReturnValue([]);
+    const lock = await import("@/lib/coding-project-removal-lock");
+    const release = lock.beginRunStart(path.join(project, ".clawbox", "worktrees", "run-abc12345"));
+
+    try {
+      const res = await DELETE(del({ folder: "shop", confirm: "shop", force: true }, owned()));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "live_run" });
+      // The whole point: the folder is still there.
+      expect(fs.existsSync(project)).toBe(true);
+    } finally {
+      release();
+    }
+
+    // And once that run has finished starting, the removal goes through.
+    const after = await DELETE(del({ folder: "shop", confirm: "shop", force: true }, owned()));
+    expect(after.status).toBe(200);
+    expect(fs.existsSync(project)).toBe(false);
   });
 
   it("refuses a symlink pointing outside the roots", async () => {
@@ -474,7 +515,7 @@ describe("the success path", () => {
     // IT IS A MOVE, NOT A DELETE. The folder is gone from the project root and
     // its contents are readable where the answer says they are.
     expect(fs.existsSync(project)).toBe(false);
-    expect(body.trashPath.startsWith(path.join(session.root, "data", "deleted-projects"))).toBe(true);
+    expect(body.trashPath.startsWith(path.join(owner, ".deleted-projects"))).toBe(true);
     expect(fs.readFileSync(path.join(body.trashPath, "index.html"), "utf8")).toBe("hello");
     expect(body.keptUntil - body.deletedAt).toBe(30 * 24 * 60 * 60_000);
 
@@ -531,7 +572,7 @@ describe("the success path", () => {
 
   it("prunes older trash entries past the retention rule on the way past", async () => {
     repo("shop", { pushed: true });
-    const trash = path.join(session.root, "data", "deleted-projects");
+    const trash = path.join(owner, ".deleted-projects");
     fs.mkdirSync(trash, { recursive: true });
     const long = new Date(Date.now() - 60 * 24 * 60 * 60_000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     fs.mkdirSync(path.join(trash, `ancient--${long}`));
@@ -546,7 +587,7 @@ describe("the success path", () => {
     // count bound could take a folder minutes after it arrived. The preview now
     // names what THIS removal would cost, and the outcome says what it cost.
     repo("shop", { pushed: true });
-    const trash = path.join(session.root, "data", "deleted-projects");
+    const trash = path.join(owner, ".deleted-projects");
     fs.mkdirSync(trash, { recursive: true });
     const stamp = (msAgo: number) => new Date(Date.now() - msAgo).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     // A full shelf, every entry well inside its thirty days.
@@ -576,7 +617,7 @@ describe("the success path", () => {
 
   it("reports an EXPIRED prune apart from an early one", async () => {
     repo("shop", { pushed: true });
-    const trash = path.join(session.root, "data", "deleted-projects");
+    const trash = path.join(owner, ".deleted-projects");
     fs.mkdirSync(trash, { recursive: true });
     const long = new Date(Date.now() - 60 * 24 * 60 * 60_000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     fs.mkdirSync(path.join(trash, `ancient--${long}`));
@@ -592,7 +633,7 @@ describe("the success path", () => {
     // this removal would delete one for good. Refused — being told is not the
     // same as agreeing — and cleared only by the flag the dialog ticks.
     repo("shop", { pushed: true });
-    const trash = path.join(session.root, "data", "deleted-projects");
+    const trash = path.join(owner, ".deleted-projects");
     fs.mkdirSync(trash, { recursive: true });
     const stamp = (msAgo: number) => new Date(Date.now() - msAgo).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     const names: string[] = [];

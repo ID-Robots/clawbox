@@ -36,8 +36,9 @@ export const dynamic = "force-dynamic";
  *    owner opened over one project cannot post over another, and a request
  *    replayed from anywhere cannot mean "the current one".
  *
- *  - IT IS NOT A DELETE. The folder is moved into `data/deleted-projects/` with
- *    a timestamp on it and the answer says where it went; the retention rule
+ *  - IT IS NOT A DELETE. The folder is moved into a `.deleted-projects/` folder
+ *    in its own root — same filesystem, so the rename is atomic — with a
+ *    timestamp on it, and the answer says where it went; the retention rule
  *    lives in src/lib/coding-project-delete.ts and is stated there. Nothing in
  *    this route recursively removes anything.
  *
