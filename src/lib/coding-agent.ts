@@ -7947,14 +7947,6 @@ async function startCompletionAttempt(
     // agent off while the run worked.
     releaseSlot = await assertCanSpawn(null);
     tools = await requireSpawnTools();
-    // The copy of the project this lap works in. A live pipeline holds it now
-    // (`settleRunWorktree` steps aside for one), but a pipeline already in
-    // flight when that hold shipped, or a tree the weekly sweep took, has none
-    // — and the lap would die on a missing folder with the whole task still to
-    // do. Put back from its branch exactly as the owner's own Resume does; a
-    // restore that fails leaves the record alone and `realDirectory` below says
-    // the sentence the owner needs.
-    if (run.worktree) run.worktree = await reopenWorktree(run);
     run.directory = await realDirectory(run.directory);
   } catch (err) {
     releaseSlot?.();
