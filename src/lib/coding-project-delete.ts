@@ -664,6 +664,32 @@ function trashDirs(roots: ProjectRoots): string[] {
     .map(projectTrashDir);
 }
 
+/**
+ * The trash folders to read, one per PHYSICAL folder.
+ *
+ * DEDUPED, and not as defensive tidying. The two roots can be the same folder:
+ * config.json is a file the owner can edit, so the project folder can be
+ * pointed at `data/code-projects` by hand — or linked there — which is the
+ * arrangement `listProjects` already defends against by describing each real
+ * folder once. Reading one trash twice counted every entry twice: the shelf
+ * reported full at half the stated bound, so `trash_full` refused early and the
+ * prune took recoverable projects BEFORE their time. That is the same consent
+ * defect the count bound exists to state, arriving by the back door.
+ *
+ * By REAL path, like the listing's own dedupe, so a link between the roots
+ * counts once too. A trash that does not exist yet cannot be resolved and falls
+ * back to its own path — two of those are either the same string, and dedupe,
+ * or two genuinely different folders that are both empty.
+ */
+async function physicalTrashDirs(roots: ProjectRoots): Promise<string[]> {
+  const byReal = new Map<string, string>();
+  for (const dir of trashDirs(roots)) {
+    const real = await fs.promises.realpath(dir).catch(() => dir);
+    if (!byReal.has(real)) byReal.set(real, dir);
+  }
+  return [...byReal.values()];
+}
+
 /** How long a removed project is kept before the prune takes it. */
 export const TRASH_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
@@ -795,7 +821,7 @@ function selectTrashPrune(entries: readonly TrashEntry[], now: number, incoming:
  * twice what the dialog says it keeps.
  */
 async function readTrashEntries(roots: ProjectRoots): Promise<TrashEntry[]> {
-  const perDir = await Promise.all(trashDirs(roots).map(async (dir) => {
+  const perDir = await Promise.all((await physicalTrashDirs(roots)).map(async (dir) => {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
     return entries
       .filter((e) => e.isDirectory())

@@ -382,6 +382,38 @@ describe("the trash and its retention rule", () => {
     expect((await lib.trashPurgedByOneMore(roots(), now)).early).toEqual([]);
   });
 
+  it("counts one shelf ONCE when both roots are the same folder", async () => {
+    // config.json is a file the owner can edit, so the project folder can be
+    // pointed at `data/code-projects` by hand — the arrangement `listProjects`
+    // already defends against by describing each real folder once. There is
+    // then ONE trash, and reading it per-root counted every entry twice: the
+    // shelf reported full at half the stated bound, so `trash_full` refused
+    // early and the prune took recoverable projects before their time. That is
+    // the same consent defect the count bound was stated to fix, arriving by
+    // the back door.
+    const now = Date.parse("2026-09-13T12:00:00.000Z");
+    const code = path.join(root, "data", "code-projects");
+    const both = { ownerFolder: code, codeProjects: code, checkout: root };
+    const trash = lib.projectTrashDir(code);
+    fs.mkdirSync(trash, { recursive: true });
+    const half = Math.floor(lib.MAX_TRASH_ENTRIES / 2);
+    for (let i = 0; i < half; i += 1) fs.mkdirSync(path.join(trash, stamped(`p${i}`, now, i * 60_000)));
+
+    // Half a shelf is half a shelf, and nothing is at risk on it.
+    expect(await lib.trashPurgedByOneMore(both, now)).toEqual({ count: half, early: [] });
+    // And the prune takes nothing, rather than reporting each entry twice.
+    expect(await lib.pruneProjectTrash(both, now)).toEqual({ removed: [], expired: [], early: [] });
+    expect(fs.readdirSync(trash)).toHaveLength(half);
+
+    // The same folder reached by a LINK counts once too — two spellings that
+    // `path.resolve` cannot tell apart, which is why the dedupe is by real path
+    // the way `listProjects` dedupes its own listing.
+    const linked = path.join(root, "LinkedProjects");
+    fs.symlinkSync(code, linked);
+    expect(await lib.trashPurgedByOneMore({ ...both, ownerFolder: linked }, now))
+      .toEqual({ count: half, early: [] });
+  });
+
   it("counts the shelf ACROSS both roots, because the promise is one number for the box", async () => {
     // There is a trash per root now. If the bounds were applied per root, a box
     // with two roots would keep twice what "the {max} most recently removed
