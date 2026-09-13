@@ -110,7 +110,10 @@ describe("symlinks", () => {
       const walked = await collectDeployFiles(dir);
       expect(walked.ok && names(walked.files)).toEqual(["index.html"]);
 
-      // And with git, which lists a symlink as an ordinary path.
+      // And with git, which lists a symlink as an ordinary path — there the
+      // refusal is `O_NOFOLLOW` on the one descriptor each file is read
+      // through, which is also what closes the window between checking a path
+      // and reading it.
       gitInit();
       const listed = await collectDeployFiles(dir);
       expect(listed.ok).toBe(true);

@@ -31,7 +31,8 @@
  */
 
 import crypto from "crypto";
-import fs from "fs/promises";
+import { constants as fsConstants } from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import { gitIn } from "@/lib/coding-team-worktree";
 import type { DeployFileBody } from "@/lib/vercel";
@@ -111,7 +112,7 @@ async function gitListing(dir: string): Promise<string[] | null> {
 
 /** Every ordinary file under `dir`, relative and posix-spelled. The fallback. */
 async function walk(dir: string, base = "", out: string[] = []): Promise<string[]> {
-  const entries = await fs.readdir(path.join(dir, base), { withFileTypes: true });
+  const entries = await fsp.readdir(path.join(dir, base), { withFileTypes: true });
   for (const entry of entries) {
     if (out.length > MAX_DEPLOY_FILES) return out;
     if (NEVER_UPLOADED.has(entry.name)) continue;
@@ -175,30 +176,51 @@ export async function collectDeployFiles(dir: string): Promise<CollectResult> {
       skipped.push(rel);
       continue;
     }
-    let stat;
+    // ONE descriptor, opened `O_NOFOLLOW`, and every question asked of THAT
+    // handle rather than of the path again.
+    //
+    // Not a style preference: `lstat` then `readFile` is two lookups of the
+    // same name, and between them a run still working in this folder can
+    // replace the file with a link to somewhere else — so the check would pass
+    // on one file and the bytes would come from another. The same discipline
+    // the MCP file sinks use (`resolveGuardedPath`), and CodeQL flags the
+    // stat-then-read shape by name.
+    let handle: fsp.FileHandle;
     try {
-      stat = await fs.lstat(abs);
+      handle = await fsp.open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     } catch {
-      // Listed and gone by the time it was read: a run may still be working in
-      // this folder. Skipped and reported, never a failed deploy.
+      // Listed and gone, or a symlink O_NOFOLLOW refused. Either way it is
+      // skipped and reported, never a failed deploy: a run may still be
+      // working in this folder.
       skipped.push(rel);
       continue;
     }
-    if (!stat.isFile()) { skipped.push(rel); continue; }
-    if (stat.size > MAX_DEPLOY_FILE_BYTES) { skipped.push(rel); continue; }
-    if (bytes + stat.size > MAX_DEPLOY_BYTES) {
+    let data: Buffer;
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > MAX_DEPLOY_FILE_BYTES) { skipped.push(rel); continue; }
+      if (bytes + stat.size > MAX_DEPLOY_BYTES) {
+        return {
+          ok: false,
+          code: "too_large",
+          detail: `That folder is more than the ${Math.round(MAX_DEPLOY_BYTES / (1024 * 1024))} MB this ClawBox uploads in one deployment. Add what does not belong in the deployment to .gitignore, or connect the Vercel project to a git repository.`,
+        };
+      }
+      data = await handle.readFile();
+    } catch {
+      skipped.push(rel);
+      continue;
+    } finally {
+      await handle.close().catch(() => {});
+    }
+    // The handle's own size bounded what was read; this is what actually
+    // arrived, which is what the deployment is charged for.
+    if (bytes + data.length > MAX_DEPLOY_BYTES) {
       return {
         ok: false,
         code: "too_large",
         detail: `That folder is more than the ${Math.round(MAX_DEPLOY_BYTES / (1024 * 1024))} MB this ClawBox uploads in one deployment. Add what does not belong in the deployment to .gitignore, or connect the Vercel project to a git repository.`,
       };
-    }
-    let data: Buffer;
-    try {
-      data = await fs.readFile(abs);
-    } catch {
-      skipped.push(rel);
-      continue;
     }
     bytes += data.length;
     files.push({
