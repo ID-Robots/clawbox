@@ -54,10 +54,15 @@ afterEach(() => {
   restore();
 });
 
-function post(body: unknown, auth: "cookie" | "bearer" | "none" = "cookie"): Promise<Response> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+function post(
+  body: unknown,
+  auth: "cookie" | "bearer" | "none" = "cookie",
+  origin?: string,
+): Promise<Response> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", host: "localhost" };
   if (auth === "cookie") headers.Cookie = session.cookie;
   if (auth === "bearer") headers.Authorization = `Bearer ${MCP_TOKEN}`;
+  if (origin !== undefined) headers.Origin = origin;
   return POST(new Request("http://localhost/setup-api/coding-agent/message", {
     method: "POST",
     headers,
@@ -103,6 +108,22 @@ describe("the gate", () => {
   it("lets the OWNER's own cookie through on their own run", async () => {
     getRun.mockReturnValue(OWNER_RUN);
     expect((await post({ runId: OWNER_RUN.id, text: "hi" })).status).toBe(200);
+  });
+
+  it("refuses another site's page even with the owner's cookie on it", async () => {
+    // Unlike stop and pause, this route puts WORDS in front of a shell that
+    // edits files. A form posted as text/plain from anywhere on the web carries
+    // the cookie and needs no preflight, so the origin is checked too.
+    const res = await post({ runId: AGENT_RUN.id, text: "rm -rf everything" }, "cookie", "https://evil.example");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: "cross_origin" });
+    expect(queueRunMessage).not.toHaveBeenCalled();
+  });
+
+  it("lets our own page and a header-less caller through", async () => {
+    expect((await post({ runId: AGENT_RUN.id, text: "hi" }, "cookie", "http://localhost")).status).toBe(200);
+    // The MCP server sends no Origin at all; its gate is the run's source.
+    expect((await post({ runId: AGENT_RUN.id, text: "hi" }, "bearer")).status).toBe(200);
   });
 });
 

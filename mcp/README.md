@@ -751,7 +751,8 @@ either as the harness's next user turn — the runs spawn with Claude Code's
 into the continuation of its next attempt or the owner's Resume. The tool says
 which of the two happened. The owner's own input is on the run's page in the
 Coding Agent app; a run the OWNER started answers the MCP bearer 403 here, as
-it does for stop and resume. The summary it returns is model-authored and labelled as information,
+it does for stop and resume, and a browser request from another site is
+refused 403 `cross_origin` (a header-less caller such as this server is not). The summary it returns is model-authored and labelled as information,
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
 to the approved senders (`src/lib/coding-agent-notify.ts`).

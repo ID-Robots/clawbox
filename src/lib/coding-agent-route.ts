@@ -50,8 +50,11 @@ export interface RunLifecycleRoute {
    * stream can only be consumed once, so an action that needs a second field
    * (the message route's `text`) has to be handed it rather than re-reading
    * it. Undefined for a route whose id travels in the query.
+   *
+   * `request` is the original, for an action with a fence of its own to apply
+   * after this factory's — the message route's same-origin check.
    */
-  act: (id: string, body: unknown) => Promise<NextResponse> | NextResponse;
+  act: (id: string, body: unknown, request: Request) => Promise<NextResponse> | NextResponse;
 }
 
 /** Build the handler: requireSession → id → 404 → owner gate → act → error mapping. */
@@ -83,7 +86,7 @@ export function runLifecycleRoute({ verb, noun = "run", idFrom = "body", act }: 
         const whose = noun === "draft" ? "That draft is the owner's" : "That run was started by the owner";
         return NextResponse.json({ error: `${whose}; only they can ${verb} it.`, kind: "owner_only" }, { status: 403 });
       }
-      return await act(id, body);
+      return await act(id, body, request);
     } catch (err) {
       if (err instanceof CodingAgentError) {
         return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });

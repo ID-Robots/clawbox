@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { queueRunMessage } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   MAX_QUEUED_RUN_MESSAGES,
   MAX_RUN_MESSAGE_CHARS,
@@ -43,6 +44,16 @@ const STATUS_FOR: Record<RunMessageRefusal, number> = {
  * at the run's next attempt or when you resume it". A surface that could not
  * tell them apart would have to claim the stronger one.
  *
+ * OUR PAGE ONLY, on top of that gate. Every other run route is a lifecycle
+ * verb — stop it, pause it, resume it — and the worst a cross-site page could
+ * do with the owner's cookie there is end work they wanted. This route puts
+ * WORDS in front of a shell that edits files and runs commands, which is a
+ * different thing: a form posted as `text/plain` from any page on the web
+ * carries the box's cookie and needs no preflight, so "the owner is signed in"
+ * is not enough on its own. `isSameOriginRequest` lets a header-less caller
+ * through, which is what keeps the MCP bearer — the agent, whose own gate is
+ * the run's `source` above — working.
+ *
  * The refusal body carries a stable `code` beside its English sentence, so the
  * card can word it in the owner's language and the MCP tool can advise on the
  * right thing — "shorten it" and "that run has finished" need different next
@@ -50,7 +61,13 @@ const STATUS_FOR: Record<RunMessageRefusal, number> = {
  */
 export const POST = runLifecycleRoute({
   verb: "send a message to",
-  act: (id, body) => {
+  act: (id, body, request) => {
+    if (!isSameOriginRequest(request)) {
+      return NextResponse.json(
+        { error: "A message to a run can only be sent from this ClawBox's own pages.", code: "cross_origin" },
+        { status: 403 },
+      );
+    }
     const text = (body as { text?: unknown } | null)?.text;
     try {
       const { run, delivered } = queueRunMessage(id, text);
