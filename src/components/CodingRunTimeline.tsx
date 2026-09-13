@@ -92,6 +92,13 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   droppedSteps: "codingAgent.stepDropped",
   secretsInjected: "codingAgent.stepSecretsInjected",
   secretsUnreadable: "codingAgent.stepSecretsUnreadable",
+  deployWatching: "codingAgent.stepDeployWatching",
+  deployReady: "codingAgent.stepDeployReady",
+  deployFailed: "codingAgent.stepDeployFailed",
+  deployStopped: "codingAgent.stepDeployStopped",
+  deployFeedback: "codingAgent.stepDeployFeedback",
+  deployFixTurn: "codingAgent.stepDeployFixTurn",
+  deployPromoted: "codingAgent.stepDeployPromoted",
 };
 
 /**
