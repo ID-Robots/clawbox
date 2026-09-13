@@ -81,6 +81,7 @@ import {
   isCodingRunStatus,
   isHeld,
   isLive,
+  isSettled,
   parsePauseReason,
 } from "@/lib/coding-agent-status";
 import {
@@ -95,6 +96,9 @@ import {
 // them can recognise each one and say it in the owner's language.
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 import { memAvailableMb } from "@/lib/mem-available";
+// Why the runs and the handles on them do not live in module-level `let`: this
+// file is compiled twice into the one web-server process. See the store below.
+import { processStore } from "@/lib/process-store";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import {
   CODING_AGENT_PROVIDER_CONFIG_KEY,
@@ -3332,19 +3336,80 @@ function countOf(raw: unknown): number {
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
+/**
+ * What the runs file looks like from outside, so a writer can tell whether it
+ * is still the file it read. Null when there is none. The inode is in it
+ * because every write lands through a rename: a file replaced between two
+ * writes with the same size in the same millisecond is still a different file.
+ */
+function fileSignature(): string | null {
+  try {
+    const stat = fs.statSync(RUNS_PATH);
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
 function readAll(): CodingRun[] {
   try {
-    if (!fs.existsSync(RUNS_PATH)) return [];
+    if (!fs.existsSync(RUNS_PATH)) {
+      store.signature = null;
+      return [];
+    }
     const parsed: unknown = JSON.parse(fs.readFileSync(RUNS_PATH, "utf-8"));
+    store.signature = fileSignature();
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(isCodingRun).map(normalizeRun);
   } catch {
     // A corrupt file must not take the feature down; the next write repairs it.
+    store.signature = null;
     return [];
   }
 }
 
+/**
+ * Never write a run that is still going over one the file already says is
+ * FINISHED.
+ *
+ * The store above is what makes this process agree with itself; this is the
+ * floor under it, for a writer that is not this process at all. The module has
+ * always known there can be one — a script, a test worker, a second server
+ * during a restart — and the cost of losing the argument is not a stale read
+ * but a destroyed record: the rig watched `completed` + its commit go back to
+ * `running` + null on disk, after which the next boot settled a finished run as
+ * lost and offered to start it again over work that was already merged.
+ *
+ * Only that one direction, and only for a run BOTH lists know about. A record
+ * this process has settled and the file has not is the ordinary case and must
+ * win; a record the file has and this list has not was deliberately dropped
+ * (clearFinishedRuns) and stays dropped. `isSettled` and not `!isLive`: a
+ * paused run or a draft is held, not finished, and both legitimately go back to
+ * running.
+ */
+function keepSettledRecords(list: CodingRun[]): void {
+  const onDisk = new Map(readAll().map((r) => [r.id, r]));
+  for (const mine of list) {
+    if (!isLive(mine.status)) continue;
+    const theirs = onDisk.get(mine.id);
+    if (!theirs || !isSettled(theirs.status)) continue;
+    console.error(
+      `[coding-agent] ${mine.id} is recorded as ${theirs.status} on disk; keeping that over this process's "${mine.status}"`,
+    );
+    // Over the record IN PLACE rather than replacing it in the array: the
+    // repair has to reach every reader here, not just the bytes on their way
+    // out, and `live` and a settle already in flight hold this very object. A
+    // fresh one swapped into the array would leave them mutating an orphan.
+    // Nothing in `live` is torn down — if this process really is driving that
+    // run, its own settle writes the truth over this next.
+    Object.assign(mine, theirs);
+  }
+}
+
 function writeAll(list: CodingRun[]): void {
+  // Cheap (one stat) and only ever true when a second writer exists, which on
+  // a healthy box is never — see keepSettledRecords.
+  if (store.signature !== null && fileSignature() !== store.signature) keepSettledRecords(list);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${RUNS_PATH}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
@@ -3354,6 +3419,7 @@ function writeAll(list: CodingRun[]): void {
     // best-effort; a failed chmod must not lose the run record
   }
   fs.renameSync(tmp, RUNS_PATH);
+  store.signature = fileSignature();
 }
 
 /** What a spawn needs off the disk, resolved once before the record flips to running. */
@@ -3533,13 +3599,85 @@ interface LiveRun {
   outcome: { status: "completed" | "failed"; error: string | null; resumable: boolean } | null;
 }
 
-/** Newest first. `null` until first use. */
-let runs: CodingRun[] | null = null;
-const live = new Map<string, LiveRun>();
-const waiters = new Map<string, Set<() => void>>();
-let flushTimer: NodeJS.Timeout | null = null;
-let dirty = false;
-let exitHookInstalled = false;
+/**
+ * Everything about the runs that must not exist twice.
+ *
+ * WHY IT IS NOT PLAIN MODULE STATE. Next compiles the boot hook
+ * (src/instrumentation.ts) in a layer of its own, so its
+ * `require("./lib/coding-agent")` and a route handler's
+ * `import "@/lib/coding-agent"` are two DIFFERENT modules inside the one
+ * web-server process — proved off the production build, see
+ * src/lib/process-store.ts. With the state per module copy, the two halves of
+ * this file's job came apart exactly where a restart put them:
+ *
+ *   - the boot hook REATTACHES a run that survived the restart and settles it
+ *     on its own copy, while the routes' copy froze whatever the file said at
+ *     the moment the first GET populated it — and the Coding Agent window polls
+ *     every 5 s, so on the rig (2026-09-13, 2 boards, 2/2) that was always
+ *     mid-run. The record answered `running`, `commit: null` for ever, and the
+ *     phantom cost a parallel slot: `maxParallelRuns: 1` then refused every new
+ *     run;
+ *   - and that copy's next write — an unrelated run being started — put the
+ *     older snapshot back over the settled record on disk (`completed` + commit
+ *     → `running` + null, read straight off data/coding-agent-runs.json), so
+ *     the next restart settled a finished run as "the box restarted while the
+ *     run was live" over work that was already merged.
+ *
+ * Keyed by the runs file, because that is what the state is a cache OF: two
+ * copies pointing at one file share one store, and a test with its own
+ * CLAWBOX_ROOT gets its own.
+ *
+ * `liveHarnessFault` is deliberately NOT here: it is a synchronous shadow of a
+ * value that lives in the config store, so a second copy of this module reads
+ * it off disk rather than missing it.
+ */
+interface RunStore {
+  /** Newest first. `null` until first use. */
+  runs: CodingRun[] | null;
+  live: Map<string, LiveRun>;
+  waiters: Map<string, Set<() => void>>;
+  flushTimer: NodeJS.Timeout | null;
+  dirty: boolean;
+  exitHookInstalled: boolean;
+  /** A run's injected secrets, kept off the record — see runSecretEnv. */
+  runSecretEnv: Map<string, Record<string, string>>;
+  /** The runs whose pull request, deployment or review is already being watched. */
+  prWatchers: Set<string>;
+  deployWatchers: Set<string>;
+  reviewWatchers: Set<string>;
+  /** Settle chains a test can wait on — see trackSettleWork. */
+  settling: Set<Promise<void>>;
+  /** One lifecycle change at a time per run — see transitions. */
+  transitions: Map<string, Promise<CodingRun>>;
+  /** Starts past the gate and not yet visible to loadRuns() — see startingRuns. */
+  startingRuns: number;
+  /**
+   * The runs file as this process last read or wrote it. A file that has moved
+   * on since means somebody else writes it too; writeAll() checks rather than
+   * trusting its own snapshot.
+   */
+  signature: string | null;
+}
+
+const store = processStore<RunStore>(RUNS_PATH, () => ({
+  runs: null,
+  live: new Map<string, LiveRun>(),
+  waiters: new Map<string, Set<() => void>>(),
+  flushTimer: null,
+  dirty: false,
+  exitHookInstalled: false,
+  runSecretEnv: new Map<string, Record<string, string>>(),
+  prWatchers: new Set<string>(),
+  deployWatchers: new Set<string>(),
+  reviewWatchers: new Set<string>(),
+  settling: new Set<Promise<void>>(),
+  transitions: new Map<string, Promise<CodingRun>>(),
+  startingRuns: 0,
+  signature: null,
+}));
+
+const live = store.live;
+const waiters = store.waiters;
 
 /**
  * Load the store. READ-ONLY on purpose: settling stale records lives in
@@ -3550,9 +3688,9 @@ let exitHookInstalled = false;
  * stamp it failed on disk (measured on this box: run-0nxtbhb1, 2026-08-27).
  */
 function loadRuns(): CodingRun[] {
-  if (runs) return runs;
-  runs = readAll();
-  return runs;
+  if (store.runs) return store.runs;
+  store.runs = readAll();
+  return store.runs;
 }
 
 /** What a run lost to a restart is told, when nothing in its log says otherwise. */
@@ -3790,10 +3928,10 @@ function settleLostRun(run: CodingRun, tools: SpawnTools): void {
 function persist(immediate = false): void {
   const list = loadRuns();
   if (immediate) {
-    dirty = false;
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
+    store.dirty = false;
+    if (store.flushTimer) {
+      clearTimeout(store.flushTimer);
+      store.flushTimer = null;
     }
     try {
       writeAll(list);
@@ -3802,19 +3940,20 @@ function persist(immediate = false): void {
     }
     return;
   }
-  dirty = true;
-  if (flushTimer) return;
-  flushTimer = setTimeout(() => {
-    flushTimer = null;
-    if (!dirty) return;
-    dirty = false;
+  store.dirty = true;
+  if (store.flushTimer) return;
+  const timer = setTimeout(() => {
+    store.flushTimer = null;
+    if (!store.dirty) return;
+    store.dirty = false;
     try {
       writeAll(loadRuns());
     } catch (err) {
       console.error("[coding-agent] could not write the runs file:", err instanceof Error ? err.message : err);
     }
   }, FLUSH_INTERVAL_MS);
-  flushTimer.unref();
+  timer.unref();
+  store.flushTimer = timer;
 }
 
 function cloneRun(run: CodingRun): CodingRun {
@@ -4752,7 +4891,7 @@ async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">):
  * reusing what is here, so an entry the owner has since un-ticked is not handed
  * back to a run that already had it.
  */
-const runSecretEnv = new Map<string, Record<string, string>>();
+const runSecretEnv = store.runSecretEnv;
 
 /**
  * Work out what this run may have, put it where the spawn can reach it, and
@@ -6353,7 +6492,7 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
 
 /** Runs whose checks are being polled right now, so a restart or a second
  *  settle cannot start two watchers for one pull request. */
-const prWatchers = new Set<string>();
+const prWatchers = store.prWatchers;
 
 /**
  * Poll a pull request's checks until they decide something.
@@ -6509,7 +6648,7 @@ export function resumePullRequestWatches(): void {
  * Runs whose deployment is being polled right now, so a restart, a second
  * settle or a fix turn coming home cannot start two watchers for one push.
  */
-const deployWatchers = new Set<string>();
+const deployWatchers = store.deployWatchers;
 
 /** Record a terminal deployment phase on the run and persist it. */
 function settleDeploy(run: CodingRun, phase: VercelPhase, detail: string | null): void {
@@ -6893,7 +7032,7 @@ export function recordDeployPromotion(runId: string, promotion: VercelPromotion)
  * request. The twin of `prWatchers`, and separate from it because the two
  * watchers are never both on one pull request.
  */
-const reviewWatchers = new Set<string>();
+const reviewWatchers = store.reviewWatchers;
 
 /** What a pull request the loop cleared but was not allowed to merge says. */
 const REVIEW_CLEAN_DETAIL =
@@ -7660,7 +7799,7 @@ function stderrTail(stderr: string): string {
  * was removing. Holding the promises costs nothing in production and gives the
  * suites something to wait on.
  */
-const settling = new Set<Promise<void>>();
+const settling = store.settling;
 
 function trackSettleWork(work: Promise<unknown>): void {
   // Neutralised first: the tracked promise must never be the one that rejects,
@@ -8021,8 +8160,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
 }
 
 function installExitHook(): void {
-  if (exitHookInstalled) return;
-  exitHookInstalled = true;
+  if (store.exitHookInstalled) return;
+  store.exitHookInstalled = true;
   process.on("exit", () => {
     for (const state of live.values()) {
       // A run in its own scope is MEANT to outlive this process: that is the
@@ -9338,7 +9477,7 @@ export function pauseRun(id: string): CodingRun {
  * ask for the same run while it is under way gets the same promise, exactly
  * as a start of a run already running gets the running record back.
  */
-const transitions = new Map<string, Promise<CodingRun>>();
+const transitions = store.transitions;
 
 function singleFlight(id: string, transition: () => Promise<CodingRun>): Promise<CodingRun> {
   const inFlight = transitions.get(id);
@@ -9583,17 +9722,15 @@ export function deleteDraftRun(id: string): void {
  * Held from the gate to the insert, released in a `finally` so a start that
  * throws in between gives its slot back.
  */
-let startingRuns = 0;
-
 function holdSpawnSlot(): () => void {
-  startingRuns += 1;
+  store.startingRuns += 1;
   let released = false;
   return () => {
     if (released) return;
     released = true;
     // Never below zero: a double release would otherwise make the counter a
     // permanent discount on the limit.
-    startingRuns = Math.max(0, startingRuns - 1);
+    store.startingRuns = Math.max(0, store.startingRuns - 1);
   };
 }
 
@@ -9666,7 +9803,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   const active = loadRuns().filter((r) => isLive(r.status));
   // The runs already going PLUS the starts that have passed this gate and have
   // not reached their record yet — see `startingRuns`.
-  const going = active.length + startingRuns;
+  const going = active.length + store.startingRuns;
   if (going >= limit) {
     throw new CodingAgentError(
       "busy",
@@ -9802,17 +9939,26 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   live.clear();
   waiters.clear();
   transitions.clear();
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
+  runSecretEnv.clear();
+  prWatchers.clear();
+  deployWatchers.clear();
+  reviewWatchers.clear();
+  if (store.flushTimer) {
+    clearTimeout(store.flushTimer);
+    store.flushTimer = null;
   }
-  dirty = false;
-  runs = null;
+  store.dirty = false;
+  store.runs = null;
+  store.signature = null;
+  // `exitHookInstalled` is deliberately LEFT set: the listener it guards is on
+  // `process`, which this cannot take back, and it works against the shared
+  // `live` map either way — clearing the flag would add one more listener per
+  // test instead of reusing the one that is already there.
   // Module state like the rest: left set, it would refuse the next test file's
   // runs from a fault the box under test never had.
   liveHarnessFault = null;
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
-  startingRuns = 0;
+  store.startingRuns = 0;
   return settleWork(killed, SETTLE_DRAIN_BUDGET_MS);
 }
