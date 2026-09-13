@@ -7,19 +7,14 @@ import {
   CodingAgentError,
   httpStatusForCodingError,
   listRuns,
-  recordManualDeployment,
   resolveProjectScope,
   resolveWorkingDirectory,
 } from "@/lib/coding-agent";
-import { deployProject } from "@/lib/vercel-deploy";
+import { runDeployment } from "@/lib/vercel-deploy-run";
 import {
-  newProjectDeploy,
   productionAllowance,
   readAutoProduction,
   readProjectDeploy,
-  recordProjectDeploy,
-  releaseProductionSlot,
-  reserveProductionSlot,
   setAutoProduction,
   updateProjectDeploy,
   MAX_PRODUCTION_DEPLOYS,
@@ -35,7 +30,6 @@ import {
   VercelLinkError,
   type DeployActor,
   type DeployTarget,
-  type ProjectDeploy,
 } from "@/lib/vercel-state";
 
 export const dynamic = "force-dynamic";
@@ -388,94 +382,30 @@ export async function POST(request: Request): Promise<NextResponse> {
     // The rate limit, on the TARGET rather than on who asked: a bound on how
     // often this box rebuilds a domain other people are using is not a
     // statement about whether the owner is trusted, and an owner who really
-    // means it has the Vercel dashboard. It is the loop it stops — which is why
-    // the slot is RESERVED in one step rather than checked and then taken: two
-    // calls that arrive together read the same count, and a loop is exactly
-    // when calls arrive together.
-    let reserved: number | null = null;
-    if (target === "production") {
-      const slot = await reserveProductionSlot(scope);
-      if (!slot.ok) {
+    // means it has the Vercel dashboard. It, the deployment itself and the two
+    // records it leaves are `runDeployment`'s — shared verbatim with the
+    // delivery pipeline, which deploys the same two targets with nobody
+    // watching (src/lib/vercel-deploy-run.ts). Every GATE above this line stays
+    // here, where it can be read in one go.
+    const outcome = await runDeployment({ scope, directory, target, gitRef: branch, runId, by });
+    if (!outcome.ok) {
+      if (outcome.code === "rate_limited") {
         return refuse(
           429,
           "rate_limited",
           `This project has had ${MAX_PRODUCTION_DEPLOYS} production deployments in the last hour, which is as many as this ClawBox makes. Wait, or deploy it from Vercel.`,
-          { nextAt: slot.nextAt },
+          { nextAt: outcome.nextAt },
         );
       }
-      reserved = slot.at;
-    }
-
-    const made = await deployProject({
-      scope,
-      directory,
-      target,
-      gitRef: branch,
-      // Shown on Vercel's own build page. The scope is the owner's own project
-      // name and the run id is this box's; neither is a path or a credential.
-      meta: { clawbox: "1", clawboxProject: scope, ...(runId ? { clawboxRun: runId } : {}) },
-    });
-    if (!made.ok) {
-      // Nothing was deployed, so the slot goes back: the counter bounds
-      // DEPLOYMENTS, not attempts, and a wrong token must not lock the owner
-      // out of their own domain for an hour after three instant failures.
-      if (reserved !== null) await releaseProductionSlot(scope, reserved);
       return NextResponse.json(
-        { error: made.detail, kind: made.code, code: made.code },
+        { error: outcome.detail, kind: outcome.code, code: outcome.code },
         // A refusal Vercel spoke is a 502 — the request was fine and the far
         // side is not — while everything this box decided is the caller's to
         // fix and answers 400.
-        { status: made.code === "not_found" ? 404 : UPSTREAM_CODES.has(made.code) ? 502 : 400 },
+        { status: outcome.code === "not_found" ? 404 : UPSTREAM_CODES.has(outcome.code) ? 502 : 400 },
       );
     }
-
-    const deploy: ProjectDeploy = newProjectDeploy({
-      target,
-      projectId: made.projectId,
-      teamId: made.teamId,
-      deploymentId: made.deployment.id,
-      readyState: made.deployment.readyState,
-      url: made.deployment.url,
-      inspectorUrl: made.deployment.inspectorUrl,
-      source: made.source,
-      gitRef: made.gitRef,
-      fileCount: made.fileCount,
-      by,
-      runId,
-    });
-    // Guarded for the reason the run record below is: by this line the
-    // deployment is building on somebody's account, and a 500 would have the
-    // caller retry and deploy it a second time. The fallback preserves
-    // `productionAt` — a reservation that is no longer counted is a cap the
-    // next call can walk past.
-    let entry: ProjectDeployEntry;
-    try {
-      entry = await recordProjectDeploy(scope, deploy);
-    } catch (err) {
-      console.error(`[vercel-deploy] ${scope} deployment not recorded:`, err instanceof Error ? err.message : err);
-      entry = { latest: deploy, productionAt: (await readProjectDeploy(scope).catch(() => null))?.productionAt ?? [] };
-    }
-    // And on the RUN, when there is one: the same deployment, followed by the
-    // watcher that already draws building → ready → failed on a run's card.
-    //
-    // It CANNOT be allowed to fail the answer. By this line the deployment is
-    // real and building on somebody's account; a 500 here would have the caller
-    // retry and deploy it a second time, which for `production` means building
-    // a live domain twice because a disk write on the Jetson hiccupped. The
-    // project record above is what the card reads either way.
-    if (runId) {
-      try {
-        recordManualDeployment(runId, {
-          deployment: made.deployment,
-          projectId: made.projectId,
-          teamId: made.teamId,
-          target,
-          branch: made.gitRef,
-        });
-      } catch (err) {
-        console.error(`[vercel-deploy] ${runId} not recorded on the run:`, err instanceof Error ? err.message : err);
-      }
-    }
+    const { entry, made } = outcome;
     return NextResponse.json({
       ok: true,
       // Same rule: nothing after the deployment exists may turn a real

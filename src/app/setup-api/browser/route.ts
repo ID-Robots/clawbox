@@ -9,12 +9,13 @@ import { describePortOwner, findPlaywrightChromium, probeCdp } from "@/lib/cdp-p
 import net from "net";
 import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
-import { lookup as dnsLookup } from "dns/promises";
 import { activeRunDirectory, activeRunId, getRun, getRealBrowser } from "@/lib/coding-agent";
 import type { BrowserKind } from "@/lib/browser-sessions";
 import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
 import { getBrowserStartUrl, writeBrowserLaunchEnv } from "@/lib/browser-setup";
 import { isInside } from "@/lib/file-guard";
+import { isPrivateIp, lookupWithTimeout } from "@/lib/private-address";
+import { chromiumSandboxArgs } from "@/lib/chromium-sandbox";
 import { ensureArtifactsDir } from "@/lib/coding-agent-artifacts";
 import { describeImage } from "@/lib/vision-describe";
 
@@ -34,55 +35,6 @@ const SCREENSHOT_TIMEOUT_MS = 15_000;
 // hosts that are, or resolve to, loopback/private/link-local addresses.
 // One scoped exception: file:// inside the ACTIVE coding run's own folder —
 // see validateFileNavUrl.
-function isPrivateIp(ip: string): boolean {
-  if (net.isIPv4(ip)) {
-    const p = ip.split(".").map(Number);
-    if (p[0] === 127 || p[0] === 10 || p[0] === 0) return true;
-    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
-    if (p[0] === 192 && p[1] === 168) return true;
-    if (p[0] === 169 && p[1] === 254) return true;
-    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // 100.64/10 CGNAT
-    if (p[0] >= 224) return true;
-    return false;
-  }
-  const lc = ip.toLowerCase();
-  if (lc === "::1" || lc === "::") return true;
-  // fe80::/10 link-local spans fe80–febf, not just the fe80 prefix; fc00::/7
-  // unique-local is fc/fd. ff00::/8 is multicast.
-  if (/^fe[89ab]/.test(lc) || lc.startsWith("fc") || lc.startsWith("fd") || lc.startsWith("ff")) return true;
-  if (lc.startsWith("::ffff:")) {
-    // IPv4-mapped IPv6. WHATWG URL normalizes these to the HEX form
-    // (::ffff:7f00:1), so a plain recurse on the suffix (expecting dotted
-    // ::ffff:127.0.0.1) misses loopback/private targets. Canonicalize both
-    // forms to dotted IPv4; fail closed on any unrecognized ::ffff: shape.
-    const mapped = lc.slice(7);
-    if (net.isIPv4(mapped)) return isPrivateIp(mapped);
-    const hx = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped);
-    if (hx) {
-      const hi = parseInt(hx[1], 16), lo = parseInt(hx[2], 16);
-      return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
-    }
-    return true;
-  }
-  return false;
-}
-
-// getaddrinfo runs on the libuv threadpool (size 4 by default). A hostile or
-// dead resolver can hang each lookup for the OS timeout, and enough concurrent
-// nav requests would exhaust the pool and stall unrelated fs/crypto work. Cap
-// the wait so validateNavUrl fails closed instead of blocking indefinitely.
-const DNS_TIMEOUT_MS = 3000;
-async function lookupWithTimeout(host: string): Promise<{ address: string }[]> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("DNS lookup timed out")), DNS_TIMEOUT_MS);
-  });
-  try {
-    return await Promise.race([dnsLookup(host, { all: true }), timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
 
 /**
  * The one file:// exception to SEC-4: the coding agent viewing the page IT is
@@ -407,28 +359,6 @@ class BrowserUnavailableError extends Error {
   }
 }
 
-/**
- * Chromium's namespace sandbox, on or off — the same test
- * `scripts/launch-browser.sh` makes for the window on the screen, so the two
- * Chromiums on this box are not hardened differently by accident.
- *
- * It cannot initialise where the kernel restricts unprivileged user
- * namespaces (Ubuntu 23.10+ through AppArmor, and the e2e container), and a
- * blanket `--no-sandbox` gave a page this browser opens — which can be any
- * address a run or the assistant types — a renderer running with the whole
- * `clawbox` user's privileges. So the flag is now the exception it is in the
- * launcher: on a real Jetson the sandbox stays ON.
- */
-function chromiumSandboxArgs(): string[] {
-  if (process.env.CLAWBOX_TEST_MODE === "1") return ["--no-sandbox", "--disable-setuid-sandbox"];
-  try {
-    const restricted = fs.readFileSync("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "utf-8").trim();
-    if (restricted === "1") return ["--no-sandbox", "--disable-setuid-sandbox"];
-  } catch {
-    // No such knob on this kernel: nothing is restricting the sandbox.
-  }
-  return [];
-}
 
 /** Launch a headless Chromium of our own, once, and keep the handle. */
 async function getOwnBrowser(): Promise<import("playwright").Browser> {
