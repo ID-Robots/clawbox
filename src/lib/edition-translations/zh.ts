@@ -966,6 +966,17 @@ export const zh: Record<string, string> = {
   "codingAgent.worktreeKept": "这次运行的专属副本还在磁盘上。它的工作在分支 {branch} 上，所以删除副本不会丢失。",
   "codingAgent.worktreeRemove": "删除副本",
   "codingAgent.worktreeRemoveFailed": "无法删除这次运行的项目副本。",
+  "codingAgent.bringHomeDirty": "这次运行的工作在分支 {branch} 上，还没有进入项目：项目文件夹有自己未提交的改动，ClawBox 不会覆盖它们。先提交或暂存你自己的改动，然后把工作并回项目。",
+  "codingAgent.bringHomeNotOnBase": "这次运行的工作在分支 {branch} 上，还没有进入项目：项目当前不在 {base} 分支上，ClawBox 不会猜测工作该去哪里。把项目切回 {base}，然后把工作并回项目。",
+  "codingAgent.bringHomeConflict": "这次运行的工作在分支 {branch} 上，还没有进入项目：它与项目自己的改动冲突，ClawBox 不会靠猜测解决冲突。手动合并 {branch}，或者在冲突解决后再把工作并回项目。",
+  "codingAgent.bringHomeFailed": "这次运行的工作在分支 {branch} 上，还没有进入项目：git 拒绝了这次合并。再试一次，或者手动合并 {branch}。",
+  "codingAgent.bringHomeUnknown": "这次运行的工作在分支 {branch} 上，不在项目里。把它并回项目，或者手动合并 {branch}。",
+  "codingAgent.bringHome": "把工作并回项目",
+  "codingAgent.bringHomeWorking": "正在并回项目…",
+  "codingAgent.bringHomeError": "无法把这次运行的工作并回项目。",
+  "codingAgent.bringHomeCopy": "复制 git 命令",
+  "codingAgent.bringHomeCopied": "已复制",
+  "codingAgent.worktreeMergedInto": "这次运行的工作已合并到 {base}。它的项目副本还在磁盘上。",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "告诉智能体",

@@ -956,6 +956,17 @@ export const nl: Record<string, string> = {
   "codingAgent.worktreeKept": "De eigen kopie van deze run staat nog op schijf. Het werk staat op branch {branch}, dus de kopie verwijderen raakt het niet kwijt.",
   "codingAgent.worktreeRemove": "Kopie verwijderen",
   "codingAgent.worktreeRemoveFailed": "Kon de kopie van het project niet verwijderen.",
+  "codingAgent.bringHomeDirty": "Het werk van deze run staat op branch {branch} en niet in het project: de projectmap heeft eigen niet-vastgelegde wijzigingen en ClawBox schrijft daar niet overheen. Commit of stash je eigen wijzigingen en haal het werk daarna naar het project.",
+  "codingAgent.bringHomeNotOnBase": "Het werk van deze run staat op branch {branch} en niet in het project: het project staat op een andere branch dan {base} en ClawBox gokt niet waar het werk hoort. Zet het project terug op {base} en haal het werk daarna naar het project.",
+  "codingAgent.bringHomeConflict": "Het werk van deze run staat op branch {branch} en niet in het project: het botst met de eigen wijzigingen van het project en ClawBox lost een conflict niet op gevoel op. Merge {branch} met de hand, of haal het werk naar het project zodra het conflict weg is.",
+  "codingAgent.bringHomeFailed": "Het werk van deze run staat op branch {branch} en niet in het project: git weigerde de merge. Probeer het opnieuw, of merge {branch} met de hand.",
+  "codingAgent.bringHomeUnknown": "Het werk van deze run staat op branch {branch} en zit niet in het project. Haal het naar het project, of merge {branch} met de hand.",
+  "codingAgent.bringHome": "Werk naar het project halen",
+  "codingAgent.bringHomeWorking": "Wordt naar het project gehaald…",
+  "codingAgent.bringHomeError": "Kon het werk van de run niet naar het project halen.",
+  "codingAgent.bringHomeCopy": "De git-opdrachten kopiëren",
+  "codingAgent.bringHomeCopied": "Gekopieerd",
+  "codingAgent.worktreeMergedInto": "Het werk van deze run is samengevoegd in {base}. De eigen kopie van het project staat nog op schijf.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "De agent iets vertellen",

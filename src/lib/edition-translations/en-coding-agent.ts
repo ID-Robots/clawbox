@@ -547,6 +547,25 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.worktreeRemove": "Remove copy",
   "codingAgent.worktreeRemoveFailed": "Could not remove the run's copy of the project.",
 
+  // ── A run whose work could not be merged back ─────────────────────────────
+  //
+  // The settle merges a run's branch into the project conservatively, and
+  // every refusal used to leave the owner with a run that said "Finished",
+  // work reachable only as a branch name, and one button that deleted the
+  // copy. Each sentence below names the blocker AND the move that clears it,
+  // because a dead end with no next step is the thing being fixed.
+  "codingAgent.bringHomeDirty": "This run's work is on the branch {branch} and not in the project: the project folder has uncommitted changes of its own, so ClawBox would not merge over them. Commit or stash your own changes, then bring the work home.",
+  "codingAgent.bringHomeNotOnBase": "This run's work is on the branch {branch} and not in the project: the project is on a different branch than {base}, and ClawBox will not guess where the work belongs. Switch the project back to {base}, then bring the work home.",
+  "codingAgent.bringHomeConflict": "This run's work is on the branch {branch} and not in the project: it conflicts with the project's own changes, and ClawBox will not resolve a conflict by guessing. Merge {branch} by hand to settle it, or bring the work home once the conflict is gone.",
+  "codingAgent.bringHomeFailed": "This run's work is on the branch {branch} and not in the project: git refused the merge. Try again, or merge {branch} by hand.",
+  "codingAgent.bringHomeUnknown": "This run's work is on the branch {branch} and is not in the project. Bring it home, or merge {branch} by hand.",
+  "codingAgent.bringHome": "Bring the work home",
+  "codingAgent.bringHomeWorking": "Bringing it home\u2026",
+  "codingAgent.bringHomeError": "Could not bring the run's work home.",
+  "codingAgent.bringHomeCopy": "Copy the git commands",
+  "codingAgent.bringHomeCopied": "Copied",
+  "codingAgent.worktreeMergedInto": "This run's work was merged into {base}. Its own copy of the project is still on disk.",
+
   // ── Telling a run something while it works ────────────────────────────────
   //
   // A delegated run cannot ask a question, and until this box could not be

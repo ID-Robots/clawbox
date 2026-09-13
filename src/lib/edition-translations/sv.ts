@@ -952,6 +952,17 @@ export const sv: Record<string, string> = {
   "codingAgent.worktreeKept": "Den här körningens egen kopia ligger kvar på disken. Arbetet finns på grenen {branch}, så att ta bort kopian förlorar det inte.",
   "codingAgent.worktreeRemove": "Ta bort kopian",
   "codingAgent.worktreeRemoveFailed": "Det gick inte att ta bort körningens kopia av projektet.",
+  "codingAgent.bringHomeDirty": "Den här körningens arbete ligger på grenen {branch} och inte i projektet: projektmappen har egna icke-committade ändringar, och ClawBox skriver inte över dem. Committa eller stasha dina egna ändringar och hämta sedan hem arbetet.",
+  "codingAgent.bringHomeNotOnBase": "Den här körningens arbete ligger på grenen {branch} och inte i projektet: projektet står på en annan gren än {base}, och ClawBox gissar inte var arbetet hör hemma. Ställ tillbaka projektet på {base} och hämta sedan hem arbetet.",
+  "codingAgent.bringHomeConflict": "Den här körningens arbete ligger på grenen {branch} och inte i projektet: det krockar med projektets egna ändringar, och ClawBox löser inte en konflikt på måfå. Merga {branch} för hand, eller hämta hem arbetet när konflikten är borta.",
+  "codingAgent.bringHomeFailed": "Den här körningens arbete ligger på grenen {branch} och inte i projektet: git nekade mergen. Försök igen, eller merga {branch} för hand.",
+  "codingAgent.bringHomeUnknown": "Den här körningens arbete ligger på grenen {branch} och finns inte i projektet. Hämta hem det, eller merga {branch} för hand.",
+  "codingAgent.bringHome": "Hämta hem arbetet",
+  "codingAgent.bringHomeWorking": "Hämtar hem det…",
+  "codingAgent.bringHomeError": "Det gick inte att hämta hem körningens arbete.",
+  "codingAgent.bringHomeCopy": "Kopiera git-kommandona",
+  "codingAgent.bringHomeCopied": "Kopierat",
+  "codingAgent.worktreeMergedInto": "Den här körningens arbete mergades in i {base}. Dess egen kopia av projektet ligger kvar på disken.",
 
   // Telling a run something while it works (coding-run-messages.ts).
   "codingAgent.message.title": "Säg något till agenten",
