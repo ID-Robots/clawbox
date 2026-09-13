@@ -155,7 +155,30 @@ function all(...expectations) {
 // and a valid payload is exactly that: `{ installed_apps: "[]" }` would have
 // emptied it.
 
-const NO_LIVE_RUN = (ctx) => (ctx.liveRun ? "a coding run is live; asking would spend the box's picture allowance" : null);
+/**
+ * The media fence is the one check on the box whose ANSWER depends on there
+ * being no run: `resolveMediaTarget` refuses with `no_run` when there is none
+ * and ACCEPTS when there is, and the route then draws a real picture against
+ * the owner's daily allowance. So this asks again here rather than trusting
+ * the reading taken at the start of the sweep — a run can be started by
+ * anything at any moment, and a stale "no run" would make this the one check
+ * that spends the owner's money. A runs list that cannot be read is a reason
+ * not to ask, never permission to.
+ *
+ * `running` is the whole of it: `isLive` in src/lib/coding-agent-status.ts is
+ * `status === "running"`, and the route resolves the active run the same way.
+ */
+const NO_LIVE_RUN = async (ctx) => {
+  try {
+    const res = await request(ctx, { path: "/setup-api/coding-agent/runs" });
+    if (res.status !== 200 || !Array.isArray(res.json?.runs)) return "could not read the runs list to check that none is live";
+    return res.json.runs.some((run) => run?.status === "running")
+      ? "a coding run is live; asking would spend the box's picture allowance"
+      : null;
+  } catch {
+    return "could not read the runs list to check that none is live";
+  }
+};
 const ONLINE = (ctx) => (ctx.online === false ? "the box reports it is offline" : null);
 
 const AREAS = [
@@ -423,7 +446,7 @@ async function request(ctx, check) {
 
 async function runCheck(ctx, area, check) {
   const base = { area, name: check.name };
-  const skip = check.needs?.(ctx);
+  const skip = await check.needs?.(ctx);
   if (skip) return { ...base, verdict: "unproven", detail: skip };
   if (!ctx.token && !check.anonymous && !check.bearer) {
     return { ...base, verdict: "unproven", detail: "no MCP bearer available to authenticate with" };
@@ -451,8 +474,9 @@ async function runCheck(ctx, area, check) {
 /**
  * The facts the checks branch on, read before the sweep so nothing has to be
  * guessed at: is the box online (an off-box service that cannot be reached is
- * unproven, not broken), is a coding run live (then the media fence must not
- * be poked), is ClawKeep paired.
+ * unproven, not broken) and is ClawKeep paired. Whether a run is LIVE is
+ * deliberately NOT among them — see NO_LIVE_RUN, which asks at the moment it
+ * matters.
  */
 async function readContext(ctx) {
   const probe = async (rel) => {
@@ -461,14 +485,11 @@ async function readContext(ctx) {
       return res.status === 200 ? res.json : null;
     } catch { return null; }
   };
-  const [internet, runs, clawkeep] = await Promise.all([
+  const [internet, clawkeep] = await Promise.all([
     probe("/setup-api/network/internet"),
-    probe("/setup-api/coding-agent/runs"),
     probe("/setup-api/clawkeep"),
   ]);
   ctx.online = internet ? internet.online === true : null;
-  ctx.liveRun = Array.isArray(runs?.runs)
-    && runs.runs.some((r) => r.status === "running" || r.status === "starting");
   ctx.clawkeepPaired = clawkeep?.paired === true;
 }
 
