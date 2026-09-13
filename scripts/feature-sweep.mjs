@@ -30,6 +30,7 @@
 // Usage: node scripts/feature-sweep.mjs --host <ip-or-host> [--json]
 //                                       [--only <area>] [--timeout <ms>]
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import process from "process";
@@ -143,6 +144,16 @@ function all(...expectations) {
 // before the request and returns a reason string to skip the check as
 // `unproven` — which is how a check that would cost money, or that depends on
 // hardware this box has not got, is left unasked rather than guessed at.
+//
+// Every fence check posts a body the route would REFUSE on its own merits even
+// with the fence down: a control character where a preference value belongs, a
+// string where a boolean does, a mode that is not one of the three. The gates
+// here are all checked before the body is validated — `preferences` on the key
+// PREFIX, `browser/setup` and `improvement-program` before the body is even
+// read — so the 403 is still the thing being asserted. But a sweep must not be
+// the thing that wipes the desktop's app list on the day a fence regresses,
+// and a valid payload is exactly that: `{ installed_apps: "[]" }` would have
+// emptied it.
 
 const NO_LIVE_RUN = (ctx) => (ctx.liveRun ? "a coding run is live; asking would spend the box's picture allowance" : null);
 const ONLINE = (ctx) => (ctx.online === false ? "the box reports it is offline" : null);
@@ -165,7 +176,7 @@ const AREAS = [
   ]],
   ["preferences", [
     { name: "the UI language reads back", path: "/setup-api/preferences?keys=ui_language", expect: ok("ui_language") },
-    { name: "the agent cannot write installed_apps", path: "/setup-api/preferences", method: "POST", body: { installed_apps: "[]" }, expect: ownerOnly() },
+    { name: "the agent cannot write installed_apps", path: "/setup-api/preferences", method: "POST", body: { installed_apps: "\u0001" }, expect: ownerOnly() },
   ]],
   ["kv", [
     { name: "a value writes", path: "/setup-api/kv", method: "POST", body: (ctx) => ({ key: ctx.scratchKey, value: ctx.scratchValue }), expect: (res) => (res.status === 200 ? true : `expected 200, got ${res.status} ${truncate(res.text)}`) },
@@ -187,7 +198,7 @@ const AREAS = [
   ]],
   ["browser", [
     { name: "the device browser reports itself", path: "/setup-api/browser/manage", expect: ok("chromium", "browser") },
-    { name: "the agent cannot change the browser's settings", path: "/setup-api/browser/setup", method: "POST", body: { autoOpen: true }, expect: ownerOnly() },
+    { name: "the agent cannot change the browser's settings", path: "/setup-api/browser/setup", method: "POST", body: { autoOpen: "not-a-boolean" }, expect: ownerOnly() },
   ]],
   ["vision", [
     { name: "a file outside the allowed roots is refused", path: "/setup-api/vision/describe", method: "POST", body: { path: "/etc/hostname" }, expect: refusesOneOf([403]) },
@@ -238,7 +249,7 @@ const AREAS = [
   ]],
   ["improvement-program", [
     { name: "the mode reads back", path: "/setup-api/improvement-program", expect: all(ok("mode"), (res) => (["off", "ask", "auto"].includes(res.json.mode) ? true : `mode is \`${res.json.mode}\``)) },
-    { name: "the agent cannot opt the box in", path: "/setup-api/improvement-program", method: "POST", body: { mode: "off" }, expect: ownerOnly() },
+    { name: "the agent cannot opt the box in", path: "/setup-api/improvement-program", method: "POST", body: { mode: "__not_a_mode__" }, expect: ownerOnly() },
   ]],
   ["coding-agent", [
     { name: "the switch and readiness report", path: "/setup-api/coding-agent/status", expect: ok("enabled", "readiness") },
@@ -287,7 +298,9 @@ const HELP = `ClawBox feature sweep — walk a live box and say what actually wo
                                  [--only <area>] [--timeout <ms>]
 
   --host <h>      the box to sweep; host, host:port or a full URL
-                  (default 127.0.0.1, port 80)
+                  (default 127.0.0.1, port 80). A box that is not THIS machine
+                  needs https://, or an explicitly typed http:// to say you
+                  accept the bearer crossing a plaintext network.
   --only <area>   sweep one area only: ${AREAS.map(([a]) => a).join(", ")}
   --timeout <ms>  per-request timeout (default 15000)
   --json          machine-readable results on stdout
@@ -302,16 +315,23 @@ REFUSE that bearer. Exit 0 when everything it could check passed, 1 otherwise;
 
 function parseArgs(argv) {
   const args = { host: "127.0.0.1", json: false, only: null, timeout: 15000, help: false };
+  // A flag where a value belongs is a typo, not a hostname: `--host --json`
+  // otherwise swept `http://--json` and reported a connection failure (exit 1)
+  // where it should have reported a usage error (exit 2).
+  const value = (i, flag) => {
+    const next = argv[i];
+    if (next === undefined || next.startsWith("--")) throw new Error(`${flag} needs a value`);
+    return next;
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") args.help = true;
     else if (arg === "--json") args.json = true;
-    else if (arg === "--host") args.host = argv[++i];
-    else if (arg === "--only") args.only = argv[++i];
-    else if (arg === "--timeout") args.timeout = Number(argv[++i]);
+    else if (arg === "--host") args.host = value(++i, "--host");
+    else if (arg === "--only") args.only = value(++i, "--only");
+    else if (arg === "--timeout") args.timeout = Number(value(++i, "--timeout"));
     else throw new Error(`unknown argument: ${arg}`);
   }
-  if (!args.host) throw new Error("--host needs a value");
   if (!Number.isFinite(args.timeout) || args.timeout <= 0) throw new Error("--timeout needs a positive number of milliseconds");
   return args;
 }
@@ -319,6 +339,28 @@ function parseArgs(argv) {
 function baseUrl(host) {
   if (/^https?:\/\//.test(host)) return host.replace(/\/$/, "");
   return `http://${host}`;
+}
+
+const LOOPBACK = /^(?:127\.\d+\.\d+\.\d+|localhost|\[?::1\]?|\[?::ffff:127\.\d+\.\d+\.\d+\]?)$/i;
+
+/**
+ * The bearer in the Authorization header is the device's own credential, and a
+ * bare `--host 192.168.1.50` would put it on the wire in clear. Plaintext is
+ * allowed to THIS machine, where there is no wire; to anywhere else the scheme
+ * has to be typed, so an operator on a LAN they trust says so deliberately
+ * rather than by leaving the default in place. No flag for it: the value is
+ * the consent, the way the device's own value-gated root steps work.
+ */
+function transportRefusal(host, base) {
+  const url = new URL(base);
+  if (url.protocol === "https:" || LOOPBACK.test(url.hostname)) return null;
+  if (/^http:\/\//i.test(host)) {
+    console.error(`Sending this box's bearer in clear to ${url.hostname} — you asked for http:// explicitly.\n`);
+    return null;
+  }
+  return `${url.hostname} is not this machine, and plaintext would put the box's bearer on the wire.\n`
+    + `Sweep it over the tunnel (--host https://<name>.trycloudflare.com), or, on a LAN you trust,\n`
+    + `say so by typing the scheme: --host http://${url.host}`;
 }
 
 /** The bearer, resolved the way the device itself resolves it. */
@@ -442,12 +484,20 @@ async function main() {
   }
 
   const token = readToken();
+  const base = baseUrl(args.host);
+  const refusal = transportRefusal(args.host, base);
+  if (refusal) {
+    console.error(refusal);
+    return 2;
+  }
   const ctx = {
-    base: baseUrl(args.host),
+    base,
     token,
     timeout: args.timeout,
-    // The sweep's own KV key, deleted again whatever happens below.
-    scratchKey: `clawbox:feature-sweep:${process.pid}`,
+    // The sweep's own KV key, deleted again whatever happens below. Random
+    // rather than the pid alone: two machines sweeping one box can share a pid,
+    // and each would then read and delete the other's scratch entry.
+    scratchKey: `clawbox:feature-sweep:${crypto.randomUUID()}`,
     scratchValue: `sweep-${Date.now()}`,
     clean: (text) => redact(text, token ? [token] : []),
   };
