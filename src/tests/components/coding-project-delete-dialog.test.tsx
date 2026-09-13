@@ -177,6 +177,61 @@ describe("a project that may go", () => {
     expect(deletes[0].body).toMatchObject({ purgeOldest: true });
   });
 
+  it("re-reads the shelf after a trash_full refusal, instead of leaving a dead button", async () => {
+    // The shelf filled up between the preview and the click — another removal
+    // elsewhere, or a second tab. The refusal that comes back is about folders
+    // this dialog has never named: its `wouldPurge` was empty, so the consent
+    // tick was not even drawn, and retrying posted the same refused state for
+    // ever. Reopening the dialog was the only way out.
+    const full = { ...CLEAN, trashCount: 10, wouldPurge: ["old-thing--20260801T090000Z"] };
+    let previews = 0;
+    deletes = [];
+    const json = (body: unknown, ok: boolean, status: number) => Promise.resolve({
+      ok, status, json: () => Promise.resolve(body),
+    } as Response);
+    vi.stubGlobal("fetch", vi.fn((_input: string | URL, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        deletes.push({ body: JSON.parse(String(init.body)) });
+        // Refused the first time only: the second attempt carries the consent.
+        return deletes.length === 1
+          ? json({ code: "trash_full", error: "the shelf is full" }, false, 409)
+          : json(OUTCOME, true, 200);
+      }
+      previews += 1;
+      // The shelf is empty on the first read and full on the re-read.
+      return json(previews === 1 ? CLEAN : full, true, 200);
+    }));
+
+    open();
+    await screen.findByTestId("coding-agent-delete-facts");
+    // Nothing at risk yet, so no tick is offered.
+    expect(screen.queryByTestId("coding-agent-delete-purge-oldest")).toBeNull();
+
+    const button = screen.getByTestId("coding-agent-delete-confirm") as HTMLButtonElement;
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    fireEvent.click(button);
+
+    // The refusal is shown AND the preview is read again, so the owner is now
+    // looking at the folders they would actually be agreeing to lose.
+    await waitFor(() => expect(screen.queryByTestId("coding-agent-delete-would-purge")).toBeTruthy());
+    expect(previews).toBe(2);
+    // Worded from the catalogue by CODE, not echoed from the server's English.
+    expect(screen.getByTestId("coding-agent-delete-error").textContent)
+      .toContain(t("codingAgent.delete.refusal.trashFull"));
+    expect(screen.getByTestId("coding-agent-delete-would-purge").textContent)
+      .toContain("old-thing--20260801T090000Z");
+
+    // And the button is OFF again: the yes it needs now is a yes about names
+    // that were not on screen when the owner first pressed it.
+    expect((screen.getByTestId("coding-agent-delete-confirm") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("coding-agent-delete-purge-oldest"));
+    expect((screen.getByTestId("coding-agent-delete-confirm") as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("coding-agent-delete-done")).toBeTruthy());
+    expect(deletes[1].body).toMatchObject({ purgeOldest: true });
+  });
+
   it("asks for no such yes when the shelf has room", async () => {
     stubFetch(CLEAN);
     open();
