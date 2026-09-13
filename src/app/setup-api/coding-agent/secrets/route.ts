@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { boundedBody } from "@/lib/bounded-body";
+import { declaredTooLong, readJsonObject } from "@/lib/bounded-json";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
@@ -117,59 +117,24 @@ const MAX_BODY_BYTES = MAX_SECRET_VALUE_CHARS * 8 + 4_096;
 const TOO_LONG = "That request is larger than one secret can be.";
 
 /**
- * Does the request ANNOUNCE more than one secret's worth?
- *
- * A header read and nothing else, so it is worth asking even on the path that
- * never touches the body: DELETE with `?name=` reads no body at all, which is
- * why a stream cannot cost this route anything there — but a declared length is
- * free to check and a request that says it is sending megabytes has no business
- * being answered (found in review). The one thing NOT done about that path is
- * to start reading the body in order to bound it, which would turn a request
- * this route ignores into one it buffers.
- */
-function declaredTooLong(request: Request): boolean {
-  const declared = Number(request.headers.get("content-length"));
-  return Number.isFinite(declared) && declared > MAX_BODY_BYTES;
-}
-
-/**
  * A JSON body, as an object or nothing — METERED on the way in.
  *
  * `request.json()` buffers and parses whatever arrives, and neither Next's
  * config nor `production-server.js` puts a limit in front of it, so a caller
  * past the owner gate could have made this appliance hold and parse an
  * arbitrary body before the value-length check downstream ever looked at it
- * (found in review). The meter is the one the upload routes already use
- * (src/lib/bounded-body.ts): it counts what actually arrives and errors the
- * source past the cap, which is what a chunked body needs — `Content-Length`
- * is checked too, but a chunked request declares none, so the header bounds
- * only the callers that were never the problem.
+ * (found in review). `readJsonObject` (src/lib/bounded-json.ts) is that fix,
+ * shared since the Vercel routes needed the same thing: it checks the declared
+ * length AND meters what actually arrives, which is what a chunked body needs.
  *
  * Answers `"too_long"` rather than null for an oversized body, so the caller
  * gets 413 and not "invalid body": one says "send less", the other "send
  * something else".
  */
 async function objectBody(request: Request): Promise<Record<string, unknown> | "too_long" | null> {
-  if (declaredTooLong(request)) return "too_long";
-  if (!request.body) return null;
-  const bounded = boundedBody(request.body, { limit: MAX_BODY_BYTES, message: TOO_LONG });
-  let text: string;
-  try {
-    text = await new Response(bounded.stream).text();
-  } catch {
-    // The meter cut the source, or the connection dropped. Only the first is
-    // the caller's fault, and `overflowed()` is what tells them apart — never
-    // the message, for the reason bounded-body's own header gives.
-    return bounded.overflowed() ? "too_long" : null;
-  }
-  let body: unknown;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
-  return body as Record<string, unknown>;
+  const read = await readJsonObject(request, MAX_BODY_BYTES, TOO_LONG);
+  if (read.ok) return read.body;
+  return read.reason === "too_long" ? "too_long" : null;
 }
 
 export async function GET(request: Request) {
@@ -244,7 +209,7 @@ export async function DELETE(request: Request) {
   // never reads the body and would otherwise answer a request that announced
   // far more than one secret. `objectBody` asks again for the body path, where
   // the meter is what covers a body that declares no length.
-  if (declaredTooLong(request)) return refuse(413, "invalid", TOO_LONG, "value_too_long");
+  if (declaredTooLong(request, MAX_BODY_BYTES)) return refuse(413, "invalid", TOO_LONG, "value_too_long");
   const query = new URL(request.url).searchParams;
   let name: unknown = query.get("name");
   let scope: unknown = query.get("scope");

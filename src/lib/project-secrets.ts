@@ -14,9 +14,11 @@
  * of its own output (src/lib/secret-redact.ts).
  *
  * WHAT THIS FILE IS NOT. It is not a general-purpose vault for the agent. The
- * value is write-only from every surface: it goes in through the owner's own
- * browser session and comes out only into a run's environment. There is no
- * route, no tool and no MCP verb that answers with a stored value —
+ * value is write-only from every SURFACE: it goes in through the owner's own
+ * browser session and comes out in exactly two directions, neither of which is
+ * a surface — into a run's environment, and into a request this box makes on
+ * the owner's behalf (`readSecretForProject`, at the foot of this file). There
+ * is no route, no tool and no MCP verb that answers with a stored value —
  * `listSecrets` returns names and scopes, which is what the picker and the
  * agent's own tool need in order to talk about a secret without holding one.
  *
@@ -559,5 +561,89 @@ export async function resolveSecretsForRun(run: { project?: string | null }): Pr
   } catch (err) {
     console.error("[secrets] could not resolve the secrets for a run:", err instanceof Error ? err.message : err);
     return NOTHING;
+  }
+}
+
+// ── what the BOX itself may read ────────────────────────────────────────────
+
+/**
+ * ONE stored value, resolved for a project, for a call this box makes ITSELF.
+ *
+ * THE SECOND LEGITIMATE CONSUMER, and the header's "write-only from every
+ * surface" is unchanged by it: a value still leaves this module in exactly two
+ * directions — into a run's environment, and into an outgoing request the
+ * device makes on the owner's behalf (src/lib/vercel-link.ts asks a Vercel
+ * project how its build went). Neither is a surface. No route, no tool and no
+ * MCP verb answers with what this returns, and the one sentence that could
+ * carry it — an upstream error quoted back — is scrubbed before it is stored
+ * (`redactToken` in src/lib/vercel.ts).
+ *
+ * DELIBERATELY NOT GATED ON THE INJECTION SWITCH OR THE ENTRY'S TICK. Both of
+ * those answer "may an unattended shell hold this credential", which is a
+ * different question from "may this ClawBox use the token its owner attached to
+ * a deploy". An owner who has switched injection OFF has said runs may not have
+ * their token; they have not said the box may not tell them whether their
+ * project built. Gating on the tick would also make a feature the owner
+ * configured fail silently the day they un-ticked an unrelated box.
+ *
+ * The SCOPE precedence is `resolveSecretsForRun`'s, because it is the store's
+ * rule rather than that function's: the project's own entry wins over a
+ * box-wide one of the same name.
+ *
+ * Never throws, and never says WHY beyond null: the callers turn that into
+ * their own refusal, and a store that cannot be read is not this function's to
+ * explain.
+ */
+/**
+ * THREE ways to not have a value, and they are kept apart because each one
+ * needs a different sentence said to the owner.
+ *
+ * Folding any two of them together gives advice that is wrong for the other:
+ * "save it under that name" is useless about an entry that is already there,
+ * and worse than useless about a store this box cannot read at all — the owner
+ * would type a credential into a file that is not going to keep it.
+ */
+export type SecretLookup =
+  /** There is an entry, and this box can open it. */
+  | { found: true; value: string }
+  /** There is an entry and this box CANNOT open it — sealed under a key that is
+   *  gone (a factory reset took `.session-secret`), or edited by hand. */
+  | { found: false; reason: "unreadable" }
+  /** The store was read, and holds no entry of that name in either scope. */
+  | { found: false; reason: "missing" }
+  /** The store or its key could not be read AT ALL: `data/secrets.json` is
+   *  unreadable or is not the list it should be, or there is no session secret
+   *  to derive the key from. Nothing is known about any entry. */
+  | { found: false; reason: "unavailable" };
+
+export async function readSecretForProject(input: { name: string; project?: string | null }): Promise<SecretLookup> {
+  try {
+    const name = requireSecretName(input.name);
+    const project = typeof input.project === "string" && isValidSecretScope(input.project) && input.project !== BOX_SCOPE
+      ? input.project
+      : null;
+    const [entries, k] = await Promise.all([readStore(), storeKey()]);
+    for (const scope of project ? [project, BOX_SCOPE] : [BOX_SCOPE]) {
+      const at = indexOf(entries, name, scope);
+      if (at < 0) continue;
+      const value = open(entries[at], k);
+      // An override this box cannot OPEN takes the box-wide value with it, the
+      // way it does for a run: handing back a different credential from the one
+      // the owner chose for this project, silently, is the worst of the three
+      // outcomes. Reported as its OWN reason rather than as "missing", because
+      // the two need opposite things said — "save it under that name" is
+      // useless advice about an entry that is already there (found in review).
+      return value === null ? { found: false, reason: "unreadable" } : { found: true, value };
+    }
+    return { found: false, reason: "missing" };
+  } catch (err) {
+    // A store this box cannot READ says nothing about whether the entry exists,
+    // so it is neither "missing" nor "unreadable" — both of those are claims
+    // about one entry, and this is a fault in the store itself (found in
+    // review). An invalid NAME is the caller's error and is the one thing here
+    // that really does mean "there is no such entry".
+    const bad = err instanceof SecretStoreError
+      && (err.code === "invalid_name" || err.code === "reserved_name");
+    return { found: false, reason: bad ? "missing" : "unavailable" };
   }
 }

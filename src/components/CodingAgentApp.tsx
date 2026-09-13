@@ -19,6 +19,7 @@ import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
+import type { VercelState } from "@/lib/vercel-state";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -27,6 +28,8 @@ import { formatBytes } from "@/lib/format-bytes";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
+import CodingRunVercelCard from "./CodingRunVercelCard";
+import VercelProjectCard from "./VercelProjectCard";
 import CodingRunTeamMembers from "./CodingRunTeamMembers";
 import {
   OPEN_CODING_RUN_EVENT,
@@ -143,6 +146,11 @@ interface Run {
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
+  /** What the run's push became on Vercel, once the owner has attached a Vercel
+   *  project to this project. Absent on a run recorded before the feature, and
+   *  null for ever on a project with no link — which reads the same way: the
+   *  box never asked Vercel anything about it. */
+  vercel?: VercelState | null;
   /** The run's evidence folder — screenshots, test output and its report.md.
    *  `markdown` is the kind that opens rendered in the app; every other
    *  non-image opens as the plain text the route serves it as. */
@@ -814,6 +822,36 @@ export default function CodingAgentApp() {
       setError(err instanceof Error ? err.message : t("codingAgent.prFailed"));
     } finally {
       setBusy(null);
+    }
+  };
+
+  /**
+   * Put one deployment in front of the project's users.
+   *
+   * The card asks the question; this sends the answer, with `confirm: true` on
+   * the wire so the button and the route agree about what the gesture is.
+   *
+   * It answers the REASON rather than throwing — the card draws it in its own
+   * line beside the deployment, because a promotion that was refused is about
+   * that one build and not about the page. The reason ALONE, not a finished
+   * sentence: the card wraps it in `deployPromoteFailed`, and returning the
+   * whole sentence here had the owner read the prefix twice ("Could not
+   * promote: Could not promote: 500"), found in review.
+   */
+  const promoteDeployment = async (runId: string, deploymentId: string): Promise<string | null> => {
+    try {
+      const res = await fetch("/setup-api/coding-agent/vercel/promote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId, deploymentId, confirm: true }),
+      });
+      if (!res.ok) return await readError(res, String(res.status));
+      // The record now carries the promotion; nothing else would make the page
+      // look again inside the poll interval.
+      await load();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
     }
   };
 
@@ -2273,6 +2311,15 @@ export default function CodingAgentApp() {
 
               {deliverableCard(run)}
               {reviewCard(run)}
+              {run.vercel && (
+                <CodingRunVercelCard
+                  runId={run.id}
+                  vercel={run.vercel}
+                  t={t}
+                  onPromote={(deploymentId) => promoteDeployment(run.id, deploymentId)}
+                  onOpenRun={showRun}
+                />
+              )}
 
               {/* The summary is the run's closing message, and that is
                   markdown. Drawn through the chat's renderer, which builds
@@ -2663,6 +2710,11 @@ export default function CodingAgentApp() {
                   )}
                 </span>
               </div>
+              {/* Where this project's runs deploy to, and the token that is
+                  used — the settings belong beside the thing they govern, and
+                  the card draws nothing at all on a project no link can be
+                  attached to. */}
+              <VercelProjectCard key={projectQuery} query={projectQuery} t={t} />
               {/* Four tabs, each with the whole width: the folder, what changed,
                   the runs, the team. The runs sat in a 22rem rail before and
                   their rows wrapped three deep. */}
