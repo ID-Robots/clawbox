@@ -22,6 +22,7 @@ import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSetupWizard from "@/components/CodingAgentSetupWizard";
 import MemoryShardWizard from "@/components/MemoryShardWizard";
+import MemoryShardSettingsPanel from "@/components/MemoryShardSettingsPanel";
 import { PaidPlanNotice } from "@/components/PaidFeatureGate";
 import type { AgentStatus } from "@/components/CodingAgentSettingsPanel";
 
@@ -154,6 +155,52 @@ for (const wizard of WIZARDS) {
   });
 }
 
+describe("the settings switch behind an unsatisfied gate", () => {
+  /**
+   * A switch that posts a request the box will answer 402 is not a switch: the
+   * page showed the notice and then let the owner press On, which came back as
+   * a generic "could not save" naming nothing they could act on.
+   *
+   * Only the OFF-to-ON move is held. The other direction is always allowed,
+   * because an already-enabled box whose plan lapsed is never auto-disabled
+   * and must still be switchable off — the whole shape of this gate.
+   */
+  const unsatisfied = { required: true, satisfied: false, plan: null };
+
+  it("holds the Memory Shard switch off, and lets an enabled one be turned off", () => {
+    const { rerender } = render(
+      <MemoryShardSettingsPanel
+        state={{ enabled: false, setupComplete: false, planGate: unsatisfied }}
+        onChanged={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("memory-shard-switch")).toBeDisabled();
+
+    rerender(
+      <MemoryShardSettingsPanel
+        state={{ enabled: true, setupComplete: true, planGate: unsatisfied }}
+        onChanged={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("memory-shard-switch")).not.toBeDisabled();
+    expect(screen.getByTestId("paid-plan-notice")).toBeInTheDocument();
+  });
+
+  it("leaves the switch alone when the server never sent a gate", () => {
+    render(
+      <MemoryShardSettingsPanel
+        state={{ enabled: false, setupComplete: false }}
+        onChanged={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("memory-shard-switch")).not.toBeDisabled();
+    expect(screen.queryByTestId("paid-plan-notice")).toBeNull();
+  });
+});
+
 describe("the settings-page notice", () => {
   it("says nothing when the plan covers the feature", () => {
     render(<PaidPlanNotice gate={{ required: true, satisfied: true, plan: "flash" }} />);
@@ -187,7 +234,9 @@ describe("the device handoff inside the gate", () => {
         return json({ clawaiConfigured: false, clawaiAccountTier: null });
       }
       if (url === "/setup-api/ai-models/clawai/start") {
-        return json({ user_code: "WDJB-MJHT", verification_url: "https://clawbox.com/portal/device", interval: 5 });
+        // One second, so the handoff's first tick lands inside the test's
+        // budget; the device flow's own cadence is the portal's to set.
+        return json({ user_code: "WDJB-MJHT", verification_url: "https://clawbox.com/portal/device", interval: 1 });
       }
       if (url === "/setup-api/ai-models/clawai/poll") return json({ status: "complete" });
       return json({ installed: true, connected: false, login: null, paths: [] });
@@ -199,7 +248,84 @@ describe("the device handoff inside the gate", () => {
     expect(polled).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByTestId("paid-gate-connect-start"));
-    const card = await screen.findByTestId("paid-gate-device");
-    expect(card).toHaveTextContent("WDJB-MJHT");
-  });
+    expect(await screen.findByTestId("paid-gate-device")).toHaveTextContent("WDJB-MJHT");
+
+    // The poll reports `complete` on its first tick, so what matters is the
+    // state AFTER it: the card must say it is checking the plan. Dropping back
+    // to the Connect button — which is what `reset()` alone did — reads as a
+    // failure over a pairing that worked, and is exactly what this pins.
+    await screen.findByTestId("paid-gate-connected", undefined, { timeout: 5_000 });
+    expect(screen.queryByTestId("paid-gate-connect-start")).toBeNull();
+    expect(screen.queryByTestId("paid-gate-connect-error")).toBeNull();
+  }, 10_000);
+
+  it("stops polling when the owner cancels", async () => {
+    // `reset()` only clears the code on screen. Without `stop()` the timer and
+    // the in-flight request survive a cancel, so a handoff the owner walked
+    // away from went on polling and could still land on them.
+    let polls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/ai-models/status") {
+        return json({ clawaiConfigured: false, clawaiAccountTier: null });
+      }
+      if (url === "/setup-api/ai-models/clawai/start") {
+        return json({ user_code: "WDJB-MJHT", verification_url: "https://clawbox.com/portal/device", interval: 1 });
+      }
+      if (url === "/setup-api/ai-models/clawai/poll") {
+        polls += 1;
+        return json({ status: "pending", interval: 1 });
+      }
+      return json({ installed: true, connected: false, login: null, paths: [] });
+    }));
+
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "connect"));
+    fireEvent.click(screen.getByTestId("paid-gate-connect-start"));
+    await screen.findByTestId("paid-gate-device");
+
+    // Let it poll at least once, so "no polls after cancel" is a fact about
+    // the cancel and not about a flow that never started.
+    await waitFor(() => expect(polls).toBeGreaterThan(0), { timeout: 5_000 });
+    fireEvent.click(screen.getByTestId("paid-gate-connect-cancel"));
+    const after = polls;
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(polls).toBe(after);
+  }, 15_000);
+});
+
+describe("the gate holds for the whole wizard, not just its front door", () => {
+  /**
+   * The plan poll runs behind every step. A subscription that lapses — or a
+   * credential withdrawn — while the owner is several steps in used to leave
+   * the finishing button live, so the flow ran to its end and collected a 402
+   * from the enable route after the work had been done.
+   */
+  for (const wizard of WIZARDS) {
+    it(`${wizard.name} returns to the gate when the plan goes away mid-flow`, async () => {
+      let paid = true;
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+        const url = input.toString();
+        if (url === "/setup-api/ai-models/status") {
+          return json({ clawaiConfigured: true, clawaiAccountTier: paid ? "flash" : null });
+        }
+        return json({ installed: true, connected: false, login: null, paths: [] });
+      }));
+
+      wizard.render();
+      const enable = await screen.findByTestId(wizard.enableTestId);
+      await waitFor(() => expect(enable).not.toBeDisabled());
+      fireEvent.click(enable);
+      // Off the intro: the enable button is gone.
+      await waitFor(() => expect(screen.queryByTestId(wizard.enableTestId)).toBeNull());
+
+      paid = false;
+      // Back on the intro, with the upgrade card in the place the next step
+      // would have been.
+      await waitFor(() =>
+        expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "upgrade"), { timeout: 10_000 });
+      expect(screen.getByTestId(wizard.enableTestId)).toBeDisabled();
+    }, 15_000);
+  }
 });

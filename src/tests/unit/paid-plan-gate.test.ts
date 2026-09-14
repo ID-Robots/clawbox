@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bodyWouldEnable,
+  enableBlockedBy,
   isPaidPlan,
   isPlanGate,
   paidPlanRefusalText,
@@ -84,5 +85,25 @@ describe("the refusal sentence", () => {
       expect(text).toMatch(/Pro or Max/);
       expect(text).not.toMatch(/flash/);
     }
+  });
+});
+
+describe("enableBlockedBy", () => {
+  const unsatisfied = { required: true, satisfied: false, plan: null };
+
+  it("holds the OFF-to-ON move when the plan does not cover the feature", () => {
+    expect(enableBlockedBy(unsatisfied, false)).toBe(true);
+  });
+
+  it("never holds the other direction — off is always allowed", () => {
+    // A box already enabled when the subscription lapsed is not auto-disabled,
+    // so the switch that turns it off has to keep working.
+    expect(enableBlockedBy(unsatisfied, true)).toBe(false);
+  });
+
+  it("holds nothing when the gate is satisfied, absent, or not required", () => {
+    expect(enableBlockedBy({ required: true, satisfied: true, plan: "pro" }, false)).toBe(false);
+    expect(enableBlockedBy(undefined, false)).toBe(false);
+    expect(enableBlockedBy({ required: false, satisfied: true, plan: null }, false)).toBe(false);
   });
 });

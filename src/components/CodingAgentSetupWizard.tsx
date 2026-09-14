@@ -66,6 +66,25 @@ export default function CodingAgentSetupWizard({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * The gate governs the WHOLE wizard, not just its front door.
+   *
+   * The plan poll runs behind every step, so a subscription that lapses — or a
+   * credential withdrawn — while the owner is three steps in must not leave
+   * the finishing button live: the enable route would answer 402 at the end of
+   * a flow that had already installed Chromium and started a test run. Back to
+   * the intro, which is where the gate is drawn and says why.
+   *
+   * It cannot fire on the poll's own first tick: the wizard opens on the
+   * intro, and `useClawboxLogin` preserves its last answer across a failed
+   * poll rather than reporting a downgrade.
+   */
+  useEffect(() => {
+    if (!gated || step === "intro") return;
+    setBusy(null);
+    setStep("intro");
+  }, [gated, step]);
+
   // ─── GitHub (step 1) ───
   const [github, setGithub] = useState<GitHubState | null>(null);
   const [deviceLogin, setDeviceLogin] = useState<
@@ -338,6 +357,11 @@ export default function CodingAgentSetupWizard({
    * box whose harness is not ready yet is still a configured box.
    */
   const finish = async (runId: string | null = null) => {
+    // The plan is re-read at the moment of the act, not only at the render
+    // that drew the button: `setupComplete: true` is one of the two bodies the
+    // route refuses, and sending it after a subscription lapsed mid-wizard
+    // would spend a 402 on a question the box can answer itself.
+    if (gated) { setStep("intro"); return; }
     setBusy("finish");
     setError(null);
     try {

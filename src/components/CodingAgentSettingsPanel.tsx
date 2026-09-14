@@ -13,7 +13,7 @@ import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
-import type { PlanGate } from "@/lib/paid-plan-gate";
+import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
 import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
 /**
@@ -599,7 +599,11 @@ export default function CodingAgentSettingsPanel({
           <Switch
             checked={status?.enabled ?? false}
             busy={busy === "switch"}
-            disabled={!status || saving}
+            // A switch that posts a request the box will answer 402 is not a
+            // switch. Only the OFF-to-ON move is held: an already-enabled box
+            // whose plan lapsed must still be switchable off, which is the
+            // whole shape of this gate.
+            disabled={!status || saving || enableBlockedBy(status?.planGate, status?.enabled ?? false)}
             label={t("codingAgent.switchLabel")}
             onChange={(next) => void toggle(next)}
           />

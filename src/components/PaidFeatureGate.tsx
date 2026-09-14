@@ -187,7 +187,10 @@ export default function PaidFeatureGate({
               actions={
                 <button
                   type="button"
-                  onClick={() => clawaiLogin.reset()}
+                  // stop() BEFORE reset(): reset only clears the code on
+                  // screen, so cancel alone left the poll timer running and a
+                  // handoff the owner had walked away from could still land.
+                  onClick={() => { clawaiLogin.stop(); clawaiLogin.reset(); }}
                   data-testid="paid-gate-connect-cancel"
                   className="bg-transparent border-none text-[var(--text-muted)] hover:text-white text-xs underline cursor-pointer p-0"
                 >

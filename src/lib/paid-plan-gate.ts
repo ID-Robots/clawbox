@@ -99,6 +99,19 @@ export function isPlanGate(value: unknown): value is PlanGate {
 }
 
 /**
+ * Is turning this feature ON the thing the plan is in the way of?
+ *
+ * The screen-side reading of the same rule the routes enforce, and it takes
+ * `enabled` for a reason: the switch of a feature that is already ON must stay
+ * live, because turning it off is always allowed. Only the off-to-on
+ * transition is blocked, and only when a gate this build actually asks for is
+ * unsatisfied — an absent gate (an older server) blocks nothing.
+ */
+export function enableBlockedBy(gate: PlanGate | undefined, enabled: boolean): boolean {
+  return !enabled && gate?.required === true && gate.satisfied === false;
+}
+
+/**
  * Would this request switch the feature ON, or finish its wizard?
  *
  * The gate's shape, and the reason it is not "refuse every write": an owner

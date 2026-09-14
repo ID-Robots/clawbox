@@ -83,6 +83,29 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const [detail, setDetail] = useState<string | null>(null);
 
   /**
+   * The gate governs the WHOLE flow, not just the front door.
+   *
+   * The plan poll goes on running behind every step, and a subscription that
+   * lapses — or a credential that is withdrawn — while the owner is two steps
+   * in must not leave the provisioning button live: `clawkeep/memory/enable`
+   * would answer 402 at the very end, after the model download had been paid
+   * for. So an in-flight provision is aborted and the wizard goes back to the
+   * intro, which is where the gate itself is drawn and says why.
+   *
+   * It cannot fire spuriously on the poll's first tick: the wizard opens on
+   * the intro, and `useClawboxLogin` preserves its last answer across a failed
+   * poll rather than reporting a downgrade.
+   */
+  useEffect(() => {
+    if (!gated || step === "intro") return;
+    provisionAbort.current?.abort();
+    provisionAbort.current = null;
+    setBusy(null);
+    setPhase("idle");
+    setStep("intro");
+  }, [gated, step]);
+
+  /**
    * Fetch the embedding model if it is missing, point the index at the
    * embedder on this box, save the schedule, switch the feature on and start
    * the first pass.
@@ -95,6 +118,10 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
    * a search reached it directly and never woke it.
    */
   const provision = async () => {
+    // Re-read at the moment of the act, not only at the render that drew the
+    // button: the effect above sends the owner back on any change, and this is
+    // the one that would otherwise race it.
+    if (gated) { setStep("intro"); return; }
     provisionAbort.current?.abort();
     const ctl = new AbortController();
     provisionAbort.current = ctl;

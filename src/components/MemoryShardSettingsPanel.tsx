@@ -7,7 +7,7 @@ import HelpTip from "./HelpTip";
 import MemoryShardFolders from "./MemoryShardFolders";
 import StatusMessage from "./StatusMessage";
 import { PaidPlanNotice } from "./PaidFeatureGate";
-import { isPlanGate, type PlanGate } from "@/lib/paid-plan-gate";
+import { enableBlockedBy, isPlanGate, type PlanGate } from "@/lib/paid-plan-gate";
 import { BTN_DANGER, BTN_SECONDARY, CARD } from "./coding-agent-ui";
 
 /**
@@ -40,9 +40,11 @@ const CONFIRM_MS = 5_000;
  * built from the same tokens, and lifting one into a shared kit is a change
  * that has to own both files.
  */
-function Switch({ checked, busy, label, onChange }: {
+function Switch({ checked, busy, disabled, label, onChange }: {
   checked: boolean;
   busy: boolean;
+  /** Held for a reason other than a write in flight — today, the paid plan. */
+  disabled: boolean;
   label: string;
   onChange: (next: boolean) => void;
 }) {
@@ -66,7 +68,7 @@ function Switch({ checked, busy, label, onChange }: {
         aria-label={label}
         aria-checked={checked}
         aria-busy={busy}
-        disabled={busy}
+        disabled={busy || disabled}
         onClick={() => onChange(!checked)}
         data-testid="memory-shard-switch"
         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
@@ -183,6 +185,12 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
           <Switch
             checked={state.enabled}
             busy={busy}
+            // A switch that posts a request the box will answer 402 is not a
+            // switch, and the generic "could not save" it produced named
+            // nothing the owner could act on. Only the OFF-to-ON move is held:
+            // a box already indexing when its plan lapsed must still be
+            // switchable off.
+            disabled={enableBlockedBy(state.planGate, state.enabled)}
             label={t("clawkeep.memory.settings.switchTitle")}
             onChange={(next) => void save(next)}
           />
