@@ -45,6 +45,26 @@ import { fileURLToPath } from "node:url";
  *     on that path, so a slow gateway no longer fails the install.
  */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+/** The shell the installers run, which no `timeout` may appear in. */
+const WATCHED = [
+  "install.sh",
+  "install-x64.sh",
+  "scripts/install-voice.sh",
+  // Dispatched BY install.sh (`ensure_local_embeddings`), and this PR changed
+  // how it downloads — so a `timeout` added here would be a cap on install work
+  // that the rule above never saw. What it legitimately keeps is one wall-clock
+  // wait of its own, pinned separately below.
+  "scripts/ensure-local-embeddings.sh",
+] as const;
+
+/**
+ * The files held to the LOOPBACK rule as well.
+ *
+ * scripts/ensure-local-embeddings.sh is deliberately not here: its one
+ * `--max-time` covers a cold model load through the proxy, which is minutes
+ * rather than probe-sized, and the describe block at the bottom of this file
+ * pins that single exception by name so a second one still fails.
+ */
 const FILES = ["install.sh", "install-x64.sh", "scripts/install-voice.sh"] as const;
 
 const NL = String.fromCharCode(10);
@@ -84,7 +104,7 @@ function enclosingFunction(file: string, line: number): string {
 }
 
 describe("the installers kill no work on a clock", () => {
-  for (const file of FILES) {
+  for (const file of WATCHED) {
     it(`${file} invokes \`timeout\` nowhere`, () => {
       // `timeout` as a COMMAND: at the start of a line, after a pipe/&&/;, or at
       // the start of a quoted command string handed to su/runuser/
@@ -103,7 +123,9 @@ describe("the installers kill no work on a clock", () => {
         "a `timeout N` kills work for being slow — see the header of this file",
       ).toEqual([]);
     });
+  }
 
+  for (const file of FILES) {
     it(`${file} caps a curl transfer only on a loopback liveness probe`, () => {
       const LOOPBACK = /127\.0\.0\.1|localhost|\[::1\]/;
       const hits = linesOf(file).filter(({ text }) => text.includes("--max-time"));
@@ -132,6 +154,64 @@ describe("the installers kill no work on a clock", () => {
     });
   }
 
+  // Every window that is left measures WALL TIME, and asks before it acts.
+  //
+  // Both of these counted turns round the loop instead, which reads as seconds
+  // only if an iteration IS a second. install-x64's readiness loop spends 20 s
+  // in its stability sleep whenever the port is open, so a service that opened
+  // and restarted repeatedly held a "ten minute" window for hours; the
+  // rollback's poll spends the probe's own `--max-time 5`, so a server that
+  // accepts and stalls turned three minutes into eighteen. And a deadline read
+  // at the BOTTOM of the loop is overshot by whatever the last iteration did.
+  it.each([
+    { file: "install-x64.sh", fn: "wait_for_http", window: '"$window"' },
+    { file: "install.sh", fn: "restore_previous_build", window: '"$probe_window"' },
+  ])("$fn measures its window in wall time, and checks it first", ({ file, fn, window }) => {
+    const src = readFileSync(path.join(REPO, file), "utf-8");
+    const start = src.indexOf(`${fn}() {`);
+    expect(start, `${fn} is missing from ${file}`).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf(`${NL}}`, start));
+
+    // bash's own counter, read as a delta so a caller's clock is undisturbed.
+    expect(body).toContain("local started=$SECONDS");
+    expect(body).toMatch(/\(\( SECONDS - started \)\)/);
+    // …and nothing that counts iterations and calls the answer seconds.
+    expect(body, "the loop still counts iterations").not.toMatch(/waited=\$\(\(waited \+ 1\)\)/);
+
+    // The deadline is the first thing inside the loop, before the probe and
+    // before any sleep.
+    const loop = body.indexOf("while :; do");
+    expect(loop).toBeGreaterThan(-1);
+    const deadline = body.indexOf(`SECONDS - started )) `, loop);
+    const firstSleep = body.indexOf("sleep ", loop);
+    const firstProbe = body.indexOf("curl ", loop);
+    expect(deadline, `${fn} never consults ${window} inside its loop`).toBeGreaterThan(loop);
+    expect(deadline, "the deadline is read after the probe").toBeLessThan(firstProbe);
+    expect(deadline, "the deadline is read after a sleep").toBeLessThan(firstSleep);
+    expect(body).toContain(window);
+  });
+
+  it("validates the test-mode cap before anything compares against it", () => {
+    // Read raw, a non-numeric override makes `[ … -ge … ]` exit 2 with "integer
+    // expression expected", which every call site reads as "do not give up yet"
+    // — so the one knob that exists to CAP these loops would silently uncap
+    // them. A zero is the opposite failure: a wait that ends before it began.
+    const sh = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+    const start = sh.indexOf("test_mode_wait_cap_s() {");
+    expect(start, "the validating reader is missing").toBeGreaterThan(-1);
+    const body = sh.slice(start, sh.indexOf(`${NL}}`, start));
+    expect(body).toMatch(/case "\$cap" in ''\|\*\[!0-9\]\*\) cap=60 ;; esac/);
+    expect(body).toMatch(/\[ "\$cap" -ge 1 \]/);
+    // Nothing may read the raw variable except that reader.
+    const raw = linesOf("install.sh").filter(({ text }) =>
+      text.includes("CLAWBOX_TEST_MODE_WAIT_CAP_S"));
+    expect(
+      raw.map(({ n, text }) => `install.sh:${n}: ${text.trim()}`),
+      "the raw override is read somewhere other than its validating reader",
+    ).toHaveLength(1);
+    expect(raw[0].text.trim()).toBe('local cap="${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}"');
+  });
+
   it("install.sh waits for the apt lock rather than giving up on it", () => {
     const sh = readFileSync(path.join(REPO, "install.sh"), "utf-8");
     const start = sh.indexOf("wait_for_apt() {");
@@ -153,6 +233,50 @@ describe("the installers kill no work on a clock", () => {
           `${file}:${n} bounds a connect without retrying it: ${text.trim()}`,
         ).toBe(true);
       }
+    }
+  });
+});
+
+/**
+ * The one wall-clock wait outside install.sh, and the reason it is allowed.
+ *
+ * scripts/ensure-local-embeddings.sh runs DETACHED from every gateway start,
+ * under an exclusive flock. Waiting there for ever does not make a slow box
+ * succeed — it keeps every later gateway start out of the lock permanently — and
+ * nothing is lost by giving up, because the download is already on disk and the
+ * next gateway start asks again. That is a retry schedule, not a box failed for
+ * being slow. It is pinned by name so a SECOND cap, or a `timeout` (covered
+ * above), still fails.
+ */
+describe("scripts/ensure-local-embeddings.sh keeps exactly one wait", () => {
+  const SRC = "scripts/ensure-local-embeddings.sh";
+
+  it("caps one request, and it is the proxy readiness probe", () => {
+    const hits = linesOf(SRC).filter(({ text }) => text.includes("--max-time"));
+    expect(hits).toHaveLength(1);
+    expect(hits[0].text).toContain("$EMBED_PROXY_URL/models");
+  });
+
+  it("bounds the proxy wait on the clock, not on a count of naps", () => {
+    // One probe can hold the line for its whole `--max-time`, so adding up the
+    // sleeps let a 120 s promise run for the better part of an hour — with the
+    // flock held throughout.
+    const src = readFileSync(path.join(REPO, SRC), "utf-8");
+    expect(src).toContain("EMBED_PROXY_WAIT_SECONDS");
+    expect(src).toMatch(/deadline=\$\(\( \$\(date \+%s\) \+ EMBED_PROXY_WAIT_SECONDS \)\)/);
+  });
+
+  it("puts no clock on the download or the index rebuild", () => {
+    // The two things that are WORK here. The model is a 639 MB fetch and the
+    // reindex walks everything the owner has; neither may be cut short.
+    const lines = linesOf(SRC).filter(({ text }) =>
+      /hf download|memory index/.test(text));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const { n, text } of lines) {
+      expect(
+        /--max-time|\btimeout\b/.test(text),
+        `${SRC}:${n} bounds work on a clock: ${text.trim()}`,
+      ).toBe(false);
     }
   });
 });

@@ -1482,9 +1482,10 @@ EOF
 # a retry loop, and without it a socket that accepts and never answers hangs the
 # loop anyway.
 wait_for_http() {
-  local url="$1" label="$2" log_unit="$3" waited=0
+  local url="$1" label="$2" log_unit="$3"
   local window="${CLAWBOX_HTTP_READY_WINDOW_S:-600}"
   case "$window" in ''|*[!0-9]*) window=600 ;; esac
+  { [ "${#window}" -le 6 ] && [ "$window" -ge 1 ]; } || window=600
   # LOOPBACK ONLY, asserted rather than assumed. The `--max-time` below is
   # allowed precisely because this is a liveness probe against a socket on this
   # machine; pointed at a remote host the same flag would be a transfer deadline,
@@ -1499,7 +1500,18 @@ wait_for_http() {
       return 1
       ;;
   esac
+  # WALL CLOCK, not a count of turns round the loop. `waited` used to be
+  # incremented once per iteration, which reads as seconds only if an iteration
+  # IS a second — and one that finds the port open spends 20 s in the stability
+  # sleep below. A service that opened its port and restarted repeatedly could
+  # therefore hold this loop for hours under a window that says ten minutes.
+  # `$SECONDS` is bash's own and cannot fail the way `date` can; taken as a DELTA
+  # rather than reset, so a caller's clock is never disturbed.
+  local started=$SECONDS
   while :; do
+    # Asked FIRST, and again before the stability sleep: a deadline checked only
+    # at the bottom is overshot by the length of whatever the iteration did.
+    [ $(( SECONDS - started )) -lt "$window" ] || break
     if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
       local ready_pid
       ready_pid=$(systemctl show "$log_unit" -p MainPID --value)
@@ -1516,12 +1528,10 @@ wait_for_http() {
       echo "  $label opened its port but restarted; continuing readiness checks..."
     fi
     unit_is_coming_up "$log_unit" || break
-    [ "$waited" -lt "$window" ] || break
     sleep 1
-    waited=$((waited + 1))
-    wait_note "$waited" "$label to answer at $url"
+    wait_note "$(( SECONDS - started ))" "$label to answer at $url"
   done
-  echo "Error: $label did not become ready at $url (waited ${waited}s)" >&2
+  echo "Error: $label did not become ready at $url (waited $(( SECONDS - started ))s)" >&2
   systemctl status "$log_unit" --no-pager -n 30 >&2 || true
   journalctl -u "$log_unit" --no-pager -n 50 >&2 || true
   return 1

@@ -942,6 +942,19 @@ unit_is_coming_up() {
   esac
 }
 
+# How long a test-mode wait may run, VALIDATED before anybody compares against
+# it. Read raw, a non-numeric override makes `[ … -ge … ]` exit 2 with "integer
+# expression expected" — which reads as "do not give up yet" at every call site,
+# so the one knob that exists to cap these loops would silently uncap them. A
+# zero or a negative is the opposite failure and is refused the same way: a cap
+# of 0 ends a wait before it has begun.
+test_mode_wait_cap_s() {
+  local cap="${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}"
+  case "$cap" in ''|*[!0-9]*) cap=60 ;; esac
+  { [ "${#cap}" -le 5 ] && [ "$cap" -ge 1 ]; } || cap=60
+  printf '%s' "$cap"
+}
+
 # The ONE exception, and it is not about hardware: the e2e container has no
 # radio, no GPU and no real systemd, so a check that can never pass there has to
 # be able to fail rather than hold CI open until the job's own timeout. A real
@@ -950,7 +963,9 @@ unit_is_coming_up() {
 # $1 = seconds elapsed. True when the caller should stop waiting.
 wait_give_up_in_test_mode() {
   is_test_mode || return 1
-  [ "${1:-0}" -ge "${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}" ]
+  local elapsed="${1:-0}"
+  case "$elapsed" in ''|*[!0-9]*) elapsed=0 ;; esac
+  [ "$elapsed" -ge "$(test_mode_wait_cap_s)" ]
 }
 # The disk-backed swap step's numbers (see step_swapfile): the file's size, the
 # free space that must remain after it, and its priority — BELOW zram's 5, so
@@ -2444,7 +2459,7 @@ set_previous_build_aside() {
 #
 # $3 is 1 when a build actually ran, which is what separates the last two.
 restore_previous_build() {
-  local build_dir="$1" kept_dir="$2" built="${3:-0}" restored=0 waited=0 http_code
+  local build_dir="$1" kept_dir="$2" built="${3:-0}" restored=0 http_code
   if [ -d "$kept_dir" ]; then
     rm -rf "$build_dir"
     mv "$kept_dir" "$build_dir"
@@ -2521,8 +2536,22 @@ restore_previous_build() {
   # night.
   local probe_window="${CLAWBOX_RESTORE_PROBE_WAIT_S:-180}"
   case "$probe_window" in ''|*[!0-9]*) probe_window=180 ;; esac
-  if is_test_mode; then probe_window="${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}"; fi
+  { [ "${#probe_window}" -le 5 ] && [ "$probe_window" -ge 1 ]; } || probe_window=180
+  if is_test_mode; then probe_window="$(test_mode_wait_cap_s)"; fi
+  # WALL CLOCK, not a count of turns round the loop. Counting iterations reads
+  # as seconds only when every iteration is a second, and this one is the probe's
+  # own `--max-time 5` plus a sleep — so a server that accepts and stalls made a
+  # window that says three minutes run for eighteen. `$SECONDS` is bash's own and
+  # cannot fail the way `date` can; taken as a DELTA rather than reset, so a
+  # caller's clock is never disturbed.
+  local started=$SECONDS
   while :; do
+    # Asked FIRST: a deadline checked at the bottom is overshot by the length of
+    # whatever the last iteration did.
+    if [ $(( SECONDS - started )) -ge "$probe_window" ]; then
+      echo "  $what, but the dashboard did not answer on :80 (last HTTP ${http_code:-000}) — it is DOWN" >&2
+      return 1
+    fi
     # `--max-time` on a LOCALHOST LIVENESS PROBE inside a retry loop is the one
     # class of cap this file keeps: it bounds nothing that downloads, builds or
     # installs — it is what makes the probe a probe. Without it a server that
@@ -2543,13 +2572,8 @@ restore_previous_build() {
       echo "  $what, but clawbox-setup is not running (last HTTP $http_code) — the dashboard is DOWN" >&2
       return 1
     fi
-    if [ "$waited" -ge "$probe_window" ]; then
-      echo "  $what, but the dashboard did not answer on :80 (last HTTP $http_code) — it is DOWN" >&2
-      return 1
-    fi
     sleep 1
-    waited=$((waited + 1))
-    wait_note "$waited" "the dashboard to answer on :80 after the rollback (last HTTP $http_code)"
+    wait_note "$(( SECONDS - started ))" "the dashboard to answer on :80 after the rollback (last HTTP $http_code)"
   done
 }
 
@@ -10036,7 +10060,7 @@ step_validate_services() {
   case "$settle" in ''|*[!0-9]*) settle=180 ;; esac
   # The e2e container cannot satisfy some of these by construction, and CI has
   # to be able to report a failure rather than hold the job open.
-  if is_test_mode; then settle="${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}"; fi
+  if is_test_mode; then settle="$(test_mode_wait_cap_s)"; fi
   local started_at; started_at=$(date +%s)
   local deadline=$(( started_at + settle ))
   local -a failed_active=() failed_installed=() failed_probe=()
