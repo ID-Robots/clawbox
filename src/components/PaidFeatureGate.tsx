@@ -20,8 +20,10 @@ import type { ClawboxLoginState } from "@/lib/use-clawbox-login";
  * differs between them is two catalogue keys — the name and the description —
  * which is why {@link FEATURE_KEYS} is a table and not a branch.
  *
- * Three faces, and they are not the same refusal:
+ * Four states, and the two refusals are not the same refusal:
  *
+ * - STILL READING — the login poll's own first tick. A spinner and nothing
+ *   else; see {@link paidGateFace} for why this may never be read as Free.
  * - NOT CONNECTED — this box has no ClawBox AI account at all. Nothing to
  *   upgrade yet, so the answer is the device-code handoff the setup wizard and
  *   the Providers page already run (`useClawaiDeviceLogin`), not a link to a
@@ -30,7 +32,7 @@ import type { ClawboxLoginState } from "@/lib/use-clawbox-login";
  *   upgrade card, the same one Remote Control shows.
  * - PAID — nothing at all; the wizard is unchanged.
  *
- * The server refuses the same three states in `coding-agent/enable` and
+ * The server refuses both of those states in `coding-agent/enable` and
  * `clawkeep/memory/enable`; this is the half that stops the owner pressing a
  * button that was always going to bounce.
  */

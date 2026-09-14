@@ -61,8 +61,7 @@ export default function CodingAgentSetupWizard({
   // without reopening the window; the server refuses the same three states in
   // /setup-api/coding-agent/enable.
   const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
-  const gateFace = paidGateFace(clawboxLogin);
-  const gated = gateFace !== "satisfied";
+  const gated = paidGateFace(clawboxLogin) !== "satisfied";
   const [step, setStep] = useState<Step>("intro");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

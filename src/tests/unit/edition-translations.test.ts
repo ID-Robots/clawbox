@@ -9,6 +9,7 @@ import { systemProfileEn } from "@/lib/edition-translations/en-system-profile";
 import { codingAgentEn } from "@/lib/edition-translations/en-coding-agent";
 import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
 import { improvementEn } from "@/lib/edition-translations/en-improvement";
+import { paidGateEn } from "@/lib/edition-translations/en-paid-gate";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -124,6 +125,7 @@ describe("edition-translations (TASK-458)", () => {
       ["codingAgentEn", codingAgentEn, (k) => k.startsWith("codingAgent.")],
       ["shellScanEn", shellScanEn, (k) => k.startsWith("shellScan.")],
       ["improvementEn", improvementEn, (k) => k.startsWith("improvement.")],
+      ["paidGateEn", paidGateEn, (k) => k.startsWith("paidGate.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {
