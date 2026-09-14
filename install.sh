@@ -899,12 +899,25 @@ harness_has_no_gpu() {
 # failed install is not cheaper than a slow one, it is a box somebody has to
 # drive out to.
 #
-# So a wait here runs until the thing it waits for happens, or until the thing
-# it waits for becomes IMPOSSIBLE — never until a clock says so. Every loop
-# below therefore has a non-time exit: the unit stopped trying, the process is
-# gone, the job returned. What replaces the deadline is a line every
-# WAIT_NOTE_EVERY_S seconds naming what is still outstanding, so a long wait
-# reads as a long wait and not as a hang.
+# So a wait for WORK — an apt lock, a download, a build, a package install —
+# runs until the work happens, or until it becomes IMPOSSIBLE, and never until a
+# clock says so. `timeout` appears nowhere in this file.
+#
+# The loops that WATCH rather than work are the exception, and there are four:
+# wait_for_gateway_port, hermes_dashboard_restart_after_install's pid poll,
+# restore_previous_build's dashboard poll, and step_validate_services' settle.
+# None of them bounds anything — by the time each runs, the thing it is looking
+# at has already succeeded or already failed — they decide when to write a
+# REPORT or when to attempt a REPAIR, and a report cannot be deferred for ever.
+# They are the exception because systemd answers the two halves of "not
+# answering yet" identically: a unit still coming up and a unit that is up and
+# will never bind the port are both `active`. Each says so where it lives.
+#
+# Every one of them, and every wait above, asks a FACT before it asks a clock —
+# the unit stopped trying, the process is gone, the job returned — and every one
+# measures WALL time, not turns round the loop. What stands in for the deadline
+# elsewhere is a line every WAIT_NOTE_EVERY_S seconds naming what is still
+# outstanding, so a long wait reads as a long wait and not as a hang.
 WAIT_NOTE_EVERY_S=30
 
 # One "still waiting" line per WAIT_NOTE_EVERY_S seconds of elapsed time.
