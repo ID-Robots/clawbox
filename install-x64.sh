@@ -1489,8 +1489,11 @@ wait_for_http() {
   # allowed precisely because this is a liveness probe against a socket on this
   # machine; pointed at a remote host the same flag would be a transfer deadline,
   # which is the thing this file no longer has.
+  # The brackets are ESCAPED: unescaped, `[::1]` is a shell character class —
+  # one of `:` or `1` — so a genuine `http://[::1]:PORT` fell through to the
+  # refusal this arm is supposed to let past.
   case "$url" in
-    http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*|http://[::1]:*) ;;
+    http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*|http://\[::1\]:*|http://\[::1\]/*) ;;
     *)
       echo "Error: wait_for_http is a loopback liveness probe; refusing $url" >&2
       return 1

@@ -946,9 +946,16 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     expect(run.rc).toBe(0);
     expect(run.steps).toEqual(["model-step", "ran"]);
     expect(run.cliCalls).toContain("memory status --agent main --deep --json");
-    // -k, because `timeout` alone sends SIGTERM only and
-    // collectMemoryStatusJson() escalates to SIGKILL after 5 s.
-    expect(BLOCK).toMatch(/timeout -k \d+ \d+ "\$OPENCLAW_BIN" memory status/);
+    // …and it asks the CLI plainly. The probe used to be wrapped in `timeout -k
+    // 5 60`; it no longer is (owner's rule, 2026-09-14: nothing in the installer
+    // is cut short for being slow). `memory status --deep` walks the whole index,
+    // so on a box with a large one the cap did not protect a hanging CLI — it
+    // reported "could not read an embedder" about a healthy one that was simply
+    // taking its time, which is a verdict this block exists not to invent.
+    // Nothing is at risk: the outcome here is a warning line either way, and the
+    // if-condition assignment still discards output from a non-zero exit.
+    expect(BLOCK).toContain('"$OPENCLAW_BIN" memory status --agent main --deep --json');
+    expect(BLOCK).not.toMatch(/timeout[^\n]*memory status/);
   });
 
   it("reports ClawBox's own embedder behind the proxy as ready", () => {
