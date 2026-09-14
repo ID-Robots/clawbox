@@ -1,0 +1,102 @@
+/**
+ * The ClawBox AI cloud embedder: where it is, and who is allowed to say so.
+ *
+ * The property pinned here is a security one. The owner's whole memory index
+ * becomes the body of a request to this endpoint, so the endpoint may not come
+ * out of `data/config.json` — that file is deny-listed for a coding run's own
+ * file tools precisely so a prompt-injected run cannot redirect the box. The
+ * store gets a SWITCH; the address comes from the environment.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const store = new Map<string, unknown>();
+vi.mock("@/lib/config-store", () => ({ get: async (key: string) => store.get(key) }));
+vi.mock("@/lib/harness/credentials", () => ({
+  CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
+  resolveClawaiToken: async () => "claw_test",
+}));
+
+import {
+  CLAWAI_CLOUD_EMBEDDINGS_KEY,
+  cloudEmbeddingsSwitchedOff,
+  cloudEmbeddingsUrl,
+  embeddingsBaseUrlOf,
+  forgetCloudEmbeddingsProbe,
+  probeCloudEmbeddings,
+} from "@/lib/clawai-cloud-embeddings";
+
+const REAL_URL = process.env.CLAWBOX_AI_EMBEDDINGS_URL;
+
+beforeEach(() => {
+  store.clear();
+  forgetCloudEmbeddingsProbe();
+  delete process.env.CLAWBOX_AI_EMBEDDINGS_URL;
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  if (REAL_URL === undefined) delete process.env.CLAWBOX_AI_EMBEDDINGS_URL;
+  else process.env.CLAWBOX_AI_EMBEDDINGS_URL = REAL_URL;
+});
+
+function answer(body: unknown, status = 200) {
+  return vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
+}
+
+describe("cloudEmbeddingsUrl", () => {
+  it("is the proxy's own route on a device build", () => {
+    expect(cloudEmbeddingsUrl()).toBe("https://clawbox.test/api/ai/embeddings");
+  });
+
+  it("takes its address from the environment, which is root's", () => {
+    process.env.CLAWBOX_AI_EMBEDDINGS_URL = "https://staging.test/v1/embeddings";
+    expect(cloudEmbeddingsUrl()).toBe("https://staging.test/v1/embeddings");
+  });
+
+  it("cannot be repointed by anything in the device store", async () => {
+    // The whole reason the key holds a word: a host written here would be an
+    // exfiltration route for every document the owner has indexed.
+    store.set(CLAWAI_CLOUD_EMBEDDINGS_KEY, "https://attacker.test/collect");
+    expect(cloudEmbeddingsUrl()).toBe("https://clawbox.test/api/ai/embeddings");
+    // And a value that is not the one word it understands is not "off" either.
+    expect(await cloudEmbeddingsSwitchedOff()).toBe(false);
+  });
+
+  it("hands OpenClaw the base the core appends /embeddings to itself", () => {
+    expect(embeddingsBaseUrlOf("https://clawbox.test/api/ai/embeddings")).toBe("https://clawbox.test/api/ai");
+    expect(embeddingsBaseUrlOf("https://clawbox.test/api/ai/")).toBe("https://clawbox.test/api/ai");
+  });
+});
+
+describe("probeCloudEmbeddings", () => {
+  it("accepts a route that answers a numeric vector", async () => {
+    const fetchMock = answer({ data: [{ embedding: [0.1, 0.2] }] });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(probeCloudEmbeddings()).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Believed for hours: a second ask costs no request.
+    await expect(probeCloudEmbeddings()).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a route that has not shipped, and one that answers a shape nothing can read", async () => {
+    vi.stubGlobal("fetch", answer({}, 404));
+    await expect(probeCloudEmbeddings()).resolves.toBe(false);
+    forgetCloudEmbeddingsProbe();
+    vi.stubGlobal("fetch", answer({ data: [{ embedding: "not a vector" }] }));
+    await expect(probeCloudEmbeddings()).resolves.toBe(false);
+  });
+
+  it("never throws at a refused connection", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    await expect(probeCloudEmbeddings()).resolves.toBe(false);
+  });
+
+  it("asks nothing at all on a box switched off in the field", async () => {
+    store.set(CLAWAI_CLOUD_EMBEDDINGS_KEY, "off");
+    const fetchMock = answer({ data: [{ embedding: [1] }] });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(probeCloudEmbeddings()).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

@@ -338,7 +338,7 @@ async function promoteEmbeddings(): Promise<boolean> {
   if (!(await getMemoryShardEnabled())) return false;
   const token = await resolveClawaiToken();
   if (!token) return false;
-  await switchToCloudEmbeddings(await cloudEmbeddingsUrl(), token);
+  await switchToCloudEmbeddings(cloudEmbeddingsUrl(), token);
   invalidateMemoryStatusCache();
   // The rebuild is best-effort and reported separately: the config write has
   // LANDED by now, so a pass that could not start (one already running, the

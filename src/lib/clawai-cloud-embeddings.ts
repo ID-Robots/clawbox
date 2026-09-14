@@ -13,6 +13,8 @@
  *
  * The route is `POST <proxy>/embeddings`, OpenAI-compatible (`input`, `model`,
  * `data[].embedding`, `usage`) with the box's own `claw_` token as the bearer.
+ * WHERE it is comes from the environment and never from a file — see
+ * `CLAWAI_CLOUD_EMBEDDINGS_KEY` for why that distinction is load-bearing.
  * It is shipping separately on the website side; until it does, every probe here
  * answers false and the resolver leaves the index on the model on this box. That
  * is the whole reason the probe exists rather than a flag someone flips: a box
@@ -45,39 +47,39 @@ export const CLOUD_EMBEDDING_PROVIDER = "openai-compatible";
 export const CLOUD_EMBEDDING_ENGINE = "ClawBox AI";
 
 /**
- * The config-store override for the endpoint.
+ * The field switch: `"off"` stops this box using the cloud embedder at all.
  *
- * A key rather than only an env var because the proxy route is shipping after
- * this code: a box in the field can be pointed at it, or away from it, without
- * an update. Absent — which is every box — means the default below.
+ * A key rather than only a build-time constant because the proxy route is
+ * shipping after this code: a box already in a customer's hands can be taken
+ * back off it without an update, whatever its plan says.
+ *
+ * IT IS A SWITCH AND NOT AN ADDRESS, deliberately. The first draft let this key
+ * hold the endpoint URL, which CodeQL flagged for what it is
+ * (`js/file-data-outbound-request`): the owner's whole memory index becomes the
+ * body of a request to whatever `data/config.json` names, and that file is
+ * deny-listed for a coding run's own file tools exactly because a
+ * prompt-injected run must not be able to redirect the box. A word cannot name
+ * a host. Where the endpoint IS is decided by the environment the image was
+ * built with, below, which is root's and not the clawbox account's.
  */
-export const CLAWAI_CLOUD_EMBEDDINGS_URL_KEY = "clawai_cloud_embeddings_url";
-
-/** The default endpoint: the AI proxy's own OpenAI-compatible embeddings route. */
-export function defaultCloudEmbeddingsUrl(): string {
-  return `${CLAWBOX_AI_PROXY_URL.replace(/\/+$/, "")}/embeddings`;
-}
+export const CLAWAI_CLOUD_EMBEDDINGS_KEY = "clawai_cloud_embeddings";
 
 /**
- * The endpoint, validated.
+ * The endpoint.
  *
- * The owner's document text becomes the body of a request to whatever this
- * answers, so the stored override is parsed rather than trusted: anything that
- * is not an absolute http(s) URL is ignored in favour of the default. `http` is
- * admitted for one reason only — a staging proxy on the LAN — and the default
- * this falls back to is https.
+ * From the environment or from the proxy constant, never from a file — see the
+ * key above. `CLAWBOX_AI_EMBEDDINGS_URL` is for a staging image pointed at a
+ * proxy of its own; a device build sets neither and gets the line below.
  */
-export async function cloudEmbeddingsUrl(): Promise<string> {
-  const stored = await get(CLAWAI_CLOUD_EMBEDDINGS_URL_KEY);
-  if (typeof stored === "string" && stored.trim()) {
-    try {
-      const url = new URL(stored.trim());
-      if (url.protocol === "https:" || url.protocol === "http:") return url.toString().replace(/\/+$/, "");
-    } catch {
-      // A malformed override is not a reason to stop embedding; the default is.
-    }
-  }
-  return defaultCloudEmbeddingsUrl();
+export function cloudEmbeddingsUrl(): string {
+  const override = process.env.CLAWBOX_AI_EMBEDDINGS_URL?.trim();
+  return override || `${CLAWBOX_AI_PROXY_URL.replace(/\/+$/, "")}/embeddings`;
+}
+
+/** Has the owner (or a support engineer) switched the cloud embedder off here? */
+export async function cloudEmbeddingsSwitchedOff(): Promise<boolean> {
+  const stored = await get(CLAWAI_CLOUD_EMBEDDINGS_KEY);
+  return typeof stored === "string" && stored.trim().toLowerCase() === "off";
 }
 
 /**
@@ -123,7 +125,8 @@ export function forgetCloudEmbeddingsProbe(): void {
  * Never throws.
  */
 export async function probeCloudEmbeddings(): Promise<boolean> {
-  const endpoint = await cloudEmbeddingsUrl();
+  if (await cloudEmbeddingsSwitchedOff()) return false;
+  const endpoint = cloudEmbeddingsUrl();
   const now = Date.now();
   if (probeCache && probeCache.endpoint === endpoint) {
     const ttl = probeCache.ok ? PROBE_OK_TTL_MS : PROBE_FAIL_TTL_MS;

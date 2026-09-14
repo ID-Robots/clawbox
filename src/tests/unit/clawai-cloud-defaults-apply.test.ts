@@ -25,7 +25,7 @@ vi.mock("@/lib/harness/credentials", () => ({
 
 const routeReady = vi.fn(async () => true);
 vi.mock("@/lib/clawai-cloud-embeddings", () => ({
-  cloudEmbeddingsUrl: async () => "https://clawbox.test/api/ai/embeddings",
+  cloudEmbeddingsUrl: () => "https://clawbox.test/api/ai/embeddings",
   forgetCloudEmbeddingsProbe: () => {},
   probeCloudEmbeddings: () => routeReady(),
 }));
