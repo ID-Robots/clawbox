@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
+import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { syncChannelAudio } from "@/lib/stt-channel";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { localSttInstalled } from "@/lib/stt-local";
@@ -110,6 +111,11 @@ export async function POST(req: Request) {
     // stored preference describing what the box still does.
     const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(primary), local.installed);
     await setSttPrimary(primary);
+    // WHO DECIDED, beside WHAT was decided. A person pinning the engine on the
+    // box is what stops the ClawBox AI cloud default from moving it back at the
+    // next boot; picking the cloud hands the capability back to that default,
+    // which is not the same as never having been asked (see clearOwnerChoice).
+    await (primary === "local" ? noteOwnerChoice("stt") : clearOwnerChoice("stt"));
     if (wrote) {
       try {
         // Media-understanding config is read at gateway start, so a restart is

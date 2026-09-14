@@ -46,8 +46,12 @@ vi.mock("@/lib/voice-output-store", () => ({
   writeLocalVoice: vi.fn(async () => {}),
 }));
 
+const choiceSourceMock = vi.fn();
 vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => preferenceMock(...a),
+  // The route records WHO chose the voice (src/lib/clawai-cloud-choice.ts), so
+  // the automatic ClawBox AI cloud default never moves an owner's pin.
+  set: (...a: unknown[]) => choiceSourceMock(...a),
 }));
 
 const wireMock = vi.fn();

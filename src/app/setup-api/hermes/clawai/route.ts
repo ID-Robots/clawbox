@@ -205,6 +205,27 @@ export async function POST(request: Request) {
       codingAgentReadyBefore,
       previousClawaiToken,
     });
+    // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). Linking a
+    // subscription is the moment the cloud voice, cloud transcription and cloud
+    // embeddings become available — or become a different account's. The
+    // applier never demotes and never overrides a pick the owner made, and
+    // never rejects; the boot hook runs the same pass on every start, so a box
+    // this misses is put right by its next restart.
+    try {
+      const { applyClawaiCloudDefaults } = await import("@/lib/clawai-cloud-defaults");
+      await applyClawaiCloudDefaults({
+        trigger: "link",
+        credentialChanged: previousClawaiToken !== token,
+      });
+    } catch (err) {
+      // The save has LANDED by the time this runs, so nothing here may turn it
+      // into a failure — the catch below would answer 502 over a box that is
+      // configured. The boot hook runs the same pass on every start.
+      console.warn(
+        "[hermes/clawai] could not apply the ClawBox AI cloud defaults:",
+        err instanceof Error ? err.message : err,
+      );
+    }
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     // Only OUR own error text is safe to echo — a raw spawn error can carry the

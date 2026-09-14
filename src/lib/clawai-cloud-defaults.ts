@@ -29,10 +29,11 @@
  * can do on a box that was not is nothing.
  */
 
-import { get, set } from "@/lib/config-store";
+
 import { readClawaiEntitlementTier } from "@/lib/clawai-plan-tier";
+import { readChoiceSource } from "@/lib/clawai-cloud-choice";
+import { get } from "@/lib/config-store";
 import {
-  CHOICE_SOURCE_KEYS,
   ownerChoiceFrom,
   resolveClawaiCloudDefaults,
   type CapabilitySource,
@@ -180,9 +181,9 @@ export async function readCloudDefaultsStatus(): Promise<CloudDefaultsStatus> {
  */
 async function readOwnerChoices(): Promise<Record<CloudCapability, boolean>> {
   const [ttsSource, sttSource, embedSource, storedStt, voiceState] = await Promise.all([
-    get(CHOICE_SOURCE_KEYS.tts),
-    get(CHOICE_SOURCE_KEYS.stt),
-    get(CHOICE_SOURCE_KEYS.embeddings),
+    readChoiceSource("tts"),
+    readChoiceSource("stt"),
+    readChoiceSource("embeddings"),
     get(STT_PRIMARY_KEY),
     readVoiceState(),
   ]);
@@ -194,27 +195,6 @@ async function readOwnerChoices(): Promise<Record<CloudCapability, boolean>> {
     // "only a person could have done this" value to grandfather here.
     embeddings: ownerChoiceFrom(embedSource, false),
   };
-}
-
-/**
- * Record that the OWNER chose this capability's engine, so no later default
- * moves it. Called by every surface a person can pick from.
- */
-export async function noteOwnerChoice(capability: CloudCapability): Promise<void> {
-  await set(CHOICE_SOURCE_KEYS[capability], "owner");
-}
-
-/**
- * Hand a capability back to the automatic default.
- *
- * The other half of `noteOwnerChoice`, and the reason the key holds a word
- * rather than a boolean: "the owner chose the box" and "the owner asked for
- * whatever the subscription covers" are different answers, and deleting the key
- * would make the second one indistinguishable from never having been asked —
- * on a box whose stored value is `local`, that reads as an owner pick again.
- */
-export async function clearOwnerChoice(capability: CloudCapability): Promise<void> {
-  await set(CHOICE_SOURCE_KEYS[capability], "auto");
 }
 
 /**

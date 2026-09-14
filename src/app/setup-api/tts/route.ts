@@ -34,6 +34,7 @@ import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/
 import { createSerialLock } from "@/lib/serial-lock";
 import { wireLocalVoice } from "@/lib/voice-local-wiring";
 import { getVoiceAutoReply, setVoiceAutoReply, ttsAutoModeFor } from "@/lib/voice-reply";
+import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { logSafe } from "@/lib/log-safe";
@@ -322,7 +323,19 @@ async function settleOnAuto(
   await withVoiceState(async () => {
     await writeVoiceState({ ...(await readVoiceState()), choice: "auto" });
   });
+  // The pick was NOT honoured, so it is not an owner choice to remember: the
+  // box settled on Auto, and Auto is the automatic default's to move.
+  await recordVoiceChoiceSource("auto");
   return NextResponse.json({ ...(await status()), fallback: { requested, reason } }, { headers: NO_STORE });
+}
+
+/** See the call site: the write has landed, so this may not fail the answer. */
+async function recordVoiceChoiceSource(choice: VoiceChoice): Promise<void> {
+  try {
+    await (choice === "local" ? noteOwnerChoice("tts") : clearOwnerChoice("tts"));
+  } catch (err) {
+    console.warn("[setup-api/tts] could not record who chose the voice:", err instanceof Error ? err.message : err);
+  }
 }
 
 async function handleSelect(choice: VoiceChoice) {
@@ -403,6 +416,18 @@ async function handleSelectUnlocked(choice: VoiceChoice, harness: ActiveHarness)
     }
     await writeVoiceState({ ...(await readVoiceState()), choice });
   });
+  // WHO DECIDED. Pinning the voice on the box is what stops the ClawBox AI
+  // cloud default from moving it at the next boot; Auto and the cloud hand the
+  // capability back to that default. Outside the state lock on purpose — it is
+  // a different key in a different store, and holding the lock across a second
+  // write buys nothing.
+  //
+  // Best effort: the voice HAS changed by now, so a store that would not take
+  // the bookkeeping must not be reported as a voice that did not change. A lost
+  // `owner` mark costs nothing either — the applier reads a stored `local`
+  // choice as an owner pick on its own (`ownerChoiceFrom`), which is what a box
+  // that predates this key relies on.
+  await recordVoiceChoiceSource(choice);
   return NextResponse.json(await status(), { headers: NO_STORE });
 }
 
