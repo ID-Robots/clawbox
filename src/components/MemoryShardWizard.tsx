@@ -35,9 +35,28 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   // server-side by /setup-api/clawkeep/memory/enable.
   const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
   const gated = paidGateFace(clawboxLogin) !== "satisfied";
-  const [step, setStep] = useState<Step>("intro");
-  const [busy, setBusy] = useState<string | null>(null);
+  const [chosenStep, setStep] = useState<Step>("intro");
+  const [startedBusy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * The gate governs the WHOLE flow, not just the front door.
+   *
+   * The plan poll goes on running behind every step, and a subscription that
+   * lapses — or a credential that is withdrawn — while the owner is two steps
+   * in must not leave the provisioning button live: `clawkeep/memory/enable`
+   * would answer 402 at the very end, after the model download had been paid
+   * for. While the gate is shut the only step there is, is the intro, which is
+   * where the gate itself is drawn and says why.
+   *
+   * DERIVED, not corrected in an effect — see the same three lines in
+   * CodingAgentSetupWizard for the whole of the reasoning. The owner's chosen
+   * step is KEPT, so a plan restored in another tab puts them back where they
+   * were, with nothing left half-running: the request is aborted below and the
+   * phase reads idle, so the button they land on is one they can press.
+   */
+  const step: Step = gated ? "intro" : chosenStep;
+  const busy = gated ? null : startedBusy;
 
   // ─── Step 2: the folders to read — MemoryShardFolders, shared with the
   // settings page so the two cannot drift. Next waits while it writes, so the
@@ -50,6 +69,19 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   // the UI showing it, and a fetch left running here would defeat that.
   const provisionAbort = useRef<AbortController | null>(null);
   useEffect(() => () => provisionAbort.current?.abort(), []);
+
+  /**
+   * A provision still in flight when the plan goes away is stopped.
+   *
+   * This one IS an effect, because aborting a request is a side effect on an
+   * external system rather than a correction of React's own state — and it
+   * sets none: the step and the phase the owner then sees are derived.
+   */
+  useEffect(() => {
+    if (!gated) return;
+    provisionAbort.current?.abort();
+    provisionAbort.current = null;
+  }, [gated]);
 
   // ─── Step 3: when it runs ───
   const [frequency, setFrequency] = useState<"daily" | "weekly">("daily");
@@ -78,32 +110,11 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   };
 
   // ─── Step 4: the model, then the first index ───
-  const [phase, setPhase] = useState<ProvisionPhase>("idle");
+  const [reachedPhase, setPhase] = useState<ProvisionPhase>("idle");
   const [progress, setProgress] = useState<number | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
-
-  /**
-   * The gate governs the WHOLE flow, not just the front door.
-   *
-   * The plan poll goes on running behind every step, and a subscription that
-   * lapses — or a credential that is withdrawn — while the owner is two steps
-   * in must not leave the provisioning button live: `clawkeep/memory/enable`
-   * would answer 402 at the very end, after the model download had been paid
-   * for. So an in-flight provision is aborted and the wizard goes back to the
-   * intro, which is where the gate itself is drawn and says why.
-   *
-   * It cannot fire spuriously on the poll's first tick: the wizard opens on
-   * the intro, and `useClawboxLogin` preserves its last answer across a failed
-   * poll rather than reporting a downgrade.
-   */
-  useEffect(() => {
-    if (!gated || step === "intro") return;
-    provisionAbort.current?.abort();
-    provisionAbort.current = null;
-    setBusy(null);
-    setPhase("idle");
-    setStep("intro");
-  }, [gated, step]);
+  /** Derived like the step above: the request was aborted, so nothing is running. */
+  const phase: ProvisionPhase = gated ? "idle" : reachedPhase;
 
   /**
    * Fetch the embedding model if it is missing, point the index at the

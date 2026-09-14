@@ -62,8 +62,8 @@ export default function CodingAgentSetupWizard({
   // /setup-api/coding-agent/enable.
   const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
   const gated = paidGateFace(clawboxLogin) !== "satisfied";
-  const [step, setStep] = useState<Step>("intro");
-  const [busy, setBusy] = useState<string | null>(null);
+  const [chosenStep, setStep] = useState<Step>("intro");
+  const [startedBusy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   /**
@@ -72,18 +72,24 @@ export default function CodingAgentSetupWizard({
    * The plan poll runs behind every step, so a subscription that lapses — or a
    * credential withdrawn — while the owner is three steps in must not leave
    * the finishing button live: the enable route would answer 402 at the end of
-   * a flow that had already installed Chromium and started a test run. Back to
-   * the intro, which is where the gate is drawn and says why.
+   * a flow that had already installed Chromium and started a test run. While
+   * the gate is shut the only step there is, is the intro — which is where the
+   * gate is drawn and says why.
    *
-   * It cannot fire on the poll's own first tick: the wizard opens on the
-   * intro, and `useClawboxLogin` preserves its last answer across a failed
-   * poll rather than reporting a downgrade.
+   * DERIVED, not corrected in an effect. There is nothing to store: "which
+   * step is on screen" is a function of the step the owner chose and whether
+   * the plan still covers this, and an effect that wrote the answer back would
+   * be a cascading render (`react-hooks/set-state-in-effect`) for a value that
+   * was never state. It cannot fire on the poll's own first tick either way:
+   * the wizard opens on the intro, and `useClawboxLogin` preserves its last
+   * answer across a failed poll rather than reporting a downgrade.
+   *
+   * The owner's chosen step is KEPT, so a plan restored in another tab puts
+   * them back where they were rather than at the start.
    */
-  useEffect(() => {
-    if (!gated || step === "intro") return;
-    setBusy(null);
-    setStep("intro");
-  }, [gated, step]);
+  const step: Step = gated ? "intro" : chosenStep;
+  /** Nothing is in flight from the owner's point of view while the gate is shut. */
+  const busy = gated ? null : startedBusy;
 
   // ─── GitHub (step 1) ───
   const [github, setGithub] = useState<GitHubState | null>(null);
