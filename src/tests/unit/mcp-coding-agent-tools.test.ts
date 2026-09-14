@@ -54,7 +54,7 @@ const NAMES = [
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
   const h = captureRegistrar(edition);
-  registerCodingAgentTools(h.reg, { codingAgent });
+  registerCodingAgentTools(h.reg, { codingAgent, codingVercel: codingAgent });
   return h;
 }
 

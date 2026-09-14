@@ -41,7 +41,7 @@ import { PIPELINE_STAGES, type PipelineStage, type PipelineState } from "../../.
 
 function harness() {
   const h = captureRegistrar("openclaw");
-  registerCodingAgentTools(h.reg, { codingAgent: true });
+  registerCodingAgentTools(h.reg, { codingAgent: true, codingVercel: true });
   return h;
 }
 

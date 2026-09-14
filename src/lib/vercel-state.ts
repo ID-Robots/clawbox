@@ -361,6 +361,26 @@ export class VercelLinkError extends Error {
   }
 }
 
+/**
+ * The refusal every Vercel surface gives when the owner has the integration
+ * switched off box-wide (`coding_vercel_enabled`, @/lib/coding-agent).
+ *
+ * ONE CODE AND ONE SENTENCE, here rather than in each of the three routes,
+ * because the difference between "you have not attached a Vercel project" and
+ * "this box does not do Vercel at all" is the whole point of the switch, and
+ * three routes wording it three ways is how a caller ends up retrying the
+ * wrong fix. The code is what the MCP error mapping and the panels key on; the
+ * sentence is the English floor, said in the owner's own language by whatever
+ * surface has a catalogue.
+ *
+ * 409 and not 403: the request was understood and the caller is who they say
+ * they are — the box is in a state where this cannot be done, and the owner can
+ * change that state.
+ */
+export const VERCEL_DISABLED_CODE = "vercel_disabled";
+export const VERCEL_DISABLED_MESSAGE =
+  "The Vercel integration is switched off on this ClawBox. Turn it on in the Coding Agent app, under Settings.";
+
 // ── what the agent is handed when a build fails ─────────────────────────────
 
 /**

@@ -236,7 +236,7 @@ import {
   type VercelReadyState,
   type VercelState,
 } from "@/lib/vercel";
-import { checkVercelReadiness, readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
+import { checkVercelReadiness, readVercelLink, readVercelLinks, resolveVercelAuth, type VercelLinks } from "@/lib/vercel-link";
 import type { DeployTarget } from "@/lib/vercel-state";
 import { readAutoProduction } from "@/lib/vercel-deploy-store";
 import { runDeployment } from "@/lib/vercel-deploy-run";
@@ -569,6 +569,29 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
  * for the screen and was given the headless one can say so.
  */
 export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
+
+/**
+ * Is the Vercel integration part of this box at all?
+ *
+ * ONE switch, box-wide, over every Vercel surface the device has: the project
+ * page's link card, the Deploy buttons on a project and on a run, the run's
+ * deployment card, the delivery pipeline's four deploy-and-check stages, the
+ * two `coding_deploy_*` MCP tools and the three routes behind all of them. Off
+ * means the feature is not there — not a button that refuses when pressed.
+ *
+ * OFF WHEN THE KEY IS ABSENT, unlike the media and browser preferences beside
+ * it, because this one is not a preference about how a run works: it is
+ * standing consent for the box to push the owner's code to another company's
+ * account and put it on the internet. A box that has never been asked has not
+ * said yes.
+ *
+ * WHICH WOULD HAVE TAKEN THE FEATURE AWAY from every box already using it, so
+ * the absent key is read through `migrateVercelEnabled` once: a box that
+ * already has a Vercel LINK has answered this question by attaching one, and
+ * the switch is written `true` for it at the first read. See that function for
+ * why the migration is at the read and not in an install step.
+ */
+export const CODING_VERCEL_ENABLED_CONFIG_KEY = "coding_vercel_enabled";
 
 /**
  * The owner's standing answer to "may a run do this?" — the permission rules
@@ -1772,6 +1795,9 @@ export interface CodingAgentStatus {
   generateAudio: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
+  /** Is the Vercel integration part of this box at all? OFF when the key is
+   *  absent, except on a box that already has a link — see the config key. */
+  vercelEnabled: boolean;
   /** The owner's standing permission rules, in the order they saved them. */
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
@@ -2225,6 +2251,79 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
     throw new CodingAgentError("invalid", "The browser switch must be true or false.");
   }
   await configSet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY, on);
+  return on;
+}
+
+/**
+ * The one-time adoption of a box that was already deploying to Vercel.
+ *
+ * The switch ships OFF, and a setting that ships off takes a working feature
+ * away from everyone who already had it — the owner's project page would lose
+ * its link card, its Deploy buttons and its last deployment overnight, with
+ * nothing on the screen to say where they went.
+ *
+ * So an ABSENT key is answered by asking the box a question it can answer for
+ * itself: has the owner attached a Vercel project to anything? Attaching one
+ * takes an owner session, a Vercel project id and a stored token — it is a yes,
+ * said in the only way this feature ever offered. One link is enough.
+ *
+ * AT THE READ, not in an install step, because there is no install step a box
+ * in a customer's hands is guaranteed to run before something asks: the status
+ * route is polled by the app every few seconds, the MCP server probes it while
+ * it boots, and the routes ask on every call. Migrating where the question is
+ * asked is the only placement that cannot be missed.
+ *
+ * ONCE, because the write makes the key a boolean and every later read returns
+ * before reaching here. A box with no links writes NOTHING — the key stays
+ * absent and the answer stays `false`, so an owner who attaches nothing is
+ * never given a stored `false` they would have to find and undo.
+ *
+ * A write that FAILS still answers `true` for this read and is retried at the
+ * next one: an unwritable config must not be the reason the owner's cards
+ * disappear, which is the same direction every other read here fails in.
+ */
+async function migrateVercelEnabled(): Promise<boolean> {
+  let links: VercelLinks;
+  try {
+    links = await readVercelLinks();
+  } catch (err) {
+    // `readVercelLinks` reads a malformed map as empty rather than throwing, so
+    // this is the config file itself being unreadable. Answer "not enabled" —
+    // the safe direction for a consent — and leave the key absent, so the box
+    // migrates properly once the file can be read again.
+    console.error("[coding-agent] could not read the Vercel links to adopt this box:", err instanceof Error ? err.message : err);
+    return false;
+  }
+  if (Object.keys(links).length === 0) return false;
+  try {
+    await configSet(CODING_VERCEL_ENABLED_CONFIG_KEY, true);
+    console.error("[coding-agent] Vercel integration switched on for a box that already has a Vercel project attached");
+  } catch (err) {
+    console.error("[coding-agent] could not record the Vercel integration switch:", err instanceof Error ? err.message : err);
+  }
+  return true;
+}
+
+/**
+ * Is the Vercel integration on? OFF when absent — see the config key, and
+ * `migrateVercelEnabled` for the one case where absent still means on.
+ *
+ * Every Vercel surface asks this: the three routes, the pipeline's deploy and
+ * verify stages, and the status the panels and the MCP probe read. Read each
+ * time rather than cached or frozen on a run, so switching it off stops the
+ * next deploy rather than the next reboot.
+ */
+export async function readVercelEnabled(): Promise<boolean> {
+  const raw = await configGet(CODING_VERCEL_ENABLED_CONFIG_KEY);
+  if (typeof raw === "boolean") return raw;
+  return await migrateVercelEnabled();
+}
+
+export async function setVercelEnabled(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The Vercel integration switch must be true or false.");
+  }
+  await configSet(CODING_VERCEL_ENABLED_CONFIG_KEY, on);
   return on;
 }
 
@@ -3085,9 +3184,10 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
   const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
-  const [readiness, projectFolders] = await Promise.all([
+  const [readiness, projectFolders, vercelEnabled] = await Promise.all([
     readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
     defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
+    readVercelEnabled(),
   ]);
   return {
     enabled,
@@ -3119,6 +3219,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
+    // Not read off the snapshot like its neighbours: an ABSENT key is answered
+    // by asking whether this box already has a Vercel link (migrateVercelEnabled),
+    // which is a second config read and possibly a write. It is resolved above,
+    // beside the readiness, so this builder still does its I/O in one place.
+    vercelEnabled,
     // The home, so a harness-project rule is still on the list the panels
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
@@ -8611,6 +8716,24 @@ async function drivePipeline(
  * — and an outcome when the stage decided itself, which the two verifications
  * and every refusal do.
  */
+/**
+ * The pipeline stages that need the Vercel integration, and what the run is
+ * told when this box does not have it.
+ *
+ * A set rather than four `||`s, so a stage added to the pipeline is either in
+ * it or deliberately out of it rather than silently neither.
+ */
+const VERCEL_PIPELINE_STAGES: ReadonlySet<PipelineStage> = new Set<PipelineStage>([
+  "deploy_preview",
+  "verify_preview",
+  "deploy_production",
+  "verify_production",
+]);
+
+/** `vercel_disabled`, in the words the run's page shows. */
+export const PIPELINE_VERCEL_DISABLED_DETAIL =
+  "vercel_disabled: the Vercel integration is switched off on this ClawBox, so there was nothing to deploy to or check.";
+
 async function enterPipelineStage(
   run: CodingRun,
   stage: PipelineStage,
@@ -8619,6 +8742,23 @@ async function enterPipelineStage(
   const pipeline = run.pipeline;
   if (!pipeline) return null;
   enterStage(pipeline, stage);
+
+  // The box-wide Vercel switch, asked once for the four stages that need it.
+  //
+  // SKIPPED, not failed: the pipeline's first half — build, review, improve —
+  // is work the owner asked for and got, and throwing it away over a setting
+  // would be the box punishing them for a switch they are allowed to hold. A
+  // skip carries the reason into the step's own `detail`, so the strip on the
+  // run's page says why the deploy is not there rather than leaving a gap.
+  //
+  // ALL FOUR, not just the two deploys. `skipped` advances to the next stage
+  // (decidePipeline), so skipping `deploy_preview` alone walks straight into
+  // `verify_preview`, which has no address to look at and answers "Vercel gave
+  // the preview no address, so there was nothing to check" — a FAILED pipeline,
+  // in the box's own words, over a feature the owner switched off.
+  if (VERCEL_PIPELINE_STAGES.has(stage) && !(await readVercelEnabled())) {
+    return { kind: "skipped", detail: PIPELINE_VERCEL_DISABLED_DETAIL };
+  }
 
   switch (stage) {
     case "build":

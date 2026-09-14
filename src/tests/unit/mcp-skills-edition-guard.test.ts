@@ -130,6 +130,7 @@ const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   providers: [],
   emailCanRead: false,
   codingAgent: false,
+  codingVercel: false,
   canGenerateImages: true,
 });
 
