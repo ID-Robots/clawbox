@@ -532,10 +532,12 @@ describe("the trash and its retention rule", () => {
       .toEqual({ removed: [], expired: [], early: [] });
   });
 
-  // Skipped for a run as root, which the permission bits do not apply to. The
-  // rule itself is pinned unconditionally by the ENOTDIR case below, so nothing
-  // goes uncovered on a box whose CI runs in a container as uid 0.
-  it.skipIf(process.getuid?.() === 0)("refuses a trash folder it cannot READ, which realpath resolves perfectly well", async () => {
+  // Skipped for a run as root, which the permission bits do not apply to, and
+  // on Windows, which does not enforce POSIX directory read permission from
+  // chmod(0o000) — there `readdir` would simply succeed and the refusal this
+  // asserts would never fire. The rule itself is pinned unconditionally by the
+  // ENOTDIR case below, so nothing goes uncovered on either.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("refuses a trash folder it cannot READ, which realpath resolves perfectly well", async () => {
     // The half a resolved path cannot speak for. `realpath` walks a folder's
     // ANCESTORS and never opens the folder itself, so a trash the owner took
     // the permissions off resolves without complaint and then fails on the
