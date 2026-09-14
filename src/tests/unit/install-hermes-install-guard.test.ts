@@ -109,17 +109,38 @@ describe("hermes_dashboard_restart_after_install bounds one bounce with one budg
     }
   })();
 
-  it("draws the blocking call and the wait after it from the SAME clock", () => {
-    // The two are phases of one restart. Giving each its own `budget` doubles
-    // the worst case — a hung `try-restart` spends it, then the poll spends it
-    // again — which is exactly the arithmetic the block comment reasons about
-    // against step_post_update's 900 s budget. The clock is started once,
-    // before the blocking call, and the wait is measured against it.
+  it("puts no clock on the restart itself — only on the look after it", () => {
+    // `timeout 120 systemctl try-restart` was a SECOND, shorter deadline laid
+    // over systemd's own TimeoutStartSec=300, and on a cold clone (a web-dist
+    // build measured at 60-90 s) it fired first: the step reported a bounce that
+    // had not settled over a dashboard that came up perfectly. Owner's rule,
+    // 2026-09-14: nothing here is cut short for being slow.
     expect(RESTART_CODE, "the restart helper is missing from install.sh").not.toBe("");
-    expect(RESTART_CODE).toMatch(/SECONDS=0[\s\S]*timeout "\$budget" systemctl try-restart/);
-    expect(RESTART_CODE).toMatch(/\[ "\$SECONDS" -lt "\$budget" \]/);
-    // …and no second counter that would restart the clock.
-    expect(RESTART_CODE).not.toMatch(/waited=0/);
+    expect(RESTART_CODE).toMatch(/^\s*systemctl try-restart "\$unit"/m);
+    expect(RESTART_CODE, "the restart is time-boxed again").not.toMatch(/timeout [^\n]*try-restart/);
+    // The verification poll keeps its budget, and it is not a limit on any work:
+    // the restart has already happened or already failed by the time it runs, it
+    // only decides how long to watch for the replacement main process, and both
+    // outcomes are a warning the step returns 0 from. Unbounded, it would hang
+    // step_post_update on a unit whose pid never moves.
+    expect(RESTART_CODE).toMatch(/SECONDS=0[\s\S]*\[ "\$SECONDS" -lt "\$budget" \]/);
+  });
+
+  it("stops looking on a fact before it stops looking on the clock", () => {
+    // A unit that is no longer active or activating is not on its way to a new
+    // main process. Answering that with the budget instead made the ordinary
+    // failure — somebody stopped the unit — cost two minutes of silence inside
+    // step_post_update before the warning it was always going to print.
+    //
+    // Anchored on the POLL's own check, not on any `is-active`: the function
+    // asks one before the restart too, and an assertion that matched that one
+    // would still pass with the poll's check deleted.
+    expect(RESTART_CODE, "the restart helper is missing from install.sh").not.toBe("");
+    const poll = RESTART_CODE.indexOf('unit_is_coming_up "$unit" || break');
+    const clock = RESTART_CODE.indexOf('[ "$SECONDS" -lt "$budget" ]');
+    expect(poll, "the poll has no non-time exit at all").toBeGreaterThan(-1);
+    expect(clock).toBeGreaterThan(-1);
+    expect(poll, "the clock is consulted before the fact").toBeLessThan(clock);
   });
 
   it("uses a shell builtin for elapsed time, not an external command", () => {
@@ -517,9 +538,9 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     // installed them yet, so there is nothing to bounce and nothing to promise.
     dashState = "inactive" as "active" | "inactive" | "failed" | "activating",
     proxyState = "inactive" as "active" | "inactive" | "failed" | "activating",
-    // "ok" | "refuse" (systemd says no) | "hang" (the blocking job outlives the
-    // budget and `timeout` kills it with 124).
-    restart = "ok" as "ok" | "refuse" | "hang",
+    // "ok" | "refuse" (systemd says no) | "slow" (the blocking job takes its
+    // time, the cold-clone case — nothing in install.sh may cut it short).
+    restart = "ok" as "ok" | "refuse" | "slow",
     // Whether a restarted unit comes back with a NEW main process at all. false
     // is the unit that was asked and never returned — the case a step reading
     // try-restart's exit code as the outcome cannot tell from success.
@@ -627,9 +648,9 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
         "    fi",
         '    echo "$((base + 100))"; exit 0 ;;',
         "  try-restart)",
-        // A job that outlives the caller's budget: `timeout` kills this and the
-        // step sees 124, which is NOT the same as systemd refusing.
-        '    [ "$RESTART" = "hang" ] && sleep 30',
+        // A job that takes its time. Nothing may kill it: systemd's own
+        // TimeoutStartSec is the only thing that bounds a real one.
+        '    [ "$RESTART" = "slow" ] && sleep 2',
         '    [ "$RESTART" = "refuse" ] && exit 1',
         '    [ "$live" = active ] && touch "$st.restarted"',
         "    exit 0 ;;",
@@ -685,7 +706,11 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       // cannot find them. Listing them by name is deliberate — renaming one
       // without updating this fails loudly here rather than silently skipping
       // the restart on a box.
-      "sed -n '/^hermes_dashboard_restart_warn() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      // The non-time exit the pid poll asks before its own window: has the unit
+      // stopped trying? Sliced like the rest, so a rename fails loudly here
+      // rather than turning the poll into a 127 that breaks on probe one.
+      "sed -n '/^unit_is_coming_up() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      "sed -n '/^hermes_dashboard_restart_warn() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^hermes_dashboard_restart_after_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       '. "$1/fn.sh"',
@@ -1247,20 +1272,20 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(refused.code).toBe(0);
   });
 
-  it("a blocking restart is bounded, and a timeout is not read as a refusal", () => {
-    // `systemctl try-restart` without --no-block waits for the job to finish,
-    // and this unit declares TimeoutStartSec=300 — so the call is bounded. What
-    // comes back then is timeout's 124, which means "it may still be running",
-    // not "systemd said no": the verification still gets to answer.
+  it("waits out a slow blocking restart instead of killing it", () => {
+    // The point of removing `timeout` from the call. A restart that takes its
+    // time — the cold-clone case, where the unit forces a web-dist build — is
+    // waited out and then verified honestly, rather than cut off and reported as
+    // a bounce that did not settle. systemd's own TimeoutStartSec is what bounds
+    // the job; this script adds no second, shorter one.
     giveShim();
     giveAgent({ venv: true, head: OTHER_COMMIT });
 
-    const r = run({ ...UP, restart: "hang", waitBudget: "1" });
+    const r = run({ ...UP, restart: "slow" });
 
     expect(r.code).toBe(0);
     expect(r.out).not.toMatch(/could not be restarted \(systemctl exit/);
-    // The unit never actually restarted, so the honest answer is the warning.
-    expect(r.out).toMatch(WARN);
+    expect(r.out).toMatch(/Restarted clawbox-hermes-dashboard\.service on the new agent/);
   });
 
   it("names what systemd actually says instead of asserting one diagnosis", () => {

@@ -380,6 +380,35 @@ ensure_playwright_chromium() {
   echo "  Playwright Chromium runtime ready"
 }
 
+# Same rule as install.sh (owner's decision, 2026-09-14): nothing here is cut
+# short for being slow. "Proceeding anyway" after 5 minutes was worse than
+# waiting — the apt call that followed hit the lock it had just given up on and
+# failed the step outright. A line every 30 s says what is being waited for.
+WAIT_NOTE_EVERY_S=30
+WAIT_NOTE_LAST=""
+
+# Is this unit still on its way somewhere, or has it stopped trying? The
+# non-time exit wait_for_http uses in place of an attempt cap. Both halves are
+# needed: `is-active` EXITS 0 for an active unit, and PRINTS `activating` while
+# exiting non-zero.
+unit_is_coming_up() {
+  local state
+  state="$(systemctl is-active "$1" 2>/dev/null)" && return 0
+  case "$state" in
+    active|activating|reloading|deactivating) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+wait_note() {
+  local elapsed="$1" key
+  [ "$elapsed" -gt 0 ] 2>/dev/null || return 0
+  key="$2|$(( elapsed / WAIT_NOTE_EVERY_S ))"
+  case "$key" in *"|0") return 0 ;; esac
+  [ "$key" != "$WAIT_NOTE_LAST" ] || return 0
+  WAIT_NOTE_LAST="$key"
+  echo "  Still waiting for $2 (${elapsed}s so far)..."
+}
+
 wait_for_apt() {
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
@@ -388,10 +417,7 @@ wait_for_apt() {
     fi
     sleep 5
     waited=$((waited + 5))
-    if [ $waited -ge 300 ]; then
-      echo "  Warning: apt lock held for 5+ minutes, proceeding anyway"
-      break
-    fi
+    wait_note "$waited" "the apt lock (another updater still holds it)"
   done
 }
 
@@ -1126,8 +1152,10 @@ ensure_codex_cli() {
 
   url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
   installer="$(mktemp || true)"
+  # `--connect-timeout` with `--retry` bounds a black hole; no `--max-time`,
+  # which would answer "could not download" for a link that is merely slow.
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
-      --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
+      --connect-timeout 15 --retry 3 --retry-connrefused "$url" -o "$installer" 2>/dev/null \
     || [ ! -s "$installer" ]; then
     echo "  WARN: could not download OpenAI's Codex installer from $url" >&2
     rm -f "$installer"
@@ -1153,10 +1181,11 @@ ensure_codex_cli() {
 
   # CODEX_NON_INTERACTIVE=true is what declines the installer's own offer to
   # remove the npm copy (its prompt opens /dev/tty, so </dev/null alone would
-  # not) — the removal is ours, after the verification. `timeout` bounds the
-  # ~117 MB package fetch, which the vendor leaves unbounded on its GitHub
-  # fallback path.
-  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' timeout -k 30 1800 sh '$installer'" </dev/null; then
+  # not) — the removal is ours, after the verification. The ~117 MB package
+  # fetch is deliberately NOT time-boxed: it is a long download on a slow link,
+  # not a stalled one, and a killed install leaves the vendor's staging
+  # directory for the next run to trip over.
+  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
     echo "  WARN: OpenAI's Codex installer ran but failed" >&2
     rm -f "$installer"
     return 1
@@ -1433,9 +1462,57 @@ EOF
   echo "  Persistent x64 services installed"
 }
 
+# Waits for a unit to answer on its own port.
+#
+# The 60 attempts this used to allow were a guess at how long a gateway takes to
+# come up, and a box that needed 70 had its install FAILED over a service that
+# was working a moment later — the OpenClaw gateway's ExecStartPre alone was
+# measured at 31, 86 and 120 s. So: a FACT first (the unit is no longer active or
+# activating, and nothing will arrive by waiting), and ten minutes behind it.
+#
+# The window does not go away entirely, because systemd cannot tell the two
+# halves of "not answering yet" apart: a unit whose ExecStart has forked and is
+# still coming up and one that is up and will never bind the port (a plugin
+# awaiting capability consent holds that state for ever) are both `active`.
+# Unbounded, this would hang the installer there instead of printing the status
+# and journal below, which is the whole diagnosis. Ten minutes is far outside
+# every start ever measured on this path.
+#
+# `--max-time` on the probe itself stays: it is a loopback liveness check inside
+# a retry loop, and without it a socket that accepts and never answers hangs the
+# loop anyway.
 wait_for_http() {
-  local url="$1" label="$2" log_unit="$3" attempt
-  for attempt in $(seq 1 60); do
+  local url="$1" label="$2" log_unit="$3"
+  local window="${CLAWBOX_HTTP_READY_WINDOW_S:-600}"
+  case "$window" in ''|*[!0-9]*) window=600 ;; esac
+  { [ "${#window}" -le 6 ] && [ "$window" -ge 1 ]; } || window=600
+  # LOOPBACK ONLY, asserted rather than assumed. The `--max-time` below is
+  # allowed precisely because this is a liveness probe against a socket on this
+  # machine; pointed at a remote host the same flag would be a transfer deadline,
+  # which is the thing this file no longer has.
+  # The brackets are ESCAPED: unescaped, `[::1]` is a shell character class —
+  # one of `:` or `1` — so a genuine `http://[::1]:PORT` fell through to the
+  # refusal this arm is supposed to let past.
+  case "$url" in
+    http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*|http://\[::1\]:*|http://\[::1\]/*) ;;
+    *)
+      echo "Error: wait_for_http is a loopback liveness probe; refusing $url" >&2
+      return 1
+      ;;
+  esac
+  # WALL CLOCK, not a count of turns round the loop. `waited` used to be
+  # incremented once per iteration, which reads as seconds only if an iteration
+  # IS a second — and one that finds the port open spends 20 s in the stability
+  # sleep below. A service that opened its port and restarted repeatedly could
+  # therefore hold this loop for hours under a window that says ten minutes.
+  # `$SECONDS` is bash's own and cannot fail the way `date` can; taken as a DELTA
+  # rather than reset, so a caller's clock is never disturbed.
+  local started=$SECONDS
+  while :; do
+    # Asked FIRST, so the 20 s stability sleep below cannot start on a window
+    # that is already spent: a deadline read only at the bottom is overshot by
+    # the length of whatever the iteration did.
+    [ $(( SECONDS - started )) -lt "$window" ] || break
     if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
       local ready_pid
       ready_pid=$(systemctl show "$log_unit" -p MainPID --value)
@@ -1451,9 +1528,11 @@ wait_for_http() {
       fi
       echo "  $label opened its port but restarted; continuing readiness checks..."
     fi
+    unit_is_coming_up "$log_unit" || break
     sleep 1
+    wait_note "$(( SECONDS - started ))" "$label to answer at $url"
   done
-  echo "Error: $label did not become ready at $url" >&2
+  echo "Error: $label did not become ready at $url (waited $(( SECONDS - started ))s)" >&2
   systemctl status "$log_unit" --no-pager -n 30 >&2 || true
   journalctl -u "$log_unit" --no-pager -n 50 >&2 || true
   return 1

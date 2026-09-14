@@ -888,6 +888,98 @@ in_container() {
 harness_has_no_gpu() {
   [ "${CLAWBOX_TEST_NO_GPU:-0}" = "1" ]
 }
+
+# ── Waits without deadlines ─────────────────────────────────────────────────
+#
+# Nothing in this installer aborts, skips or downgrades a step because a box was
+# SLOW (owner's decision, 2026-09-14). Every budget this file used to carry was
+# a guess about hardware and links it cannot see: a 900 s apt lock, a 180 s
+# gateway, a 300 s npm, a 600 s download. On a Jetson with a tired SD card and a
+# rural uplink each of those turned a long install into a FAILED one — and a
+# failed install is not cheaper than a slow one, it is a box somebody has to
+# drive out to.
+#
+# So a wait for WORK — an apt lock, a download, a build, a package install —
+# runs until the work happens, or until it becomes IMPOSSIBLE, and never until a
+# clock says so. `timeout` appears nowhere in this file.
+#
+# The loops that WATCH rather than work are the exception, and there are four:
+# wait_for_gateway_port, hermes_dashboard_restart_after_install's pid poll,
+# restore_previous_build's dashboard poll, and step_validate_services' settle.
+# None of them bounds anything — by the time each runs, the thing it is looking
+# at has already succeeded or already failed — they decide when to write a
+# REPORT or when to attempt a REPAIR, and a report cannot be deferred for ever.
+# They are the exception because systemd answers the two halves of "not
+# answering yet" identically: a unit still coming up and a unit that is up and
+# will never bind the port are both `active`. Each says so where it lives.
+#
+# Every one of them, and every wait above, asks a FACT before it asks a clock —
+# the unit stopped trying, the process is gone, the job returned — and every one
+# measures WALL time, not turns round the loop. What stands in for the deadline
+# elsewhere is a line every WAIT_NOTE_EVERY_S seconds naming what is still
+# outstanding, so a long wait reads as a long wait and not as a hang.
+WAIT_NOTE_EVERY_S=30
+
+# One "still waiting" line per WAIT_NOTE_EVERY_S seconds of elapsed time.
+# $1 = seconds elapsed, $2 = what is being waited for.
+#
+# Bucketed rather than `elapsed % WAIT_NOTE_EVERY_S == 0`: a loop whose step is
+# not a divisor of the interval — or whose probe takes a second of its own —
+# steps straight over the exact multiple and then says nothing for the length of
+# the wait. The bucket is keyed by the SUBJECT as well, so two different waits in
+# one run cannot swallow each other's first line.
+WAIT_NOTE_LAST=""
+wait_note() {
+  local elapsed="$1" key
+  [ "$elapsed" -gt 0 ] 2>/dev/null || return 0
+  key="$2|$(( elapsed / WAIT_NOTE_EVERY_S ))"
+  case "$key" in *"|0") return 0 ;; esac
+  [ "$key" != "$WAIT_NOTE_LAST" ] || return 0
+  WAIT_NOTE_LAST="$key"
+  echo "  Still waiting for $2 (${elapsed}s so far)..."
+}
+
+# Is this unit still on its way somewhere, or has it stopped trying?
+#
+# The non-time exit every wait loop in this file uses in place of a deadline.
+# Both halves are needed: `is-active` EXITS 0 for an active unit (and prints the
+# state), and prints `activating` while it exits non-zero — so reading only the
+# status misses a slow start, and reading only the text misses an environment
+# whose systemctl says nothing on stdout.
+unit_is_coming_up() {
+  local state
+  state="$(systemctl is-active "$1" 2>/dev/null)" && return 0
+  case "$state" in
+    active|activating|reloading|deactivating) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# How long a test-mode wait may run, VALIDATED before anybody compares against
+# it. Read raw, a non-numeric override makes `[ … -ge … ]` exit 2 with "integer
+# expression expected" — which reads as "do not give up yet" at every call site,
+# so the one knob that exists to cap these loops would silently uncap them. A
+# zero or a negative is the opposite failure and is refused the same way: a cap
+# of 0 ends a wait before it has begun.
+test_mode_wait_cap_s() {
+  local cap="${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}"
+  case "$cap" in ''|*[!0-9]*) cap=60 ;; esac
+  { [ "${#cap}" -le 5 ] && [ "$cap" -ge 1 ]; } || cap=60
+  printf '%s' "$cap"
+}
+
+# The ONE exception, and it is not about hardware: the e2e container has no
+# radio, no GPU and no real systemd, so a check that can never pass there has to
+# be able to fail rather than hold CI open until the job's own timeout. A real
+# device never sets CLAWBOX_TEST_MODE, so this is unreachable on the fleet.
+#
+# $1 = seconds elapsed. True when the caller should stop waiting.
+wait_give_up_in_test_mode() {
+  is_test_mode || return 1
+  local elapsed="${1:-0}"
+  case "$elapsed" in ''|*[!0-9]*) elapsed=0 ;; esac
+  [ "$elapsed" -ge "$(test_mode_wait_cap_s)" ]
+}
 # The disk-backed swap step's numbers (see step_swapfile): the file's size, the
 # free space that must remain after it, and its priority — BELOW zram's 5, so
 # the compressed devices stay the kernel's first choice.
@@ -2380,7 +2472,7 @@ set_previous_build_aside() {
 #
 # $3 is 1 when a build actually ran, which is what separates the last two.
 restore_previous_build() {
-  local build_dir="$1" kept_dir="$2" built="${3:-0}" restored=0 waited=0 http_code
+  local build_dir="$1" kept_dir="$2" built="${3:-0}" restored=0 http_code
   if [ -d "$kept_dir" ]; then
     rm -rf "$build_dir"
     mv "$kept_dir" "$build_dir"
@@ -2442,19 +2534,61 @@ restore_previous_build() {
     echo "  $what, and clawbox-setup was started — but curl is missing, so whether the dashboard answers was NOT checked" >&2
     return 0
   fi
-  while [ "$waited" -lt 20 ]; do
-    http_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null)" || http_code="000"
+  # 20 s was a guess at how long a Next standalone server needs to load a
+  # restored build, and on a loaded Jetson it is routinely short — which reported
+  # a rollback that HAD worked as a box that was DOWN, at the one moment an
+  # operator most needs the truth. So: a fact first (clawbox-setup has stopped
+  # trying, and nothing will arrive by waiting), and a far more patient window
+  # behind it.
+  #
+  # The window stays, unlike the deadlines elsewhere in this file, because this
+  # loop bounds no WORK — the restart has already happened — it decides when to
+  # write the REPORT, and a report is the one thing that cannot be deferred for
+  # ever. A `Type=simple` unit is `active` the instant node forks, whether or not
+  # it can load the build, so "active and silent" is a state that can last all
+  # night.
+  local probe_window="${CLAWBOX_RESTORE_PROBE_WAIT_S:-180}"
+  case "$probe_window" in ''|*[!0-9]*) probe_window=180 ;; esac
+  { [ "${#probe_window}" -le 5 ] && [ "$probe_window" -ge 1 ]; } || probe_window=180
+  if is_test_mode; then probe_window="$(test_mode_wait_cap_s)"; fi
+  # WALL CLOCK, not a count of turns round the loop. Counting iterations reads
+  # as seconds only when every iteration is a second, and this one is the probe's
+  # own `--max-time 5` plus a sleep — so a server that accepts and stalls made a
+  # window that says three minutes run for eighteen. `$SECONDS` is bash's own and
+  # cannot fail the way `date` can; taken as a DELTA rather than reset, so a
+  # caller's clock is never disturbed.
+  local started=$SECONDS
+  while :; do
+    # Asked FIRST: a deadline checked at the bottom is overshot by the length of
+    # whatever the last iteration did.
+    if [ $(( SECONDS - started )) -ge "$probe_window" ]; then
+      echo "  $what, but the dashboard did not answer on :80 (last HTTP ${http_code:-000}) — it is DOWN" >&2
+      return 1
+    fi
+    # `--max-time` on a LOCALHOST LIVENESS PROBE inside a retry loop is the one
+    # class of cap this file keeps: it bounds nothing that downloads, builds or
+    # installs — it is what makes the probe a probe. Without it a server that
+    # accepts the connection and then never answers hangs this loop for ever.
+    # The retry is what absorbs a slow answer, which is the case the owner's
+    # rule is about.
+    http_code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null)" || http_code="000"
     case "$http_code" in
       2*|3*)
         echo "  $what; the dashboard answers on :80 again" >&2
         return 0
         ;;
     esac
+    # The fact, which is what ends an ORDINARY failure without spending the
+    # window above on it: `Restart=always` means `activating` and `active` are
+    # both "still coming", but a unit that has hit its start limit, been
+    # stopped, or has no unit file at all is never going to answer.
+    if ! unit_is_coming_up clawbox-setup.service; then
+      echo "  $what, but clawbox-setup is not running (last HTTP $http_code) — the dashboard is DOWN" >&2
+      return 1
+    fi
     sleep 1
-    waited=$((waited + 1))
+    wait_note "$(( SECONDS - started ))" "the dashboard to answer on :80 after the rollback (last HTTP $http_code)"
   done
-  echo "  $what, but the dashboard did not answer on :80 (last HTTP $http_code) — it is DOWN" >&2
-  return 1
 }
 
 # `bun run build`, with ONE retry and only for the mid-build file-trace race.
@@ -2685,19 +2819,25 @@ recover_dpkg() {
   fi
 }
 
+# Wait for whoever holds the apt locks to finish. No deadline: the holder is
+# almost always unattended-upgrades working through the same mirror this install
+# is about to use, and the old 900 s cap turned "your box was busy" into a failed
+# step — after which the operator's only move was to wait and run it again, which
+# is precisely what this loop does for them. It takes no argument now; the one
+# call site that passed a shorter budget (the ufw backstop) passes none.
 wait_for_apt() {
-  local max_wait="${1:-900}"
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-    if [ $waited -eq 0 ]; then
+    if [ "$waited" -eq 0 ]; then
       echo "  Waiting for apt lock (another update is running)..."
+    fi
+    if wait_give_up_in_test_mode "$waited"; then
+      echo "Error: apt lock is still held (test mode gives up after ${waited}s)." >&2
+      return 1
     fi
     sleep 5
     waited=$((waited + 5))
-    if [ $waited -ge "$max_wait" ]; then
-      echo "Error: apt lock is still held after $((max_wait / 60)) minutes. Another updater (often unattended-upgrades) is still running; try again shortly." >&2
-      return 1
-    fi
+    wait_note "$waited" "the apt lock (another updater, often unattended-upgrades, still holds it)"
   done
   recover_dpkg
 }
@@ -3751,22 +3891,21 @@ hermes_dashboard_restart_warn() {
 hermes_dashboard_restart_after_install() {
   local unit state before after settled budget settle restart_rc
 
-  # ONE budget for the whole bounce of ONE unit — the blocking call and the
-  # wait after it are two phases of the same restart, so the clock is not
-  # restarted between them. Giving each phase its own `budget` would double the
-  # worst case (a hung `try-restart` spends it, then the poll spends it again),
-  # which is what makes the arithmetic below wrong at a glance.
+  # NOTHING bounds the restart itself any more (owner's decision, 2026-09-14).
+  # `systemctl try-restart` without `--no-block` waits for the job to finish, and
+  # systemd is already what bounds that job: the unit declares
+  # TimeoutStartSec=300 and takes systemd's default 90 s stop, so the call
+  # returns on its own. The `timeout 120` that used to wrap it was a SECOND,
+  # shorter deadline laid over systemd's, and on a cold clone — which forces a
+  # web-dist build measured at 60-90 s — it fired first: the step then reported a
+  # bounce that had not settled over a dashboard that came up perfectly.
   #
-  # `systemctl try-restart` without `--no-block` waits for the job to finish,
-  # and this unit declares TimeoutStartSec=300 with systemd's default 90 s stop
-  # — so an unbounded call is a ~390 s term inside step_post_update's 900 s
-  # budget, next to the 300 s WhatsApp warm-up below. `timeout` is what bounds
-  # it; the poll after it is for the cases where the call did NOT block to a
-  # finished restart (it timed out, or it exited 0 having done nothing because
-  # the unit stopped in the gap since the is-active probe).
-  #
-  # Worst case, therefore: `budget + settle` per unit, so ~246 s for the pair on
-  # the shipped defaults, before the warm-up's own 300 s.
+  # What is still bounded is the LOOK AFTER IT, and that is not a limit on any
+  # work. The restart has already happened or already failed by then; this budget
+  # only says how long to watch for the replacement main process before writing
+  # the warning line. Both outcomes are a warning, the step returns 0 either way,
+  # and no install is failed or skipped by it — while an unbounded look would
+  # hang step_post_update on a unit whose pid never moves.
   budget="${HERMES_DASHBOARD_RESTART_WAIT_S:-120}"
   # Digits, at most four of them, and at least one second. The hazard is not
   # errexit — the `-lt` below is the left side of a `||`, which errexit never
@@ -3806,19 +3945,20 @@ hermes_dashboard_restart_after_install() {
     before="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
 
     restart_rc=0
-    # bash's own second counter, reset here and read below: the elapsed time has
-    # to survive a `date` that is missing or fails, and an external command that
-    # answers 0 on failure would make the deadline below never arrive.
-    SECONDS=0
-    timeout "$budget" systemctl try-restart "$unit" >/dev/null 2>&1 || restart_rc=$?
-    # 124 is `timeout`'s: the job outlived the budget and may still be running,
-    # which the checks below can still answer. Anything else is systemd saying
-    # no, and there is nothing left to verify.
-    if [ "$restart_rc" -ne 0 ] && [ "$restart_rc" -ne 124 ]; then
+    # Unwrapped, and blocking: systemd's own TimeoutStartSec is what bounds this
+    # job. There used to be a `timeout` over it; see the header.
+    systemctl try-restart "$unit" >/dev/null 2>&1 || restart_rc=$?
+    # systemd saying no. There is nothing left to verify.
+    if [ "$restart_rc" -ne 0 ]; then
       hermes_dashboard_restart_warn "$unit" "could not be restarted (systemctl exit $restart_rc)"
       continue
     fi
 
+    # bash's own second counter, reset here and read in the poll below: the
+    # elapsed time has to survive a `date` that is missing or fails, and an
+    # external command that answers 0 on failure would make the check below never
+    # arrive. Started AFTER the blocking call, which it no longer measures.
+    SECONDS=0
     while :; do
       after="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
       # Empty (no systemd, a failed query), 0 (stopped, or still in an
@@ -3827,8 +3967,10 @@ hermes_dashboard_restart_after_install() {
         ''|0|"$before") ;;
         *) break ;;
       esac
-      # Against the SAME deadline the blocking call above drew from, so a
-      # `try-restart` that already spent the budget does not get it again.
+      # A unit that is no longer active or activating is not on its way to a new
+      # main process, and nothing will change by waiting for one. Asked first, so
+      # the ordinary failure is answered by a fact rather than by the clock.
+      unit_is_coming_up "$unit" || break
       [ "$SECONDS" -lt "$budget" ] || break
       sleep 1
     done
@@ -3996,8 +4138,13 @@ step_hermes_install() {
   # this step on EVERY update on EVERY hermes/dual box, so a false-negative
   # probe on a device with no internet must not be able to turn a healthy agent
   # into no agent — the very outcome this file exists to prevent.
+  # `--connect-timeout`, not `--max-time`: this probe answers "is the installer
+  # REACHABLE", and the only thing it must not do is hang forever on a black
+  # hole. A transfer cap would have it answer "unreachable" for a link that is
+  # merely slow — and that answer costs the box its agent upgrade, silently, on
+  # every update. See the wait-note block near the top of this file.
   if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-    curl -fsS --max-time 30 -o /dev/null "$installer_url"; then
+    curl -fsS --connect-timeout 15 --retry 3 --retry-connrefused -o /dev/null "$installer_url"; then
     echo "  Warning: cannot reach the Hermes installer — leaving the existing agent untouched" >&2
     return 0
   fi
@@ -4063,8 +4210,10 @@ step_hermes_install() {
   # passed as an argument rather than spliced into the -c string, so it stays a
   # single source of truth without shell-quoting exposure. `-o pipefail`
   # because `curl | bash` otherwise exits 0 when the fetch fails (bash just
-  # reads empty stdin) and the warning below could never fire; the timeouts
-  # because the caller is a systemd unit with TimeoutStartSec=7200.
+  # reads empty stdin) and the warning below could never fire. `--connect-timeout`
+  # with `--retry` bounds a black hole without bounding a slow transfer; there is
+  # deliberately no `--max-time`, because a clone-and-venv install killed
+  # half-way is how a box ends up with the husk the block above exists to clear.
   #
   # `--force-commit` is not optional. For an existing checkout the upstream
   # installer fetches, checks out and fast-forwards its branch (main) FIRST
@@ -4075,7 +4224,7 @@ step_hermes_install() {
   # including fresh ones, and boxes keep landing on random main commits.
   # `bash -s --` is what gets the flags through the pipe to the script.
   runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
-    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash -s -- --commit "$2" --force-commit' \
+    'curl -fsSL --connect-timeout 15 --retry 3 --retry-connrefused "$1" | bash -s -- --commit "$2" --force-commit' \
     _ "$installer_url" "$pin" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
@@ -4165,22 +4314,21 @@ step_hermes_install() {
     # install must never be reported as a failed step because an npm mirror was
     # down — the on-demand path is still there and still works.
     #
-    # 300s, not longer: step_post_update's budget is 900s total
-    # (src/lib/updater.ts) and this step is followed inside it by the Gemma
-    # re-cache, so a stalled registry must not be able to eat the rest of the
-    # update. An 80 MB install over a working link is far inside that, and what
-    # would consume the difference is npm's own retry backoff — exactly the
-    # case this block already declares non-fatal.
+    # No time box on it any more (owner's decision, 2026-09-14): an 80 MB npm
+    # install on a slow link is a long install, not a broken one, and killing it
+    # at 300 s left the bridge's node_modules half-written — which the on-demand
+    # path then had to clear before it could do the same work again. npm's own
+    # retry backoff is what used to consume the difference; it now runs to its
+    # own conclusion, and the WARNING below still covers a registry that is down.
     local bridge_dir="$agent_dir/scripts/whatsapp-bridge"
     if [ -d "$bridge_dir" ] && [ ! -d "$bridge_dir/node_modules" ]; then
       echo "  Warming up the WhatsApp bridge so the first pairing does not pay for it..."
       # `env -C` gives the install its working directory without a wrapper
-      # shell to quote the path into, and leaves npm as timeout's direct child
-      # so the time box actually lands on it. HOME is explicit for the same
-      # reason as every other command in this step: npm caches under $HOME/.npm
-      # and this function's HOME is /root, which the clawbox user cannot write.
+      # shell to quote the path into. HOME is explicit for the same reason as
+      # every other command in this step: npm caches under $HOME/.npm and this
+      # function's HOME is /root, which the clawbox user cannot write.
       runuser -u "$CLAWBOX_USER" -- env -C "$bridge_dir" HOME="$CLAWBOX_HOME" \
-        timeout 300 npm install --no-fund --no-audit --progress=false \
+        npm install --no-fund --no-audit --progress=false \
         || echo "  Warning: WhatsApp bridge warm-up failed (non-fatal) — the first pairing will install it on demand" >&2
     fi
   else
@@ -4896,14 +5044,15 @@ harness_swap_to_openclaw() {
   # The box's own wait, not a private one: wait_for_gateway_port gives the
   # listener 180 s in 3 s polls and stops the moment the unit stops trying or
   # RESTARTS (a crash loop spends its time `activating`, which a state check
-  # alone reads as "still starting"). The brief said "retry ≤ 60 s", and a
+  # alone reads as "still starting"). The brief said "retry <= 60 s", and a
   # 60 s loop is what shipped first — but the listener came 14 s after
   # `Started` behind an ExecStartPre measured at 31, 86 and 120 s on this box
   # (2026-09-06), so on the slower half of its own starts the swap was
   # reported failed — lock flipped, carry-over skipped — over a gateway that
-  # listened a minute later. The budget is this step's alone:
-  # GATEWAY_READY_SPENT is 0 in a fresh dispatch and nothing before this spent
-  # any of it.
+  # listened a minute later. This is the one budget install.sh keeps, and the
+  # header of wait_for_gateway_port says why no fact can replace it. The budget
+  # is this step's alone: GATEWAY_READY_SPENT is 0 in a fresh dispatch and
+  # nothing before this spent any of it.
   if ! wait_for_gateway_port; then
     harness_swap_say_failed provision "the OpenClaw gateway did not start listening on port ${GATEWAY_PORT:-18789} (it stopped, is restarting, or took longer than ${CLAWBOX_GATEWAY_READY_BUDGET_S:-180} s). This box is now the OpenClaw edition with its gateway down." \
       "journalctl -u clawbox-gateway.service"
@@ -7601,14 +7750,16 @@ step_firewall() {
   # only a backstop for a box that got here with it missing (an update that
   # skipped apt because it was offline).
   #
-  # Both halves are time-bounded on purpose. post_update runs inside the
-  # updater's step budget, and an apt that blocks on an unreachable mirror (or
-  # on another process holding the dpkg lock) would burn the whole budget here
-  # and push the `hermes_edition` step that follows into a hard failure. The
-  # firewall is worth a couple of minutes, not the update.
+  # Neither half is time-bounded any more (owner's decision, 2026-09-14). They
+  # both used to be, to keep a stalled mirror from eating step_post_update's
+  # budget — but the cure was worse than the disease on a slow link: the ufw
+  # install was killed mid-dpkg often enough that boxes carried a half-configured
+  # package, and `wait_for_apt 60` gave up on a lock that would have cleared.
+  # Both stay best-effort (`|| true`), which is what keeps a firewall this step
+  # could not install from failing the update.
   if ! command -v ufw >/dev/null 2>&1; then
-    wait_for_apt 60 || true
-    timeout 180 env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw || true
+    wait_for_apt || true
+    env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw || true
   fi
 
   bash "$SRC"
@@ -7926,10 +8077,29 @@ gateway_unit_running_or_starting() {
 #
 # Returns as soon as the port answers, and as soon as the unit stops trying, so
 # a healthy box costs a second or two and a genuinely dead one costs nothing.
+# ONE OF THE THREE CLOCKS THIS FILE KEEPS, and none of them is an install
+# deadline. (The others: the look for a restarted Hermes dashboard's new main
+# pid, and step_validate_services' settle window before it writes its report.)
+#
+# Everywhere else a clock was removed (see the wait-note block near the top): a
+# slow box must never fail. Here the clock is the switch between "keep waiting"
+# and "attempt the repair", and it cannot be replaced by a fact, because the fact
+# does not exist. Both halves of the answer look identical to systemd: the unit
+# is `active` while its ExecStart has forked and is still coming up, AND while it
+# is up and will never bind the port at all — a plugin awaiting capability
+# consent is the documented case, and it holds that state for ever. An unbounded
+# wait here would therefore hang install.sh in exactly the situation the recovery
+# below exists to fix, which is worse than waiting three minutes for it.
+#
+# Timing out is not a failure on either caller's side: step_gateway_legacy_state
+# _recovery runs `openclaw doctor` next, and the harness swap reports a gateway
+# that did not come up. Nothing here aborts an install over a slow download or a
+# tired disk, which is what the owner's rule is about.
+#
 # Seconds this STEP has already spent waiting. The budget is the step's, not
 # each call's: the recovery asks up to four times, and four independent
 # 180-second budgets would turn a genuinely broken gateway from an 8-second
-# path into a six-minute one inside post_update's 900 s advisory budget — where
+# path into a six-minute one inside post_update's advisory budget — where
 # an overrun is reported `completed`, which is the false-success class at the
 # report level.
 GATEWAY_READY_SPENT=0
@@ -7963,6 +8133,7 @@ wait_for_gateway_port() {
       echo "  The gateway restarted while we waited for it ($restarts_before -> $restarts_now) — it is looping, not starting" >&2
       return 1
     fi
+    wait_note "$waited" "the gateway to start listening on port ${GATEWAY_PORT:-18789}"
   done
 }
 
@@ -8414,19 +8585,27 @@ ensure_local_embeddings() {
     return 1
   fi
   step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
-  as_clawbox_login "timeout -k 10 600 $helper" || true
+  # No `timeout` on the helper. It downloads a 639 MB GGUF and then runs
+  # `memory index --force`, and 600 s was a guess at both: killed at the cap it
+  # left a partial model and a half-built index, which the next run had to redo
+  # from the start. The helper has its OWN internal wait for the proxy and exits
+  # 0 on every soft failure, so it ends by itself; `|| true` covers the rest.
+  as_clawbox_login "$helper" </dev/null || true
   # The helper exits 0 on every soft failure by design, so its exit code says
-  # nothing about the outcome; ask the core. Bounded and best-effort: a CLI
-  # that hangs, is absent or answers nothing must neither stall nor abort the
-  # run, and "could not read an embedder" is reported as itself, never as a
-  # verdict. -k 5: `timeout` alone sends SIGTERM only, and
-  # collectMemoryStatusJson() escalates to SIGKILL after 5 s; a CLI that
-  # ignores SIGTERM must not hang here when it would not hang there. The
-  # status is the verdict, not just the bytes: assignment in if-condition
-  # position, so a non-zero exit discards output that describes nothing anyone
-  # should vouch for, and errexit stays suppressed.
+  # nothing about the outcome; ask the core. Best-effort: "could not read an
+  # embedder" is reported as itself, never as a verdict. The status is the
+  # verdict, not just the bytes: assignment in if-condition position, so a
+  # non-zero exit discards output that describes nothing anyone should vouch
+  # for, and errexit stays suppressed.
   local EMBED_JSON EMBED_STATE
-  if ! EMBED_JSON="$(as_clawbox timeout -k 5 60 "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null)"; then
+  # `</dev/null`, and no clock. The CLI is what decides how long this takes —
+  # `--deep` walks the whole index, so the 60 s cap this used to carry reported
+  # "could not read an embedder" about a healthy one on a box whose index was
+  # merely large, which is the false verdict the block below exists not to
+  # invent. What IS closed off is the one way a non-interactive CLI hangs
+  # without doing anything: a prompt on stdin, which it would otherwise inherit
+  # from the root step and wait on for ever.
+  if ! EMBED_JSON="$(as_clawbox "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
     EMBED_JSON=""
   fi
   # `command -v` first, and a state of its own: without the interpreter the
@@ -8604,7 +8783,7 @@ install_prebuilt_llamacpp() {
       ;;
     https://*)
       echo "  Fetching prebuilt llama.cpp from $src"
-      curl -fsSL --proto '=https' --max-time 600 -o "$archive" "$src" \
+      curl -fsSL --proto '=https' --connect-timeout 15 --retry 3 --retry-connrefused -o "$archive" "$src" \
         || { echo "  Prebuilt download failed."; return 1; }
       ;;
     *)
@@ -9020,11 +9199,21 @@ step_chromium_install() {
     # Ensure snapd is running, install chromium, then continue.
     systemctl enable --now snapd snapd.socket 2>/dev/null || true
 
-    # Wait for snapd to be ready (can take a few seconds after enable)
+    # Wait for snapd to be ready (it can take a while after enable, and on a
+    # cold SD card a good deal longer than the 30 tries this used to allow —
+    # after which `snap install chromium` ran against a socket that was not
+    # there yet and the step failed for being early rather than broken). The
+    # exit is a fact, not a clock: snapd answering, or snapd no longer trying.
     local retries=0
-    while ! snap version &>/dev/null && [ $retries -lt 30 ]; do
+    while ! snap version &>/dev/null; do
+      if ! unit_is_coming_up snapd.socket; then
+        echo "  snapd is not running — installing Chromium anyway and letting snap report" >&2
+        break
+      fi
+      wait_give_up_in_test_mode "$retries" && break
       sleep 1
       retries=$((retries + 1))
+      wait_note "$retries" "snapd to come up before installing Chromium"
     done
 
     # Clean up any leftover Debian repo config from earlier install attempts
@@ -9070,12 +9259,14 @@ ensure_claude_code() {
 
   local installer rc=1
   installer="$(mktemp)"
-  # --max-time bounds a STALLED vendor: this runs inside step_post_update, and
-  # every recovery step after it waits behind this download. --proto-redir keeps
-  # a redirect from stepping down to plain HTTP on the way to something we then
-  # execute as the clawbox user.
+  # `--connect-timeout` with `--retry`, and deliberately no `--max-time`: the
+  # transfer cap used to turn a slow link into "the CLI could not be downloaded",
+  # and the box then had no `claude` at all. A black-holed connection is still
+  # bounded, because that is a connect failure rather than a slow download.
+  # --proto-redir keeps a redirect from stepping down to plain HTTP on the way to
+  # something we then execute as the clawbox user.
   if curl -fsSL --proto '=https' --proto-redir '=https' \
-       --connect-timeout 15 --max-time 300 \
+       --connect-timeout 15 --retry 3 --retry-connrefused \
        https://claude.ai/install.sh -o "$installer" 2>/dev/null \
      && [ -s "$installer" ] \
      && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region' \
@@ -9386,12 +9577,12 @@ ensure_codex_cli() {
   # plainly, so a full or read-only /tmp would end install.sh at this line with
   # nothing said. Empty, it falls into the download-failed branch, which reports.
   installer="$(mktemp || true)"
-  # --max-time bounds THIS fetch — the ~30 KB installer script, nothing more.
-  # The vendor's own 117 MB package download is bounded separately below.
-  # --proto-redir stops a redirect stepping down to plain HTTP on the way to
-  # something we then execute.
+  # `--connect-timeout` with `--retry` bounds a black hole; there is no
+  # `--max-time`, because a transfer cap answers "could not download" for a link
+  # that is merely slow. --proto-redir stops a redirect stepping down to plain
+  # HTTP on the way to something we then execute.
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
-      --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
+      --connect-timeout 15 --retry 3 --retry-connrefused "$url" -o "$installer" 2>/dev/null \
     || [ ! -s "$installer" ]; then
     echo "  WARN: could not download OpenAI's Codex installer from $url" >&2
     codex_left_as_is
@@ -9438,14 +9629,14 @@ ensure_codex_cli() {
   #     not disturb ensure_clawbox_bashrc_path (whose guard greps the export
   #     line, not the comment). It makes the native binary win sooner, which is
   #     the direction this step is going in anyway.
-  #   * it downloads a ~117 MB package, and on its GitHub fallback path applies
-  #     no timeout of its own. `timeout` is therefore ours: without it a stalled
-  #     fetch parks step_post_update — and every recovery step queued behind it
-  #     — until systemd's TimeoutStartSec=7200 fires two hours later. -k because
-  #     a plain SIGTERM is not a ceiling; a killed install leaves the vendor's
-  #     staging directory rather than a half-linked codex, and the verification
-  #     below is what decides either way.
-  if ! as_clawbox_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' timeout -k 30 1800 sh '$installer'" </dev/null; then
+  #   * it downloads a ~117 MB package. That download used to be wrapped in
+  #     `timeout -k 30 1800`; it no longer is (owner's decision, 2026-09-14),
+  #     because 117 MB over a rural uplink is a long download and not a stalled
+  #     one, and a killed install left the vendor's staging directory behind for
+  #     the next run to trip over. systemd's TimeoutStartSec=7200 on the root
+  #     step is the only ceiling left, and the verification below is what decides
+  #     whether anything usable landed.
+  if ! as_clawbox_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
     echo "  WARN: OpenAI's Codex installer ran but failed" >&2
     codex_left_as_is
     rm -f "$installer"
@@ -9842,10 +10033,23 @@ step_browser_launch() {
 }
 
 step_validate_services() {
-  # Polls expected units + functional probes for up to 30 s. Exits 1 if any
-  # check fails by the deadline, after printing a per-failure table with a
-  # systemctl status snippet for unit failures and a one-line reason for
-  # probe failures.
+  # Polls expected units + functional probes until they all pass, or until the
+  # settle window below is up — then prints a per-failure table with a systemctl
+  # status snippet for unit failures and a one-line reason for probe failures.
+  #
+  # THE ONE REMAINING RETRY WINDOW, and it is not a limit on any work: every
+  # install step has already run by the time this is reached, nothing here
+  # downloads, builds or configures anything, and no step is aborted or skipped
+  # by it. It is the time a service is given to finish coming up before the
+  # installer writes its REPORT — and a report is the one thing that cannot be
+  # deferred for ever. Most of what it can find (a missing unit file, a foreign
+  # edition's harness still enabled, a desynced dashboard auth, a mute TTS
+  # verdict on disk) will never change by waiting, so an unbounded loop here
+  # would simply never tell anybody, which is worse than telling them late.
+  #
+  # 180 s rather than the 30 s it used to be: the old window was a guess that a
+  # tired SD card routinely missed, and a service that was 40 s from ready got
+  # the box reported as broken. The gateway's own patience is the same number.
 
   # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
   # export it, so on a fresh install our process still has it unset. Reload the
@@ -9873,7 +10077,13 @@ step_validate_services() {
     active_services+=("$s")
   done
 
-  local deadline=$(( $(date +%s) + 30 ))
+  local settle="${CLAWBOX_VALIDATE_SETTLE_S:-180}"
+  case "$settle" in ''|*[!0-9]*) settle=180 ;; esac
+  # The e2e container cannot satisfy some of these by construction, and CI has
+  # to be able to report a failure rather than hold the job open.
+  if is_test_mode; then settle="$(test_mode_wait_cap_s)"; fi
+  local started_at; started_at=$(date +%s)
+  local deadline=$(( started_at + settle ))
   local -a failed_active=() failed_installed=() failed_probe=()
 
   while :; do
@@ -10121,6 +10331,7 @@ step_validate_services() {
     [ ${#failed_active[@]} -eq 0 ] && [ ${#failed_installed[@]} -eq 0 ] && [ ${#failed_probe[@]} -eq 0 ] && break
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 2
+    wait_note "$(( $(date +%s) - started_at ))" "${#failed_active[@]} unit(s) and ${#failed_probe[@]} probe(s) still short of healthy"
   done
 
   local probe_count=2

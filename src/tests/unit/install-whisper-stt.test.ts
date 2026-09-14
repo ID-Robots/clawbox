@@ -269,3 +269,115 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     expect(r.unitWritten).toBe(true);
   });
 });
+
+/**
+ * The weights are downloaded once, not looked at again on every update.
+ *
+ * `whisper_predownload_model` constructed a `WhisperModel` unconditionally. With
+ * a complete cache that touches no network, but it still reads 148 MB off an SD
+ * card and builds a model to throw away — once per update — for an answer the
+ * filesystem already had. And the answer it gives is not free of judgement: a
+ * failed or rate-limited Hugging Face fetch leaves 0-byte blobs behind, which is
+ * a cache to redo rather than one to trust.
+ */
+describe("whisper_model_cached — the weights are asked about, not re-fetched", () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "whisper-cache-"));
+  });
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const CACHE = "cache/huggingface/hub/models--Systran--faster-whisper-base";
+  // What `faster_whisper.utils.download_model` fetches for a model repo.
+  const ARTIFACTS = [
+    "config.json",
+    "preprocessor_config.json",
+    "model.bin",
+    "tokenizer.json",
+    "vocabulary.txt",
+  ];
+
+  function ask({
+    snapshot = false,
+    modelBytes = 1,
+    emptyBlob = false,
+    // Artifacts to leave out of an otherwise complete snapshot.
+    missing = [] as string[],
+    // Write model.bin as a symlink to a file that is not there — the shape an
+    // interrupted download leaves, since a snapshot entry is a link into blobs/.
+    danglingModel = false,
+  } = {}) {
+    if (snapshot) {
+      const snap = path.join(tmp, CACHE, "snapshots", "deadbeef");
+      fs.mkdirSync(snap, { recursive: true });
+      for (const artifact of ARTIFACTS) {
+        if (missing.includes(artifact)) continue;
+        if (artifact === "model.bin" && danglingModel) {
+          fs.symlinkSync(path.join(tmp, CACHE, "blobs", "gone"), path.join(snap, artifact));
+          continue;
+        }
+        const bytes = artifact === "model.bin" ? modelBytes : 1;
+        fs.writeFileSync(path.join(snap, artifact), "x".repeat(bytes));
+      }
+    }
+    const blobs = path.join(tmp, CACHE, "blobs");
+    fs.mkdirSync(blobs, { recursive: true });
+    if (emptyBlob) fs.writeFileSync(path.join(blobs, "abc123"), "");
+    const log = path.join(tmp, "calls.log");
+    fs.writeFileSync(log, "");
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_HOME="${tmp}"`,
+      `LOG="${log}"`,
+      // The one collaborator: the python that would do the download.
+      'clawbox_python() { printf "download\\n" >> "$LOG"; return 0; }',
+      // Sourced out of the shipped file, so this test fails when the artifact
+      // drifts — the same shape the install_whisper_stt harness above uses.
+      `sed -n '/^whisper_model_cached() {/,/^}/p' "$1" > "${tmp}/f.sh"`,
+      `sed -n '/^whisper_predownload_model() {/,/^}/p' "$1" >> "${tmp}/f.sh"`,
+      `. "${tmp}/f.sh"`,
+      `WHISPER_HF_CACHE="${path.join(tmp, CACHE)}"`,
+      "rc=0; whisper_predownload_model || rc=$?; echo RC=$rc",
+    ].join(NL);
+    const out = execFileSync("bash", ["-c", script, "bash", VOICE_SH_PATH], { encoding: "utf8" });
+    return { out, downloaded: fs.readFileSync(log, "utf8").includes("download") };
+  }
+
+  it("downloads nothing when the weights are already there", () => {
+    const r = ask({ snapshot: true });
+    expect(r.out).toContain("RC=0");
+    expect(r.out).toContain("already cached");
+    expect(r.downloaded, "the weights were fetched over a complete cache").toBe(false);
+  });
+
+  it("downloads when there is no cache at all", () => {
+    const r = ask({ snapshot: false });
+    expect(r.out).toContain("RC=0");
+    expect(r.downloaded).toBe(true);
+  });
+
+  it("downloads over a cache a failed fetch left 0-byte blobs in", () => {
+    const r = ask({ snapshot: true, emptyBlob: true });
+    expect(r.downloaded, "a half-written cache was trusted").toBe(true);
+  });
+
+  it("downloads over a 0-byte model.bin", () => {
+    const r = ask({ snapshot: true, modelBytes: 0 });
+    expect(r.downloaded, "an empty model.bin was trusted").toBe(true);
+  });
+
+  it("downloads over a dangling model.bin link", () => {
+    // A snapshot entry is a symlink into blobs/. An interrupted download leaves
+    // the link with nothing behind it, and a size test on the LINK passes.
+    const r = ask({ snapshot: true, danglingModel: true });
+    expect(r.downloaded, "a dangling model.bin link was trusted").toBe(true);
+  });
+
+  it.each(ARTIFACTS)("downloads over a snapshot missing %s", (artifact) => {
+    // The weights alone are not the model: without the tokenizer or the feature
+    // extractor config the first transcription pays for the missing file, which
+    // is the cost this check exists to avoid moved to the worst moment.
+    const r = ask({ snapshot: true, missing: [artifact] });
+    expect(r.downloaded, `a snapshot with no ${artifact} was trusted`).toBe(true);
+  });
+});

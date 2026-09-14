@@ -3210,12 +3210,16 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 600_000,
     requiresRoot: true,
   },
-  {
-    id: "nvidia_jetpack",
-    label: "Installing NVIDIA JetPack",
-    timeoutMs: 600_000,
-    requiresRoot: true,
-  },
+  // `nvidia_jetpack` is deliberately NOT here. CUDA and the JetPack meta-package
+  // are laid down ONCE — by the factory image, or by the first `install.sh` run
+  // on a bare board — and re-running `apt-get install nvidia-jetpack` on every
+  // "Update everything" bought nothing: the packages are already at the version
+  // the pinned apt repo serves, so the step spent minutes of a Jetson's apt on a
+  // no-op, and on a box whose mirror had moved it could pull a JetPack change
+  // nobody asked for into an update the owner started for ClawBox itself.
+  // (Owner's decision, 2026-09-14.) The step itself stays — `install.sh --step
+  // nvidia_jetpack` and the root-step allow-list keep it available as an
+  // explicit repair — it is only off the automatic update path.
   {
     id: "performance_mode",
     label: "Enabling max performance mode",

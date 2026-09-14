@@ -305,6 +305,56 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(preflightCall).toBeLessThan(firstLog);
   });
 
+  it("refuses a readiness probe pointed anywhere but this machine", () => {
+    // `wait_for_http` keeps a `--max-time`, which is only defensible because it
+    // is a LOOPBACK liveness probe — pointed at a remote host the same flag is a
+    // transfer deadline. So the guard is run, not read: `[::1]` unescaped is a
+    // shell character class (one of `:` or `1`), which both refused a genuine
+    // IPv6 loopback URL and accepted nonsense like `http://:1`.
+    const start = SOURCE.indexOf("wait_for_http() {");
+    const guardStart = SOURCE.indexOf('  case "$url" in', start);
+    const guardEnd = SOURCE.indexOf("  esac", guardStart);
+    expect(guardStart).toBeGreaterThan(-1);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    const guard = SOURCE.slice(guardStart, guardEnd + "  esac".length)
+      // The refusal arm writes to stderr and returns; in this loop it says so
+      // and moves to the next URL. Only the `case` patterns are under test.
+      .replace(/echo "Error[^\n]*\n/, 'echo "REFUSE"\n')
+      .replace(/return 1\n/, "continue\n");
+    const script = [
+      "set -u",
+      "for url in \"$@\"; do",
+      `${guard.replace(/;; \n/g, ";;\n")}`,
+      '  echo "ACCEPT $url"',
+      "done",
+    ].join("\n");
+    const urls = [
+      "http://127.0.0.1:18789",
+      "http://127.0.0.1/",
+      "http://localhost:80",
+      "http://localhost/health",
+      "http://[::1]:18789",
+      "http://[::1]/health",
+      "https://example.com/health",
+      "http://:1",
+      "http://example.com:18789",
+    ];
+    const out = execFileSync("bash", ["-c", script, "bash", ...urls], { encoding: "utf8" })
+      .trim()
+      .split("\n");
+    expect(out).toEqual([
+      "ACCEPT http://127.0.0.1:18789",
+      "ACCEPT http://127.0.0.1/",
+      "ACCEPT http://localhost:80",
+      "ACCEPT http://localhost/health",
+      "ACCEPT http://[::1]:18789",
+      "ACCEPT http://[::1]/health",
+      "REFUSE",
+      "REFUSE",
+      "REFUSE",
+    ]);
+  });
+
   it("threads the configured ports into the units and the readiness wait", () => {
     expect(SOURCE).toContain("Environment=OPENCLAW_GATEWAY_PORT=$GATEWAY_PORT");
     expect(SOURCE).toContain("Environment=GATEWAY_PORT=$GATEWAY_PORT");
