@@ -24,14 +24,25 @@ import { fileURLToPath } from "node:url";
  *     scope: it bounds a dead TCP handshake, never a slow transfer, and it is
  *     paired with `--retry` at every site that carries it.
  *
- * The three wall-clock windows the installer keeps are deliberate, named in
- * their own comments, and none of them bounds work: the gateway-listener wait
- * (the switch between waiting and running the repair — systemd reports "coming
- * up" and "up but never listening" identically, so no fact can replace it), the
- * look for a restarted Hermes dashboard's new main pid (the restart has already
- * happened by then; both outcomes are a warning), and step_validate_services'
- * settle window before it writes its report (a report is the one thing that
- * cannot be deferred for ever).
+ * The wall-clock windows the installers keep are deliberate, each named in its
+ * own comment, and NONE of them bounds work — every one of them sits after the
+ * work is done and decides only how long to LOOK before reporting. They exist
+ * because systemd reports the two halves of "not answering yet" identically: a
+ * unit whose ExecStart has forked and is still coming up, and one that is up and
+ * will never bind the port (a plugin awaiting capability consent holds that
+ * state for ever) are both `active`. Unbounded, each of these would hang the
+ * installer in exactly the state its report or its repair exists to address.
+ * Every one asks the FACT first — `unit_is_coming_up`, the unit has stopped
+ * trying — so the clock is the last resort rather than the first:
+ *
+ *   - install.sh `wait_for_gateway_port` (180 s, step-wide): the switch between
+ *     waiting and running the `openclaw doctor` repair. Nothing fails.
+ *   - install.sh `hermes_dashboard_restart_after_install` (120 s): the look for
+ *     the restarted dashboard's new main pid. Both outcomes are a warning.
+ *   - install.sh `restore_previous_build` (180 s) and `step_validate_services`
+ *     (180 s): when to write the report. A report cannot be deferred for ever.
+ *   - install-x64.sh `wait_for_http` (600 s): far outside every start measured
+ *     on that path, so a slow gateway no longer fails the install.
  */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const FILES = ["install.sh", "install-x64.sh", "scripts/install-voice.sh"] as const;
