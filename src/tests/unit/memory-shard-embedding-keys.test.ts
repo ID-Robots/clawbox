@@ -16,11 +16,12 @@ const OPENCLAW_PACKAGE_JSON = "/home/clawbox/.npm-global/lib/node_modules/opencl
 const PROXY_URL = "http://127.0.0.1/setup-api/local-ai/embed/v1";
 const TOKEN = "t".repeat(64);
 
-const { runOpenclawConfigSetBatch, readFile, openclawIsAbsent, stampLocalEmbeddingIdentity } = vi.hoisted(() => ({
+const { runOpenclawConfigSetBatch, readFile, openclawIsAbsent, stampLocalEmbeddingIdentity, readConfig } = vi.hoisted(() => ({
   runOpenclawConfigSetBatch: vi.fn(async () => ""),
   openclawIsAbsent: vi.fn(() => false),
   stampLocalEmbeddingIdentity: vi.fn(async () => {}),
   readFile: vi.fn<(path: string, encoding: string) => Promise<string>>(),
+  readConfig: vi.fn<() => Promise<Record<string, unknown>>>(),
 }));
 
 vi.mock("fs/promises", () => ({ readFile }));
@@ -29,7 +30,7 @@ vi.mock("@/lib/config-store", () => ({
   set: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
-  readConfig: vi.fn(async () => ({})),
+  readConfig,
   readConfigStrict: vi.fn(async () => ({})),
   runOpenclawConfigSetBatch,
   openclawIsAbsent,
@@ -50,7 +51,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   getLocalAiToken: () => TOKEN,
 }));
 
-import { embeddingConfigHome, switchToLocalEmbeddings } from "@/lib/memory-shard";
+import { embeddingConfigHome, readEmbeddingChoice, switchToLocalEmbeddings } from "@/lib/memory-shard";
 import { LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_PROVIDER } from "@/lib/memory-shard-state";
 
 /** Everything the embedder needs, and the provider LAST — the switch itself. */
@@ -74,6 +75,7 @@ function installedCore(version: string): void {
 beforeEach(() => {
   runOpenclawConfigSetBatch.mockClear();
   readFile.mockReset();
+  readConfig.mockReset().mockResolvedValue({});
   stampLocalEmbeddingIdentity.mockClear();
   openclawIsAbsent.mockReturnValue(false);
 });
@@ -94,6 +96,72 @@ describe("embeddingConfigHome", () => {
   it("assumes the generation ClawBox pins when the version cannot be read", () => {
     expect(embeddingConfigHome(null)).toBe("memory.search");
     expect(embeddingConfigHome("garbage")).toBe("memory.search");
+  });
+});
+
+/**
+ * The READ side of the same two homes, and it must answer from ONE of them.
+ *
+ * `readEmbeddingChoice` used to take each leaf from `memory.search` and fall
+ * back to `agents.defaults.memorySearch` per FIELD, which could compose an
+ * answer out of two different configurations. On a box part-way through the
+ * 2026.8 move — a new `memory.search` carrying provider and model, a stale
+ * legacy `remote.baseUrl` still naming a cloud endpoint — it reported that
+ * legacy endpoint. `currentEmbeddingSource` then called the box "cloud",
+ * `promoteEmbeddings` skipped the write as already done, and the half-written
+ * `memory.search` it was meant to complete stayed half-written.
+ */
+describe("readEmbeddingChoice", () => {
+  const LEGACY_CLOUD = {
+    agents: { defaults: { memorySearch: { provider: "openai", model: "text-embedding-3-large", remote: { baseUrl: "https://clawbox.test/api/ai" } } } },
+  };
+
+  it("reads only the home the installed core uses, on an OpenClaw 2 box", async () => {
+    installedCore("2026.8.1");
+    readConfig.mockResolvedValue({
+      memory: { search: { provider: LOCAL_EMBEDDING_PROVIDER, model: LOCAL_EMBEDDING_MODEL, remote: { baseUrl: PROXY_URL } } },
+      ...LEGACY_CLOUD,
+    });
+    expect(await readEmbeddingChoice()).toEqual({
+      provider: LOCAL_EMBEDDING_PROVIDER,
+      model: LOCAL_EMBEDDING_MODEL,
+      baseUrl: PROXY_URL,
+    });
+  });
+
+  it("does not borrow a leaf from the home nothing writes any more", async () => {
+    // The half-migrated box: the new home has the provider and the model, and
+    // no endpoint yet. The stale cloud endpoint next door is NOT the answer —
+    // reporting it made the applier skip the write that completes this config.
+    installedCore("2026.8.1");
+    readConfig.mockResolvedValue({
+      memory: { search: { provider: LOCAL_EMBEDDING_PROVIDER, model: LOCAL_EMBEDDING_MODEL } },
+      ...LEGACY_CLOUD,
+    });
+    expect(await readEmbeddingChoice()).toEqual({
+      provider: LOCAL_EMBEDDING_PROVIDER,
+      model: LOCAL_EMBEDDING_MODEL,
+      baseUrl: null,
+    });
+  });
+
+  it("reads the legacy home, and only it, on a core older than 2026.8", async () => {
+    installedCore("2026.7.12");
+    readConfig.mockResolvedValue({
+      memory: { search: { provider: "should-not-be-read", model: "nor-this", remote: { baseUrl: "http://nor.this" } } },
+      ...LEGACY_CLOUD,
+    });
+    expect(await readEmbeddingChoice()).toEqual({
+      provider: "openai",
+      model: "text-embedding-3-large",
+      baseUrl: "https://clawbox.test/api/ai",
+    });
+  });
+
+  it("answers null for what the config does not say, which is not either engine", async () => {
+    installedCore("2026.8.1");
+    readConfig.mockResolvedValue({ memory: { search: { model: "   " } } });
+    expect(await readEmbeddingChoice()).toEqual({ provider: null, model: null, baseUrl: null });
   });
 });
 

@@ -295,9 +295,25 @@ export async function switchToLocalEmbeddings(): Promise<void> {
  * boot, and the cloud-defaults resolver asks this on every boot and on every
  * credential save. `null` is "this config does not say", which the caller must
  * not read as either answer.
+ *
+ * ONE HOME, resolved the same way the WRITERS resolve it. An earlier version
+ * read each leaf from `memory.search` and fell back to
+ * `agents.defaults.memorySearch` per FIELD, which could compose an answer out of
+ * two different configurations: a box part-way through the 2026.8 move — new
+ * `memory.search.provider` and `.model`, a stale legacy `remote.baseUrl` still
+ * naming a cloud endpoint — reported `baseUrl` from the home nothing writes any
+ * more. `currentEmbeddingSource` then called that box "cloud", `promoteEmbeddings`
+ * skipped the write as already done, and the half-written `memory.search` it was
+ * meant to complete stayed half-written. Reading only the home
+ * {@link embeddingConfigHome} names keeps this reader and
+ * {@link switchToCloudEmbeddings}/{@link switchToLocalEmbeddings} describing the
+ * same place.
  */
 export async function readEmbeddingChoice(): Promise<{ provider: string | null; model: string | null; baseUrl: string | null }> {
-  const config = (await readConfig()) as Record<string, unknown>;
+  const [config, home] = await Promise.all([
+    readConfig() as Promise<Record<string, unknown>>,
+    installedOpenclawVersion().then(embeddingConfigHome),
+  ]);
   const pick = (keys: readonly string[]): string | null => {
     let node: unknown = config;
     for (const key of keys) {
@@ -306,8 +322,7 @@ export async function readEmbeddingChoice(): Promise<{ provider: string | null; 
     }
     return typeof node === "string" && node.trim() ? node.trim() : null;
   };
-  const at = (tail: readonly string[]) =>
-    pick(["memory", "search", ...tail]) ?? pick(["agents", "defaults", "memorySearch", ...tail]);
+  const at = (tail: readonly string[]) => pick([...home.split("."), ...tail]);
   return { provider: at(["provider"]), model: at(["model"]), baseUrl: at(["remote", "baseUrl"]) };
 }
 
