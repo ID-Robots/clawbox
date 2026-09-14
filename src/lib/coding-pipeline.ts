@@ -481,7 +481,7 @@ export function decidePipeline(
     step.state = "skipped";
     step.endedAt = now;
     step.detail = clamp(outcome.detail, MAX_PIPELINE_DETAIL_CHARS);
-    return next(pipeline, afterPass(pipeline, stage), now);
+    return advance(pipeline, stage, now);
   }
 
   if (outcome.kind === "passed") {
@@ -489,17 +489,7 @@ export function decidePipeline(
     step.state = "passed";
     step.endedAt = now;
     step.detail = outcome.detail ? clamp(outcome.detail, MAX_PIPELINE_DETAIL_CHARS) : null;
-    const after = afterPass(pipeline, stage);
-    if (after === "complete") {
-      stepFor(pipeline, "complete").state = "passed";
-      stepFor(pipeline, "complete").startedAt = now;
-      stepFor(pipeline, "complete").endedAt = now;
-      pipeline.stage = "complete";
-      pipeline.status = "complete";
-      pipeline.endedAt = now;
-      return { action: "settled", status: "complete" };
-    }
-    return next(pipeline, after, now);
+    return advance(pipeline, stage, now);
   }
 
   // Failed.
@@ -566,6 +556,34 @@ function next(pipeline: PipelineState, stage: PipelineStage, now: number): Pipel
   // the stage, because a stage recorded as running that nothing is doing is
   // exactly what a restart cannot tell from one that is.
   return { action: "enter", stage };
+}
+
+/**
+ * Move past a stage that is DONE — passed or skipped — into whatever follows.
+ *
+ * ONE function for both, because "what happens when the stage that follows is
+ * `complete`" is the same answer for both and was written out only for
+ * `passed`. A SKIP landing on `complete` therefore entered that stage and
+ * returned `{ action: "enter" }`, and `complete` does nothing and answers no
+ * outcome — so the pipeline's status stayed `running` for ever, with the run
+ * settled and nothing left to move it.
+ *
+ * Nothing reached it until the box-wide Vercel switch: the only skip the
+ * machine could produce was the review stage's, and review is followed by
+ * `deploy_preview`. With the integration off the last four stages skip, and
+ * `verify_production` is followed by exactly `complete`.
+ */
+function advance(pipeline: PipelineState, stage: PipelineStage, now: number): PipelineTransition {
+  const after = afterPass(pipeline, stage);
+  if (after !== "complete") return next(pipeline, after, now);
+  const done = stepFor(pipeline, "complete");
+  done.state = "passed";
+  done.startedAt = now;
+  done.endedAt = now;
+  pipeline.stage = "complete";
+  pipeline.status = "complete";
+  pipeline.endedAt = now;
+  return { action: "settled", status: "complete" };
 }
 
 function fail(pipeline: PipelineState, stage: PipelineStage, reason: string, now: number): PipelineTransition {

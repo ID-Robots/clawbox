@@ -62,6 +62,7 @@ function stubFetch(
     autoMerge?: boolean;
     completionAttempts?: number;
     maxParallelRuns?: number;
+    vercelEnabled?: boolean;
   },
   opts: {
     resolveTo?: string;
@@ -85,6 +86,9 @@ function stubFetch(
     /** A server from before worktrees: no runs-at-once field, so that control
      *  must not be drawn either. */
     noMaxParallelRuns?: boolean;
+    /** A server from before the box-wide Vercel switch: no field at all, which
+     *  the panel must read as OFF — it is a consent, not a preference. */
+    noVercelEnabled?: boolean;
   } = {},
 ) {
   posts = [];
@@ -101,6 +105,8 @@ function stubFetch(
   let autoMerge = status.autoMerge ?? false;
   let completionAttempts = status.completionAttempts ?? 3;
   let maxParallelRuns = status.maxParallelRuns ?? 2;
+  // OFF when the device has never stored it, unlike the media switches above.
+  let vercelEnabled = status.vercelEnabled ?? false;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -124,6 +130,7 @@ function stubFetch(
     ...(opts.noReviewLoop ? {} : { reviewRounds, minReviewRounds: 0, maxReviewRounds: 6, autoMerge }),
     ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
+    ...(opts.noVercelEnabled ? {} : { vercelEnabled }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -179,6 +186,7 @@ function stubFetch(
       if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
       if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
       if (typeof body.realBrowser === "boolean") realBrowser = body.realBrowser;
+      if (typeof body.vercelEnabled === "boolean") vercelEnabled = body.vercelEnabled;
       if (typeof body.reviewRounds === "number") {
         if (opts.rejectRounds) {
           return json({ error: "The number of review rounds must be between 0 and 6.", kind: "invalid" }, 400);
@@ -491,6 +499,40 @@ describe("the browser a run verifies its work in", () => {
     expect(screen.queryByText(translations.en["codingAgent.realBrowserHint"])).toBeNull();
     fireEvent.click(screen.getByTestId("coding-agent-real-browser-help"));
     expect(screen.getByText(translations.en["codingAgent.realBrowserHint"])).toBeInTheDocument();
+  });
+});
+
+describe("the box-wide Vercel integration", () => {
+  const VERCEL = translations.en["codingAgent.vercelEnabledLabel"];
+
+  it("renders OFF for a device that answers with no such field", async () => {
+    // The opposite fallback to the media and browser switches above, and
+    // deliberately: this is standing consent for pushing the owner's code to
+    // another company's account, so "the device never said" reads as no. A box
+    // that was already deploying is switched on by the DEVICE before it
+    // answers, so it never lands here.
+    stubFetch({ enabled: true, readiness: READY }, { noVercelEnabled: true });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: VERCEL })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("posts the field the route reads and renders what it answers", async () => {
+    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: VERCEL });
+    expect(toggle).toHaveAttribute("data-testid", "coding-agent-vercel-enabled");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { vercelEnabled: true } }]));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+  });
+
+  it("shows what the device has stored, and keeps its hint one tap away", async () => {
+    stubFetch({ enabled: true, readiness: READY, vercelEnabled: true });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: VERCEL })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByText(translations.en["codingAgent.vercelEnabledHint"])).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-vercel-enabled-help"));
+    expect(screen.getByText(translations.en["codingAgent.vercelEnabledHint"])).toBeInTheDocument();
   });
 });
 

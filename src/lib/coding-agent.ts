@@ -8747,9 +8747,10 @@ async function enterPipelineStage(
   //
   // SKIPPED, not failed: the pipeline's first half — build, review, improve —
   // is work the owner asked for and got, and throwing it away over a setting
-  // would be the box punishing them for a switch they are allowed to hold. A
-  // skip carries the reason into the step's own `detail`, so the strip on the
-  // run's page says why the deploy is not there rather than leaving a gap.
+  // would be the box punishing them for a switch they are allowed to hold. The
+  // skip carries its reason into the step's own `detail`, which is what a run
+  // record answers with — the app hides the pipeline card altogether while the
+  // integration is off, so the record is where this is readable.
   //
   // ALL FOUR, not just the two deploys. `skipped` advances to the next stage
   // (decidePipeline), so skipping `deploy_preview` alone walks straight into

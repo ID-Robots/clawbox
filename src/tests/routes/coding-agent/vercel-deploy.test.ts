@@ -24,12 +24,16 @@ const listRuns = vi.hoisted(() => vi.fn());
 const recordManualDeployment = vi.hoisted(() => vi.fn());
 const resolveProjectScope = vi.hoisted(() => vi.fn());
 const resolveWorkingDirectory = vi.hoisted(() => vi.fn());
+/** The box-wide Vercel switch. ON for every case here but the one that pins
+ *  what happens when the owner switches the integration off. */
+const readVercelEnabled = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   listRuns,
   recordManualDeployment,
   resolveProjectScope,
   resolveWorkingDirectory,
+  readVercelEnabled,
 }));
 
 const deployProject = vi.hoisted(() => vi.fn());
@@ -112,6 +116,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   process.env.SESSION_SECRET = SESSION_SECRET;
   process.env.CLAWBOX_MCP_TOKEN = MCP_TOKEN;
+  readVercelEnabled.mockResolvedValue(true);
   resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/projects/shop", projectId: null });
   resolveProjectScope.mockResolvedValue("shop");
   readVercelLink.mockResolvedValue(LINK);
@@ -465,6 +470,45 @@ describe("the switch itself", () => {
   it("refuses anything that is not on or off", async () => {
     const res = await route.PUT(request({ method: "PUT", cookie: ownerCookie(), body: { autoProduction: "yes" } }));
     expect(res.status).toBe(400);
+    expect(setAutoProduction).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The box-wide Vercel switch, on the route that actually deploys.
+ *
+ * The GET is refused too, deliberately: the card that would render the answer
+ * is not on the page while the integration is off, so a GET that still
+ * answered would be the one surface saying the feature is there.
+ */
+describe("the box-wide Vercel switch", () => {
+  beforeEach(() => readVercelEnabled.mockResolvedValue(false));
+
+  it("refuses a deploy from the owner AND from the agent, and sends nothing", async () => {
+    for (const [name, req] of [
+      ["owner", request({ method: "POST", cookie: ownerCookie(), body: { target: "preview" } })],
+      ["agent", request({ method: "POST", bearer: MCP_TOKEN, origin: null, body: { target: "preview" } })],
+    ] as const) {
+      const res = await route.POST(req);
+      expect(res.status, name).toBe(409);
+      expect((await res.json()).code, name).toBe("vercel_disabled");
+    }
+    expect(deployProject).not.toHaveBeenCalled();
+    expect(recordManualDeployment).not.toHaveBeenCalled();
+    // A refused deploy must not have spent a production slot on the way.
+    expect(reserveProductionSlot).not.toHaveBeenCalled();
+  });
+
+  it("refuses the READ, so nothing on the page can claim the feature is there", async () => {
+    const res = await route.GET(request({ cookie: ownerCookie() }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("vercel_disabled");
+  });
+
+  it("refuses the per-project production switch rather than storing a permission nobody can see", async () => {
+    const res = await route.PUT(request({ method: "PUT", cookie: ownerCookie(), body: { autoProduction: true } }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("vercel_disabled");
     expect(setAutoProduction).not.toHaveBeenCalled();
   });
 });

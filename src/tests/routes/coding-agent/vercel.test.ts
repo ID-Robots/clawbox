@@ -20,11 +20,15 @@ import { saveEnv } from "@/tests/helpers/env";
 const listRuns = vi.hoisted(() => vi.fn());
 const recordDeployPromotion = vi.hoisted(() => vi.fn());
 const resolveProjectScope = vi.hoisted(() => vi.fn());
+/** The box-wide Vercel switch. ON for every case here but the one that pins
+ *  what happens when the owner switches the integration off. */
+const readVercelEnabled = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   listRuns,
   recordDeployPromotion,
   resolveProjectScope,
+  readVercelEnabled,
 }));
 
 const readVercelLink = vi.hoisted(() => vi.fn());
@@ -126,6 +130,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   process.env.SESSION_SECRET = SESSION_SECRET;
   process.env.CLAWBOX_MCP_TOKEN = MCP_TOKEN;
+  readVercelEnabled.mockResolvedValue(true);
   resolveProjectScope.mockResolvedValue("shop");
   readVercelLink.mockResolvedValue(LINK);
   setVercelLink.mockResolvedValue(LINK);
@@ -346,5 +351,53 @@ describe("promoting to production", () => {
     expect(res.status).toBe(502);
     expect((await res.json()).code).toBe("auth");
     expect(recordDeployPromotion).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The box-wide switch (`coding_vercel_enabled`). Off is not a permission
+ * problem and must not read like one: the caller IS the owner, on their own
+ * page, and the box is in a state they can change.
+ */
+describe("the box-wide Vercel switch", () => {
+  beforeEach(() => readVercelEnabled.mockResolvedValue(false));
+
+  it("refuses every verb with 409 vercel_disabled, and touches no store", async () => {
+    for (const [name, call] of [
+      ["GET", () => route.GET(request({ cookie: ownerCookie() }))],
+      ["POST", () => route.POST(request({ method: "POST", cookie: ownerCookie(), body: { vercelProjectId: "prj_acme", tokenSecretName: "VERCEL_TOKEN" } }))],
+      ["DELETE", () => route.DELETE(request({ method: "DELETE", cookie: ownerCookie() }))],
+    ] as const) {
+      const res = await call();
+      expect(res.status, name).toBe(409);
+      const body = await res.json();
+      expect(body.code, name).toBe("vercel_disabled");
+      expect(body.kind, name).toBe("vercel_disabled");
+      // The sentence names where to turn it on. A refusal a person cannot act
+      // on is the one this switch must not produce.
+      expect(body.error, name).toMatch(/Coding Agent app/);
+    }
+    expect(readVercelLink).not.toHaveBeenCalled();
+    expect(setVercelLink).not.toHaveBeenCalled();
+    expect(deleteVercelLink).not.toHaveBeenCalled();
+  });
+
+  it("refuses a promotion — the one act here that changes what the world sees", async () => {
+    const res = await promote.POST(request({
+      method: "POST",
+      cookie: ownerCookie(),
+      path: "/setup-api/coding-agent/vercel/promote",
+      body: { runId: RUN.id, deploymentId: "dpl_1", confirm: true },
+    }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("vercel_disabled");
+    expect(promoteDeployment).not.toHaveBeenCalled();
+    expect(recordDeployPromotion).not.toHaveBeenCalled();
+  });
+
+  it("still answers 403 to the MCP bearer, not 409 — the switch is not the agent's business", async () => {
+    const res = await route.GET(request({ bearer: MCP_TOKEN }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
   });
 });

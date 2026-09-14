@@ -473,6 +473,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.realBrowserLabel": "Verify in this box's browser",
   "codingAgent.realBrowserHint": "A run checks its work in the Chromium window on this box's screen — the one the Browser app shows — so you can watch the pages it opens. Switched off, it uses an invisible browser instead and nothing appears on the screen. Either way, a run that cannot reach the screen's browser falls back to the invisible one by itself.",
   "codingAgent.realBrowserFailed": "Could not change the browser setting.",
+  "codingAgent.vercelEnabledLabel": "Vercel integration",
+  "codingAgent.vercelEnabledHint": "Let this box deploy your projects to Vercel. With it on, a project's page gets a card for attaching a Vercel project and buttons to deploy a preview or production, and the assistant can deploy for you. Off, none of that is on the box at all. Off unless you turn it on — or unless you had already attached a Vercel project, which turns it on for you.",
+  "codingAgent.vercelEnabledFailed": "Could not change the Vercel setting.",
 
   // A run that finished on its own keeps whatever it started — the way an app
   // that serves itself on a port is meant to work — so the page says so and

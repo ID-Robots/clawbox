@@ -63,6 +63,33 @@ describe("the order the owner asked for", () => {
     expect(isPipelineLive(p)).toBe(false);
   });
 
+  it("settles when a SKIPPED stage is the last one, not just a passed one", () => {
+    // The whole tail can be skipped — that is what the box-wide Vercel switch
+    // does. `complete` runs nothing and answers no outcome, so a skip that
+    // merely ENTERED it would leave the pipeline `running` with a settled run
+    // and nothing left to move it.
+    const p = made();
+    pass(p, "build");
+    pass(p, "review");
+    const skip = (stage: PipelineStage) => {
+      const t = decidePipeline(p, stage, { kind: "skipped", detail: "vercel_disabled: the integration is off." });
+      if (t.action === "enter") enterStage(p, t.stage);
+      return t;
+    };
+    expect(skip("deploy_preview")).toEqual({ action: "enter", stage: "verify_preview" });
+    expect(skip("verify_preview")).toEqual({ action: "enter", stage: "deploy_production" });
+    expect(skip("deploy_production")).toEqual({ action: "enter", stage: "verify_production" });
+    expect(skip("verify_production")).toEqual({ action: "settled", status: "complete" });
+    expect(p.status).toBe("complete");
+    expect(stepFor(p, "complete").state).toBe("passed");
+    expect(p.endedAt).not.toBeNull();
+    // The skipped stages say so, and say why.
+    for (const stage of ["deploy_preview", "verify_preview", "deploy_production", "verify_production"] as const) {
+      expect(stepFor(p, stage).state, stage).toBe("skipped");
+      expect(stepFor(p, stage).detail, stage).toContain("vercel_disabled");
+    }
+  });
+
   it("stops at a verified preview when production was switched off", () => {
     const p = made({ production: false });
     pass(p, "build");

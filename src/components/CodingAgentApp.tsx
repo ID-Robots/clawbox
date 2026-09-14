@@ -585,6 +585,24 @@ export default function CodingAgentApp() {
   // chat, which that page does not mount, so a message dispatched from it
   // would reach nothing while the card said "handed to the assistant".
   const [standalone] = useState(onStandaloneAppPage);
+  /**
+   * Is the Vercel integration part of this box at all?
+   *
+   * The box-wide switch (`vercelEnabled`, Settings in this app), read off the
+   * same status poll as everything else here. OFF when the field is absent —
+   * `?? false`, not `?? true` — because a server that predates the switch is
+   * handled on the DEVICE: it migrates a box that already has a Vercel link to
+   * `true` before answering, so the only box that lands here with no field is
+   * one running an older build, and drawing Deploy buttons against routes we
+   * cannot ask about is the guess worth not making.
+   *
+   * Every Vercel surface in this file hangs off it: the project page's link
+   * card, a run's deployment card, the compact Deploy buttons on a run, and
+   * the delivery pipeline's strip — which goes too, rather than showing four
+   * greyed-out deploy stages, since the pipeline IS the delivery flow and a
+   * strip advertising it is exactly what the owner switched off.
+   */
+  const vercelOn = status?.vercelEnabled ?? false;
   const [projects, setProjects] = useState<Project[]>([]);
   /** The project folder the list was read from; null until one is set. */
   const [projectsDir, setProjectsDir] = useState<string | null>(null);
@@ -2582,7 +2600,7 @@ export default function CodingAgentApp() {
                   buttons are left off — it has no project context and a
                   production deploy is not something to offer from a page
                   opened in a tab with nothing else on it. */}
-              {run.pipeline && (
+              {run.pipeline && vercelOn && (
                 <CodingRunPipelineCard
                   runId={run.id}
                   pipeline={run.pipeline}
@@ -2592,7 +2610,7 @@ export default function CodingAgentApp() {
                   onStopPipeline={standalone ? undefined : () => steerPipeline(run.id, "stop")}
                 />
               )}
-              {run.vercel && (
+              {run.vercel && vercelOn && (
                 <CodingRunVercelCard
                   runId={run.id}
                   vercel={run.vercel}
@@ -2606,7 +2624,7 @@ export default function CodingAgentApp() {
                   folder nobody deploys is unchanged; the owner's own page is
                   where the link and the settings live. Not on the standalone
                   page, which has no project context to send the deploy to. */}
-              {!standalone && (
+              {!standalone && vercelOn && (
                 <VercelDeployPanel
                   key={`deploy-${run.id}`}
                   query={run.projectId
@@ -3070,7 +3088,7 @@ export default function CodingAgentApp() {
                   first of them is neither matched nor deleted, so switching
                   projects from the sidebar left its node on the page and
                   mounted a second card beside it. */}
-              <VercelProjectCard key={`vercel-${projectQuery}`} query={projectQuery} t={t} />
+              {vercelOn && <VercelProjectCard key={`vercel-${projectQuery}`} query={projectQuery} t={t} />}
               {/* Four tabs, each with the whole width: the folder, what changed,
                   the runs, the team. The runs sat in a 22rem rail before and
                   their rows wrapped three deep. */}
