@@ -380,6 +380,22 @@ ensure_playwright_chromium() {
   echo "  Playwright Chromium runtime ready"
 }
 
+# Same rule as install.sh (owner's decision, 2026-09-14): nothing here is cut
+# short for being slow. "Proceeding anyway" after 5 minutes was worse than
+# waiting — the apt call that followed hit the lock it had just given up on and
+# failed the step outright. A line every 30 s says what is being waited for.
+WAIT_NOTE_EVERY_S=30
+WAIT_NOTE_LAST=""
+wait_note() {
+  local elapsed="$1" key
+  [ "$elapsed" -gt 0 ] 2>/dev/null || return 0
+  key="$2|$(( elapsed / WAIT_NOTE_EVERY_S ))"
+  case "$key" in *"|0") return 0 ;; esac
+  [ "$key" != "$WAIT_NOTE_LAST" ] || return 0
+  WAIT_NOTE_LAST="$key"
+  echo "  Still waiting for $2 (${elapsed}s so far)..."
+}
+
 wait_for_apt() {
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
@@ -388,10 +404,7 @@ wait_for_apt() {
     fi
     sleep 5
     waited=$((waited + 5))
-    if [ $waited -ge 300 ]; then
-      echo "  Warning: apt lock held for 5+ minutes, proceeding anyway"
-      break
-    fi
+    wait_note "$waited" "the apt lock (another updater still holds it)"
   done
 }
 
@@ -1126,8 +1139,10 @@ ensure_codex_cli() {
 
   url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
   installer="$(mktemp || true)"
+  # `--connect-timeout` with `--retry` bounds a black hole; no `--max-time`,
+  # which would answer "could not download" for a link that is merely slow.
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
-      --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
+      --connect-timeout 15 --retry 3 --retry-connrefused "$url" -o "$installer" 2>/dev/null \
     || [ ! -s "$installer" ]; then
     echo "  WARN: could not download OpenAI's Codex installer from $url" >&2
     rm -f "$installer"
@@ -1153,10 +1168,11 @@ ensure_codex_cli() {
 
   # CODEX_NON_INTERACTIVE=true is what declines the installer's own offer to
   # remove the npm copy (its prompt opens /dev/tty, so </dev/null alone would
-  # not) — the removal is ours, after the verification. `timeout` bounds the
-  # ~117 MB package fetch, which the vendor leaves unbounded on its GitHub
-  # fallback path.
-  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' timeout -k 30 1800 sh '$installer'" </dev/null; then
+  # not) — the removal is ours, after the verification. The ~117 MB package
+  # fetch is deliberately NOT time-boxed: it is a long download on a slow link,
+  # not a stalled one, and a killed install leaves the vendor's staging
+  # directory for the next run to trip over.
+  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
     echo "  WARN: OpenAI's Codex installer ran but failed" >&2
     rm -f "$installer"
     return 1
@@ -1433,9 +1449,16 @@ EOF
   echo "  Persistent x64 services installed"
 }
 
+# Waits for a unit to answer on its own port. No attempt cap: 60 tries was a
+# guess at how long a gateway takes to come up, and a box that needed 70 had its
+# install failed over a service that was working a moment later. The wait ends on
+# a FACT instead — the unit is no longer active or activating, so nothing will
+# arrive by waiting. `--max-time` on the probe itself stays: it is a loopback
+# liveness check inside a retry loop, and without it a socket that accepts and
+# never answers hangs the loop for ever.
 wait_for_http() {
-  local url="$1" label="$2" log_unit="$3" attempt
-  for attempt in $(seq 1 60); do
+  local url="$1" label="$2" log_unit="$3" waited=0
+  while :; do
     if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
       local ready_pid
       ready_pid=$(systemctl show "$log_unit" -p MainPID --value)
@@ -1451,9 +1474,15 @@ wait_for_http() {
       fi
       echo "  $label opened its port but restarted; continuing readiness checks..."
     fi
+    case "$(systemctl is-active "$log_unit" 2>/dev/null || true)" in
+      active|activating|reloading|deactivating) ;;
+      *) break ;;
+    esac
     sleep 1
+    waited=$((waited + 1))
+    wait_note "$waited" "$label to answer at $url"
   done
-  echo "Error: $label did not become ready at $url" >&2
+  echo "Error: $label did not become ready at $url ($log_unit stopped trying)" >&2
   systemctl status "$log_unit" --no-pager -n 30 >&2 || true
   journalctl -u "$log_unit" --no-pager -n 50 >&2 || true
   return 1

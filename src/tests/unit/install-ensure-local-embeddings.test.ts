@@ -453,9 +453,21 @@ describe("ensure_local_embeddings never fails the update", () => {
     expect(r.out).toContain("RC=1");
   });
 
-  it("bounds the helper so it cannot hold a quiesced gateway open for ever", () => {
-    // post_update carries a 900s budget and stops the gateway while it runs.
-    expect(shellCode(extractShellFunction("ensure_local_embeddings"))).toMatch(/timeout -k \d+ \d+/);
+  it("puts no clock on the helper — it bounds itself", () => {
+    // It used to be wrapped in `timeout -k 10 600`, to keep it from holding a
+    // quiesced gateway open. The cure cost more than the disease: the helper
+    // downloads a 639 MB GGUF and then runs `memory index --force`, and killed
+    // at 600 s it left a partial model and a half-built index for the next run
+    // to redo from the start. Owner's rule, 2026-09-14 — nothing in the
+    // installer kills work for being slow.
+    //
+    // What ends it instead is its own design: a wall-clock wait for the proxy
+    // (scripts/ensure-local-embeddings.sh, EMBED_PROXY_WAIT_SECONDS) after which
+    // it exits 0 and leaves the work to the next gateway start, plus the `||
+    // true` here, which is what keeps its outcome out of this step's verdict.
+    const body = shellCode(extractShellFunction("ensure_local_embeddings"));
+    expect(body).not.toMatch(/\btimeout\b/);
+    expect(body).toMatch(/as_clawbox_login "\$helper" \|\| true/);
   });
 
   it("puts no verdict on a core that never answers", () => {

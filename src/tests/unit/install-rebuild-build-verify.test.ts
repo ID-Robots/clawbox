@@ -307,6 +307,10 @@ function run(scenario: Scenario = {}): Run {
     'DISK_HEADROOM=' + JSON.stringify(diskHeadroom),
     "",
     "is_test_mode() { return 1; }",
+    // wait_note's bucket state, a top-level assignment in install.sh: under
+    // `set -u` an unset one ends the slice on the first heartbeat check.
+    'WAIT_NOTE_EVERY_S=30',
+    'WAIT_NOTE_LAST=""',
     "# The readiness poll waits a real second per attempt. The LOOP is the",
     "# subject, not the wall clock, so the wait is a no-op here and all twenty",
     "# attempts run instantly.",
@@ -385,6 +389,13 @@ function run(scenario: Scenario = {}): Run {
     'forget_paused_engines() { echo "FORGOT"; }',
     "",
     shellFunctions(
+      // The non-time exit restore_previous_build's poll asks before its own
+      // window: has clawbox-setup stopped trying? Sliced out of install.sh like
+      // everything else, so a rename fails loudly here instead of silently
+      // turning the poll into a 127 inside the rollback path.
+      "unit_is_coming_up",
+      // The heartbeat that makes a long wait readable rather than a hang.
+      "wait_note",
       "build_entry_present",
       "verify_build_present",
       // The drain promote_parked_build calls before it decides anything

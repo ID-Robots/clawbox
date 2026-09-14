@@ -1,0 +1,205 @@
+import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Owner's decision, 2026-09-14: "remove all limits for time from install.sh".
+ *
+ * The rule this file pins is not "no number anywhere" — it is that NOTHING in
+ * the installers aborts, skips or downgrades work because a box was SLOW. Every
+ * budget that used to do so was a guess about hardware and links the script
+ * cannot see (a 900 s apt lock, a 300 s npm, a 600 s download, a 1800 s vendor
+ * installer), and on a Jetson with a tired SD card and a rural uplink each of
+ * them turned a long install into a FAILED one. A failed install is not cheaper
+ * than a slow one; it is a box somebody has to drive out to.
+ *
+ * Two mechanically checkable halves:
+ *
+ *  1. `timeout N …` — the command that KILLS work — appears nowhere.
+ *  2. `--max-time` — curl's cap on a whole TRANSFER, i.e. on a slow download —
+ *     appears only on a LOOPBACK LIVENESS PROBE inside a retry loop, where it is
+ *     what makes the probe a probe: a socket that accepts and never answers
+ *     would otherwise hang the loop for ever. `--connect-timeout` is not in
+ *     scope: it bounds a dead TCP handshake, never a slow transfer, and it is
+ *     paired with `--retry` at every site that carries it.
+ *
+ * The three wall-clock windows the installer keeps are deliberate, named in
+ * their own comments, and none of them bounds work: the gateway-listener wait
+ * (the switch between waiting and running the repair — systemd reports "coming
+ * up" and "up but never listening" identically, so no fact can replace it), the
+ * look for a restarted Hermes dashboard's new main pid (the restart has already
+ * happened by then; both outcomes are a warning), and step_validate_services'
+ * settle window before it writes its report (a report is the one thing that
+ * cannot be deferred for ever).
+ */
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const FILES = ["install.sh", "install-x64.sh", "scripts/install-voice.sh"] as const;
+
+function linesOf(file: string): { n: number; text: string }[] {
+  return readFileSync(path.join(REPO, file), "utf-8")
+    .split(String.fromCharCode(10))
+    .map((text, i) => ({ n: i + 1, text }))
+    // Comments explain the rule; they are not the rule.
+    .filter(({ text }) => !/^\s*#/.test(text));
+}
+
+describe("the installers kill no work on a clock", () => {
+  for (const file of FILES) {
+    it(`${file} invokes \`timeout\` nowhere`, () => {
+      // `timeout` as a COMMAND: at the start of a line, after a pipe/&&/;, or at
+      // the start of a quoted command string handed to su/runuser/
+      // as_clawbox_login — with any of its own flags (`-k 30`) in between. The
+      // character class deliberately excludes `-`, which is what keeps
+      // `--connect-timeout 15` (an option of curl, and not a killer) out.
+      const COMMAND_TIMEOUT = /(^|[|&;("']|\s)timeout\s+(-[a-zA-Z]\s+\S+\s+)*[0-9]/;
+      const hits = linesOf(file).filter(({ text }) => COMMAND_TIMEOUT.test(text));
+      expect(
+        hits.map(({ n, text }) => `${file}:${n}: ${text.trim()}`),
+        "a `timeout N` kills work for being slow — see the header of this file",
+      ).toEqual([]);
+    });
+
+    it(`${file} caps a curl transfer only on a liveness probe`, () => {
+      const hits = linesOf(file).filter(({ text }) => text.includes("--max-time"));
+      for (const { n, text } of hits) {
+        const seconds = Number(/--max-time\s+([0-9]+)/.exec(text)?.[1] ?? NaN);
+        // A liveness probe asks "does this answer at all" and throws the body
+        // away. A cap that can kill a real download is a large one against a
+        // curl that is KEEPING what it fetches; neither is allowed.
+        expect(
+          seconds <= 5,
+          `${file}:${n} caps a transfer with a download-sized budget: ${text.trim()}`,
+        ).toBe(true);
+        expect(
+          /-o\s+\/dev\/null|>\s*\/dev\/null/.test(text),
+          `${file}:${n} caps a curl that keeps what it fetches: ${text.trim()}`,
+        ).toBe(true);
+      }
+    });
+  }
+
+  it("install.sh waits for the apt lock rather than giving up on it", () => {
+    const sh = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+    const start = sh.indexOf("wait_for_apt() {");
+    expect(start).toBeGreaterThan(-1);
+    const body = sh.slice(start, sh.indexOf(`${String.fromCharCode(10)}}`, start));
+    expect(body).not.toMatch(/max_wait/);
+    // The heartbeat is what makes an unbounded wait readable rather than a hang.
+    expect(body).toContain("wait_note");
+  });
+
+  it("every download the installers run is retried rather than time-boxed", () => {
+    // A `--connect-timeout` with no `--retry` beside it is a cap that can still
+    // answer "unreachable" for a link that merely blinked.
+    for (const file of FILES) {
+      for (const { n, text } of linesOf(file)) {
+        if (!text.includes("--connect-timeout")) continue;
+        expect(
+          text.includes("--retry"),
+          `${file}:${n} bounds a connect without retrying it: ${text.trim()}`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+/**
+ * CUDA and JetPack are laid down ONCE — by the factory image, or by the first
+ * `install.sh` run on a bare board. "Update everything" must not re-run them:
+ * on a healthy box that was minutes of Jetson apt for a no-op, and on a box
+ * whose mirror had moved it could pull a JetPack change nobody asked for into an
+ * update the owner started for ClawBox itself. (Owner's decision, 2026-09-14.)
+ *
+ * The behavioural assertion — the step list the updater actually builds, on
+ * every edition — lives in updater.test.ts. This one guards the two halves that
+ * make the repair path still reachable, and would otherwise be quietly deleted
+ * along with the update step.
+ */
+describe("JetPack is installed once, and stays repairable by hand", () => {
+  const SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+
+  it("is off the automatic update path", () => {
+    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
+    const start = updater.indexOf("const UPDATE_STEPS: UpdateStepDef[] = [");
+    expect(start).toBeGreaterThan(-1);
+    const list = updater.slice(start, updater.indexOf(`${String.fromCharCode(10)}];`, start));
+    expect(list).not.toMatch(/id:\s*"nvidia_jetpack"/);
+  });
+
+  it("is still dispatchable, and still runs on a first install", () => {
+    expect(SH).toContain("step_nvidia_jetpack()");
+    // `--step nvidia_jetpack`, and the main flow's own call.
+    expect(SH).toMatch(/DISPATCH_STEPS=\([\s\S]*?nvidia_jetpack/);
+    expect(SH).toMatch(/^step_nvidia_jetpack$/m);
+  });
+
+  it("does not build llama.cpp's CUDA toolchain outside its own step", () => {
+    // The ~19-minute native cmake build. It has never been on the update path
+    // and must not drift onto it: only step_llamacpp_install may run it.
+    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
+    const start = updater.indexOf("const UPDATE_STEPS: UpdateStepDef[] = [");
+    const list = updater.slice(start, updater.indexOf(`${String.fromCharCode(10)}];`, start));
+    expect(list).not.toMatch(/id:\s*"llamacpp_install"/);
+  });
+});
+
+/**
+ * The four models a ClawBox installs, and no others (owner's decision,
+ * 2026-09-14). Anything else a box runs locally is the owner's own explicit
+ * pull from the UI — install.sh does not choose it for them.
+ */
+describe("install.sh downloads only the four blessed local models", () => {
+  const BLESSED = [
+    // Gemma 4 E2B (the offline chat model, llama.cpp)
+    "google/gemma-4-E2B-it-qat-q4_0-gguf",
+    // Qwen3-Embedding-0.6B (memory search)
+    "Qwen/Qwen3-Embedding-0.6B-GGUF",
+  ];
+
+  it("fetches exactly the two GGUFs from Hugging Face, by their pinned repos", () => {
+    const sh = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+    for (const repo of BLESSED) expect(sh).toContain(repo);
+    // Every `hf download` in the file is one of those two: both read their repo
+    // and file from $HF_REPO/$HF_FILE, which the two functions above set from
+    // the pinned defaults.
+    const downloads = sh
+      .split(String.fromCharCode(10))
+      .filter((l) => !/^\s*#/.test(l) && /\bhf download\b/.test(l));
+    expect(downloads).toHaveLength(2);
+    for (const line of downloads) {
+      // Both read the repo and the file from the pinned defaults above; a third
+      // download, or one with a literal repo spliced in, fails here.
+      expect(line).toMatch(/hf download \\?"\$HF_REPO\\?" \\?"\$HF_FILE\\?"/);
+    }
+  });
+
+  it("pulls no Ollama model — the daemon only, the models are the owner's pick", () => {
+    for (const file of ["install.sh", "install-x64.sh", "scripts/install-voice.sh"]) {
+      const lines = linesOf(file).filter(({ text }) => /\bollama\s+(pull|run)\b/.test(text));
+      expect(
+        lines.map(({ n, text }) => `${file}:${n}: ${text.trim()}`),
+        "install must not choose a local chat model for the owner",
+      ).toEqual([]);
+    }
+  });
+
+  it("pre-fetches exactly the two voice models, Kokoro and faster-whisper base", () => {
+    const voice = readFileSync(path.join(REPO, "scripts/install-voice.sh"), "utf-8");
+    expect(voice).toContain("kokoro_predownload_model");
+    expect(voice).toContain("whisper_predownload_model");
+    // `base`, not a larger Whisper: the runtime default in whisper-server.py.
+    expect(voice).toMatch(/WhisperModel\("base"/);
+    const whisperServer = readFileSync(path.join(REPO, "scripts/whisper-server.py"), "utf-8");
+    expect(whisperServer).toMatch(/MODEL_SIZE = os\.environ\.get\("WHISPER_MODEL", "base"\)/);
+  });
+
+  it("re-downloads neither of them on a box that already has them", () => {
+    const voice = readFileSync(path.join(REPO, "scripts/install-voice.sh"), "utf-8");
+    // The CUDA torch wheel and the Whisper weights are asked about directly,
+    // not inferred from a stamp under .cache that a factory reset removes.
+    expect(voice).toContain("cuda_torch_present()");
+    expect(voice).toContain("whisper_model_cached()");
+    expect(voice).toMatch(/install_cuda_torch\(\) \{\s*\n\s*if cuda_torch_present; then/);
+  });
+});

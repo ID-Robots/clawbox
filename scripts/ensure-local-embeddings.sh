@@ -62,6 +62,15 @@ EMBED_RETRY_SECONDS="${EMBED_RETRY_SECONDS:-21600}"
 # The gateway and the web server start in parallel at boot; the proxy may not
 # be listening yet when this runs. How long to keep asking before giving up
 # for this run (the next gateway start asks again).
+#
+# install.sh has had every one of its deadlines removed (owner's decision,
+# 2026-09-14) and this one deliberately stays, because it is not the same kind
+# of thing. This script runs DETACHED from every gateway start and holds an
+# exclusive flock for its whole life: waiting for ever here does not make a slow
+# box succeed, it keeps every later gateway start out of the lock permanently.
+# Nothing is lost by giving up — the download is already on disk, the next
+# gateway start asks again, and install.sh's own call is one of many. That is a
+# retry schedule, not a box failed for being slow.
 EMBED_PROXY_WAIT_SECONDS="${EMBED_PROXY_WAIT_SECONDS:-120}"
 
 # Where OpenClaw reaches the embedder: the proxy's mount, the same derivation
