@@ -4,10 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardFolders from "./MemoryShardFolders";
+import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
 import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { type ProvisionPhase, TIME_OF_DAY } from "@/lib/memory-shard-state";
+import { useClawboxLogin } from "@/lib/use-clawbox-login";
 
 /**
  * Memory Shard's first-run wizard: what it is, which folders to read, when to
@@ -27,9 +29,34 @@ interface PullLine { status?: string; success?: boolean; error?: string }
 
 export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const { t } = useT();
-  const [step, setStep] = useState<Step>("intro");
-  const [busy, setBusy] = useState<string | null>(null);
+  // The paid-plan gate (owner's decision, 2026-09-14). Same shape and same
+  // reason as the coding agent's wizard: polled, so an owner who subscribes in
+  // another tab is let through without reopening the window, and mirrored
+  // server-side by /setup-api/clawkeep/memory/enable.
+  const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
+  const gated = paidGateFace(clawboxLogin) !== "satisfied";
+  const [chosenStep, setStep] = useState<Step>("intro");
+  const [startedBusy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * The gate governs the WHOLE flow, not just the front door.
+   *
+   * The plan poll goes on running behind every step, and a subscription that
+   * lapses — or a credential that is withdrawn — while the owner is two steps
+   * in must not leave the provisioning button live: `clawkeep/memory/enable`
+   * would answer 402 at the very end, after the model download had been paid
+   * for. While the gate is shut the only step there is, is the intro, which is
+   * where the gate itself is drawn and says why.
+   *
+   * DERIVED, not corrected in an effect — see the same three lines in
+   * CodingAgentSetupWizard for the whole of the reasoning. The owner's chosen
+   * step is KEPT, so a plan restored in another tab puts them back where they
+   * were, with nothing left half-running: the request is aborted below and the
+   * phase reads idle, so the button they land on is one they can press.
+   */
+  const step: Step = gated ? "intro" : chosenStep;
+  const busy = gated ? null : startedBusy;
 
   // ─── Step 2: the folders to read — MemoryShardFolders, shared with the
   // settings page so the two cannot drift. Next waits while it writes, so the
@@ -42,6 +69,21 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   // the UI showing it, and a fetch left running here would defeat that.
   const provisionAbort = useRef<AbortController | null>(null);
   useEffect(() => () => provisionAbort.current?.abort(), []);
+
+  /**
+   * A provision still in flight when the plan goes away is stopped.
+   *
+   * This one IS an effect, because aborting a request is a side effect on an
+   * external system rather than a correction of React's own state — and it
+   * sets none: the step and the phase the owner then sees are derived, and
+   * what the stopped run leaves behind is cleared by that run's own cleanup
+   * (see `provision`'s `finally`), which is the only place that knows whether
+   * the controller it is holding is still the current one.
+   */
+  useEffect(() => {
+    if (!gated) return;
+    provisionAbort.current?.abort();
+  }, [gated]);
 
   // ─── Step 3: when it runs ───
   const [frequency, setFrequency] = useState<"daily" | "weekly">("daily");
@@ -70,9 +112,16 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   };
 
   // ─── Step 4: the model, then the first index ───
-  const [phase, setPhase] = useState<ProvisionPhase>("idle");
+  const [reachedPhase, setPhase] = useState<ProvisionPhase>("idle");
   const [progress, setProgress] = useState<number | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
+  /**
+   * Derived like the step above, and for the one tick the derivation alone
+   * covers: `abort()` is synchronous but the aborted request's cleanup is a
+   * microtask later, so without this the gated intro would paint once with
+   * the phase the run had reached. The lasting reset is that cleanup's.
+   */
+  const phase: ProvisionPhase = gated ? "idle" : reachedPhase;
 
   /**
    * Fetch the embedding model if it is missing, point the index at the
@@ -87,6 +136,11 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
    * a search reached it directly and never woke it.
    */
   const provision = async () => {
+    // Re-read at the moment of the act, not only at the render that drew the
+    // button. The derived step already puts the intro on screen, so there is
+    // nothing to set here — this only catches a click whose handler was
+    // already in flight when the gate closed under it.
+    if (gated) return;
     provisionAbort.current?.abort();
     const ctl = new AbortController();
     provisionAbort.current = ctl;
@@ -204,7 +258,21 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
       setPhase("failed");
       setError(err instanceof Error ? err.message : t("clawkeep.memory.setup.provisionFailed"));
     } finally {
-      if (!signal.aborted) setBusy(null);
+      // Controller IDENTITY, not `signal.aborted`: a second provision installs
+      // its own controller before this one's cleanup runs, and a superseded
+      // run must never clear the new run's busy state.
+      //
+      // While this IS still the current controller the run is over however it
+      // ended, so an ABORTED one has to leave the wizard idle rather than
+      // frozen mid-phase. The gate can reopen — an owner who subscribes in the
+      // other tab — and `startedBusy`/`reachedPhase` preserved from a run that
+      // was stopped would put them back on a dead button with a progress line
+      // behind it and nothing running.
+      if (provisionAbort.current === ctl) {
+        provisionAbort.current = null;
+        setBusy(null);
+        if (signal.aborted) setPhase("idle");
+      }
     }
   };
 
@@ -241,11 +309,23 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             <p className="mt-2.5 text-xs leading-[1.7] text-[var(--text-secondary)]">
               {t("clawkeep.memory.setup.introBody")}
             </p>
+            {/* See CodingAgentSetupWizard for the whole of the reasoning: the
+                gate takes the place the first step would have led to, and the
+                button stays on screen, disabled, so the card underneath is
+                the answer to "why can I not start this". */}
+            {gated && (
+              <div className="mt-6">
+                <PaidFeatureGate feature="memory_shard" login={clawboxLogin} />
+              </div>
+            )}
             <button
               type="button"
               onClick={() => setStep("folders")}
               data-testid="memory-shard-enable"
-              className={`${BTN_PRIMARY} mt-7`}
+              disabled={gated}
+              aria-disabled={gated}
+              title={gated ? t("paidGate.buttonBlocked") : undefined}
+              className={`${BTN_PRIMARY} mt-7 disabled:opacity-50 disabled:cursor-default`}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">rocket_launch</span>
               {t("clawkeep.memory.setup.enable")}

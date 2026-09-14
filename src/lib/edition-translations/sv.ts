@@ -1273,4 +1273,19 @@ export const sv: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Att ta bort en projektmapp kräver en inloggad webbläsarsession.",
   "codingAgent.delete.refusal.crossOrigin": "En projektmapp kan bara tas bort från den här ClawBoxens egna sidor.",
   "codingAgent.delete.refusal.trashFailed": "Den här ClawBoxen kunde inte flytta undan mappen, så ingenting togs bort.",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "Kodagent",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "Kodagenten tar hand om en hel uppgift på den här ClawBoxen — den skriver filerna, kör testerna och rapporterar tillbaka. Tillgängligt med planerna Pro och Max.",
+  "paidGate.memoryShardDescription": "Memory Shard indexerar de mappar du väljer så att assistenten kan söka i dina egna dokument. Tillgängligt med planerna Pro och Max.",
+  "paidGate.signInTitle": "Anslut ditt ClawBox-konto",
+  "paidGate.signInBody": "{feature} kräver en ClawBox-plan Pro eller Max. Anslut den här ClawBoxen till ditt konto och slå sedan på funktionen.",
+  "paidGate.signInButton": "Anslut ClawBox AI",
+  "paidGate.signInCancel": "Avbryt",
+  "paidGate.signInStarting": "Begär en kod…",
+  "paidGate.buttonBlocked": "Kräver en ClawBox-plan Pro eller Max",
+  "paidGate.requiresPlan": "Kräver planen Pro eller Max",
+  "paidGate.upgradeLink": "Uppgradera",
+  "paidGate.loading": "Kontrollerar din plan…",
 };

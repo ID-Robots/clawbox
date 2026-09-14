@@ -12,6 +12,8 @@ import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import HelpTip from "./HelpTip";
+import { PaidPlanNotice } from "./PaidFeatureGate";
+import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
 import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
 /**
@@ -110,6 +112,10 @@ export interface AgentStatus {
    *  wizard pre-fills it, and saving it creates it. */
   suggestedDirectory?: string;
   enabled: boolean;
+  /** Does this box's ClawBox AI plan cover the coding agent, and which plan is
+   *  on record? Optional: a server that predates the gate answers with none,
+   *  and nothing is then drawn rather than a warning being invented. */
+  planGate?: PlanGate;
   ready: boolean;
   readiness: Readiness;
   running: number;
@@ -589,11 +595,21 @@ export default function CodingAgentSettingsPanel({
               </label>
             </div>
             <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">{t("settings.codingAgentHint")}</p>
+            {/* The plan the box is on does not cover this. Said here, beside
+                the switch, rather than left for the owner to discover as a
+                402 when they press it. An already-enabled box is never
+                auto-disabled, so this line can perfectly well sit over a
+                switch that is on — which is exactly the state worth naming. */}
+            <PaidPlanNotice gate={status?.planGate} />
           </div>
           <Switch
             checked={status?.enabled ?? false}
             busy={busy === "switch"}
-            disabled={!status || saving}
+            // A switch that posts a request the box will answer 402 is not a
+            // switch. Only the OFF-to-ON move is held: an already-enabled box
+            // whose plan lapsed must still be switchable off, which is the
+            // whole shape of this gate.
+            disabled={!status || saving || enableBlockedBy(status?.planGate, status?.enabled ?? false)}
             label={t("codingAgent.switchLabel")}
             onChange={(next) => void toggle(next)}
           />

@@ -26,6 +26,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory-shard";
+import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
+import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
@@ -117,6 +119,16 @@ export interface ClawKeepMemoryStatus {
   /** False until the owner finishes the setup wizard. The app shows the wizard
    *  instead of the index card while it is. */
   setupComplete: boolean;
+  /**
+   * Does this box's ClawBox AI plan pay for Memory Shard, and which plan is on
+   * record? Owner's decision, 2026-09-14: Pro or Max.
+   *
+   * REPORTED here, enforced by `clawkeep/memory/enable`. A box already
+   * indexing when its subscription lapsed is never auto-disabled; this is what
+   * lets a panel say what is missing instead of leaving the owner to find out
+   * at the button.
+   */
+  planGate: PlanGate;
   sourceCount: number;
   files: number;
   chunks: number;
@@ -625,9 +637,12 @@ export async function parseMemoryStatus(
     indexIdentity,
     fingerprint,
     // Filled in by getMemoryStatus, which is the only caller with an await to
-    // spend on the config store; the parser itself stays synchronous.
+    // spend on the config store; the parser itself stays synchronous. The gate
+    // is placed here for the same reason, and with the same floor: a value
+    // nothing has read yet must not be a PASS.
     enabled: false,
     setupComplete: false,
+    planGate: planGateFor(null),
     sourceCount,
     files,
     chunks,
@@ -665,6 +680,7 @@ function unavailableStatus(
     available: false,
     enabled: false,
     setupComplete: false,
+    planGate: planGateFor(null),
     provider: "",
     model: "",
     location: "unknown",
@@ -835,16 +851,17 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   } else if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
     reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   }
-  const [live, enabled, setupComplete] = await Promise.all([
+  const [live, enabled, setupComplete, planGate] = await Promise.all([
     withLiveRunState(base),
     getMemoryShardEnabled(),
     getMemoryShardSetupComplete(),
+    readPlanGate(),
   ]);
   // A "next run" while the switch is off would name an hour at which nothing
   // happens: the scheduler arms no timer at all in that state, and this is the
   // number every surface prints. The schedule itself is left as the owner saved
   // it, so switching back on restores the hour they chose.
-  return { ...live, enabled, setupComplete, nextRunAtMs: enabled ? live.nextRunAtMs : 0 };
+  return { ...live, enabled, setupComplete, planGate, nextRunAtMs: enabled ? live.nextRunAtMs : 0 };
 }
 
 /**

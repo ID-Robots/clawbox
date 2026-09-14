@@ -7,6 +7,7 @@ import { onMemoryShardChanged } from "@/lib/ui-events";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
 import MemoryShardSettingsPanel, { type MemoryShardSettingsState } from "./MemoryShardSettingsPanel";
+import { isPlanGate } from "@/lib/paid-plan-gate";
 import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import type {
   ClawKeepMemoryStatus,
@@ -576,7 +577,7 @@ export default function MemoryShardApp() {
     try {
       const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store", signal });
       if (!res.ok) throw new Error("status");
-      const status = await res.json() as { enabled?: boolean; setupComplete?: boolean };
+      const status = await res.json() as { enabled?: boolean; setupComplete?: boolean; planGate?: unknown };
       if (signal?.aborted) return;
       if (isMemoryStatus(status)) setFirstStatus(status);
       // ONLY an explicit boolean opens the wizard.
@@ -588,7 +589,14 @@ export default function MemoryShardApp() {
       // back oddly. Leaving the state unknown keeps the index card up, and the
       // card already knows how to say it is still loading.
       if (typeof status.setupComplete !== "boolean") return;
-      setState({ enabled: status.enabled === true, setupComplete: status.setupComplete });
+      setState({
+        enabled: status.enabled === true,
+        setupComplete: status.setupComplete,
+        // The paid-plan gate, as the SERVER reads it — the settings page draws
+        // its "Requires Pro or Max" line from this. A server that predates the
+        // field sends none and the line is simply not drawn.
+        planGate: isPlanGate(status.planGate) ? status.planGate : undefined,
+      });
     } catch {
       // Same rule: an unreachable status says nothing about setup.
     } finally {

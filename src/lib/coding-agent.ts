@@ -118,6 +118,8 @@ import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
+import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
+import { CLAWAI_PLAN_TIER_KEY, clawaiEntitlementTier } from "@/lib/clawai-plan-tier";
 import {
   deriveAllowRule,
   isAllowRuleRefusal,
@@ -1760,6 +1762,16 @@ export interface CodingHarnessReadiness {
 export interface CodingAgentStatus {
   /** The owner's switch. */
   enabled: boolean;
+  /**
+   * Does this box's ClawBox AI plan pay for the coding agent, and what plan is
+   * on record? Owner's decision, 2026-09-14: Pro or Max.
+   *
+   * REPORTED, never enforced here — `enable` is what refuses, and a box that
+   * was already switched on before its subscription lapsed is left alone. This
+   * is what lets the settings page say so rather than leaving the owner to
+   * discover it at the button.
+   */
+  planGate: PlanGate;
   /** The owner's default working folder, or null when they have not set one. */
   defaultDirectory: string | null;
   /** What the device proposes when they have not chosen one: ~/Projects. */
@@ -3191,6 +3203,12 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   ]);
   return {
     enabled,
+    // Off the SAME config snapshot as everything else here — the app polls
+    // this route, and `readClawaiEntitlementTier` would open the file again
+    // for two keys we already hold. `clawaiEntitlementTier` is the one rule
+    // for reading the plan/badge pair, so this cannot disagree with the
+    // routes that refuse on it.
+    planGate: planGateFor(clawaiEntitlementTier(config[CLAWAI_PLAN_TIER_KEY], config.clawai_tier)),
     defaultDirectory,
     suggestedDirectory: suggestedDefaultDirectory(),
     ready: enabled && readiness.ready,

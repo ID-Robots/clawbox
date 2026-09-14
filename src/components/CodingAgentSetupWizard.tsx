@@ -6,9 +6,11 @@ import { notifyCodingAgentChanged, notifyCodingRunStarted } from "@/lib/ui-event
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
+import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 import { browserErrorText, runBrowserAction } from "@/lib/browser-actions";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
+import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import {
   devicePollSeconds,
   type AgentStatus,
@@ -54,9 +56,40 @@ export default function CodingAgentSetupWizard({
   onDone: (runId?: string | null) => void;
 }) {
   const { t } = useT();
-  const [step, setStep] = useState<Step>("intro");
-  const [busy, setBusy] = useState<string | null>(null);
+  // The paid-plan gate (owner's decision, 2026-09-14). Polled rather than read
+  // off `status`, so an owner who subscribes in another tab is let through
+  // without reopening the window; the server refuses the same three states in
+  // /setup-api/coding-agent/enable.
+  const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
+  const gated = paidGateFace(clawboxLogin) !== "satisfied";
+  const [chosenStep, setStep] = useState<Step>("intro");
+  const [startedBusy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * The gate governs the WHOLE wizard, not just its front door.
+   *
+   * The plan poll runs behind every step, so a subscription that lapses — or a
+   * credential withdrawn — while the owner is three steps in must not leave
+   * the finishing button live: the enable route would answer 402 at the end of
+   * a flow that had already installed Chromium and started a test run. While
+   * the gate is shut the only step there is, is the intro — which is where the
+   * gate is drawn and says why.
+   *
+   * DERIVED, not corrected in an effect. There is nothing to store: "which
+   * step is on screen" is a function of the step the owner chose and whether
+   * the plan still covers this, and an effect that wrote the answer back would
+   * be a cascading render (`react-hooks/set-state-in-effect`) for a value that
+   * was never state. It cannot fire on the poll's own first tick either way:
+   * the wizard opens on the intro, and `useClawboxLogin` preserves its last
+   * answer across a failed poll rather than reporting a downgrade.
+   *
+   * The owner's chosen step is KEPT, so a plan restored in another tab puts
+   * them back where they were rather than at the start.
+   */
+  const step: Step = gated ? "intro" : chosenStep;
+  /** Nothing is in flight from the owner's point of view while the gate is shut. */
+  const busy = gated ? null : startedBusy;
 
   // ─── GitHub (step 1) ───
   const [github, setGithub] = useState<GitHubState | null>(null);
@@ -330,6 +363,12 @@ export default function CodingAgentSetupWizard({
    * box whose harness is not ready yet is still a configured box.
    */
   const finish = async (runId: string | null = null) => {
+    // The plan is re-read at the moment of the act, not only at the render
+    // that drew the button: `setupComplete: true` is one of the two bodies the
+    // route refuses, and sending it after a subscription lapsed mid-wizard
+    // would spend a 402 on a question the box can answer itself. The derived
+    // step has already put the intro on screen, so there is nothing to set.
+    if (gated) return;
     setBusy("finish");
     setError(null);
     try {
@@ -412,11 +451,25 @@ export default function CodingAgentSetupWizard({
             <p className="mt-2.5 text-xs leading-[1.7] text-[var(--text-secondary)]">
               {t("codingAgent.wizardIntro")}
             </p>
+          {/* Nothing on the intro changes for a paid box. For every other
+              state the gate takes the place the first step would have led to:
+              a box with no ClawBox AI account gets the device-code handoff, a
+              Free one the upgrade card. The button stays on screen and
+              disabled rather than vanishing, because "why can I not start
+              this" is the question the card underneath answers. */}
+          {gated && (
+            <div className="mt-6">
+              <PaidFeatureGate feature="coding_agent" login={clawboxLogin} />
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setStep("github")}
             data-testid="coding-agent-wizard-enable"
-            className={`${PRIMARY} mt-7`}
+            disabled={gated}
+            aria-disabled={gated}
+            title={gated ? t("paidGate.buttonBlocked") : undefined}
+            className={`${PRIMARY} mt-7 disabled:opacity-50 disabled:cursor-default`}
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">rocket_launch</span>
             {t("codingAgent.wizardEnable")}

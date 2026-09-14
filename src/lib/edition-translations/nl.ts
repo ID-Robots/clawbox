@@ -1277,4 +1277,19 @@ export const nl: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Een projectmap verwijderen vraagt om een aangemelde browsersessie.",
   "codingAgent.delete.refusal.crossOrigin": "Een projectmap kan alleen vanaf de eigen pagina's van deze ClawBox worden verwijderd.",
   "codingAgent.delete.refusal.trashFailed": "Deze ClawBox kon die map niet opzijzetten, dus er is niets verwijderd.",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "Codeeragent",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "De codeeragent neemt een hele taak over op deze ClawBox: hij schrijft de bestanden, voert de tests uit en rapporteert terug. Beschikbaar met de abonnementen Pro en Max.",
+  "paidGate.memoryShardDescription": "Memory Shard indexeert de mappen die je kiest, zodat de assistent je eigen documenten kan doorzoeken. Beschikbaar met de abonnementen Pro en Max.",
+  "paidGate.signInTitle": "Verbind je ClawBox-account",
+  "paidGate.signInBody": "{feature} heeft een ClawBox-abonnement Pro of Max nodig. Verbind deze ClawBox met je account en zet de functie daarna aan.",
+  "paidGate.signInButton": "ClawBox AI verbinden",
+  "paidGate.signInCancel": "Annuleren",
+  "paidGate.signInStarting": "Code aanvragen…",
+  "paidGate.buttonBlocked": "Vereist een ClawBox-abonnement Pro of Max",
+  "paidGate.requiresPlan": "Vereist een abonnement Pro of Max",
+  "paidGate.upgradeLink": "Upgraden",
+  "paidGate.loading": "Je abonnement wordt gecontroleerd…",
 };

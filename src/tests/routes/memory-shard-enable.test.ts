@@ -80,6 +80,10 @@ beforeEach(async () => {
   scheduleWrite.fail = false;
   await fs.rm(path.join(TEST_ROOT, "data", "config.json"), { force: true });
   await fs.rm(SCHEDULE_PATH, { force: true });
+  // Memory Shard is a paid feature (owner's decision, 2026-09-14). Every test
+  // that expects the switch to move needs a plan on record; the gate's own
+  // suite is the one that takes it away again.
+  await config.set("clawai_plan_tier", "flash");
 });
 
 function post(url: string, body?: unknown): Request {
@@ -112,6 +116,66 @@ describe("POST /setup-api/clawkeep/memory/enable", () => {
     const res = await enablePOST(post("enable", { setupComplete: true }));
     expect((await res.json()).setupComplete).toBe(true);
     expect(scheduler.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("the paid-plan gate", () => {
+  // The internal names are off by one: `flash` is the plan marketed as Pro and
+  // `pro` is Max. Both are paid, and both must let the switch through.
+  for (const plan of ["flash", "pro"] as const) {
+    it(`lets the switch through on the ${plan} plan`, async () => {
+      await config.set("clawai_plan_tier", plan);
+      const res = await enablePOST(post("enable", { enabled: true }));
+      expect(res.status).toBe(200);
+      expect(await shard.getMemoryShardEnabled()).toBe(true);
+    });
+  }
+
+  // "free" is the portal's positive word for an unpaid account; an ABSENT key
+  // is a box that has never been connected. Both fail, and neither may write.
+  for (const [name, value] of [["a free account", "free"], ["no account at all", undefined]] as const) {
+    it(`refuses the switch with ${name}`, async () => {
+      if (value === undefined) await config.set("clawai_plan_tier", undefined);
+      else await config.set("clawai_plan_tier", value);
+      await config.set("clawai_tier", undefined);
+
+      const res = await enablePOST(post("enable", { enabled: true }));
+      expect(res.status).toBe(402);
+      const body = await res.json();
+      expect(body.error).toBe("paid_plan_required");
+      expect(body.code).toBe("paid_plan_required");
+      expect(body.feature).toBe("memory_shard");
+      expect(body.plan).toBeNull();
+      // Nothing was written and the scheduler was never touched.
+      expect(await shard.getMemoryShardEnabled()).toBe(false);
+      expect(scheduler.refresh).not.toHaveBeenCalled();
+    });
+  }
+
+  it("refuses the wizard's completion flag too", async () => {
+    await config.set("clawai_plan_tier", "free");
+    await config.set("clawai_tier", undefined);
+    const res = await enablePOST(post("enable", { setupComplete: true }));
+    expect(res.status).toBe(402);
+    expect(await config.get("memory_shard_setup_complete")).toBeUndefined();
+  });
+
+  // The gate is not "refuse every write": a box already indexing when the
+  // subscription lapsed keeps its index, and the owner must still be able to
+  // switch it OFF.
+  it("still lets an unpaid box switch itself off", async () => {
+    await shard.setMemoryShardEnabled(true);
+    await config.set("clawai_plan_tier", "free");
+    await config.set("clawai_tier", undefined);
+
+    const res = await enablePOST(post("enable", { enabled: false }));
+    expect(res.status).toBe(200);
+    expect(await shard.getMemoryShardEnabled()).toBe(false);
+  });
+
+  it("reports the gate beside the flags", async () => {
+    const res = await enablePOST(post("enable", { enabled: true }));
+    expect((await res.json()).planGate).toEqual({ required: true, satisfied: true, plan: "flash" });
   });
 });
 

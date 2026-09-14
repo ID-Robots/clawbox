@@ -1272,4 +1272,19 @@ export const es: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Eliminar una carpeta de proyecto requiere una sesión de navegador iniciada.",
   "codingAgent.delete.refusal.crossOrigin": "Una carpeta de proyecto solo se puede eliminar desde las páginas propias de esta ClawBox.",
   "codingAgent.delete.refusal.trashFailed": "Esta ClawBox no ha podido apartar esa carpeta, así que no se ha eliminado nada.",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "Agente de código",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "El agente de código se encarga de una tarea completa en esta ClawBox: escribe los archivos, ejecuta las pruebas y te informa. Disponible en los planes Pro y Max.",
+  "paidGate.memoryShardDescription": "Memory Shard indexa las carpetas que elijas para que el asistente pueda buscar en tus propios documentos. Disponible en los planes Pro y Max.",
+  "paidGate.signInTitle": "Conecta tu cuenta de ClawBox",
+  "paidGate.signInBody": "{feature} necesita un plan ClawBox Pro o Max. Conecta esta ClawBox a tu cuenta y después activa la función.",
+  "paidGate.signInButton": "Conectar ClawBox AI",
+  "paidGate.signInCancel": "Cancelar",
+  "paidGate.signInStarting": "Solicitando un código…",
+  "paidGate.buttonBlocked": "Necesita un plan ClawBox Pro o Max",
+  "paidGate.requiresPlan": "Necesita un plan Pro o Max",
+  "paidGate.upgradeLink": "Mejorar plan",
+  "paidGate.loading": "Comprobando tu plan…",
 };

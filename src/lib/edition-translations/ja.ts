@@ -1278,4 +1278,19 @@ export const ja: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "プロジェクトフォルダーの削除にはサインイン済みのブラウザーセッションが必要です。",
   "codingAgent.delete.refusal.crossOrigin": "プロジェクトフォルダーはこの ClawBox 自身のページからのみ削除できます。",
   "codingAgent.delete.refusal.trashFailed": "この ClawBox はそのフォルダーを脇へ移せなかったため、何も削除されていません。",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "コーディングエージェント",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "コーディングエージェントはタスク全体をこの ClawBox 上で引き受け、ファイルを書き、テストを実行し、結果を報告します。Pro および Max プランで利用できます。",
+  "paidGate.memoryShardDescription": "Memory Shard は選んだフォルダーをインデックス化し、アシスタントがあなた自身の文書を検索できるようにします。Pro および Max プランで利用できます。",
+  "paidGate.signInTitle": "ClawBox アカウントを接続",
+  "paidGate.signInBody": "{feature} には ClawBox Pro または Max プランが必要です。この ClawBox をアカウントに接続してから、機能をオンにしてください。",
+  "paidGate.signInButton": "ClawBox AI を接続",
+  "paidGate.signInCancel": "キャンセル",
+  "paidGate.signInStarting": "コードを要求しています…",
+  "paidGate.buttonBlocked": "ClawBox Pro または Max プランが必要です",
+  "paidGate.requiresPlan": "Pro または Max プランが必要です",
+  "paidGate.upgradeLink": "アップグレード",
+  "paidGate.loading": "プランを確認しています…",
 };

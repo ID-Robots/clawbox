@@ -81,7 +81,12 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   process.env.SESSION_SECRET = SESSION_SECRET;
-  vi.mocked(configGet).mockImplementation(async () => undefined);
+  // A paid plan on record by default. The coding agent is a paid feature
+  // (owner's decision, 2026-09-14) and `clawai_plan_tier` is what the gate
+  // reads; the gate's own block below takes it away again. `flash` is the
+  // plan marketed as Pro — the internal names are off by one.
+  vi.mocked(configGet).mockImplementation(async (key: string) =>
+    key === "clawai_plan_tier" ? "flash" : undefined);
   getStatus.mockResolvedValue(STATUS);
   setEnabled.mockResolvedValue(undefined);
   reloadMcp.mockResolvedValue(true);
@@ -488,5 +493,76 @@ describe("telling the running agent", () => {
     expect(res.status).toBe(200);
     expect(setEnabled).toHaveBeenCalledWith(false);
     errorSpy.mockRestore();
+  });
+});
+
+/**
+ * The paid-plan gate — owner's decision, 2026-09-14: the coding agent needs a
+ * ClawBox Pro or Max plan.
+ *
+ * The tier names are off by one and always have been: the internal `flash` is
+ * the plan marketed as **Pro** and the internal `pro` is **Max**. So both are
+ * paid, and "Free" is either the portal's positive `free` word or no key at
+ * all — a box nobody has connected.
+ *
+ * What is pinned here as hard as the refusal itself is its SHAPE: it refuses
+ * only a body that would switch the feature ON or finish its wizard. A box
+ * that was already enabled when the subscription lapsed is never auto-disabled
+ * — that is the owner's own consent and their own runs — so its settings stay
+ * writable, including the switch that turns it off.
+ */
+describe("the paid-plan gate", () => {
+  const plan = (value: string | undefined) =>
+    vi.mocked(configGet).mockImplementation(async (key: string) =>
+      key === "clawai_plan_tier" ? value : undefined);
+
+  for (const tier of ["flash", "pro"] as const) {
+    it(`lets the switch through on the ${tier} plan`, async () => {
+      plan(tier);
+      const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true } }));
+      expect(res.status).toBe(200);
+      expect(setEnabled).toHaveBeenCalledWith(true);
+    });
+  }
+
+  for (const [name, value] of [["a free account", "free"], ["no account at all", undefined]] as const) {
+    it(`refuses the switch with ${name}`, async () => {
+      plan(value);
+      const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true } }));
+      expect(res.status).toBe(402);
+      const body = await res.json();
+      expect(body.error).toBe("paid_plan_required");
+      expect(body.code).toBe("paid_plan_required");
+      expect(body.feature).toBe("coding_agent");
+      expect(body.plan).toBeNull();
+      expect(setEnabled).not.toHaveBeenCalled();
+    });
+  }
+
+  it("refuses the wizard's completion flag too", async () => {
+    plan("free");
+    const res = await POST(request({ cookie: ownerCookie(), body: { setupComplete: true } }));
+    expect(res.status).toBe(402);
+  });
+
+  it("is checked BEFORE the owner check gives way — the bearer still gets 403", async () => {
+    plan("free");
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { enabled: true } }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+  });
+
+  it("still lets an unpaid box switch itself off", async () => {
+    plan("free");
+    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: false } }));
+    expect(res.status).toBe(200);
+    expect(setEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("leaves the other settings of an unpaid box writable", async () => {
+    plan("free");
+    const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low" } }));
+    expect(res.status).toBe(200);
+    expect(setEffort).toHaveBeenCalledWith("low");
   });
 });

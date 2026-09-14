@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { bodyWouldEnable } from "@/lib/paid-plan-gate";
+import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
 import {
   getMemoryShardEnabled,
   getMemoryShardSetupComplete,
@@ -19,6 +21,10 @@ export const dynamic = "force-dynamic";
  * and same rule as coding-agent/enable.
  *
  * POST { enabled?: boolean, setupComplete?: boolean } → the new state.
+ *
+ * Switching it ON, or marking the wizard finished, also needs a paid ClawBox
+ * AI plan (Pro or Max) — 402 `paid_plan_required` otherwise. See
+ * @/lib/paid-plan-gate for why the other writes stay open.
  */
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) {
@@ -44,6 +50,18 @@ export async function POST(request: Request) {
     );
   }
 
+  // The paid-plan gate, before either flag is written. Owner's decision,
+  // 2026-09-14: Memory Shard is a Pro-or-Max feature.
+  //
+  // Only a body that would switch it ON or finish the wizard is refused. A box
+  // already indexing when its subscription lapsed keeps its index and its
+  // folders — nothing here auto-disables the owner's own data — and can still
+  // be switched OFF, which a blanket refusal would have taken away.
+  if (bodyWouldEnable(body)) {
+    const gate = await readPlanGate();
+    if (!gate.satisfied) return refusePaidPlan("memory_shard", gate);
+  }
+
   if (hasEnabled) {
     await setMemoryShardEnabled(body.enabled as boolean);
     console.error(`[memory-shard] switched ${body.enabled ? "on" : "off"} by the owner`);
@@ -61,5 +79,9 @@ export async function POST(request: Request) {
   return NextResponse.json({
     enabled: await getMemoryShardEnabled(),
     setupComplete: await getMemoryShardSetupComplete(),
+    // Re-read beside the two flags so a panel that only ever sees this answer
+    // (the embedded settings page writes and renders from it) can draw the
+    // "needs Pro or Max" line without a second request.
+    planGate: await readPlanGate(),
   });
 }
