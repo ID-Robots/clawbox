@@ -1462,15 +1462,29 @@ EOF
   echo "  Persistent x64 services installed"
 }
 
-# Waits for a unit to answer on its own port. No attempt cap: 60 tries was a
-# guess at how long a gateway takes to come up, and a box that needed 70 had its
-# install failed over a service that was working a moment later. The wait ends on
-# a FACT instead — the unit is no longer active or activating, so nothing will
-# arrive by waiting. `--max-time` on the probe itself stays: it is a loopback
-# liveness check inside a retry loop, and without it a socket that accepts and
-# never answers hangs the loop for ever.
+# Waits for a unit to answer on its own port.
+#
+# The 60 attempts this used to allow were a guess at how long a gateway takes to
+# come up, and a box that needed 70 had its install FAILED over a service that
+# was working a moment later — the OpenClaw gateway's ExecStartPre alone was
+# measured at 31, 86 and 120 s. So: a FACT first (the unit is no longer active or
+# activating, and nothing will arrive by waiting), and ten minutes behind it.
+#
+# The window does not go away entirely, because systemd cannot tell the two
+# halves of "not answering yet" apart: a unit whose ExecStart has forked and is
+# still coming up and one that is up and will never bind the port (a plugin
+# awaiting capability consent holds that state for ever) are both `active`.
+# Unbounded, this would hang the installer there instead of printing the status
+# and journal below, which is the whole diagnosis. Ten minutes is far outside
+# every start ever measured on this path.
+#
+# `--max-time` on the probe itself stays: it is a loopback liveness check inside
+# a retry loop, and without it a socket that accepts and never answers hangs the
+# loop anyway.
 wait_for_http() {
   local url="$1" label="$2" log_unit="$3" waited=0
+  local window="${CLAWBOX_HTTP_READY_WINDOW_S:-600}"
+  case "$window" in ''|*[!0-9]*) window=600 ;; esac
   # LOOPBACK ONLY, asserted rather than assumed. The `--max-time` below is
   # allowed precisely because this is a liveness probe against a socket on this
   # machine; pointed at a remote host the same flag would be a transfer deadline,
@@ -1499,11 +1513,12 @@ wait_for_http() {
       echo "  $label opened its port but restarted; continuing readiness checks..."
     fi
     unit_is_coming_up "$log_unit" || break
+    [ "$waited" -lt "$window" ] || break
     sleep 1
     waited=$((waited + 1))
     wait_note "$waited" "$label to answer at $url"
   done
-  echo "Error: $label did not become ready at $url ($log_unit stopped trying)" >&2
+  echo "Error: $label did not become ready at $url (waited ${waited}s)" >&2
   systemctl status "$log_unit" --no-pager -n 30 >&2 || true
   journalctl -u "$log_unit" --no-pager -n 50 >&2 || true
   return 1

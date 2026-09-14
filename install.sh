@@ -2785,8 +2785,8 @@ recover_dpkg() {
 # almost always unattended-upgrades working through the same mirror this install
 # is about to use, and the old 900 s cap turned "your box was busy" into a failed
 # step — after which the operator's only move was to wait and run it again, which
-# is precisely what this loop does for them. The argument every caller used to
-# pass is accepted and ignored, so no call site has to change.
+# is precisely what this loop does for them. It takes no argument now; the one
+# call site that passed a shorter budget (the ufw backstop) passes none.
 wait_for_apt() {
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
@@ -3907,10 +3907,8 @@ hermes_dashboard_restart_after_install() {
     before="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
 
     restart_rc=0
-    # bash's own second counter, reset here and read below: the elapsed time has
-    # to survive a `date` that is missing or fails, and an external command that
-    # answers 0 on failure would make the deadline below never arrive. Started
-    # AFTER the blocking call, which is no longer part of what it measures.
+    # Unwrapped, and blocking: systemd's own TimeoutStartSec is what bounds this
+    # job. There used to be a `timeout` over it; see the header.
     systemctl try-restart "$unit" >/dev/null 2>&1 || restart_rc=$?
     # systemd saying no. There is nothing left to verify.
     if [ "$restart_rc" -ne 0 ]; then
@@ -3918,6 +3916,10 @@ hermes_dashboard_restart_after_install() {
       continue
     fi
 
+    # bash's own second counter, reset here and read in the poll below: the
+    # elapsed time has to survive a `date` that is missing or fails, and an
+    # external command that answers 0 on failure would make the check below never
+    # arrive. Started AFTER the blocking call, which it no longer measures.
     SECONDS=0
     while :; do
       after="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
@@ -9159,10 +9161,10 @@ step_chromium_install() {
     # exit is a fact, not a clock: snapd answering, or snapd no longer trying.
     local retries=0
     while ! snap version &>/dev/null; do
-      case "$(systemctl is-active snapd.socket 2>/dev/null || true)" in
-        active|activating|reloading|deactivating) ;;
-        *) echo "  snapd is not running — installing Chromium anyway and letting snap report" >&2; break ;;
-      esac
+      if ! unit_is_coming_up snapd.socket; then
+        echo "  snapd is not running — installing Chromium anyway and letting snap report" >&2
+        break
+      fi
       wait_give_up_in_test_mode "$retries" && break
       sleep 1
       retries=$((retries + 1))
