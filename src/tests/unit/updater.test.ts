@@ -2992,7 +2992,6 @@ describe("updater", () => {
       expect(ids).toEqual([
         "bootstrap_updater",
         "apt_update",
-        "nvidia_jetpack",
         "performance_mode",
         "chromium_install",
         "vnc_install",
@@ -3030,7 +3029,6 @@ describe("updater", () => {
       expect(ids).toEqual([
         "bootstrap_updater",
         "apt_update",
-        "nvidia_jetpack",
         "performance_mode",
         "chromium_install",
         "vnc_install",
@@ -3043,6 +3041,18 @@ describe("updater", () => {
         "verify_build_identity",
       ]);
       expect(ids).not.toContain("hermes_edition");
+    });
+
+    // CUDA/JetPack is laid down once, by the image or the first install.sh run.
+    // Re-running `apt-get install nvidia-jetpack` on every update was minutes of
+    // Jetson apt for a no-op at best, and an unasked-for JetPack change at worst.
+    // The step is still dispatchable by hand; it is only off the update path.
+    it("never re-installs JetPack on an update, on any edition", async () => {
+      for (const edition of ["openclaw", "hermes", "dual", undefined]) {
+        const ids = await stepIdsFor(edition);
+        expect(ids, `nvidia_jetpack is off the update path on ${edition ?? "default"}`)
+          .not.toContain("nvidia_jetpack");
+      }
     });
 
     it("runs everything on dual — it has both harnesses", async () => {
