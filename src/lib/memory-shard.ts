@@ -10,9 +10,21 @@
 import { readFile } from "fs/promises";
 import path from "path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
-import { findOpenclawBin, openclawIsAbsent, readConfig, readConfigStrict, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import {
+  findOpenclawBin,
+  openclawIsAbsent,
+  readConfig,
+  readConfigStrict,
+  runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
+} from "@/lib/openclaw-config";
 import { readLocalSources, stampLocalEmbeddingIdentity, writeLocalSources } from "@/lib/memory-index-local";
 import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import {
+  CLOUD_EMBEDDING_MODEL,
+  CLOUD_EMBEDDING_PROVIDER,
+  embeddingsBaseUrlOf,
+} from "@/lib/clawai-cloud-embeddings";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import {
   EXTRA_PATHS_CONFIG_PATH,
@@ -273,6 +285,78 @@ export async function switchToLocalEmbeddings(): Promise<void> {
     [`${home}.documentInputType`, "document"],
     [`${home}.provider`, LOCAL_EMBEDDING_PROVIDER],
   ]);
+}
+
+/**
+ * The embedding choice as it stands in openclaw.json: which provider, which
+ * model, and where its endpoint is.
+ *
+ * A FILE READ, never the CLI and never the status probe — both cost a process
+ * boot, and the cloud-defaults resolver asks this on every boot and on every
+ * credential save. `null` is "this config does not say", which the caller must
+ * not read as either answer.
+ */
+export async function readEmbeddingChoice(): Promise<{ provider: string | null; model: string | null; baseUrl: string | null }> {
+  const config = (await readConfig()) as Record<string, unknown>;
+  const pick = (keys: readonly string[]): string | null => {
+    let node: unknown = config;
+    for (const key of keys) {
+      if (!node || typeof node !== "object") return null;
+      node = (node as Record<string, unknown>)[key];
+    }
+    return typeof node === "string" && node.trim() ? node.trim() : null;
+  };
+  const at = (tail: readonly string[]) =>
+    pick(["memory", "search", ...tail]) ?? pick(["agents", "defaults", "memorySearch", ...tail]);
+  return { provider: at(["provider"]), model: at(["model"]), baseUrl: at(["remote", "baseUrl"]) };
+}
+
+/**
+ * Point the memory index at the ClawBox AI cloud embedder.
+ *
+ * The mirror of {@link switchToLocalEmbeddings}, and deliberately NOT available
+ * on the edition where ClawBox itself is the indexer: `memory-index-local.ts`
+ * refuses an embedder endpoint that is not loopback, on purpose — the owner's
+ * document text is the request body there — and a default is not allowed to
+ * open that fence. The caller checks; this refuses too, because a fence with
+ * one gate is a fence.
+ *
+ * The two `*InputType` keys are REMOVED rather than left: they exist to make
+ * OpenClaw label each request so ClawBox's own proxy can restore the Qwen3
+ * query instruction (`embed-query-instruction.ts`). Sent to an OpenAI-shaped
+ * route they are an unknown field on the request body, and a 400 per query is a
+ * memory search that has stopped working. Unset only when the path is there —
+ * the CLI exits 1 on a path that is not, which would make the whole switch fail
+ * over a key this box never had.
+ *
+ * @param token the box's `claw_` credential, which is the bearer the proxy wants.
+ */
+export async function switchToCloudEmbeddings(endpoint: string, token: string): Promise<void> {
+  if (openclawIsAbsent()) {
+    throw new Error("This edition indexes memory on the box itself and cannot use a cloud embedder.");
+  }
+  const home = embeddingConfigHome(await installedOpenclawVersion());
+  await runOpenclawConfigSetBatch([
+    [`${home}.model`, CLOUD_EMBEDDING_MODEL],
+    [`${home}.remote.baseUrl`, embeddingsBaseUrlOf(endpoint)],
+    [`${home}.remote.apiKey`, token],
+    [`${home}.provider`, CLOUD_EMBEDDING_PROVIDER],
+  ]);
+  const config = (await readConfig()) as Record<string, unknown>;
+  for (const key of ["queryInputType", "documentInputType"] as const) {
+    if (embeddingKeyPresent(config, home, key)) {
+      await runOpenclawConfigUnset(`${home}.${key}`);
+    }
+  }
+}
+
+function embeddingKeyPresent(config: Record<string, unknown>, home: string, key: string): boolean {
+  let node: unknown = config;
+  for (const part of [...home.split("."), key]) {
+    if (!node || typeof node !== "object") return false;
+    node = (node as Record<string, unknown>)[part];
+  }
+  return node !== undefined;
 }
 
 /** Describe the sources for the app, pairing derived folders with their origin. */
