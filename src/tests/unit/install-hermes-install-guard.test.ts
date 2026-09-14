@@ -131,12 +131,16 @@ describe("hermes_dashboard_restart_after_install bounds one bounce with one budg
     // main process. Answering that with the budget instead made the ordinary
     // failure — somebody stopped the unit — cost two minutes of silence inside
     // step_post_update before the warning it was always going to print.
+    //
+    // Anchored on the POLL's own check, not on any `is-active`: the function
+    // asks one before the restart too, and an assertion that matched that one
+    // would still pass with the poll's check deleted.
     expect(RESTART_CODE, "the restart helper is missing from install.sh").not.toBe("");
-    const isActive = RESTART_CODE.indexOf('is-active "$unit"');
+    const poll = RESTART_CODE.indexOf('unit_is_coming_up "$unit" || break');
     const clock = RESTART_CODE.indexOf('[ "$SECONDS" -lt "$budget" ]');
-    expect(isActive).toBeGreaterThan(-1);
+    expect(poll, "the poll has no non-time exit at all").toBeGreaterThan(-1);
     expect(clock).toBeGreaterThan(-1);
-    expect(isActive, "the clock is consulted before the fact").toBeLessThan(clock);
+    expect(poll, "the clock is consulted before the fact").toBeLessThan(clock);
   });
 
   it("uses a shell builtin for elapsed time, not an external command", () => {

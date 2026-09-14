@@ -36,12 +36,40 @@ import { fileURLToPath } from "node:url";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const FILES = ["install.sh", "install-x64.sh", "scripts/install-voice.sh"] as const;
 
+const NL = String.fromCharCode(10);
+
+function allLinesOf(file: string): string[] {
+  return readFileSync(path.join(REPO, file), "utf-8").split(NL);
+}
+
 function linesOf(file: string): { n: number; text: string }[] {
-  return readFileSync(path.join(REPO, file), "utf-8")
-    .split(String.fromCharCode(10))
+  return allLinesOf(file)
     .map((text, i) => ({ n: i + 1, text }))
     // Comments explain the rule; they are not the rule.
     .filter(({ text }) => !/^\s*#/.test(text));
+}
+
+/**
+ * The body of the shell function a given 1-indexed line sits in, or "".
+ *
+ * Some of the facts a line has to satisfy are not ON the line: install-x64's
+ * `wait_for_http` probes `"$url"`, and what makes that a LOOPBACK probe is the
+ * guard at the top of the same function. Reading the enclosing function is what
+ * lets the rule below be about the request rather than about its spelling.
+ */
+function enclosingFunction(file: string, line: number): string {
+  const lines = allLinesOf(file);
+  let start = -1;
+  for (let i = line - 1; i >= 0; i--) {
+    if (/^\s*}\s*$/.test(lines[i])) break;
+    if (/^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{/.test(lines[i])) { start = i; break; }
+  }
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^}\s*$/.test(lines[i])) { end = i; break; }
+  }
+  return lines.slice(start, end + 1).join(NL);
 }
 
 describe("the installers kill no work on a clock", () => {
@@ -49,10 +77,15 @@ describe("the installers kill no work on a clock", () => {
     it(`${file} invokes \`timeout\` nowhere`, () => {
       // `timeout` as a COMMAND: at the start of a line, after a pipe/&&/;, or at
       // the start of a quoted command string handed to su/runuser/
-      // as_clawbox_login — with any of its own flags (`-k 30`) in between. The
-      // character class deliberately excludes `-`, which is what keeps
-      // `--connect-timeout 15` (an option of curl, and not a killer) out.
-      const COMMAND_TIMEOUT = /(^|[|&;("']|\s)timeout\s+(-[a-zA-Z]\s+\S+\s+)*[0-9]/;
+      // as_clawbox_login — with any of its own flags (`-k 30`) in between, and
+      // then ANY argument. Deliberately not `[0-9]`: `timeout "$BUDGET" curl …`
+      // kills slow work exactly as hard as `timeout 600` does, and a rule that
+      // only saw the literal would wave the variable through. The character
+      // class excludes `-`, which is what keeps `--connect-timeout 15` (an
+      // option of curl, and not a killer) out, and the argument must look like a
+      // DURATION — a digit or an expansion — which is what keeps the word out of
+      // the English in an `echo` ("did not report a usable provider timeout").
+      const COMMAND_TIMEOUT = /(^|[|&;("']|\s)timeout\s+(-[a-zA-Z]\s+\S+\s+)*["'$0-9]/;
       const hits = linesOf(file).filter(({ text }) => COMMAND_TIMEOUT.test(text));
       expect(
         hits.map(({ n, text }) => `${file}:${n}: ${text.trim()}`),
@@ -60,20 +93,29 @@ describe("the installers kill no work on a clock", () => {
       ).toEqual([]);
     });
 
-    it(`${file} caps a curl transfer only on a liveness probe`, () => {
+    it(`${file} caps a curl transfer only on a loopback liveness probe`, () => {
+      const LOOPBACK = /127\.0\.0\.1|localhost|\[::1\]/;
       const hits = linesOf(file).filter(({ text }) => text.includes("--max-time"));
       for (const { n, text } of hits) {
         const seconds = Number(/--max-time\s+([0-9]+)/.exec(text)?.[1] ?? NaN);
-        // A liveness probe asks "does this answer at all" and throws the body
-        // away. A cap that can kill a real download is a large one against a
-        // curl that is KEEPING what it fetches; neither is allowed.
+        // Three things together make a request a liveness probe, and no two of
+        // them are enough. It must go to a socket on THIS machine (a remote
+        // `--max-time 5 -o /dev/null` is a transfer deadline wearing a probe's
+        // clothes) — proved on the line, or by the guard in the function around
+        // it, since one of these probes takes its URL as an argument. It must
+        // throw the body away. And its budget must be probe-sized: any cap big
+        // enough to let a real download through is one big enough to kill one.
         expect(
-          seconds <= 5,
-          `${file}:${n} caps a transfer with a download-sized budget: ${text.trim()}`,
+          LOOPBACK.test(text) || LOOPBACK.test(enclosingFunction(file, n)),
+          `${file}:${n} caps a transfer to somewhere that is not this machine: ${text.trim()}`,
         ).toBe(true);
         expect(
           /-o\s+\/dev\/null|>\s*\/dev\/null/.test(text),
           `${file}:${n} caps a curl that keeps what it fetches: ${text.trim()}`,
+        ).toBe(true);
+        expect(
+          seconds <= 5,
+          `${file}:${n} caps a transfer with a download-sized budget: ${text.trim()}`,
         ).toBe(true);
       }
     });

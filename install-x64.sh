@@ -1471,6 +1471,17 @@ EOF
 # never answers hangs the loop for ever.
 wait_for_http() {
   local url="$1" label="$2" log_unit="$3" waited=0
+  # LOOPBACK ONLY, asserted rather than assumed. The `--max-time` below is
+  # allowed precisely because this is a liveness probe against a socket on this
+  # machine; pointed at a remote host the same flag would be a transfer deadline,
+  # which is the thing this file no longer has.
+  case "$url" in
+    http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*|http://[::1]:*) ;;
+    *)
+      echo "Error: wait_for_http is a loopback liveness probe; refusing $url" >&2
+      return 1
+      ;;
+  esac
   while :; do
     if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
       local ready_pid

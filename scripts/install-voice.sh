@@ -829,19 +829,34 @@ build_ctranslate2_cuda() {
 # cache check and the full pipeline's corrupted-cache sweep all address it.
 WHISPER_HF_CACHE="$CLAWBOX_HOME/.cache/huggingface/hub/models--Systran--faster-whisper-base"
 
-# Are the Whisper weights already on this box, whole?
+# Are the Whisper weights already on this box, WHOLE?
 #
-# `model.bin` with a non-zero size under a snapshot, and no empty blob anywhere:
-# a failed or rate-limited Hugging Face download leaves 0-byte blobs behind, and
-# a cache in that state is one to redo rather than one to trust — which is the
-# same judgement the full pipeline's sweep already makes before it downloads.
+# Every artifact `faster_whisper.utils.download_model` asks Hugging Face for,
+# non-empty, in one snapshot — not `model.bin` alone. A cache with the weights
+# and no tokenizer skips this pre-download and then pays for the missing file at
+# the first transcription, which is the cost this function exists to avoid, moved
+# to the worst possible moment.
+#
+# `-s` rather than `-f`/`! -size 0`: a snapshot entry is a SYMLINK into blobs/,
+# and `-s` follows it — so a dangling link (the shape an interrupted download
+# leaves) is false here instead of passing a size check on the link itself. The
+# empty-blob sweep is the same judgement the full pipeline makes before it
+# downloads; it catches the 0-byte blobs a rate-limited fetch leaves behind.
 whisper_model_cached() {
-  [ -d "$WHISPER_HF_CACHE/snapshots" ] || return 1
+  local snapshot artifact
+  # One directory per revision under snapshots/. -L so a dangling one is not
+  # mistaken for a snapshot.
+  snapshot="$(find -L "$WHISPER_HF_CACHE/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)"
+  [ -n "$snapshot" ] || return 1
   if [ -d "$WHISPER_HF_CACHE/blobs" ] \
     && find "$WHISPER_HF_CACHE/blobs" -maxdepth 1 -type f -empty 2>/dev/null | grep -q .; then
     return 1
   fi
-  find "$WHISPER_HF_CACHE/snapshots" -maxdepth 2 -name model.bin ! -size 0 2>/dev/null | grep -q .
+  for artifact in config.json preprocessor_config.json model.bin tokenizer.json; do
+    [ -s "$snapshot/$artifact" ] || return 1
+  done
+  # vocabulary.txt on `base`, vocabulary.json on others — the family, not a name.
+  find -L "$snapshot" -maxdepth 1 -type f -name 'vocabulary.*' -size +0c -print -quit 2>/dev/null | grep -q .
 }
 
 # Fetch the Whisper weights now, so the first transcription does not pay for
