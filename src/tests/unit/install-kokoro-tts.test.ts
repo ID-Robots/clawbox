@@ -95,6 +95,8 @@ let root: string;
  *
  * Scripted via env:
  *   KOKORO_IMPORT_EXIT  `import kokoro, torch` status (0 = packages on disk)
+ *   CUDA_TORCH_EXIT     `cuda_torch_present` status (0 = the pinned wheel is
+ *                       already unpacked for this user)
  *   PIP_EXIT            every `pip3 install` status
  *   WARMUP_EXIT         the KPipeline pre-download status
  *   FAKE_ARCH           what `uname -m` reports
@@ -176,6 +178,10 @@ function runTtsOnly(
       // own python is irrelevant, so it is scripted here.
       '  *"sys.version_info"*) echo "${FAKE_PY_VERSION:-python3.10}"; exit 0 ;;',
       '  *"import kokoro, torch"*) exit "${KOKORO_IMPORT_EXIT:-1}" ;;',
+      // `cuda_torch_present`: is the PINNED Jetson CUDA wheel already unpacked
+      // for this user? Defaults to 1 (no), so every existing case here still
+      // describes a box that has to download it.
+      '  *"torch.version.cuda"*) exit "${CUDA_TORCH_EXIT:-1}" ;;',
       '  *"from kokoro import KPipeline"*) echo "Kokoro model ready on cuda"; exit "${WARMUP_EXIT:-0}" ;;',
       '  *"pip3 install"*) echo "Successfully installed"; exit "${PIP_EXIT:-0}" ;;',
       "esac",
@@ -787,6 +793,40 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only is cheap on re-run", () =
     ).toHaveLength(1);
     expect(res.curl, "something was downloaded on a no-op run").toEqual([]);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=ready");
+  });
+
+  it("does not re-download the CUDA torch wheel when it is already unpacked", () => {
+    // The stamp lives under .cache: a factory reset, or a run that could not
+    // write it, sent an already-working box back through install_cuda_torch and
+    // it re-fetched ~300 MB of torch plus cusparselt on every update. The wheel
+    // itself is the honest question, so it is asked separately from the stamp.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1", CUDA_TORCH_EXIT: "0" });
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain("CUDA-enabled PyTorch already installed at the pinned version");
+    const torchUrl = shellConst("JETSON_TORCH_URL");
+    expect(
+      res.su.filter((c) => c.includes(torchUrl)),
+      "the Jetson torch wheel was downloaded again",
+    ).toEqual([]);
+    expect(
+      res.su.filter((c) => c.includes("nvidia-cusparselt-cu12")),
+      "cusparselt was downloaded again",
+    ).toEqual([]);
+    // The rest of the install still runs: torch being there says nothing about
+    // kokoro, whose own gate is KOKORO_IMPORT_EXIT.
+    expect(res.su.some((c) => c.includes("kokoro soundfile")), "kokoro was skipped too").toBe(true);
+    expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=ready");
+  });
+
+  it("still writes the loader exports on the run that skipped the wheel", () => {
+    // The exports were appended inside install_cuda_torch, so skipping the
+    // download would have skipped them — and a box that has the wheel but lost
+    // its .bashrc would never get them back.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1", CUDA_TORCH_EXIT: "0" });
+    expect(res.status, res.stderr).toBe(0);
+    const body = readFileSync(path.join(res.home, ".bashrc"), "utf-8");
+    expect(body).toContain("cusparselt");
+    expect(body).toContain("CUDA_HOME=");
   });
 
   it("still refreshes the scripts and the unit on that cheap run", () => {

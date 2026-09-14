@@ -302,12 +302,48 @@ clawbox_python() {
   printf '%s\n' "$1" | su - "$CLAWBOX_USER" -c "$payload"
 }
 
+# Is the PINNED CUDA torch wheel already installed for the clawbox user?
+#
+# Asked separately from $KOKORO_STAMP, and not as a substitute for it. The stamp
+# records "this script finished the whole Kokoro install"; it lives under
+# .cache, so a factory reset or a box that could not write it sends the run back
+# through install_cuda_torch — which then re-downloaded ~300 MB of torch plus
+# cusparselt over a wheel that was already sitting in user-site, on every
+# update. This asks the narrower question the download actually answers.
+#
+# Two halves, because either alone lies: `torch.version.cuda` separates the
+# Jetson CUDA wheel from the CPU wheel pip resolves for anything else, and the
+# version prefix (everything in the wheel's filename before `.nv`) is what makes
+# it the PINNED one — a box carrying an older Jetson wheel still gets the
+# upgrade this file asks for. The installed build reports `2.5.0a0+<sha>.nv24.8`
+# where the filename says `nv24.08`, so the comparison stops before `.nv`.
+cuda_torch_present() {
+  local pin
+  pin="${JETSON_TORCH_URL##*/torch-}"
+  pin="${pin%%.nv*}"
+  [ -n "$pin" ] || return 1
+  clawbox_python "import sys, torch
+sys.exit(0 if torch.version.cuda and torch.__version__.startswith('$pin') else 1)" >/dev/null 2>&1
+}
+
 install_cuda_torch() {
+  if cuda_torch_present; then
+    echo "  CUDA-enabled PyTorch already installed at the pinned version — not re-downloading"
+    ensure_cuda_bashrc_exports
+    return 0
+  fi
   echo "  Installing CUDA-enabled PyTorch for Jetson (~300 MB)..."
   pip_as_clawbox "nvidia-cusparselt-cu12" || return 1
   pip_as_clawbox "--no-cache-dir '$JETSON_TORCH_URL'" || return 1
-  # Interactive shells need the same loader path the units get. "expected":
-  # this line is appended once and sourced for the life of the box.
+  ensure_cuda_bashrc_exports
+}
+
+# Interactive shells need the same loader path the units get. "expected": these
+# lines are appended once and sourced for the life of the box. Split out of
+# install_cuda_torch so the skip path above still guarantees them — a box that
+# already has the wheel but lost its .bashrc would otherwise never get them
+# back.
+ensure_cuda_bashrc_exports() {
   local bashrc="$CLAWBOX_HOME/.bashrc" ld
   ld=$(kokoro_ld_path expected)
   if ! grep -q "cusparselt" "$bashrc" 2>/dev/null; then
@@ -789,9 +825,37 @@ build_ctranslate2_cuda() {
   rm -rf "$build_dir"
 }
 
+# Where faster-whisper's `base` weights land, named once: the pre-download, the
+# cache check and the full pipeline's corrupted-cache sweep all address it.
+WHISPER_HF_CACHE="$CLAWBOX_HOME/.cache/huggingface/hub/models--Systran--faster-whisper-base"
+
+# Are the Whisper weights already on this box, whole?
+#
+# `model.bin` with a non-zero size under a snapshot, and no empty blob anywhere:
+# a failed or rate-limited Hugging Face download leaves 0-byte blobs behind, and
+# a cache in that state is one to redo rather than one to trust — which is the
+# same judgement the full pipeline's sweep already makes before it downloads.
+whisper_model_cached() {
+  [ -d "$WHISPER_HF_CACHE/snapshots" ] || return 1
+  if [ -d "$WHISPER_HF_CACHE/blobs" ] \
+    && find "$WHISPER_HF_CACHE/blobs" -maxdepth 1 -type f -empty 2>/dev/null | grep -q .; then
+    return 1
+  fi
+  find "$WHISPER_HF_CACHE/snapshots" -maxdepth 2 -name model.bin ! -size 0 2>/dev/null | grep -q .
+}
+
 # Fetch the Whisper weights now, so the first transcription does not pay for
 # 148 MB while somebody waits on it.
+#
+# A no-op when they are already here. `WhisperModel(...)` reads a complete cache
+# without touching the network, but it also loads 148 MB off an SD card and
+# builds a model to throw away, once per update, for an answer the filesystem
+# already had.
 whisper_predownload_model() {
+  if whisper_model_cached; then
+    echo "  Whisper weights already cached"
+    return 0
+  fi
   clawbox_python 'from faster_whisper import WhisperModel
 WhisperModel("base", device="cpu", compute_type="int8")' >/dev/null 2>&1
 }
@@ -1105,7 +1169,7 @@ install_kokoro_packages || { KOKORO_FULL_OK=false; echo "  Warning: Kokoro packa
 
 echo "[5/7] Pre-downloading Whisper model (base)..."
 # Clear corrupted cache (0-byte blobs from failed/rate-limited HF downloads)
-WHISPER_CACHE="$CLAWBOX_HOME/.cache/huggingface/hub/models--Systran--faster-whisper-base"
+WHISPER_CACHE="$WHISPER_HF_CACHE"
 if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -type f -empty | grep -q .; then
   echo "  Clearing corrupted Whisper model cache..."
   rm -rf "$WHISPER_CACHE"
@@ -1119,11 +1183,15 @@ fi
 # Through the shared helper: this was the third copy of the same pinned
 # python3.10 path, and STT needs that loader path for exactly the reason TTS
 # does — the CUDA libraries live under user-site.
-clawbox_python "
+if whisper_model_cached; then
+  echo "  Whisper weights already cached"
+else
+  clawbox_python "
 from faster_whisper import WhisperModel
 model = WhisperModel('base', device='$DEVICE', compute_type='$COMPUTE')
 print('Whisper base model ready on $DEVICE')
 " 2>&1 | tail -3
+fi
 
 echo "[6/7] Pre-downloading Kokoro model..."
 if kokoro_predownload_model; then
