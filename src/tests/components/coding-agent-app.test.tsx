@@ -78,6 +78,8 @@ function json(body: unknown, status = 200) {
 let posts: { url: string; body: unknown }[];
 /** Every git-block read, query string included — which project it asked about. */
 let gitReads: string[];
+/** Every Vercel-link read, the same way — which project each card asked about. */
+let vercelReads: string[];
 
 /** The device, as far as this component can tell. */
 function stubFetch(
@@ -102,6 +104,7 @@ function stubFetch(
   let runs = runsArg;
   posts = [];
   gitReads = [];
+  vercelReads = [];
   const projects = {
     directory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
     projects: opts.projects ?? [],
@@ -191,6 +194,22 @@ function stubFetch(
     if (url.startsWith("/setup-api/coding-agent/projects")) return json(projects);
     if (url.startsWith("/setup-api/coding-agent/tree?")) {
       return json({ listing: { path: "", truncated: false, ...(opts.tree ?? { entries: [] }) } });
+    }
+    // The deploy half first: the plain `startsWith` below would swallow it.
+    // Nothing here is about deploying, so the panel is told there is nothing
+    // to show and draws its buttons quietly.
+    if (url.startsWith("/setup-api/coding-agent/vercel/deploy")) return json({ error: "unexpected" }, 404);
+    if (url.startsWith("/setup-api/coding-agent/vercel")) {
+      vercelReads.push(url);
+      // The link names the project it belongs to, so the card on screen says
+      // WHICH project it is about — a stale card left behind by a switch is
+      // then visible rather than merely countable.
+      const params = new URL(url, "http://box").searchParams;
+      const which = params.get("projectId") ?? (params.get("directory") ?? "").split("/").pop() ?? "";
+      return json({
+        link: { projectId: `vercel-${which}`, teamId: null, tokenSecretName: "VERCEL_TOKEN" },
+        readiness: null,
+      });
     }
     if (url.startsWith("/setup-api/coding-agent/git?")) {
       // The route answers `{ git }` for the one project the query names, and
@@ -289,6 +308,7 @@ function stubFetch(
 beforeEach(() => {
   posts = [];
   gitReads = [];
+  vercelReads = [];
 });
 
 afterEach(() => {
@@ -1731,6 +1751,53 @@ describe("the summary and the report", () => {
 });
 
 describe("projects", () => {
+  it("keeps ONE Vercel card when the sidebar switches from project to project", async () => {
+    // The owner's report: every switch of the project folder left one more
+    // "Vercel deploys" card on the page. The card and its routes are per
+    // project and fine — the fault was two SIBLINGS under one parent carrying
+    // the same React key, which makes the reconciler lose the first of them:
+    // it is neither matched nor deleted, so its DOM node stays behind while a
+    // fresh one mounts beside it. Only the sidebar shows it, because the home
+    // list remounts the whole page.
+    const RO = class {
+      private cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+      observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+      unobserve() {}
+      disconnect() {}
+    };
+    vi.stubGlobal("ResizeObserver", RO);
+    try {
+      const other = { ...PROJECT, folder: "shop", name: "Shop", directory: "/home/clawbox/Projects/shop" };
+      stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT, other] });
+      render(<CodingAgentApp />);
+      const sidebar = await screen.findByTestId("coding-agent-sidebar");
+      const rail = await within(sidebar).findByTestId("coding-agent-sidebar-projects");
+
+      const openProject = async (name: string, folder: string) => {
+        fireEvent.click(within(rail).getByText(name));
+        await screen.findByTestId("coding-agent-project-page");
+        // Wait for THIS project's card to have read its link and drawn it…
+        await waitFor(() => {
+          const shown = screen.getAllByTestId("coding-agent-vercel-project").map((n) => n.textContent ?? "");
+          expect(shown.some((s) => s.includes(`vercel-${folder}`))).toBe(true);
+        });
+        // …and only then count: one card, and one workspace under it.
+        expect(screen.getAllByTestId("coding-agent-vercel-card")).toHaveLength(1);
+        expect(screen.getAllByTestId("coding-agent-workspace")).toHaveLength(1);
+      };
+
+      await openProject(PROJECT.name, PROJECT.directory.split("/").pop()!);
+      await openProject(other.name, "shop");
+      await openProject(PROJECT.name, PROJECT.directory.split("/").pop()!);
+      // The card really did re-read, per project — a card that never asked
+      // again would pass the count above while showing stale figures.
+      expect(vercelReads.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("lists each project with its name, last commit and badges, and opens the desktop app", async () => {
     stubFetch({ enabled: true, readiness: READY }, [], {
       projects: [
