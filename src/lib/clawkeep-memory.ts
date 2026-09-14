@@ -637,7 +637,9 @@ export async function parseMemoryStatus(
     indexIdentity,
     fingerprint,
     // Filled in by getMemoryStatus, which is the only caller with an await to
-    // spend on the config store; the parser itself stays synchronous.
+    // spend on the config store; the parser itself stays synchronous. The gate
+    // is placed here for the same reason, and with the same floor: a value
+    // nothing has read yet must not be a PASS.
     enabled: false,
     setupComplete: false,
     planGate: planGateFor(null),

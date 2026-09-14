@@ -215,7 +215,7 @@ export async function POST(request: Request) {
   // switch that turns it OFF, stay writable. What a Free or unconnected
   // account cannot do is turn it on or mark setup complete, which is what
   // stops a new box from getting through the wizard.
-  if (bodyWouldEnable(fields as { enabled?: unknown; setupComplete?: unknown })) {
+  if (bodyWouldEnable(fields)) {
     const gate = await readPlanGate();
     if (!gate.satisfied) return refusePaidPlan("coding_agent", gate);
   }
