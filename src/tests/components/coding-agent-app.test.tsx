@@ -86,7 +86,7 @@ function stubFetch(
   // `setupComplete` defaults to true: every test below is about a box whose
   // owner has been through the wizard, which is also what the route answers
   // for any box with the switch on. Pass false to get the wizard itself.
-  status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; setupComplete?: boolean },
+  status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; setupComplete?: boolean; vercelEnabled?: boolean },
   runsArg: unknown[] = [],
   opts: {
     artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string;
@@ -137,6 +137,10 @@ function stubFetch(
     effort: "ultracode",
     effortLevels: ["low", "xhigh", "max", "ultracode"],
     reviewPass: false,
+    // The box-wide Vercel switch. ON unless a test says otherwise: every case
+    // below but one is about a box that deploys, and the device migrates a box
+    // that already has a link to `true` before it answers.
+    vercelEnabled: status.vercelEnabled ?? true,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -198,7 +202,12 @@ function stubFetch(
     // The deploy half first: the plain `startsWith` below would swallow it.
     // Nothing here is about deploying, so the panel is told there is nothing
     // to show and draws its buttons quietly.
-    if (url.startsWith("/setup-api/coding-agent/vercel/deploy")) return json({ error: "unexpected" }, 404);
+    if (url.startsWith("/setup-api/coding-agent/vercel/deploy")) {
+      // Recorded like its sibling below, so a test can say "this box asked
+      // Vercel nothing at all" and mean the whole family.
+      vercelReads.push(url);
+      return json({ error: "unexpected" }, 404);
+    }
     if (url.startsWith("/setup-api/coding-agent/vercel")) {
       vercelReads.push(url);
       // The link names the project it belongs to, so the card on screen says
@@ -1747,6 +1756,74 @@ describe("the summary and the report", () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(summary).toHaveAttribute("data-source", "summary");
     expect(summary.textContent).toContain("The record's own words.");
+  });
+});
+
+/**
+ * The box-wide Vercel switch, as the app reads it (`status.vercelEnabled`).
+ *
+ * The owner's ruling: only show the Vercel UI if the integration is on. Not a
+ * disabled button and not an empty card — the surfaces are not rendered at all,
+ * on the project's page and on a run's.
+ */
+describe("the box-wide Vercel integration", () => {
+  /** The run's page, for a run that has a deployment and a pipeline on it. */
+  const DEPLOYED = {
+    ...RUN,
+    id: "run-deployed1",
+    vercel: {
+      phase: "ready", url: "https://site-abc.vercel.app", inspectorUrl: null,
+      deploymentId: "dpl_1", target: "preview", projectId: "prj_1", teamId: null,
+      branch: null, startedAt: 1, endedAt: 2, detail: null, by: "owner", promotion: null,
+    },
+    pipeline: {
+      stage: "complete", status: "complete", startedAt: 1, endedAt: 2, round: 0, maxRounds: 2,
+      deadlineAt: 9_999_999_999_999, verify: { path: "/", expect: ["Invoice"] }, production: false,
+      failure: null, productionApprovedAt: null, lastVerification: null,
+      steps: [{ stage: "build", state: "passed", attempt: 1, startedAt: 1, endedAt: 2, detail: null, evidence: [] }],
+    },
+  };
+
+  async function openDeployedRun(vercelEnabled: boolean) {
+    stubFetch({ enabled: true, readiness: READY, vercelEnabled }, [DEPLOYED], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${DEPLOYED.id}`));
+    return screen.findByTestId("coding-agent-run-page");
+  }
+
+  it("draws the run's deployment card and its pipeline strip when it is ON", async () => {
+    const page = await openDeployedRun(true);
+    expect(within(page).getByTestId("coding-agent-deploy")).toBeInTheDocument();
+    expect(within(page).getByTestId("coding-agent-pipeline")).toBeInTheDocument();
+    // And the Deploy panel asked the device about this run's project. (It
+    // draws nothing here: the stub answers that route 404, which is the
+    // "nothing to deploy" case, so what is pinned is that it ASKED.)
+    await waitFor(() => expect(vercelReads.some((u) => u.includes("/vercel/deploy"))).toBe(true));
+  });
+
+  it("draws none of the three when it is OFF", async () => {
+    const page = await openDeployedRun(false);
+    // The run still renders — its work happened, and the record still carries
+    // the deployment that was made while the integration was on.
+    expect(page).toBeInTheDocument();
+    expect(within(page).queryByTestId("coding-agent-deploy")).toBeNull();
+    expect(within(page).queryByTestId("coding-agent-pipeline")).toBeNull();
+    expect(within(page).queryByTestId("coding-agent-deploy-actions")).toBeNull();
+    // Nothing on this page asked Vercel anything.
+    expect(vercelReads).toEqual([]);
+  });
+
+  it("keeps the project page's link card off, and the rest of the page on", async () => {
+    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false }, [], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    const page = await screen.findByTestId("coding-agent-project-page");
+    expect(within(page).getByTestId("coding-agent-workspace")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-vercel-card")).toBeNull();
+    // And the card never asked its route, so a box with the integration off
+    // makes no Vercel request at all.
+    expect(vercelReads).toEqual([]);
   });
 });
 
