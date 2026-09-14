@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import type { Locale } from "@/lib/i18n";
-import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { PORTAL_DASHBOARD_URL, PORTAL_SUBSCRIBE_URL } from "@/lib/max-subscription";
 import { translations } from "@/lib/translations";
 import HarnessPicker from "@/components/HarnessPicker";
 
@@ -254,11 +254,20 @@ const swapReady = (over: Record<string, unknown> = {}) => ({
   swappable: true,
   inProgress: false,
   inProgressTarget: null,
-  plan: { tier: "flash", planNameKey: "ai.planNamePro" },
-  businessPlanRequired: false,
+  plan: { tier: "pro", planNameKey: "ai.planNameMax" },
+  maxPlanRequired: true,
   allowed: true,
+  subscribed: true,
   ...over,
 });
+
+/** A connected account that does not pay for Max — the Upgrade face. */
+const swapOnPro = (over: Record<string, unknown> = {}) =>
+  swapReady({ plan: { tier: "flash", planNameKey: "ai.planNamePro" }, allowed: false, subscribed: true, ...over });
+
+/** No ClawBox AI account on the box at all — the Subscribe face. */
+const swapUnsubscribed = (over: Record<string, unknown> = {}) =>
+  swapReady({ plan: { tier: null, planNameKey: "ai.planNameFree" }, allowed: false, subscribed: false, ...over });
 
 /** An NDJSON body the test feeds line by line, so the view between lines can be asserted. */
 function ndjsonStream() {
@@ -330,10 +339,13 @@ describe("HarnessPicker swap tiles", () => {
     expect(button.textContent).toContain("Switch to Hermes");
     expect(button.textContent).toContain("swap_horiz");
 
-    // The plan row is the swap route's plan, named through its own key.
+    // The plan row is the swap route's plan, named through its own key. On
+    // Max there is nothing the gate is in the way of, so it says the plan and
+    // nothing else.
     const plan = screen.getByTestId("harness-swap-plan");
-    expect(plan.textContent).toContain("Your plan: Pro plan");
-    expect(plan.textContent).toContain("part of the Business plan");
+    expect(plan.textContent).toContain("Your plan: Max plan");
+    expect(plan.textContent).not.toContain("needs the ClawBox Max plan");
+    expect(plan.textContent).not.toContain("keeps the harness");
 
     // The tiles replace the badge; they do not sit beside it.
     expect(screen.queryByTestId("harness-locked-dot")).toBeNull();
@@ -426,12 +438,12 @@ describe("HarnessPicker swap dialog", () => {
     const dialog = await openSwapDialog();
     expect(dialog.getAttribute("role")).toBe("dialog");
     expect(dialog.textContent).toContain("Switch this box to Hermes");
-    // Section 1: the Business-plan callout with the plan and the portal link.
+    // Section 1: the Max-plan callout. On Max it says the swap is included and
+    // sells nothing — there is no plan above this one.
     const callout = screen.getByTestId("harness-swap-callout");
-    expect(callout.textContent).toContain("Pro plan");
-    const link = screen.getByTestId("harness-swap-upgrade-link") as HTMLAnchorElement;
-    expect(link.getAttribute("href")).toBe(PORTAL_DASHBOARD_URL);
-    expect(link.getAttribute("target")).toBe("_blank");
+    expect(callout.textContent).toContain("Included in your Max plan");
+    expect(screen.queryByTestId("harness-swap-upgrade-link")).toBeNull();
+    expect(screen.queryByTestId("harness-swap-subscribe-link")).toBeNull();
     // Section 2: what the swap does, in full.
     const steps = screen.getByTestId("harness-swap-steps");
     expect(steps.querySelectorAll("li").length).toBe(7);
@@ -441,7 +453,11 @@ describe("HarnessPicker swap dialog", () => {
     expect(steps.textContent).toContain("what it knows about you carry over");
     expect(steps.textContent).toContain("Telegram approvals and other providers are per harness");
     expect(steps.textContent).toContain("The same button swaps back");
-    expect(screen.getByTestId("harness-swap-continue").textContent).toContain("Continue on the Pro plan");
+    const continueButton = screen.getByTestId("harness-swap-continue") as HTMLButtonElement;
+    expect(continueButton.textContent).toContain("Continue on the Max plan");
+    expect(continueButton.disabled).toBe(false);
+    expect(screen.queryByTestId("harness-swap-upgrade")).toBeNull();
+    expect(screen.queryByTestId("harness-swap-subscribe")).toBeNull();
     expect(container.textContent).not.toMatch(/settings\.harness/);
 
     fireEvent.click(screen.getByTestId("harness-swap-cancel"));
@@ -458,24 +474,72 @@ describe("HarnessPicker swap dialog", () => {
     await waitFor(() => expect(screen.queryByTestId("harness-swap-dialog")).toBeNull());
   });
 
-  it("offers Upgrade alone when the plan does not allow the swap", async () => {
+  it("offers Upgrade to Max, with Continue disabled rather than hidden, on a connected account below Max", async () => {
+    mockRoutes({ status: lockedOpenclaw(true), swap: swapOnPro() });
+    render(<HarnessPicker />);
+
+    await openSwapDialog();
+    const upgrade = screen.getByTestId("harness-swap-upgrade") as HTMLAnchorElement;
+    expect(upgrade.getAttribute("href")).toBe(PORTAL_DASHBOARD_URL);
+    expect(upgrade.textContent).toContain("Upgrade to Max");
+    // There IS an account, so nothing offers to subscribe to one.
+    expect(screen.queryByTestId("harness-swap-subscribe")).toBeNull();
+    // The switch is drawn and disabled: hidden, the dialog said what the swap
+    // does and then offered nothing to do it with.
+    const continueButton = screen.getByTestId("harness-swap-continue") as HTMLButtonElement;
+    expect(continueButton.disabled).toBe(true);
+    expect(continueButton.getAttribute("title")).toContain("needs the ClawBox Max plan");
+    expect(screen.getByTestId("harness-swap-callout").textContent).toContain("Switching the harness needs the Max plan");
+    // The card's note under the tiles says which plan is required, and that
+    // the box is not being taken back to the other harness.
+    const plan = screen.getByTestId("harness-swap-plan").textContent ?? "";
+    expect(plan).toContain("needs the ClawBox Max plan");
+    expect(plan).toContain("keeps the harness it runs now");
+    // Cancel is still the way out.
+    expect(screen.getByTestId("harness-swap-cancel")).toBeTruthy();
+  });
+
+  it("offers Subscribe to ClawBox AI on a box with no account at all", async () => {
+    mockRoutes({ status: lockedOpenclaw(true), swap: swapUnsubscribed() });
+    render(<HarnessPicker />);
+
+    await openSwapDialog();
+    const subscribe = screen.getByTestId("harness-swap-subscribe") as HTMLAnchorElement;
+    expect(subscribe.getAttribute("href")).toBe(PORTAL_SUBSCRIBE_URL);
+    expect(subscribe.getAttribute("target")).toBe("_blank");
+    expect(subscribe.textContent).toContain("Subscribe to ClawBox AI");
+    // "Upgrade" would send the owner looking for a subscription they never
+    // bought, so it is not offered at all.
+    expect(screen.queryByTestId("harness-swap-upgrade")).toBeNull();
+    expect((screen.getByTestId("harness-swap-continue") as HTMLButtonElement).disabled).toBe(true);
+    const callout = screen.getByTestId("harness-swap-callout");
+    expect(callout.textContent).toContain("no ClawBox AI subscription yet");
+    expect((screen.getByTestId("harness-swap-subscribe-link") as HTMLAnchorElement).getAttribute("href")).toBe(PORTAL_SUBSCRIBE_URL);
+  });
+
+  it("posts nothing when the disabled Continue is clicked", async () => {
+    const { calls } = mockRoutes({ status: lockedOpenclaw(true), swap: swapOnPro() });
+    render(<HarnessPicker />);
+
+    await openSwapDialog();
+    fireEvent.click(screen.getByTestId("harness-swap-continue"));
+    await waitFor(() => expect(screen.getByTestId("harness-swap-dialog").getAttribute("data-stage")).toBe("confirm"));
+    expect(swapPosts(calls)).toHaveLength(0);
+  });
+
+  it("treats a server that sends neither field as allowed and unsubscribed", async () => {
+    // An older server gated nothing, and the refusal is the route's to make;
+    // a card that guessed "blocked" would take the button from a box that can
+    // swap.
     mockRoutes({
       status: lockedOpenclaw(true),
-      swap: swapReady({ businessPlanRequired: true, allowed: false }),
+      swap: { edition: "openclaw", active: "openclaw", locked: true, target: "hermes", swappable: true, inProgress: false, inProgressTarget: null, plan: { tier: "flash", planNameKey: "ai.planNamePro" } },
     });
     render(<HarnessPicker />);
 
     await openSwapDialog();
-    const upgrade = screen.getByTestId("harness-swap-upgrade");
-    expect(upgrade.getAttribute("href")).toBe(PORTAL_DASHBOARD_URL);
-    expect(upgrade.textContent).toContain("Upgrade");
-    expect(screen.queryByTestId("harness-swap-continue")).toBeNull();
-    expect(screen.getByTestId("harness-swap-callout").textContent).toContain("needs the Business plan");
-    // The card's note says the same, in place of "every plan can use it".
-    expect(screen.getByTestId("harness-swap-plan").textContent).toContain("needs the Business plan");
-    expect(screen.getByTestId("harness-swap-plan").textContent).not.toContain("every plan can use it");
-    // Cancel is still the way out.
-    expect(screen.getByTestId("harness-swap-cancel")).toBeTruthy();
+    expect((screen.getByTestId("harness-swap-continue") as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId("harness-swap-plan").textContent).not.toContain("needs the ClawBox Max plan");
   });
 
   it("posts the target, follows the stream phase by phase, and reloads on success", async () => {
@@ -749,6 +813,17 @@ describe("HarnessPicker swap copy", () => {
       expect(translations[locale]["settings.harnessSwapContinue"]).toContain("{plan}");
       expect(translations[locale]["settings.harnessSwapDoneTitle"]).toContain("{name}");
       expect(translations[locale]["settings.harnessSwapElapsed"]).toContain("{time}");
+      expect(translations[locale]["settings.harnessSwapMaxIncluded"]).toContain("{plan}");
+      expect(translations[locale]["settings.harnessSwapMaxRequired"]).toContain("{plan}");
+    }
+    // The Business plan the 2026-09-07 ruling waited for does not exist; every
+    // catalogue names the Max plan now, and the dead keys are gone.
+    for (const locale of LOCALES) {
+      for (const dead of ["settings.harnessSwapPlanNote", "settings.harnessSwapBusinessTitle", "settings.harnessSwapBusinessBody", "settings.harnessSwapBusinessIncluded", "settings.harnessSwapBusinessRequired", "settings.harnessSwapUpgrade"]) {
+        expect(translations[locale][dead], `${locale} still carries ${dead}`).toBeUndefined();
+      }
+      // The one sentence that must never print an internal tier id.
+      expect(translations[locale]["settings.harnessSwapRefusedPlan"]).not.toMatch(/\bflash\b/i);
     }
   });
 

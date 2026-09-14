@@ -44,11 +44,14 @@ const h = vi.hoisted(() => ({
   /** Where the OpenClaw core is — an absolute path — or the bare name when it is not installed. */
   openclawBin: "/home/clawbox/.npm-global/bin/openclaw",
   get: vi.fn<(key: string) => Promise<unknown>>(async () => undefined),
-  entitlementTier: vi.fn(async (): Promise<"free" | "flash" | "pro" | null> => "flash"),
+  /**
+   * The plan the box is on. `"pro"` IS the Max plan (the tier names are off by
+   * one), and it is the default here because every POST past the plan gate
+   * needs it — the refusals below set a lesser one themselves.
+   */
+  entitlementTier: vi.fn(async (): Promise<"free" | "flash" | "pro" | null> => "pro"),
   memAvailableMb: vi.fn(async (): Promise<number | null> => 4000),
   freeBytes: vi.fn(async (): Promise<number | null> => 50 * 1024 * 1024 * 1024),
-  /** The Business-plan gate, flipped by one test without touching the constant. */
-  planGateOn: false,
   unitState: "ActiveState=inactive\n",
   /** A systemctl that cannot be asked at all; null lets the probe answer. */
   unitError: null as Error | null,
@@ -101,12 +104,6 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 vi.mock("@/lib/clawai-plan-tier", () => ({ readClawaiEntitlementTier: h.entitlementTier }));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: h.memAvailableMb }));
 vi.mock("@/lib/project-import", () => ({ freeBytes: h.freeBytes }));
-// The gate is a constant by design; the route's handling of a refused plan is
-// pinned through the one function that reads it.
-vi.mock("@/lib/harness-swap", async (orig) => {
-  const actual = await orig<typeof import("@/lib/harness-swap")>();
-  return { ...actual, swapAllowed: (plan: Parameters<typeof actual.swapAllowed>[0]) => !h.planGateOn && actual.swapAllowed(plan) };
-});
 vi.mock("child_process", async (orig) => {
   const actual = await orig<typeof import("child_process")>();
   // `promisify(execFile)` follows util.promisify.custom, which is how the real
@@ -151,7 +148,6 @@ afterAll(async () => {
 beforeEach(() => {
   _resetHarnessSwapForTests();
   h.edition = { edition: "openclaw", defaulted: false };
-  h.planGateOn = false;
   h.unitState = "ActiveState=inactive\n";
   h.unitError = null;
   h.invocationId = "";
@@ -172,7 +168,7 @@ beforeEach(() => {
   h.setTelegramToken.mockReset().mockResolvedValue(undefined);
   h.restartGateway.mockReset().mockResolvedValue(undefined);
   h.get.mockReset().mockResolvedValue(undefined);
-  h.entitlementTier.mockReset().mockResolvedValue("flash");
+  h.entitlementTier.mockReset().mockResolvedValue("pro");
   h.memAvailableMb.mockReset().mockResolvedValue(4000);
   h.freeBytes.mockReset().mockResolvedValue(50 * 1024 * 1024 * 1024);
   fetchMock.mockReset().mockResolvedValue(new Response(null, { status: 404 }));
@@ -238,10 +234,30 @@ describe("GET /setup-api/harness/swap", () => {
       swappable: true,
       inProgress: false,
       inProgressTarget: null,
-      plan: { tier: "flash", planNameKey: "ai.planNamePro" },
-      businessPlanRequired: false,
+      plan: { tier: "pro", planNameKey: "ai.planNameMax" },
+      maxPlanRequired: true,
       allowed: true,
+      subscribed: false,
     });
+  });
+
+  it("answers the plan and the gate per tier: only Max may swap", async () => {
+    for (const [tier, allowed] of [["pro", true], ["flash", false], ["free", false], [null, false]] as const) {
+      h.entitlementTier.mockResolvedValue(tier);
+      expect(await (await GET()).json()).toMatchObject({ plan: { tier }, maxPlanRequired: true, allowed });
+    }
+  });
+
+  it("says whether a ClawBox AI account is connected at all, apart from what it pays for", async () => {
+    // Free and not-connected are both `tier: null`; only `subscribed` tells
+    // the card whether to offer Subscribe or Upgrade.
+    h.entitlementTier.mockResolvedValue("free");
+    expect(await (await GET()).json()).toMatchObject({ allowed: false, subscribed: false });
+    h.readConfig.mockResolvedValue({ models: { providers: { deepseek: { apiKey: "claw_secret" } } } });
+    const body = await (await GET()).json();
+    expect(body).toMatchObject({ allowed: false, subscribed: true });
+    // The credential itself never leaves the box.
+    expect(JSON.stringify(body)).not.toContain("claw_secret");
   });
 
   it("points a Hermes box back at OpenClaw", async () => {
@@ -264,9 +280,9 @@ describe("GET /setup-api/harness/swap", () => {
     expect(await (await GET()).json()).toMatchObject({ inProgress: true, inProgressTarget: "hermes" });
   });
 
-  it("says allowed: false when the gate is on and the plan is not Business", async () => {
-    h.planGateOn = true;
-    expect(await (await GET()).json()).toMatchObject({ allowed: false });
+  it("says allowed: false on a box with no plan on record", async () => {
+    h.entitlementTier.mockResolvedValue(null);
+    expect(await (await GET()).json()).toMatchObject({ allowed: false, subscribed: false });
   });
 });
 
@@ -301,9 +317,11 @@ describe("POST /setup-api/harness/swap — refusals", () => {
     await expectRefusal(await POST(post({ harness: "hermes" })), 409, "same_harness");
   });
 
-  it("refuses when the Business-plan gate is on and the plan is not Business: 409 plan_required", async () => {
-    h.planGateOn = true;
-    await expectRefusal(await POST(post({ harness: "hermes" })), 409, "plan_required");
+  it("refuses every plan but Max: 409 plan_required", async () => {
+    for (const tier of ["flash", "free", null] as const) {
+      h.entitlementTier.mockResolvedValue(tier);
+      await expectRefusal(await POST(post({ harness: "hermes" })), 409, "plan_required");
+    }
   });
 
   it("refuses while the unit is already running: 409 busy", async () => {

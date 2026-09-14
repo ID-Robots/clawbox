@@ -86,7 +86,7 @@ vi.mock("child_process", async (orig) => {
 });
 
 import {
-  HARNESS_SWAP_BUSINESS_PLAN_REQUIRED,
+  HARNESS_SWAP_MAX_PLAN_REQUIRED,
   SWAP_FOLLOW_TIMEOUT_MS,
   SWAP_INSTALL_ORIGIN,
   SWAP_MIN_AVAILABLE_MB,
@@ -106,12 +106,14 @@ import {
   readSwapRequest,
   releaseSwap,
   removeSwapRequest,
+  planIsMax,
   swapAllowed,
   swapAllowedFor,
   swapInProgress,
   swapPhaseFollower,
   swapPhaseStatus,
   swapRequestPath,
+  swapSubscribed,
   swapTargetFor,
   writeSwapRequest,
 } from "@/lib/harness-swap";
@@ -207,17 +209,51 @@ describe("the plan beside the button", () => {
     expect(await readSwapPlan()).toEqual({ tier: null, planNameKey: "ai.planNameFree" });
   });
 
-  it("lets every plan swap while the Business-plan gate is off (owner, 2026-09-07)", async () => {
-    expect(HARNESS_SWAP_BUSINESS_PLAN_REQUIRED).toBe(false);
-    for (const tier of ["free", "flash", "pro", null] as const) {
-      expect(swapAllowed({ tier, planNameKey: "x" })).toBe(true);
+  it("lets only the Max plan swap (owner, 2026-09-14 — this supersedes the 2026-09-07 gate-off ruling)", () => {
+    expect(HARNESS_SWAP_MAX_PLAN_REQUIRED).toBe(true);
+    // The tier names are off by one: the internal `pro` IS the Max plan, and
+    // the internal `flash` is the plan marketed as Pro.
+    expect(swapAllowed({ tier: "pro", planNameKey: "ai.planNameMax" })).toBe(true);
+    for (const tier of ["free", "flash", null] as const) {
+      expect(swapAllowed({ tier, planNameKey: "x" })).toBe(false);
     }
   });
 
-  it("refuses every current plan once the gate is on — there is no Business tier yet to map", () => {
+  it("is a pure function of the switch, so the switched-off case stays reachable", () => {
     for (const tier of ["free", "flash", "pro", null] as const) {
-      expect(swapAllowedFor({ tier, planNameKey: "x" }, true)).toBe(false);
+      expect(swapAllowedFor({ tier, planNameKey: "x" }, false)).toBe(true);
+      expect(swapAllowedFor({ tier, planNameKey: "x" }, true)).toBe(tier === "pro");
     }
+  });
+
+  it("reads a tier outside the vocabulary as no entitlement, never as Max", () => {
+    for (const tier of ["max", "business", "", 7, undefined] as unknown[]) {
+      expect(planIsMax({ tier: tier as never, planNameKey: "x" })).toBe(false);
+    }
+    // `normalizeClawboxAiTier`'s own trim-and-lowercase still applies, which is
+    // the reading every other entitlement on the box gets.
+    expect(planIsMax({ tier: " PRO " as never, planNameKey: "x" })).toBe(true);
+  });
+});
+
+describe("whether there is a ClawBox AI account at all", () => {
+  it("is false on a box with neither store filled — the face that offers Subscribe", async () => {
+    expect(await swapSubscribed()).toBe(false);
+  });
+
+  it("is true for a token in OpenClaw's config, and for one in the Hermes store", async () => {
+    h.readConfig.mockResolvedValue({ models: { providers: { deepseek: { apiKey: "claw_secret" } } } });
+    expect(await swapSubscribed()).toBe(true);
+
+    h.readConfig.mockResolvedValue({});
+    h.get.mockImplementation(async (key) => (key === "clawai_token" ? "claw_secret" : undefined));
+    expect(await swapSubscribed()).toBe(true);
+  });
+
+  it("answers false — never throws — when neither store can be read", async () => {
+    h.readConfig.mockRejectedValue(new Error("ENOENT"));
+    h.get.mockRejectedValue(new Error("EACCES"));
+    expect(await swapSubscribed()).toBe(false);
   });
 });
 
