@@ -55,8 +55,8 @@ import { createSerialLock } from "@/lib/serial-lock";
 import { syncChannelAudio } from "@/lib/stt-channel";
 import { localSttInstalled } from "@/lib/stt-local";
 import { getSttPrimary, setSttPrimary, sttEngineOrder, STT_PRIMARY_KEY } from "@/lib/stt-preference";
-import { probeBox, writeActiveVoiceProvider } from "@/lib/voice-box";
-import { buildVoiceOutputStatus } from "@/lib/voice-output";
+import { probeBox, writeActiveVoiceProvider, type ActiveHarness } from "@/lib/voice-box";
+import { buildVoiceOutputStatus, type VoiceOutputStatus } from "@/lib/voice-output";
 import { readVoiceState } from "@/lib/voice-output-store";
 import type { ClawboxAiPlanTier } from "@/lib/clawbox-ai-models";
 
@@ -118,11 +118,34 @@ export async function readCloudDefaultsFacts(): Promise<CloudDefaultsFacts> {
   };
 }
 
-/** Which engine speaks for this box right now. */
-async function currentVoiceSource(): Promise<CapabilitySource> {
+/**
+ * The voice inventory, read ONCE per run and used twice.
+ *
+ * `probeBox` is not a cheap read: it checks the Kokoro stamp, reads the user
+ * service state, can inspect process memory and runs up to two executable
+ * checks. `readCloudDefaultsStatus` needs it to say where speech-out comes from
+ * today, and `promoteTts` needs the same three answers to write the move — so on
+ * every eligible boot and every credential link the box paid for that walk
+ * twice. Threaded through the apply run instead.
+ *
+ * DELIBERATELY NOT a cross-run cache: the local installation state is exactly
+ * what changes between runs (install.sh finishes, the owner uninstalls a voice),
+ * and a stale snapshot there is an applier writing a provider that is no longer
+ * on the box.
+ */
+interface VoiceSnapshot {
+  harness: ActiveHarness;
+  status: VoiceOutputStatus;
+}
+
+async function readVoiceSnapshot(): Promise<VoiceSnapshot> {
   const harness = await getActiveHarness();
   const [{ config, probe }, state] = await Promise.all([probeBox(harness), readVoiceState()]);
-  const status = buildVoiceOutputStatus(config, probe, state);
+  return { harness, status: buildVoiceOutputStatus(config, probe, state) };
+}
+
+/** Which engine speaks for this box right now. */
+function voiceSourceOf(status: VoiceOutputStatus): CapabilitySource {
   // The provider actually written, and only when that is neither engine does
   // the resolved preference stand in: a box mid-provisioning has a choice but
   // nothing selected yet, and reporting that as "local" would make the applier
@@ -146,14 +169,26 @@ async function currentEmbeddingSource(): Promise<CapabilitySource> {
  * decided. Read-only — nothing here writes.
  */
 export async function readCloudDefaultsStatus(): Promise<CloudDefaultsStatus> {
+  return (await readStatusAndVoice()).status;
+}
+
+/**
+ * The same read, keeping the voice snapshot it already paid for.
+ *
+ * The applier is the only caller that wants the second half — see
+ * {@link VoiceSnapshot}. The exported reader above stays the narrow one, so no
+ * panel route has to know a probe object exists.
+ */
+async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voice: VoiceSnapshot }> {
   const facts = await readCloudDefaultsFacts();
   const defaults = resolveClawaiCloudDefaults(facts);
-  const [stt, tts, embeddings, owners] = await Promise.all([
+  const [stt, voice, embeddings, owners] = await Promise.all([
     getSttPrimary(),
-    currentVoiceSource(),
+    readVoiceSnapshot(),
     currentEmbeddingSource(),
     readOwnerChoices(),
   ]);
+  const tts = voiceSourceOf(voice.status);
   const current: Record<CloudCapability, CapabilitySource> = { stt, tts, embeddings };
   const capabilities = {} as Record<CloudCapability, CapabilityState>;
   for (const capability of ["tts", "stt", "embeddings"] as const) {
@@ -169,7 +204,7 @@ export async function readCloudDefaultsStatus(): Promise<CloudDefaultsStatus> {
       reason: owner && current[capability] === "local" ? "owner" : verdict.reason,
     };
   }
-  return { linked: facts.linked, plan: facts.entitlement, capabilities };
+  return { status: { linked: facts.linked, plan: facts.entitlement, capabilities }, voice };
 }
 
 /**
@@ -222,16 +257,25 @@ export interface ApplyOptions {
  * refusal does not cost the other two.
  */
 export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Promise<CloudDefaultsApplied> {
-  if (options.credentialChanged) forgetCloudEmbeddingsProbe();
   return await withApply(async () => {
+    // INSIDE the lock, not before it. A run already holding the lock can still
+    // have an `askCloudEmbedder` call in flight, and that call writes its answer
+    // into the probe cache when it lands. Clearing outside meant the clear could
+    // happen first and the older run's answer repopulate the cache afterwards —
+    // so the credential-change run read a verdict about the PREVIOUS credential
+    // and skipped its own probe. When that stale answer was `false`, embeddings
+    // stayed on the box for up to `PROBE_FAIL_TTL_MS` after the owner linked a
+    // subscription. Here the clear and the next probe cannot be separated.
+    if (options.credentialChanged) forgetCloudEmbeddingsProbe();
     const applied: CloudDefaultsApplied = { moved: [], failed: [] };
     // A box with no credential can promote nothing, and this runs at every
     // boot: reading the whole state there would be a voice inventory and an
     // openclaw.json read bought for an answer that is already known.
     if ((await resolveClawaiToken()) === null) return applied;
     let status: CloudDefaultsStatus;
+    let voice: VoiceSnapshot;
     try {
-      status = await readCloudDefaultsStatus();
+      ({ status, voice } = await readStatusAndVoice());
     } catch (err) {
       console.warn("[clawai-cloud-defaults] could not read the box's current engines:", message(err));
       return applied;
@@ -250,7 +294,7 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
       // and is not reported as moved.
       if (state.ownerChoice || state.target !== "cloud") continue;
       try {
-        if (await promote(capability)) {
+        if (await promote(capability, voice)) {
           applied.moved.push(capability);
           console.warn(
             `[clawai-cloud-defaults] ${capability} moved to the ClawBox AI cloud (${options.trigger ?? "boot"})`,
@@ -266,12 +310,12 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
 }
 
 /** Move one capability onto the cloud. Answers whether anything was written. */
-async function promote(capability: CloudCapability): Promise<boolean> {
+async function promote(capability: CloudCapability, voice: VoiceSnapshot): Promise<boolean> {
   switch (capability) {
     case "stt":
       return await promoteStt();
     case "tts":
-      return await promoteTts();
+      return await promoteTts(voice);
     case "embeddings":
       return await promoteEmbeddings();
   }
@@ -308,11 +352,12 @@ async function promoteStt(): Promise<boolean> {
  * whose plan covers it, `gateway-pre-start.sh` is what writes the provider
  * entry, and until it has there is nothing here to select. A pick with no
  * endpoint behind it would answer every utterance with a 401.
+ *
+ * Works from the run's own {@link VoiceSnapshot} — the same one the status read
+ * above was decided from, taken moments earlier inside the same lock — rather
+ * than probing the box a second time.
  */
-async function promoteTts(): Promise<boolean> {
-  const harness = await getActiveHarness();
-  const [{ config, probe }, state] = await Promise.all([probeBox(harness), readVoiceState()]);
-  const status = buildVoiceOutputStatus(config, probe, state);
+async function promoteTts({ harness, status }: VoiceSnapshot): Promise<boolean> {
   const cloud = status.engines.find((engine) => engine.id === "cloud");
   if (!cloud?.configured || !cloud.providerId) return false;
   if (cloud.providerId === status.activeProviderId) return false;

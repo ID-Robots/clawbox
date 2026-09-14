@@ -24,9 +24,10 @@ vi.mock("@/lib/harness/credentials", () => ({
 }));
 
 const routeReady = vi.fn(async () => true);
+const forgetProbe = vi.fn(() => {});
 vi.mock("@/lib/clawai-cloud-embeddings", () => ({
   cloudEmbeddingsUrl: () => "https://clawbox.test/api/ai/embeddings",
-  forgetCloudEmbeddingsProbe: () => {},
+  forgetCloudEmbeddingsProbe: () => forgetProbe(),
   probeCloudEmbeddings: () => routeReady(),
 }));
 
@@ -191,6 +192,59 @@ describe("applyClawaiCloudDefaults", () => {
     const applied = await applyClawaiCloudDefaults();
     expect(applied.moved.sort()).toEqual(["stt", "tts"]);
     expect(applied.failed).toEqual([{ capability: "embeddings", error: "the CLI said no" }]);
+  });
+
+  /**
+   * `probeBox` is not a cheap read — the Kokoro stamp, the user service state,
+   * possibly process memory, and up to two executable checks. The status read
+   * and the voice promotion each used to do their own, so every eligible boot
+   * and every credential link paid for the walk twice.
+   */
+  it("reads the box's voice once per run, not once per decision", async () => {
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("tts");
+    expect(voiceProbe).toHaveBeenCalledTimes(1);
+    // `readVoiceState` is still read a second time, by `readOwnerChoices` — a
+    // JSON file, asked for concurrently, and for a different question (the
+    // legacy stored `local` pick). It is the PROBE that was worth not repeating.
+    //
+    // The snapshot the move was written from is the one the decision was made
+    // from, so the two cannot disagree about what is installed.
+    expect(writeProvider).toHaveBeenCalledWith(expect.anything(), expect.anything(), "openai");
+  });
+
+  /**
+   * The probe cache is cleared INSIDE the lock.
+   *
+   * Cleared before taking it, a run already holding the lock could still have an
+   * `askCloudEmbedder` call in flight — and that call writes its answer into the
+   * cache when it lands, AFTER the clear. The credential-change run then read a
+   * verdict about the credential it had just replaced and skipped its own probe;
+   * when that stale answer was `false`, embeddings stayed on the box for the
+   * whole failure TTL after the owner linked a subscription.
+   */
+  it("clears the probe cache inside the lock, where an in-flight run cannot repopulate it", async () => {
+    let release = () => {};
+    const inFlight = new Promise<void>((resolve) => { release = resolve; });
+    routeReady.mockImplementationOnce(async () => { await inFlight; return true; });
+
+    const first = applyClawaiCloudDefaults();
+    // Wait until that run is genuinely inside its probe, holding the lock.
+    await vi.waitFor(() => expect(routeReady).toHaveBeenCalledTimes(1));
+
+    const second = applyClawaiCloudDefaults({ credentialChanged: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(forgetProbe).not.toHaveBeenCalled();
+
+    release();
+    await Promise.all([first, second]);
+    // And it does still happen, once the lock is actually held.
+    expect(forgetProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not touch the probe cache when the credential is the same one", async () => {
+    await applyClawaiCloudDefaults({ trigger: "boot" });
+    expect(forgetProbe).not.toHaveBeenCalled();
   });
 });
 
