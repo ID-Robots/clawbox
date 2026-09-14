@@ -532,6 +532,48 @@ describe("the trash and its retention rule", () => {
       .toEqual({ removed: [], expired: [], early: [] });
   });
 
+  // Skipped for a run as root, which the permission bits do not apply to, and
+  // on Windows, which does not enforce POSIX directory read permission from
+  // chmod(0o000) — there `readdir` would simply succeed and the refusal this
+  // asserts would never fire. The rule itself is pinned unconditionally by the
+  // ENOTDIR case below, so nothing goes uncovered on either.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("refuses a trash folder it cannot READ, which realpath resolves perfectly well", async () => {
+    // The half a resolved path cannot speak for. `realpath` walks a folder's
+    // ANCESTORS and never opens the folder itself, so a trash the owner took
+    // the permissions off resolves without complaint and then fails on the
+    // `readdir` — the one that used to be swallowed into an empty list. Empty
+    // is the answer that skips `trash_full`, so this is the likeliest way the
+    // count bound could have been passed without the owner being asked.
+    const trash = lib.projectTrashDir(owner);
+    fs.mkdirSync(trash, { recursive: true });
+    fs.mkdirSync(path.join(trash, stamped("shop", Date.parse("2026-09-13T12:00:00.000Z"), 0)));
+    fs.chmodSync(trash, 0o000);
+
+    try {
+      expect(await refusal(() => lib.trashPurgedByOneMore(roots()))).toBe("trash_failed");
+      // The prune still answers rather than throwing: by the time it runs the
+      // folder has already moved, and its contract is that it never fails a
+      // removal that has happened.
+      expect(await lib.pruneProjectTrash(roots())).toEqual({ removed: [], expired: [], early: [] });
+    } finally {
+      fs.chmodSync(trash, 0o755);
+    }
+  });
+
+  it("refuses a FILE where the trash folder goes, rather than reading it as an empty shelf", async () => {
+    // The same rule without the permission bits, so it holds for a test run as
+    // root as well: the trash is a folder a person can open, and a person can
+    // put a file there. `readdir` answers ENOTDIR, which is not "nothing there".
+    fs.writeFileSync(lib.projectTrashDir(owner), "not a folder");
+
+    expect(await refusal(() => lib.trashPurgedByOneMore(roots()))).toBe("trash_failed");
+    expect(await lib.pruneProjectTrash(roots())).toEqual({ removed: [], expired: [], early: [] });
+    // And ENOENT still means what it has always meant: a box that has removed
+    // nothing has an empty shelf, not a broken one.
+    fs.rmSync(lib.projectTrashDir(owner));
+    expect(await lib.trashPurgedByOneMore(roots())).toEqual({ count: 0, early: [] });
+  });
+
   it("reads a name it did not write as having no time, so the prune skips it", () => {
     expect(lib.trashEntryTime("shop")).toBeNull();
     expect(lib.trashEntryTime("shop--nonsense")).toBeNull();
