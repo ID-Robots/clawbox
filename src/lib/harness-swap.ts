@@ -38,6 +38,7 @@ import { CLAWAI_TIER_INFO, type ClawaiTier } from "@/lib/clawbox-ai-tiers";
 import { CONFIG_ROOT, DATA_DIR, get } from "@/lib/config-store";
 import type { EditionSource } from "@/lib/edition-source";
 import { HARNESSES, type Harness } from "@/lib/harness";
+import { hasClawaiToken } from "@/lib/harness/credentials";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
 import { memAvailableMb } from "@/lib/mem-available";
@@ -53,14 +54,21 @@ const execFile = promisify(execFileCb);
 export const HARNESS_SWAP_STEP = "harness_swap";
 
 /**
- * Whether the swap is gated on the coming Business plan.
+ * Whether the swap is gated on the **Max plan**.
  *
- * `false` for now, at the owner's ruling (2026-09-07): the Harness card SHOWS
- * the current plan and the upgrade offer, and lets every plan swap. The
- * follow-up PR flips this to `true` once the portal reports a business plan —
- * and teaches `planIsBusiness` below to recognise it; nothing else has to move.
+ * `true` since the owner's decision of 2026-09-14: "OpenClaw ↔ Hermes switch
+ * requires the Max plan. Add a subscribe button for users without a ClawBox AI
+ * subscription." That supersedes the ruling of 2026-09-07, which had this
+ * switched off and let every plan swap while a Business plan was still
+ * expected — there is no Business plan, and the entitlement this feature
+ * belongs to is Max.
+ *
+ * Kept as a constant rather than folded into {@link swapAllowed} so the
+ * switched-OFF case stays reachable from a test through
+ * {@link swapAllowedFor}'s `required` parameter — the shape
+ * `PAID_PLAN_GATE_REQUIRED` copied from here.
  */
-export const HARNESS_SWAP_BUSINESS_PLAN_REQUIRED = false;
+export const HARNESS_SWAP_MAX_PLAN_REQUIRED = true;
 
 /** The phases the stream reports, in the order a swap passes through them. */
 export const SWAP_PHASES = ["request", "install", "lock", "provision", "carry", "done"] as const;
@@ -157,22 +165,50 @@ export async function readSwapPlan(): Promise<SwapPlan> {
 }
 
 /**
- * Is this plan the Business plan? There is no such tier yet, so nothing is;
- * the follow-up PR that flips {@link HARNESS_SWAP_BUSINESS_PLAN_REQUIRED} maps
- * the new tier here and nowhere else.
+ * Is this plan the **Max** plan?
+ *
+ * THE TIER NAMES ARE OFF BY ONE and always have been (`CLAWBOX_AI_TIER_LABEL`,
+ * and `paid-plan-gate.ts` says it again): the internal `flash` is the plan
+ * marketed as **Pro** and the internal `pro` is the plan marketed as **Max**.
+ * So the Max plan is the entitlement tier `"pro"`, and Free, "no plan on
+ * record" and Pro are all alike not it.
+ *
+ * Written against `normalizeClawboxAiTier` rather than a bare `=== "pro"` so a
+ * stored value outside the vocabulary can never be read as an entitlement.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function planIsBusiness(_plan: SwapPlan): boolean {
-  return false;
+export function planIsMax(plan: SwapPlan): boolean {
+  return normalizeClawboxAiTier(plan.tier) === "pro";
 }
 
-/** The gate as a pure function of the switch, so the flipped case is testable today. */
-export function swapAllowedFor(plan: SwapPlan, businessPlanRequired: boolean): boolean {
-  return !businessPlanRequired || planIsBusiness(plan);
+/** The gate as a pure function of the switch, so the switched-off case is testable today. */
+export function swapAllowedFor(plan: SwapPlan, maxPlanRequired: boolean): boolean {
+  return !maxPlanRequired || planIsMax(plan);
 }
 
 export function swapAllowed(plan: SwapPlan): boolean {
-  return swapAllowedFor(plan, HARNESS_SWAP_BUSINESS_PLAN_REQUIRED);
+  return swapAllowedFor(plan, HARNESS_SWAP_MAX_PLAN_REQUIRED);
+}
+
+/**
+ * Is there a ClawBox AI account connected to this box AT ALL — paid or Free?
+ *
+ * The second half of what the card needs, and a different question from the
+ * plan: a box with no account has nothing to upgrade and is offered the
+ * SUBSCRIBE path, while a box on Free or Pro is offered the upgrade. Without
+ * it both looked the same from here (`tier: null` covers Free and
+ * not-connected alike) and a brand-new box was told to "upgrade" an account it
+ * does not have.
+ *
+ * `hasClawaiToken` is the one reader of where each edition keeps that
+ * credential; a read that throws is "no account on record", which only ever
+ * offers a path that also works for someone who has one.
+ */
+export async function swapSubscribed(): Promise<boolean> {
+  try {
+    return await hasClawaiToken();
+  } catch {
+    return false;
+  }
 }
 
 // ── The request file ─────────────────────────────────────────────────────────

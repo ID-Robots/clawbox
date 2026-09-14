@@ -11,7 +11,7 @@ import {
 } from "@/lib/harness";
 import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import {
-  HARNESS_SWAP_BUSINESS_PLAN_REQUIRED,
+  HARNESS_SWAP_MAX_PLAN_REQUIRED,
   HARNESS_SWAP_STEP,
   SWAP_FOLLOW_TIMEOUT_MS,
   carryOverAfterSwap,
@@ -25,6 +25,7 @@ import {
   swapInProgress,
   swapPhaseFollower,
   swapPhaseStatus,
+  swapSubscribed,
   swapTargetFor,
   writeSwapRequest,
 } from "@/lib/harness-swap";
@@ -37,7 +38,7 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * Hermes). Settings → Harness's "Switch to …" button; owner's ask 2026-09-07.
  *
  * GET is what the card draws itself from: which edition, which way a swap
- * would go, whether one is running, and the plan beside the Business-plan
+ * would go, whether one is running, and the plan beside the Max-plan
  * gate. POST runs the `harness_swap` root step and streams it the way
  * `tts/install` streams the voice install — NDJSON `{status}` lines as the
  * journal moves, `{phase, status}` for the step's own markers (read out of the
@@ -64,7 +65,12 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
 export async function GET() {
   const source = getEditionSource();
   const target = swapTargetFor(source);
-  const [active, plan, progress] = await Promise.all([getActiveHarness(), readSwapPlan(), swapInProgress()]);
+  const [active, plan, progress, subscribed] = await Promise.all([
+    getActiveHarness(),
+    readSwapPlan(),
+    swapInProgress(),
+    swapSubscribed(),
+  ]);
   return NextResponse.json({
     edition: source.edition,
     active,
@@ -75,8 +81,13 @@ export async function GET() {
     inProgressTarget: progress.target,
     ...(progress.unknown ? { inProgressUnknown: true } : {}),
     plan,
-    businessPlanRequired: HARNESS_SWAP_BUSINESS_PLAN_REQUIRED,
+    maxPlanRequired: HARNESS_SWAP_MAX_PLAN_REQUIRED,
     allowed: swapAllowed(plan),
+    // Two fields, because "this box has no ClawBox AI account" and "its
+    // account does not pay for Max" need different buttons: subscribe, or
+    // upgrade. `plan.tier` cannot tell them apart — Free and not-connected are
+    // both null there.
+    subscribed,
   });
 }
 
@@ -120,7 +131,7 @@ export async function POST(req: Request) {
 
   const plan = await readSwapPlan();
   if (!swapAllowed(plan)) {
-    return refuse(409, "plan_required", "Changing the harness is part of the Business plan.");
+    return refuse(409, "plan_required", "Changing the harness needs the ClawBox Max plan.");
   }
 
   const claim = await claimSwap(target);

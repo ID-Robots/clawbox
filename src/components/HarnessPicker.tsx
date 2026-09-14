@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
-import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { PORTAL_DASHBOARD_URL, PORTAL_SUBSCRIBE_URL } from "@/lib/max-subscription";
 import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
 
 interface HarnessEntry {
@@ -48,9 +48,38 @@ interface SwapStatus {
   inProgress: boolean;
   inProgressTarget: SwapHarness | null;
   planNameKey: string;
-  businessPlanRequired: boolean;
+  maxPlanRequired: boolean;
   allowed: boolean;
+  /** Is a ClawBox AI account connected to this box at all — paid or Free? */
+  subscribed: boolean;
 }
+
+/**
+ * The three faces of the plan gate, in the order a box passes through them.
+ *
+ * `subscribe` and `upgrade` are BOTH refusals and are deliberately not the same
+ * one: a box with no ClawBox AI account has nothing to upgrade, and telling its
+ * owner to "upgrade" sends them looking for a subscription they never bought.
+ * The server answers the two facts (`allowed`, `subscribed`) and this is the
+ * one place they are turned into a face, so the callout, the tile button and
+ * the dialog's footer cannot disagree.
+ */
+export type SwapGateFace = "allowed" | "upgrade" | "subscribe";
+
+export function swapGateFace(swap: { allowed: boolean; subscribed: boolean }): SwapGateFace {
+  if (swap.allowed) return "allowed";
+  return swap.subscribed ? "upgrade" : "subscribe";
+}
+
+/** Where each refused face sends the owner, and what the button says. */
+const GATE_CTA: Record<Exclude<SwapGateFace, "allowed">, { href: string; labelKey: string; testId: string }> = {
+  // A Free or Pro account: the plan changes on the portal dashboard, which is
+  // where every other upgrade CTA on the device already points.
+  upgrade: { href: PORTAL_DASHBOARD_URL, labelKey: "settings.harnessSwapUpgradeMax", testId: "harness-swap-upgrade" },
+  // No account at all: subscribing comes first, and connecting the box to it
+  // is the second step the callout names (Settings → Providers).
+  subscribe: { href: PORTAL_SUBSCRIBE_URL, labelKey: "settings.harnessSwapSubscribe", testId: "harness-swap-subscribe" },
+};
 
 /**
  * The face of each harness on the tiles. Names are the products' own and are
@@ -171,10 +200,15 @@ function readSwapStatus(body: unknown): SwapStatus | null {
     inProgress: b.inProgress === true,
     inProgressTarget: isSwapHarness(b.inProgressTarget) ? b.inProgressTarget : null,
     planNameKey: typeof plan.planNameKey === "string" ? plan.planNameKey : "ai.planNameFree",
-    businessPlanRequired: b.businessPlanRequired === true,
-    // Absent means allowed: the constant the field mirrors is false today, and
-    // a server from before the field was gating nothing.
+    maxPlanRequired: b.maxPlanRequired === true,
+    // Absent means allowed: a server from before the field gated nothing, and
+    // the refusal is the route's to make — a card that guessed "blocked" over
+    // an older server would take the button away from a box that can swap.
     allowed: b.allowed !== false,
+    // Absent means NOT subscribed, which is the face that offers the path a
+    // subscriber can also take (subscribe, then connect). Read the other way
+    // round, a box with no account would be told to upgrade one.
+    subscribed: b.subscribed === true,
   };
 }
 
@@ -449,13 +483,15 @@ function SwapDialog({
   };
   const panelRef = useModalDialog<HTMLDivElement>({ onClose: dismiss });
   // Focus lands on the primary control, as ConfirmDialog's does; the hook
-  // puts it on the first control, which here is the callout's Upgrade link.
-  // Two refs because the primary is a button on an allowed plan and a link
-  // otherwise, and only one of them is ever mounted.
+  // puts it on the first control, which here is the callout's own link. Two
+  // refs because the primary is Continue on the Max plan and the portal CTA on
+  // every other one — Continue is still DRAWN there, disabled, so the owner
+  // sees what the plan is in the way of, but a disabled control takes no
+  // focus and is not the thing to offer.
   const continueRef = useRef<HTMLButtonElement>(null);
   const upgradeRef = useRef<HTMLAnchorElement>(null);
   useEffect(() => {
-    (continueRef.current ?? upgradeRef.current)?.focus();
+    (upgradeRef.current ?? continueRef.current)?.focus();
   }, []);
 
   // The control that had focus unmounts with the question, and the trap only
@@ -525,11 +561,14 @@ function SwapDialog({
     }
   }, [t, target]);
 
-  const calloutBody = swap.businessPlanRequired
-    ? swap.allowed
-      ? t("settings.harnessSwapBusinessIncluded", { plan })
-      : t("settings.harnessSwapBusinessRequired", { plan })
-    : t("settings.harnessSwapBusinessBody", { plan });
+  const gate = swapGateFace(swap);
+  const calloutBody =
+    gate === "allowed"
+      ? t("settings.harnessSwapMaxIncluded", { plan })
+      : gate === "upgrade"
+        ? t("settings.harnessSwapMaxRequired", { plan })
+        : t("settings.harnessSwapMaxSubscribe");
+  const cta = gate === "allowed" ? null : GATE_CTA[gate];
   const currentIndex = SWAP_PHASES.indexOf(phase);
 
   return (
@@ -571,9 +610,10 @@ function SwapDialog({
         {stage === "confirm" ? (
           <>
             <div className="px-5 pt-4 flex flex-col gap-4">
-              {/* The Business-plan callout, in the upgrade banner's own dress:
-                  the plan the owner is on and the portal, whether or not the
-                  gate is closed today. */}
+              {/* The Max-plan callout, in the upgrade banner's own dress: the
+                  plan the owner is on, and — while the gate is closed — the
+                  way out of it. On Max there is nothing to sell, so the link
+                  is not drawn at all. */}
               <div
                 data-testid="harness-swap-callout"
                 className="rounded-2xl px-4 py-3 flex items-center justify-between gap-3 bg-gradient-to-r from-fuchsia-500/15 to-pink-500/15 border border-fuchsia-400/30"
@@ -583,20 +623,22 @@ function SwapDialog({
                     redeem
                   </span>
                   <div>
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">{t("settings.harnessSwapBusinessTitle")}</div>
+                    <div className="text-sm font-semibold text-[var(--text-primary)]">{t("settings.harnessSwapMaxTitle")}</div>
                     <div className="text-xs text-[var(--text-muted)]">{calloutBody}</div>
                   </div>
                 </div>
-                <a
-                  href={PORTAL_DASHBOARD_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  data-testid="harness-swap-upgrade-link"
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] whitespace-nowrap no-underline"
-                >
-                  {t("settings.harnessSwapUpgrade")}
-                  <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
-                </a>
+                {cta && (
+                  <a
+                    href={cta.href}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid={`${cta.testId}-link`}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-[0_4px_12px_rgba(217,70,239,0.3)] whitespace-nowrap no-underline"
+                  >
+                    {t(cta.labelKey)}
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 12 }}>open_in_new</span>
+                  </a>
+                )}
               </div>
               <div>
                 <h3 className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] m-0 mb-2">
@@ -621,30 +663,38 @@ function SwapDialog({
               >
                 {t("cancel")}
               </button>
-              {swap.allowed ? (
-                <button
-                  ref={continueRef}
-                  type="button"
-                  onClick={() => void start()}
-                  data-testid="harness-swap-continue"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg btn-gradient text-sm font-semibold text-white cursor-pointer"
-                >
-                  <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>swap_horiz</span>
-                  {t("settings.harnessSwapContinue", { plan })}
-                </button>
-              ) : (
-                // The gate is closed on this plan: the only way forward is the
-                // portal, so that is the only primary control offered.
+              {/* The switch itself, DISABLED rather than taken away while the
+                  plan is in the way: hidden, the dialog said what the swap
+                  does and then offered nothing to do it with, and the owner
+                  had to infer that the missing button was the point. */}
+              <button
+                ref={continueRef}
+                type="button"
+                onClick={() => void start()}
+                disabled={!swap.allowed}
+                title={swap.allowed ? undefined : t("settings.harnessSwapRefusedPlan")}
+                data-testid="harness-swap-continue"
+                className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg btn-gradient text-sm font-semibold text-white ${
+                  swap.allowed ? "cursor-pointer" : "opacity-40 cursor-not-allowed"
+                }`}
+              >
+                <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>swap_horiz</span>
+                {t("settings.harnessSwapContinue", { plan })}
+              </button>
+              {cta && (
+                // The way forward on this plan, and the only live primary: the
+                // portal — to subscribe on a box with no ClawBox AI account,
+                // or to move an existing one up to Max.
                 <a
                   ref={upgradeRef}
-                  href={PORTAL_DASHBOARD_URL}
+                  href={cta.href}
                   target="_blank"
                   rel="noreferrer"
-                  data-testid="harness-swap-upgrade"
+                  data-testid={cta.testId}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-fuchsia-500 to-pink-500 no-underline cursor-pointer"
                 >
                   <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>open_in_new</span>
-                  {t("settings.harnessSwapUpgrade")}
+                  {t(cta.labelKey)}
                 </a>
               )}
             </div>
@@ -888,12 +938,15 @@ export default function HarnessPicker() {
           )}
           <div data-testid="harness-swap-plan" className="mt-3 text-xs text-[var(--text-muted)]">
             <p className="m-0 text-[var(--text-secondary)]">{t("settings.harnessSwapPlan", { plan: t(tiles.swap.planNameKey) })}</p>
-            {/* The note says the gate's state today; once the gate is closed
-                it says what opens it, and once the plan opens it there is
-                nothing left to note. */}
-            {!tiles.swap.businessPlanRequired && <p className="m-0 mt-0.5">{t("settings.harnessSwapPlanNote")}</p>}
-            {tiles.swap.businessPlanRequired && !tiles.swap.allowed && (
-              <p className="m-0 mt-0.5">{t("settings.harnessSwapRefusedPlan")}</p>
+            {/* Which plan the swap needs, and — for a box already running the
+                other harness — that nothing is being taken away from it. The
+                second line is the one an owner on Hermes without Max needs:
+                the box keeps the harness it has; only swapping again waits. */}
+            {tiles.swap.maxPlanRequired && !tiles.swap.allowed && (
+              <>
+                <p className="m-0 mt-0.5">{t("settings.harnessSwapRefusedPlan")}</p>
+                <p className="m-0 mt-0.5">{t("settings.harnessSwapKeepsHarness")}</p>
+              </>
             )}
           </div>
           {swapOpen && <SwapDialog target={tiles.target} swap={tiles.swap} onClose={closeSwap} />}
