@@ -350,6 +350,27 @@ export async function register() {
     console.error('[instrumentation] Could not arm the coding worktree sweep:', err instanceof Error ? err.message : err)
   }
   try {
+    // The ClawBox AI cloud defaults (the owner's decision of 2026-09-14): a box
+    // whose subscription covers the cloud voice, cloud transcription or cloud
+    // embeddings is put on them, and a box whose owner pinned the engine on the
+    // device is left exactly as it is. Here rather than in a boot script
+    // because two of the three answers need the OpenClaw CLI and one needs an
+    // HTTP probe, and a shell transcription of that rule would be a fourth
+    // place it could drift.
+    //
+    // AFTER the boot rush, for the same reason the worktree sweep is: the
+    // commonest outcome by far is "nothing to do" and nothing on the box is
+    // waiting for the answer. It never rejects — see its own docblock.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { applyClawaiCloudDefaults } = require('./lib/clawai-cloud-defaults')
+    const defaults = setTimeout(() => {
+      void applyClawaiCloudDefaults({ trigger: 'boot' })
+    }, 45_000)
+    defaults.unref?.()
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the ClawBox AI cloud defaults:', err instanceof Error ? err.message : err)
+  }
+  try {
     // A question asked in chat outlives the process that asked it: the button
     // is still sitting in the owner's Telegram. Nothing listens for the answer
     // unless something starts listening, so a box that reboots with an

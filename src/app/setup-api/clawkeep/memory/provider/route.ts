@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { switchToLocalEmbeddings } from "@/lib/memory-shard";
+import { noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
 import {
   LOCAL_EMBEDDING_ENGINE,
@@ -47,6 +48,14 @@ export async function POST(request: Request) {
   }
 
   try {
+    // The owner pinned the embedder on the box: the ClawBox AI cloud default
+    // must not move the index back at the next boot, which would cost a full
+    // reindex nobody asked for. BEFORE the switch, because the two orders fail
+    // differently — a mark that landed over a switch that did not honours an
+    // intent the owner expressed, while a switch that landed with no mark is
+    // one the next boot could undo. Both halves are idempotent, so the 500 a
+    // failure here answers asks for a retry that costs nothing.
+    await noteOwnerChoice("embeddings");
     await switchToLocalEmbeddings();
     invalidateMemoryStatusCache();
     console.error(

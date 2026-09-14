@@ -205,6 +205,39 @@ export async function POST(request: Request) {
       codingAgentReadyBefore,
       previousClawaiToken,
     });
+    // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). Linking a
+    // subscription is the moment the cloud voice, cloud transcription and cloud
+    // embeddings become available — or become a different account's. The
+    // applier never demotes and never overrides a pick the owner made, and
+    // never rejects; the boot hook runs the same pass on every start, so a box
+    // this misses is put right by its next restart.
+    //
+    // DETACHED, not awaited. The save has already landed by this line, and the
+    // applier is three capability probes deep: the embedder probe alone waits up
+    // to 8 s, and each openclaw CLI write behind it costs 10–12 s normally
+    // against a 30 s timeout. Awaiting it held this response for as long as the
+    // slowest of those, for an answer the caller does not read. The boot hook is
+    // the retry path if the process dies before the work finishes.
+    void import("@/lib/clawai-cloud-defaults")
+      .then(({ applyClawaiCloudDefaults }) =>
+        applyClawaiCloudDefaults({
+          trigger: "link",
+          // ONLY a supplied token can have changed the credential here. A
+          // tier-only POST — `{ tier }` with no `token`, which is what the tier
+          // pill sends — leaves `previousClawaiToken` undefined while `token`
+          // resolves to the value already stored, and the bare `!==` read that
+          // as a credential change on every such save. The applier answers a
+          // change by dropping the cached embedder probe, so the tier pill was
+          // throwing away a valid probe and buying a fresh round trip each time.
+          credentialChanged: Boolean(suppliedToken) && previousClawaiToken !== suppliedToken,
+        }),
+      )
+      .catch((err) => {
+        console.warn(
+          "[hermes/clawai] could not apply the ClawBox AI cloud defaults:",
+          err instanceof Error ? err.message : err,
+        );
+      });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     // Only OUR own error text is safe to echo — a raw spawn error can carry the

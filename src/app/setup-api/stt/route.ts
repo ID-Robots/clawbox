@@ -1,26 +1,15 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { isDeepStrictEqual } from "util";
 import { getActiveHarness } from "@/lib/harness";
-import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
-import {
-  GatewayNotReadyError,
-  openclawIsAbsent,
-  readConfig,
-  restartGateway,
-  runOpenclawConfigSetBatch,
-} from "@/lib/openclaw-config";
+import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
+import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
+import { syncChannelAudio } from "@/lib/stt-channel";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
-import {
-  buildAudioModels,
-  getSttPrimary,
-  isSttEngine,
-  setSttPrimary,
-  sttEngineOrder,
-  type SttEngine,
-} from "@/lib/stt-preference";
+import { getSttPrimary, isSttEngine, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
 
 /**
  * GET  /setup-api/stt            → which engine hears this box first, and what
@@ -88,47 +77,19 @@ export async function GET() {
 }
 
 
-/**
- * Make openclaw.json's audio chain say what the preference says. Answers
- * whether anything was written, so the caller knows whether a restart is owed.
- *
- * Skipped entirely when the file already holds this exact endpoint and list:
- * the write costs a CLI cold start and the restart drops every open channel
- * connection, and re-selecting the engine already in force must cost neither.
- * One batch, not two calls, so the endpoint and the list can never land
- * without each other.
- */
-async function syncChannelAudio(order: SttEngine[], localInstalled: boolean): Promise<boolean> {
-  const models = buildAudioModels(order, localInstalled);
-  // OpenClaw 2: the endpoint stays under tools.media.audio, but the model
-  // list lives in the SHARED tools.media.models — one list for every media
-  // capability, so rows that are not ours to order (no capabilities, or
-  // capabilities without "audio": vision, video, an owner's own entries)
-  // must ride along untouched. Only the audio subset is this route's.
-  const media = (await readConfig()).tools?.media;
-  const existing = Array.isArray(media?.models) ? media.models : [];
-  const isAudioRow = (row: unknown): boolean => {
-    if (!row || typeof row !== "object") return false;
-    const caps = (row as { capabilities?: unknown }).capabilities;
-    return Array.isArray(caps) && caps.includes("audio");
-  };
-  const foreign = existing.filter((row) => !isAudioRow(row));
-  const merged = [...foreign, ...models];
-  if (media?.audio?.baseUrl === CLAWBOX_AI_PROXY_URL && isDeepStrictEqual(existing.filter(isAudioRow), models)) return false;
-  await runOpenclawConfigSetBatch([
-    ["tools.media.audio.baseUrl", JSON.stringify(CLAWBOX_AI_PROXY_URL), "--json"],
-    ["tools.media.models", JSON.stringify(merged), "--json"],
-  ]);
-  return true;
-}
-
 export async function POST(req: Request) {
   // OWNER ONLY. Middleware admits every /setup-api/* call on the MCP bearer as
   // well, and the agent holds that bearer. Where a recording is sent is the
   // person's decision — off the box or not — so the agent is not allowed to
   // make it, whatever it has been told. Same helper and rule as
   // coding-agent/enable.
-  if (!(await hasOwnerSession(req))) {
+  //
+  // AND SAME-ORIGIN. `hasOwnerSession` answers "the owner is signed in", not
+  // "the owner asked for this": the session cookie is `SameSite=Lax`, which
+  // stops the ordinary cross-SITE POST but not a page on a different ORIGIN of
+  // the same site. This route moves where the owner's recordings are sent, so
+  // it takes the same second guard the ClawKeep mutation routes take.
+  if (!(await hasOwnerSession(req)) || !isSameOriginRequest(req)) {
     return NextResponse.json(
       { error: "Changing the transcription engine needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },
@@ -153,10 +114,28 @@ export async function POST(req: Request) {
     if (primary === "local" && !local.installed) {
       return NextResponse.json({ error: local.detail }, { status: 409 });
     }
+    // WHO DECIDED, beside WHAT was decided. A person pinning the engine on the
+    // box is what stops the ClawBox AI cloud default from moving it back at the
+    // next boot; picking the cloud hands the capability back to that default,
+    // which is not the same as never having been asked (see clearOwnerChoice).
+    //
+    // THE PIN GOES FIRST, and only the pin. On a box whose `stt_choice_source`
+    // already reads `auto` — anyone who has ever picked the cloud here — a
+    // successful engine write followed by a failed `noteOwnerChoice` left that
+    // `auto` standing, `ownerChoiceFrom("auto", true)` answered false, and the
+    // next boot's cloud default promoted the box straight back off the engine
+    // the owner had just chosen. Writing it BEFORE the engine cannot lose the
+    // decision: the worst a later failure leaves is a pin over an unchanged
+    // engine, which the applier reads as "leave this box alone" — the safe
+    // direction. Releasing the capability back to the default is the opposite
+    // case and stays AFTER its write, because a cleared pin over an engine that
+    // did not move is the one that loses a decision.
+    if (primary === "local") await noteOwnerChoice("stt");
     // Gateway first, preference second, so a failed CLI write leaves the
     // stored preference describing what the box still does.
     const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(primary), local.installed);
     await setSttPrimary(primary);
+    if (primary !== "local") await clearOwnerChoice("stt");
     if (wrote) {
       try {
         // Media-understanding config is read at gateway start, so a restart is

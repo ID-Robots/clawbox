@@ -3782,6 +3782,47 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
     }
 
+    // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). A ClawBox AI
+    // save is the moment the box either gains a subscription or changes the one
+    // it has, and the cloud voice, cloud transcription and cloud embeddings all
+    // follow from what that subscription covers. Asked for HERE, after the
+    // gateway restart above, because two of the three writes go through the
+    // openclaw CLI and the entry for the cloud voice is written by
+    // `gateway-pre-start.sh` on the way back up.
+    //
+    // Best effort, and never awaited for its answer: the save has landed, and
+    // the applier's own contract is that it never rejects and never demotes.
+    // The boot hook runs the same pass 45 s into every start, so a box this
+    // misses is put right by its next restart rather than left behind.
+    //
+    // DETACHED, which is what the paragraph above always claimed and the code
+    // did not do: it `await`ed. The applier walks three capabilities in series —
+    // the embedder probe waits up to 8 s on its own, and each openclaw CLI write
+    // behind it costs 10–12 s normally against a 30 s timeout — so the full
+    // timeout path held this response for minutes while the first-boot wizard
+    // sat on a save that had already landed. Nothing in the answer depends on
+    // it, and the boot hook re-runs the same pass 45 s into every start.
+    if (isClawAI) {
+      void import("@/lib/clawai-cloud-defaults")
+        .then(({ applyClawaiCloudDefaults }) =>
+          applyClawaiCloudDefaults({
+            trigger: "link",
+            // The credential may be a different account's, so anything this box
+            // has learned about what the last one could reach is about somebody
+            // else.
+            credentialChanged: previousClawaiToken !== clawboxAiToken,
+          }),
+        )
+        .catch((err) => {
+          // The save has LANDED by the time this runs. An unhandled rejection
+          // here would report a box that is configured as one that is not.
+          console.warn(
+            "[configure] could not apply the ClawBox AI cloud defaults:",
+            err instanceof Error ? logSafe(err.message) : err,
+          );
+        });
+    }
+
     // Configuration fully applied — now consume the OAuth handoff file (if any).
     // Deferring the unlink to here means a failure that returned EARLY left the
     // file intact, so the client can retry within the TTL. A gateway that has

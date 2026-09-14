@@ -70,6 +70,12 @@ vi.mock("@/lib/coding-agent", () => ({
 }));
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => "restarted") }));
+// The cloud-defaults applier the link kicks off. Stubbed rather than run: it
+// walks three capabilities through the OpenClaw CLI and has its own suite
+// (src/tests/unit/clawai-cloud-defaults-apply.test.ts). What is wanted here is
+// WHAT this route tells it and WHEN it lets go of it.
+const applyDefaults = vi.hoisted(() => vi.fn(async () => ({ moved: [], failed: [] })));
+vi.mock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: applyDefaults }));
 
 import { GET, POST } from "@/app/setup-api/hermes/clawai/route";
 import { EXPLICIT_MODEL_PICKS_KEY } from "@/lib/explicit-model-pick";
@@ -128,6 +134,7 @@ beforeEach(() => {
   rpcMock.mockReset();
   statusMock.mockReset();
   optionsMock.mockReset();
+  applyDefaults.mockReset().mockResolvedValue({ moved: [], failed: [] });
   optionsMock.mockImplementation(async () => unchangedCatalogue());
   rpcMock.mockImplementation(async (method: string) =>
     method === "image.generate" ? { available: true } : { status: "ok" },
@@ -298,6 +305,74 @@ describe("POST /setup-api/hermes/clawai", () => {
     const response = await POST(post({ token: PASTED, tier: "flash" }));
     expect(response.status).toBe(200);
     expect(reloadCount()).toBe(1);
+  });
+});
+
+/**
+ * The ClawBox AI cloud defaults, which a link is the moment to reconsider.
+ *
+ * Two separate things are pinned. WHAT the route tells the applier: only a
+ * SUPPLIED token can have changed the credential, and a credential change is
+ * what makes the applier throw away its cached embedder probe. And WHEN it lets
+ * go: the applier walks three capabilities in series behind an 8 s probe and
+ * openclaw CLI writes with a 30 s timeout each, so the save may not wait on it.
+ */
+describe("POST /setup-api/hermes/clawai — the cloud defaults", () => {
+  it("reports no credential change on a tier-only save", async () => {
+    // The Settings plan pill: `{ tier }` and no token. The route wrote no
+    // credential, so the applier must keep the probe answer it already has —
+    // a bare `previous !== token` read this as a change every single time,
+    // because `previous` is only captured on the token path.
+    store.clawai_token = PASTED;
+
+    expect((await POST(post({ tier: "pro" }))).status).toBe(200);
+
+    await vi.waitFor(() => expect(applyDefaults).toHaveBeenCalledTimes(1));
+    expect(applyDefaults).toHaveBeenCalledWith({ trigger: "link", credentialChanged: false });
+  });
+
+  it("reports no credential change when the SAME token is re-pasted", async () => {
+    store.clawai_token = PASTED;
+
+    expect((await POST(post({ token: PASTED, tier: "flash" }))).status).toBe(200);
+
+    await vi.waitFor(() => expect(applyDefaults).toHaveBeenCalledTimes(1));
+    expect(applyDefaults).toHaveBeenCalledWith({ trigger: "link", credentialChanged: false });
+  });
+
+  it("reports one when a different account's token is pasted", async () => {
+    store.clawai_token = "claw_ACCOUNT_A0000000";
+
+    expect((await POST(post({ token: PASTED, tier: "flash" }))).status).toBe(200);
+
+    await vi.waitFor(() => expect(applyDefaults).toHaveBeenCalledTimes(1));
+    expect(applyDefaults).toHaveBeenCalledWith({ trigger: "link", credentialChanged: true });
+  });
+
+  it("answers the save without waiting for the applier to finish", async () => {
+    // If the route awaited this, the POST below could never resolve — which is
+    // exactly the failure on a box where the probe times out and each CLI write
+    // takes its 30 s.
+    let release = () => {};
+    applyDefaults.mockImplementation(
+      () => new Promise((resolve) => { release = () => resolve({ moved: [], failed: [] }); }),
+    );
+    store.clawai_token = PASTED;
+
+    expect((await POST(post({ tier: "pro" }))).status).toBe(200);
+
+    await vi.waitFor(() => expect(applyDefaults).toHaveBeenCalledTimes(1));
+    release();
+  });
+
+  it("does not turn an applier that threw into a failed save", async () => {
+    applyDefaults.mockRejectedValue(new Error("the CLI said no"));
+    store.clawai_token = PASTED;
+
+    // The save has landed by the time the applier runs; the boot hook is the
+    // retry path.
+    expect((await POST(post({ tier: "pro" }))).status).toBe(200);
+    await vi.waitFor(() => expect(applyDefaults).toHaveBeenCalledTimes(1));
   });
 });
 

@@ -5,6 +5,7 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
+import CloudDefaultsCard from "@/components/CloudDefaultsCard";
 
 /**
  * Settings → Local AI: everything that runs on the box itself, grouped by
@@ -563,6 +564,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           </button>
         </div>
       )}
+
+      {/* Where the three cloud-capable engines actually run. Above the
+          inventory on purpose: the inventory answers "what is installed", and
+          this answers the question the owner opened the page with — what is
+          being done on the box and what is being sent away. */}
+      <CloudDefaultsCard active={active} />
 
       {GROUPS.map((group) => {
         const entries = snapshot.models.filter((m) => m.kind === group.kind);

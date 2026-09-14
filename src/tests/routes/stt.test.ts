@@ -154,6 +154,42 @@ describe("POST /setup-api/stt — who may", () => {
     expect(store.size).toBe(0);
     expect(batchMock).not.toHaveBeenCalled();
   });
+
+  /**
+   * The owner being SIGNED IN is not the owner ASKING. The session cookie is
+   * `SameSite=Lax`, which stops the ordinary cross-site POST but not a page
+   * served from another ORIGIN of the same site — and this route decides where
+   * the owner's recordings are sent. Same second guard the ClawKeep mutation
+   * routes take.
+   */
+  it("refuses a signed-in request that came from another origin", async () => {
+    const { POST } = await route();
+    const res = await POST(
+      new Request("http://box/setup-api/stt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", origin: "http://evil.example" },
+        body: JSON.stringify({ primary: "cloud" }),
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(store.size).toBe(0);
+    expect(batchMock).not.toHaveBeenCalled();
+  });
+
+  it("admits the box's own page, and a caller that sends no browser headers at all", async () => {
+    const { POST } = await route();
+    const sameOrigin = await POST(
+      new Request("http://box/setup-api/stt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", origin: "http://box" },
+        body: JSON.stringify({ primary: "cloud" }),
+      }),
+    );
+    expect(sameOrigin.status).toBe(200);
+    // curl and the MCP server send neither header; their credential is what the
+    // owner gate above decides on, and this guard is not about them.
+    expect((await POST(post({ primary: "cloud" }))).status).toBe(200);
+  });
 });
 
 describe("POST /setup-api/stt — validation", () => {
@@ -280,7 +316,12 @@ describe("POST /setup-api/stt — the write", () => {
     const res = await POST(post({ primary: "local" }));
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Could not change the transcription engine on this box." });
-    expect(store.size).toBe(0);
+    expect(store.get("stt_primary")).toBeUndefined();
+    // The owner PIN is the one thing that does survive, and on purpose — see
+    // the ordering test below. A pin over an engine that did not move tells the
+    // cloud default to leave this box alone, which is the harmless direction;
+    // the engine itself is unchanged and the answer says so.
+    expect(store.get("stt_choice_source")).toBe("owner");
     expect(restartMock).not.toHaveBeenCalled();
   });
 
@@ -310,6 +351,54 @@ describe("POST /setup-api/stt — the write", () => {
     expect(body.warning).toMatch(/gateway/i);
     expect(body.primary).toBe("local");
     expect(store.get("stt_primary")).toBe("local");
+  });
+
+  /**
+   * WHO DECIDED, and in which order it is written.
+   *
+   * A person pinning the engine on the box is the only thing that stops the
+   * ClawBox AI cloud default from moving it back at the next boot. The pin used
+   * to be written AFTER the engine, so on a box whose `stt_choice_source`
+   * already read `auto` — anyone who has ever picked the cloud here — a
+   * successful engine write followed by a failed pin left `auto` standing,
+   * `ownerChoiceFrom("auto", true)` answered false, and the next boot promoted
+   * the box straight back off the engine the owner had just chosen.
+   */
+  it("records the owner's pin before it touches the engine", async () => {
+    // The box has been on the automatic default until now, which is the case
+    // the stored-`local` grandfather rule does NOT cover.
+    store.set("stt_choice_source", "auto");
+    const order: string[] = [];
+    batchMock.mockImplementation(async () => {
+      order.push(`pin=${String(store.get("stt_choice_source"))}`);
+    });
+    const { POST } = await route();
+    expect((await POST(post({ primary: "local" }))).status).toBe(200);
+    // The engine write saw the pin already on record, not after it.
+    expect(order).toEqual(["pin=owner"]);
+    expect(store.get("stt_choice_source")).toBe("owner");
+  });
+
+  it("hands the capability back to the default only once the cloud write has landed", async () => {
+    store.set("stt_choice_source", "owner");
+    const seen: unknown[] = [];
+    batchMock.mockImplementation(async () => {
+      seen.push(store.get("stt_choice_source"));
+    });
+    const { POST } = await route();
+    expect((await POST(post({ primary: "cloud" }))).status).toBe(200);
+    // Releasing is the direction that LOSES a decision if it lands over a write
+    // that did not, so it stays behind the write.
+    expect(seen).toEqual(["owner"]);
+    expect(store.get("stt_choice_source")).toBe("auto");
+  });
+
+  it("leaves the owner's pin alone when the cloud write failed", async () => {
+    store.set("stt_choice_source", "owner");
+    batchMock.mockRejectedValue(new Error("ConfigMutationConflictError"));
+    const { POST } = await route();
+    expect((await POST(post({ primary: "cloud" }))).status).toBe(500);
+    expect(store.get("stt_choice_source")).toBe("owner");
   });
 
   it("says so when the write landed but the gateway would not restart", async () => {
