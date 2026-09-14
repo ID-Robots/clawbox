@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardFolders from "./MemoryShardFolders";
-import PaidFeatureGate, { paidGateFace } from "./PaidFeatureGate";
+import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
 import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
@@ -33,7 +33,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   // reason as the coding agent's wizard: polled, so an owner who subscribes in
   // another tab is let through without reopening the window, and mirrored
   // server-side by /setup-api/clawkeep/memory/enable.
-  const clawboxLogin = useClawboxLogin();
+  const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
   const gated = paidGateFace(clawboxLogin) !== "satisfied";
   const [step, setStep] = useState<Step>("intro");
   const [busy, setBusy] = useState<string | null>(null);

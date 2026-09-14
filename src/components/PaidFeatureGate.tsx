@@ -39,6 +39,18 @@ import type { ClawboxLoginState } from "@/lib/use-clawbox-login";
 export type PaidGateFace = "loading" | "connect" | "upgrade" | "satisfied";
 
 /**
+ * How often a wizard sitting behind the gate re-asks what plan the box is on.
+ *
+ * Faster than `useClawboxLogin`'s 30 s default, and for the same reason the
+ * ClawKeep overlay polls at 5 s: the two things that clear this gate — pairing
+ * the box through the card below, and subscribing in another tab — both
+ * finish somewhere else, and half a minute of a screen that has not noticed is
+ * how an owner concludes it did not work. The route the poll hits caches the
+ * portal's answer server-side, so the cost is a local request.
+ */
+export const PAID_GATE_POLL_MS = 5_000;
+
+/**
  * `loading` is the poll's own first tick, and is deliberately NOT treated as
  * "no plan": the hook starts every mount at `loggedIn: false` and a gate that
  * read that as Free would flash an upgrade card at a Max subscriber on every
@@ -64,18 +76,25 @@ const FEATURE_KEYS: Record<PaidFeature, { name: string; description: string }> =
 export default function PaidFeatureGate({
   feature,
   login,
-  onConnected,
 }: {
   feature: PaidFeature;
   /** The caller's own `useClawboxLogin()` state — it needs the same answer to
    *  disable its button, and two polls for one question would be two. */
   login: ClawboxLoginState;
-  /** The device just paired. The host re-reads whatever it draws from. */
-  onConnected?: () => void;
 }) {
   const { t } = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The handoff finished and the poll has not caught up yet.
+   *
+   * Without this the card drops straight back to its "Connect" button for a
+   * few seconds after a pairing that WORKED — which reads as a failure. It
+   * clears itself: the next poll either satisfies the gate (this whole card
+   * goes) or reveals that the account just connected is on the Free plan (the
+   * upgrade face), and both are answers.
+   */
+  const [connected, setConnected] = useState(false);
   const face = paidGateFace(login);
 
   const clawaiLogin = useClawaiDeviceLogin({
@@ -88,9 +107,7 @@ export default function PaidFeatureGate({
     onBusyChange: setBusy,
     onComplete: () => {
       clawaiLogin.reset();
-      // The poll picks the new plan up within its own interval; this only
-      // spares the owner that wait on the surface they are looking at.
-      onConnected?.();
+      setConnected(true);
     },
     onError: setError,
   });
@@ -148,7 +165,16 @@ export default function PaidFeatureGate({
           </p>
         </div>
 
-        {clawaiLogin.deviceCode && clawaiLogin.verificationUrl ? (
+        {connected ? (
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="paid-gate-connected"
+            className="text-xs text-[var(--text-muted)]"
+          >
+            {t("paidGate.loading")}
+          </p>
+        ) : clawaiLogin.deviceCode && clawaiLogin.verificationUrl ? (
           <div className="w-full">
             <DeviceCodeCard
               code={clawaiLogin.deviceCode}

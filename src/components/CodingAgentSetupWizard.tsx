@@ -6,7 +6,7 @@ import { notifyCodingAgentChanged, notifyCodingRunStarted } from "@/lib/ui-event
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
-import PaidFeatureGate, { paidGateFace } from "./PaidFeatureGate";
+import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 import { browserErrorText, runBrowserAction } from "@/lib/browser-actions";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
@@ -60,7 +60,7 @@ export default function CodingAgentSetupWizard({
   // off `status`, so an owner who subscribes in another tab is let through
   // without reopening the window; the server refuses the same three states in
   // /setup-api/coding-agent/enable.
-  const clawboxLogin = useClawboxLogin();
+  const clawboxLogin = useClawboxLogin(PAID_GATE_POLL_MS);
   const gateFace = paidGateFace(clawboxLogin);
   const gated = gateFace !== "satisfied";
   const [step, setStep] = useState<Step>("intro");

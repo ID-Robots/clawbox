@@ -18,7 +18,7 @@
  * Pro and the internal `pro` is Max. Both pass.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSetupWizard from "@/components/CodingAgentSetupWizard";
 import MemoryShardWizard from "@/components/MemoryShardWizard";
@@ -172,5 +172,34 @@ describe("the settings-page notice", () => {
       "href",
       "https://clawbox.com/portal/dashboard",
     );
+  });
+});
+
+describe("the device handoff inside the gate", () => {
+  it("says it is checking rather than dropping back to the Connect button", async () => {
+    // The poll runs every PAID_GATE_POLL_MS and the pairing finishes in
+    // between; the card must not read as a failure in that gap.
+    let polled = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/ai-models/status") {
+        polled += 1;
+        return json({ clawaiConfigured: false, clawaiAccountTier: null });
+      }
+      if (url === "/setup-api/ai-models/clawai/start") {
+        return json({ user_code: "WDJB-MJHT", verification_url: "https://clawbox.com/portal/device", interval: 5 });
+      }
+      if (url === "/setup-api/ai-models/clawai/poll") return json({ status: "complete" });
+      return json({ installed: true, connected: false, login: null, paths: [] });
+    }));
+
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "connect"));
+    expect(polled).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByTestId("paid-gate-connect-start"));
+    const card = await screen.findByTestId("paid-gate-device");
+    expect(card).toHaveTextContent("WDJB-MJHT");
   });
 });
