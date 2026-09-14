@@ -895,7 +895,7 @@ export const es: Record<string, string> = {
   "codingAgent.realBrowserHint": "Una ejecución comprueba su trabajo en la ventana de Chromium de la pantalla de esta caja —la que muestra la app Navegador—, así ves las páginas que abre. Desactivado, usa un navegador invisible y en la pantalla no aparece nada. En ambos casos, una ejecución que no consiga alcanzar el navegador de la pantalla recurre por sí sola al invisible.",
   "codingAgent.realBrowserFailed": "No se pudo cambiar el ajuste del navegador.",
   "codingAgent.vercelEnabledLabel": "Integración con Vercel",
-  "codingAgent.vercelEnabledHint": "Permite que esta caja despliegue tus proyectos en Vercel. Con la opción activada, la página de un proyecto muestra una tarjeta para vincular un proyecto de Vercel y botones para desplegar una vista previa o a producción, y el asistente puede desplegar por ti. Desactivada, nada de eso existe en la caja. Desactivada salvo que la actives — o salvo que ya hubieras vinculado un proyecto de Vercel, en cuyo caso se activa sola.",
+  "codingAgent.vercelEnabledHint": "Permite que esta caja despliegue tus proyectos en Vercel. Con la opción activada, la página de un proyecto muestra una tarjeta para vincular un proyecto de Vercel y botones para desplegar una vista previa o a producción, y el asistente puede desplegar por ti. Si está desactivada, nada de eso existe en la caja. Viene desactivada hasta que la actives, salvo que ya hubieras vinculado un proyecto de Vercel, en cuyo caso se activa sola.",
   "codingAgent.vercelEnabledFailed": "No se pudo cambiar el ajuste de Vercel.",
   "codingAgent.leftoverRunning": "Algo que inició esta ejecución sigue en marcha.",
   "codingAgent.killLeftover": "Terminarlo",

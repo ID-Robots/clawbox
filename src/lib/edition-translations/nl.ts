@@ -900,7 +900,7 @@ export const nl: Record<string, string> = {
   "codingAgent.realBrowserHint": "Een run controleert zijn werk in het Chromium-venster op het scherm van deze box — hetzelfde dat de Browser-app toont — zodat je de pagina's ziet die hij opent. Uitgeschakeld gebruikt hij een onzichtbare browser en verschijnt er niets op het scherm. In beide gevallen valt een run die de browser op het scherm niet kan bereiken vanzelf terug op de onzichtbare.",
   "codingAgent.realBrowserFailed": "De browserinstelling kon niet worden gewijzigd.",
   "codingAgent.vercelEnabledLabel": "Vercel-integratie",
-  "codingAgent.vercelEnabledHint": "Laat deze box je projecten naar Vercel publiceren. Staat hij aan, dan krijgt de pagina van een project een kaart om er een Vercel-project aan te koppelen en knoppen om een voorbeeld of productie te publiceren, en kan de assistent voor je publiceren. Uit bestaat daar niets van op de box. Uit tenzij je hem aanzet — of tenzij je al een Vercel-project had gekoppeld, dan staat hij voor je aan.",
+  "codingAgent.vercelEnabledHint": "Laat deze box je projecten naar Vercel publiceren. Staat hij aan, dan krijgt de pagina van een project een kaart om er een Vercel-project aan te koppelen en knoppen om een voorbeeld of productie te publiceren, en kan de assistent voor je publiceren. Staat hij uit, dan is daar niets van op de box te vinden. Hij staat standaard uit tot je hem aanzet — tenzij je al een Vercel-project had gekoppeld, dan staat hij voor je aan.",
   "codingAgent.vercelEnabledFailed": "De Vercel-instelling kon niet worden gewijzigd.",
   "codingAgent.leftoverRunning": "Iets dat deze run heeft gestart, draait nog.",
   "codingAgent.killLeftover": "Beëindigen",

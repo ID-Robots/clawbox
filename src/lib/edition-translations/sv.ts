@@ -896,7 +896,7 @@ export const sv: Record<string, string> = {
   "codingAgent.realBrowserHint": "En körning kontrollerar sitt arbete i Chromium-fönstret på den här boxens skärm — samma fönster som appen Webbläsare visar — så att du ser sidorna den öppnar. Avstängt använder den en osynlig webbläsare i stället och ingenting syns på skärmen. I båda fallen faller en körning som inte når skärmens webbläsare tillbaka på den osynliga av sig själv.",
   "codingAgent.realBrowserFailed": "Webbläsarinställningen kunde inte ändras.",
   "codingAgent.vercelEnabledLabel": "Vercel-integration",
-  "codingAgent.vercelEnabledHint": "Låt den här lådan publicera dina projekt på Vercel. När den är på får ett projekts sida ett kort för att koppla ett Vercel-projekt och knappar för att publicera en förhandsvisning eller till produktion, och assistenten kan publicera åt dig. Av finns inget av det på lådan alls. Av tills du slår på den — utom om du redan hade kopplat ett Vercel-projekt, då är den på åt dig.",
+  "codingAgent.vercelEnabledHint": "Låt den här lådan publicera dina projekt på Vercel. När den är på får ett projekts sida ett kort för att koppla ett Vercel-projekt och knappar för att publicera en förhandsvisning eller till produktion, och assistenten kan publicera åt dig. Är den av finns inget av det på lådan alls. Den är av som standard tills du slår på den — utom om du redan hade kopplat ett Vercel-projekt, då är den på åt dig.",
   "codingAgent.vercelEnabledFailed": "Vercel-inställningen kunde inte ändras.",
   "codingAgent.leftoverRunning": "Något som den här körningen startade är fortfarande igång.",
   "codingAgent.killLeftover": "Avsluta det",

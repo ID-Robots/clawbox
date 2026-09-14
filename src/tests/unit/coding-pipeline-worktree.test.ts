@@ -45,6 +45,10 @@ vi.mock("@/lib/vercel-link", () => ({
     projectName: "site", ready: true, problems: [] as string[], code: null,
   })),
   readVercelLink: vi.fn(async () => ({ projectId: "prj_1", teamId: null, tokenSecretName: "VERCEL_TOKEN" })),
+  // The box-wide Vercel switch's migration reads this when the key is absent.
+  // Never reached here — the config below sets the key — but a mock that omits
+  // it makes the migration throw rather than answer.
+  readVercelLinks: vi.fn(async () => ({})),
   resolveVercelAuth: vi.fn(async () => ({ token: "t", teamId: null })),
 }));
 
@@ -124,6 +128,8 @@ function writeConfig(cfg: Record<string, unknown> = {}): void {
   fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({
     clawai_token: "claw_test_token",
     coding_agent_enabled: true,
+    // The box-wide Vercel switch: every case here is a box that deploys.
+    coding_vercel_enabled: true,
     coding_agent_default_directory: projects,
     coding_agent_review_pass: true,
     coding_agent_review_rounds: 2,

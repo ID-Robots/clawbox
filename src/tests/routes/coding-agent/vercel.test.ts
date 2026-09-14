@@ -395,9 +395,26 @@ describe("the box-wide Vercel switch", () => {
     expect(recordDeployPromotion).not.toHaveBeenCalled();
   });
 
-  it("still answers 403 to the MCP bearer, not 409 — the switch is not the agent's business", async () => {
-    const res = await route.GET(request({ bearer: MCP_TOKEN }));
-    expect(res.status).toBe(403);
-    expect((await res.json()).kind).toBe("owner_only");
+  it("still answers 403 to the MCP bearer on every verb, not 409 — the switch is not the agent's business", async () => {
+    // The ORDER of the two refusals, pinned per verb. Whether this box does
+    // Vercel at all is a fact about the owner's box, and a caller that has not
+    // proved it is the owner must learn nothing about it — so the owner check
+    // has to come first on every door, not just the one that happened to be
+    // tested.
+    for (const [name, call] of [
+      ["GET", () => route.GET(request({ bearer: MCP_TOKEN }))],
+      ["POST", () => route.POST(request({ method: "POST", bearer: MCP_TOKEN, body: { vercelProjectId: "prj_acme", tokenSecretName: "VERCEL_TOKEN" } }))],
+      ["DELETE", () => route.DELETE(request({ method: "DELETE", bearer: MCP_TOKEN }))],
+      ["promote", () => promote.POST(request({
+        method: "POST",
+        bearer: MCP_TOKEN,
+        path: "/setup-api/coding-agent/vercel/promote",
+        body: { runId: RUN.id, deploymentId: "dpl_1", confirm: true },
+      }))],
+    ] as const) {
+      const res = await call();
+      expect(res.status, name).toBe(403);
+      expect((await res.json()).kind, name).toBe("owner_only");
+    }
   });
 });
