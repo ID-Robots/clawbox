@@ -111,8 +111,25 @@ export function bodyWouldEnable(body: { enabled?: unknown; setupComplete?: unkno
   return body.enabled === true || body.setupComplete === true;
 }
 
-/** The English floor for the refusal. Every surface words it from the code. */
+/**
+ * How each feature is NAMED in the refusal.
+ *
+ * A total record rather than a ternary, so a third feature added to
+ * {@link PAID_FEATURES} is a compile error here instead of silently borrowing
+ * another one's name.
+ */
+const FEATURE_NAME: Record<PaidFeature, string> = {
+  coding_agent: "The coding agent",
+  memory_shard: "Memory Shard",
+};
+
+/**
+ * The English floor for the refusal.
+ *
+ * Every surface words the refusal from {@link PAID_PLAN_REQUIRED_CODE}, which
+ * all ten locales carry; this is what a caller with no catalogue gets, and it
+ * names the plans as the customer knows them — never the internal tier ids.
+ */
 export function paidPlanRefusalText(feature: PaidFeature): string {
-  const name = feature === "coding_agent" ? "The coding agent" : "Memory Shard";
-  return `${name} needs a ClawBox Pro or Max plan. Connect a paid ClawBox AI account on this box, then switch it on.`;
+  return `${FEATURE_NAME[feature]} needs a ClawBox Pro or Max plan. Connect a paid ClawBox AI account on this box, then switch it on.`;
 }
