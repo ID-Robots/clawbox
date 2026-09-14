@@ -87,6 +87,7 @@ const ctx = (
   // was a helper the type checker had already stopped believing.
   emailCanRead: false,
   codingAgent: false,
+  codingVercel: false,
   canGenerateImages: true,
   ...overrides,
 });

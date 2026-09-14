@@ -2,14 +2,14 @@ import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { declaredTooLong, readJsonObject } from "@/lib/bounded-json";
-import { CodingAgentError, httpStatusForCodingError, resolveProjectScope } from "@/lib/coding-agent";
+import { CodingAgentError, httpStatusForCodingError, readVercelEnabled, resolveProjectScope } from "@/lib/coding-agent";
 import {
   checkVercelReadiness,
   deleteVercelLink,
   readVercelLink,
   setVercelLink,
 } from "@/lib/vercel-link";
-import { VercelLinkError } from "@/lib/vercel-state";
+import { VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE, VercelLinkError } from "@/lib/vercel-state";
 
 export const dynamic = "force-dynamic";
 
@@ -46,13 +46,25 @@ function refuse(status: number, kind: string, error: string, code?: string) {
   return NextResponse.json({ error, kind, ...(code ? { code } : {}) }, { status });
 }
 
-/** Owner session, and — for the writes — this box's own page. */
+/**
+ * Owner session, this box's own page for the writes — and the box-wide switch.
+ *
+ * The SWITCH IS CHECKED LAST of the three, after the two that decide whether
+ * this caller may act at all: whether the owner has the Vercel integration
+ * switched off is a fact about their box, and a request with no session has not
+ * earned it. On every verb including the read, because with the integration off
+ * the card that would draw this answer is not on the page at all — a GET that
+ * still answered would be the one surface saying the feature exists.
+ */
 async function guard(request: Request, write: boolean): Promise<NextResponse | null> {
   if (!(await hasOwnerSession(request))) {
     return refuse(403, "owner_only", "Reading or changing this ClawBox's Vercel links needs a signed-in browser session.", "owner_only");
   }
   if (write && !isSameOriginRequest(request)) {
     return refuse(403, "cross_origin", "Vercel links can only be changed from this ClawBox's own pages.", "cross_origin");
+  }
+  if (!(await readVercelEnabled())) {
+    return refuse(409, VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE, VERCEL_DISABLED_CODE);
   }
   return null;
 }

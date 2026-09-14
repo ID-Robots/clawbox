@@ -676,7 +676,7 @@ function describeRun(run: RunPayload, tail: number): string {
   return redact(parts.join("\n"));
 }
 
-export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent">): void {
+export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent" | "codingVercel">): void {
   // The device said no (switch off, harness missing, or an older build without
   // the route). Registering nothing is the safe direction.
   if (!ctx.codingAgent) return;
@@ -699,7 +699,14 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       ).optional(),
       delivery_pipeline: zBool(
         false,
-        "Run the whole delivery flow instead of just the build: review, improvement laps, a preview deploy, a check that the deployed page actually shows what was asked for, then production and the same check again. Only for a project the owner has attached a Vercel project to — the device refuses at once, saying what is missing, when it cannot. It deploys to PRODUCTION only where the owner has switched that on for that project; otherwise it pauses and waits for them to press the button. Leave it off for anything that is not a deployable web project.",
+        "Run the whole delivery flow instead of just the build: review, improvement laps, a preview deploy, a check that the deployed page actually shows what was asked for, then production and the same check again. Only for a project the owner has attached a Vercel project to — the device refuses at once, saying what is missing, when it cannot. It deploys to PRODUCTION only where the owner has switched that on for that project; otherwise it pauses and waits for them to press the button. Leave it off for anything that is not a deployable web project."
+        // Said in the parameter rather than left for the run to discover: with
+        // the integration off the device SKIPS those four stages (it does not
+        // fail the run), so a flag described as "deploys and checks it" would
+        // have this tool promising the user something that never happens.
+        + (ctx.codingVercel
+          ? ""
+          : " NOTE: the Vercel integration is switched off on this ClawBox, so the deploy and check stages are skipped — this gives you the review and improvement laps and nothing else."),
       ),
       deliverable_files: zOptText(
         512,
@@ -987,6 +994,14 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
   // the owner's answer temporary, which is the reason `browser_auto_open` has
   // none either.
 
+  // The owner's box-wide Vercel switch, and the same rule as the family gate
+  // above: with the integration off every deploy route answers 409, and a tool
+  // that can only fail opens Hermes' per-server circuit breaker — which takes
+  // every ClawBox tool offline, not just these two. So they are not declared
+  // at all, and the enable route asks the harness to rebuild its list the
+  // moment the owner moves the switch (src/lib/coding-agent-mcp-refresh.ts).
+  if (!ctx.codingVercel) return;
+
   reg.tool(
     "coding_deploy_preview",
     "Deploy a project on this ClawBox to Vercel as a PREVIEW — a private address the user can open to try what was just built. Use it after a coding run has finished something the user wants to look at, or when they ask you to deploy or publish a preview. Name the project the same way you would for a coding run (project_id, directory, or the run_id of the run that built it). The Vercel project and the token are the owner's own setting on the device; you cannot choose them and do not need them. A preview never touches the project's real domain. The deployment starts at once and builds for a minute or two — report the address and stop; do not poll.",
@@ -1041,6 +1056,19 @@ interface DeployPayload {
  * and a rate limit needs waiting rather than a second call.
  */
 const DEPLOY_RULES: ErrorRule[] = [
+  {
+    // Only reachable in a race — the tools are not registered at all while the
+    // switch is off — but the race is real: the owner can flip it between the
+    // MCP server's startup probe and this call, and the reload that rebuilds
+    // the tool list is asked for, not guaranteed. What matters is that the
+    // answer names the ONE place the owner changes it, rather than reading
+    // like the project is missing a link.
+    status: 409,
+    match: /"code":\s*"vercel_disabled"/,
+    code: "NOT_SUPPORTED_HERE",
+    message: "This ClawBox has the Vercel integration switched off.",
+    next: "Tell the user it can be turned on in the Coding Agent app, under Settings, as \"Vercel integration\". Do not retry and do not look for another way to deploy.",
+  },
   {
     status: 403,
     match: /"code":\s*"auto_production_off"/,

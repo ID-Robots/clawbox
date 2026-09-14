@@ -97,8 +97,70 @@ export async function refreshCodingAgentToolsIfReadinessChanged(
   after: boolean,
   options: CodingAgentRefreshOptions = {},
 ): Promise<void> {
-  if (before === after) return;
-  const became = `the coding agent became ${after ? "available" : "unavailable"}`;
+  return refreshCodingAgentToolsIfChanged(
+    { ready: before, vercelEnabled: null },
+    { ready: after, vercelEnabled: null },
+    options,
+  );
+}
+
+/**
+ * The facts this box's tool list is built from — the two the device can move
+ * while the MCP child is alive.
+ *
+ * `vercelEnabled` is `null` for a caller that cannot move it, which is every
+ * writer of `clawai_token`: passing the same `false` on both sides would be a
+ * claim about a switch that writer never read.
+ */
+export interface CodingAgentToolFacts {
+  /** `CodingAgentStatus.ready` — whether the coding_agent_* family exists. */
+  ready: boolean;
+  /** `CodingAgentStatus.vercelEnabled` — whether coding_deploy_* does. */
+  vercelEnabled: boolean | null;
+}
+
+/**
+ * The general form: reload when THIS request changed which tools would be
+ * registered, whichever of the two facts moved.
+ *
+ * TWO FACTS AND ONE RELOAD. A reload rebuilds every family's tool list at once,
+ * so a request that moved both (the owner switching the agent on and the Vercel
+ * integration with it) must pay for exactly one — which is why this is one
+ * function taking both rather than two calls that would each decide for
+ * themselves.
+ *
+ * The Vercel half is here for the reason the readiness half is: the two
+ * `coding_deploy_*` tools are registered behind a probe the MCP server takes
+ * ONCE while it boots (mcp/lib/context.ts), and the owner switching the
+ * integration off leaves a live agent still holding tools whose routes now
+ * answer 409 — which is the circuit-breaker shape this whole mechanism exists
+ * to avoid. Switching it ON is the same bug in the other direction: the panel
+ * shows the buttons and the agent has no tool to deploy with.
+ *
+ * @param before the two facts BEFORE this request's write
+ * @param after  the two facts after it — the same status the panel is shown
+ * @param options see `CodingAgentRefreshOptions`
+ */
+export async function refreshCodingAgentToolsIfChanged(
+  before: CodingAgentToolFacts,
+  after: CodingAgentToolFacts,
+  options: CodingAgentRefreshOptions = {},
+): Promise<void> {
+  const moved: string[] = [];
+  if (before.ready !== after.ready) {
+    moved.push(`the coding agent became ${after.ready ? "available" : "unavailable"}`);
+  }
+  // `null` on either side means this caller never read the switch, which is not
+  // the same as reading it false — see `CodingAgentToolFacts`.
+  if (
+    typeof before.vercelEnabled === "boolean"
+    && typeof after.vercelEnabled === "boolean"
+    && before.vercelEnabled !== after.vercelEnabled
+  ) {
+    moved.push(`the Vercel deploy tools became ${after.vercelEnabled ? "available" : "unavailable"}`);
+  }
+  if (moved.length === 0) return;
+  const became = moved.join(" and ");
   if (options.alreadyReloaded) {
     // Nothing to ask for: the respawn that already happened in this request
     // rebuilt EVERY family's tool list, this one included.

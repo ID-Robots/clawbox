@@ -7,6 +7,7 @@ import {
   CodingAgentError,
   httpStatusForCodingError,
   listRuns,
+  readVercelEnabled,
   resolveProjectScope,
   resolveWorkingDirectory,
 } from "@/lib/coding-agent";
@@ -27,6 +28,8 @@ import {
   isDeployTarget,
   isProjectDeployPending,
   isVercelPending,
+  VERCEL_DISABLED_CODE,
+  VERCEL_DISABLED_MESSAGE,
   VercelLinkError,
   type DeployActor,
   type DeployTarget,
@@ -220,6 +223,9 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (!(await hasValidSession(request))) {
     return refuse(401, "unauthorized", "Authentication required.");
   }
+  // After the session, like every other refusal here: whether this box does
+  // Vercel at all is the owner's business, not an anonymous caller's.
+  if (!(await readVercelEnabled())) return refuse(409, VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE);
   if (declaredTooLong(request, MAX_BODY_BYTES)) return refuse(413, "too_large", TOO_LONG);
   const url = new URL(request.url);
   try {
@@ -249,6 +255,11 @@ export async function PUT(request: Request): Promise<NextResponse> {
   if (!isSameOriginRequest(request)) {
     return refuse(403, "cross_origin", "That switch can only be changed from this ClawBox's own pages.");
   }
+  // The per-project production switch cannot be set on a box whose Vercel
+  // integration is off: it is a standing permission for something that cannot
+  // happen, and a stored `true` nobody can see is exactly what would come back
+  // the moment the integration was switched on again.
+  if (!(await readVercelEnabled())) return refuse(409, VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE);
   const read = await readJsonObject(request, MAX_BODY_BYTES, TOO_LONG);
   if (!read.ok) {
     return read.reason === "too_long" ? refuse(413, "too_large", TOO_LONG) : refuse(400, "invalid_body", "That is not a setting.");
@@ -275,6 +286,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (!(await hasValidSession(request))) {
     return refuse(401, "unauthorized", "Authentication required.");
   }
+  if (!(await readVercelEnabled())) return refuse(409, VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE);
   const owner = await hasOwnerSession(request);
   const read = await readJsonObject(request, MAX_BODY_BYTES, TOO_LONG);
   if (!read.ok) {

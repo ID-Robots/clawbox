@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { readJsonObject } from "@/lib/bounded-json";
-import { CodingAgentError, httpStatusForCodingError, listRuns, recordDeployPromotion, resolveProjectScope } from "@/lib/coding-agent";
+import { CodingAgentError, httpStatusForCodingError, listRuns, readVercelEnabled, recordDeployPromotion, resolveProjectScope } from "@/lib/coding-agent";
 import { readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
 import { promoteDeployment } from "@/lib/vercel";
-import { VercelLinkError } from "@/lib/vercel-state";
+import { VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE, VercelLinkError } from "@/lib/vercel-state";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +54,10 @@ export async function POST(request: Request) {
   if (!isSameOriginRequest(request)) {
     return refuse(403, "cross_origin", "A deployment can only be promoted from this ClawBox's own pages.");
   }
+  // After the two authorization checks, like its siblings: the switch is a
+  // fact about the owner's box, and a caller who has not proved they are the
+  // owner is told nothing about it.
+  if (!(await readVercelEnabled())) return refuse(409, VERCEL_DISABLED_CODE, VERCEL_DISABLED_MESSAGE);
   // METERED, not merely header-checked: a chunked request declares no length,
   // so the header alone bounds exactly the callers that were never the problem.
   const read = await readJsonObject(request, MAX_BODY_BYTES, TOO_LONG);

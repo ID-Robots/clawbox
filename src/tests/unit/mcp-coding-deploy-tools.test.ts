@@ -61,9 +61,9 @@ function said(out: Awaited<ReturnType<ReturnType<typeof harness>["call"]>>): str
   return out.isError ? JSON.stringify(out.error) : out.text;
 }
 
-function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
+function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true, codingVercel = true) {
   const h = captureRegistrar(edition);
-  registerCodingAgentTools(h.reg, { codingAgent });
+  registerCodingAgentTools(h.reg, { codingAgent, codingVercel });
   return h;
 }
 
@@ -82,6 +82,30 @@ describe("registration", () => {
     // Off, the whole family is absent — a tool that could only answer 409
     // would trip Hermes' per-server circuit breaker.
     expect(harness("openclaw", false).names()).toEqual([]);
+  });
+
+  it("is absent when the owner has the box-wide Vercel integration switched off", () => {
+    for (const edition of ["openclaw", "hermes"] as const) {
+      const names = harness(edition, true, false).names();
+      // The two deploy tools are gone…
+      expect(names).not.toContain("coding_deploy_preview");
+      expect(names).not.toContain("coding_deploy_production");
+      // …and nothing else in the family went with them: the owner switched off
+      // Vercel, not the coding agent.
+      expect(names).toContain("coding_agent_run");
+      expect(names).toContain("coding_agent_status");
+    }
+  });
+
+  it("says so on delivery_pipeline rather than promising a deploy that will be skipped", () => {
+    const described = (codingVercel: boolean) => {
+      const shape = harness("openclaw", true, codingVercel).get("coding_agent_run").shape as
+        Record<string, { description?: string }>;
+      return shape.delivery_pipeline.description ?? "";
+    };
+    expect(described(true)).not.toMatch(/switched off/i);
+    expect(described(false)).toMatch(/switched off on this ClawBox/i);
+    expect(described(false)).toMatch(/skipped/i);
   });
 
   it("offers no parameter that could name a Vercel project, team or token", () => {

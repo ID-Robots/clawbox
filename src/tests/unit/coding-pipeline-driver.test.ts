@@ -51,6 +51,10 @@ const readVercelLink = vi.hoisted(() => vi.fn(async () => ({ projectId: "prj_1",
 vi.mock("@/lib/vercel-link", () => ({
   checkVercelReadiness,
   readVercelLink,
+  // The box-wide switch's migration reads this when the key is absent. It is
+  // never reached here — every config below sets the key — but a mock that
+  // omits it would make the migration throw rather than answer.
+  readVercelLinks: vi.fn(async () => ({})),
   resolveVercelAuth: vi.fn(async () => ({ token: "t", teamId: null })),
 }));
 
@@ -144,6 +148,9 @@ function writeConfig(cfg: Record<string, unknown> = {}): void {
   fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({
     clawai_token: "claw_test_token",
     coding_agent_enabled: true,
+    // The box-wide Vercel switch. On for every case here but the one that pins
+    // what a pipeline does without it.
+    coding_vercel_enabled: true,
     // The pipeline's review stage IS this pass, and the rounds cap its loop.
     coding_agent_review_pass: true,
     coding_agent_review_rounds: 2,
@@ -442,6 +449,45 @@ describe("a build that fails on Vercel", () => {
     // The one-shot hand-back stood down: no `vercelFixOf` run was started
     // beside the pipeline's own lap.
     expect(lib.listRuns().some((r) => r.vercelFixOf)).toBe(false);
+  });
+});
+
+/**
+ * The box-wide Vercel switch, from inside a pipeline.
+ *
+ * The one thing a pure suite cannot tell you: what a pipeline DOES on a box
+ * whose owner has the integration off. Failing it would throw away a build and
+ * a review the owner asked for and got; letting only the deploys skip would
+ * walk straight into the verification, which has no address to look at and
+ * ends the whole pipeline as failed in the box's own words.
+ */
+describe("a box with the Vercel integration switched off", () => {
+  it("skips all four Vercel stages with a reason and completes on the work it did do", async () => {
+    writeConfig({ coding_vercel_enabled: false });
+    installHarness();
+    const started = await lib.startRun({
+      task: "build an invoice page", projectId: "site", source: "owner",
+      pipeline: { path: "/", expect: ["Invoice"] },
+    });
+    const run = await pipelineSettles(started.id, "complete");
+    const p = run.pipeline!;
+    const step = (name: string) => p.steps.find((x) => x.stage === name)!;
+
+    // The half that is not Vercel's still happened.
+    expect(step("build").state).toBe("passed");
+    expect(step("review").state).toBe("passed");
+
+    for (const name of ["deploy_preview", "verify_preview", "deploy_production", "verify_production"]) {
+      expect(step(name).state, name).toBe("skipped");
+      // The reason is ON THE RECORD — the app hides the pipeline card while
+      // the integration is off, so this is where it is readable at all.
+      expect(step(name).detail, name).toContain("vercel_disabled");
+    }
+    // Nothing was sent to Vercel, and the owner was never parked in front of a
+    // production button for a deployment that could not happen.
+    expect(runDeployment).not.toHaveBeenCalled();
+    expect(verifyDeployment).not.toHaveBeenCalled();
+    expect(p.status).toBe("complete");
   });
 });
 

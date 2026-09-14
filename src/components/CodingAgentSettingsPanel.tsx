@@ -142,6 +142,12 @@ export interface AgentStatus {
    *  switches — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
+  /** Is the Vercel integration part of this box at all: the project page's
+   *  link card, the Deploy buttons, the run's deployment card, the pipeline's
+   *  deploy-and-check stages. Optional, and OFF when absent — it is standing
+   *  consent, not a preference, so the fallback is `?? false`. The device
+   *  answers `true` on its own for a box that already has a link. */
+  vercelEnabled?: boolean;
   // The owner's standing permission rules are deliberately NOT here, though the
   // status payload carries them: CodingAgentRulesCard reads and writes its own
   // route. This panel serialises its setting writes through one chain so two
@@ -856,6 +862,35 @@ export default function CodingAgentSettingsPanel({
             label={t("codingAgent.realBrowserLabel")}
             testId="coding-agent-real-browser"
             onChange={(next) => void saveSetting({ realBrowser: next }, "realBrowser", t("codingAgent.realBrowserFailed"))}
+          />
+        </div>
+
+        {/* Deploying to Vercel, as one box-wide answer. Above the pull-request
+            controls because it is the same question one level up — where this
+            box's work is allowed to go — and off unless the owner says
+            otherwise: `?? false`, because it is standing consent for pushing
+            their code to another company's account, not a preference about how
+            a run works. Off hides the link card, the Deploy buttons, the run's
+            deployment card and the pipeline's deploy stages; the per-project
+            settings live behind it, so there is nothing left to switch. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.vercelEnabledLabel")}
+            </span>
+            <HelpTip
+              text={t("codingAgent.vercelEnabledHint")}
+              label={t("codingAgent.vercelEnabledLabel")}
+              testId="coding-agent-vercel-enabled-help"
+            />
+          </div>
+          <Switch
+            checked={status?.vercelEnabled ?? false}
+            busy={busy === "vercelEnabled"}
+            disabled={!status || saving}
+            label={t("codingAgent.vercelEnabledLabel")}
+            testId="coding-agent-vercel-enabled"
+            onChange={(next) => void saveSetting({ vercelEnabled: next }, "vercelEnabled", t("codingAgent.vercelEnabledFailed"))}
           />
         </div>
 

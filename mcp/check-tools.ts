@@ -139,6 +139,7 @@ const ALL_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true },
   emailCanRead: true,
   codingAgent: true,
+  codingVercel: true,
   canGenerateImages: true,
   providers: ["anthropic", "openai"],
 };
@@ -157,6 +158,7 @@ const NO_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   emailCanRead: false,
   codingAgent: false,
+  codingVercel: false,
   canGenerateImages: false,
   providers: [],
 };
