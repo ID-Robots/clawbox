@@ -79,7 +79,8 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
-| Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`, `coding_deploy_preview/production`) | when the owner switched it on | when the owner switched it on |
+| Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
+| Deploying to Vercel (`coding_deploy_preview/production`) | when the coding agent is on AND the owner switched the Vercel integration on | same |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
@@ -610,6 +611,20 @@ one with a `target`, because the two are different acts and a model choosing
 between two values of one argument treats them as the same act with a knob on
 it: a preview is a throwaway address nobody has, production is the project's
 real domain in front of whoever uses it.
+
+BOTH ARE ABSENT unless the owner has the box-wide Vercel integration switched
+on (`coding_vercel_enabled`, Settings in the Coding Agent app; off on a box that
+has never been asked, and on for one that already had a Vercel project
+attached, which the device migrates for itself). Not registered rather than
+registered-and-refusing, the same rule the coding-agent family above them
+follows: with the integration off every deploy route answers 409
+`vercel_disabled`, and a tool that can only ever fail opens Hermes'
+per-server circuit breaker — which takes every ClawBox tool offline, not just
+these two. The device asks the harness to rebuild its tool list when the owner
+moves the switch, so the change reaches a live agent rather than waiting for a
+restart. `delivery_pipeline` on `coding_agent_run` stays available and says so:
+with the integration off a pipeline runs its review and improvement laps and
+SKIPS its four deploy-and-check stages.
 
 NEITHER can name a Vercel project. Both take a CODING project — `project_id`,
 `directory`, or the `run_id` of the run that built it — and the device looks up
