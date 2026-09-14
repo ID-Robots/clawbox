@@ -126,9 +126,14 @@ export default function CloudDefaultsCard({ active }: { active: boolean }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(target.body),
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         setError(typeof data?.error === "string" ? data.error : t("localModels.error.changeFailed"));
+      } else if (typeof data?.warning === "string" && data.warning) {
+        // A 200 whose change did not land: the pin came off, the box refused
+        // the move, and the row below will still say "This box". Silence there
+        // would read as a button that does nothing.
+        setError(data.warning);
       }
     } catch {
       setError(t("localModels.error.unreachable"));
