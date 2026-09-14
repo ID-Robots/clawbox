@@ -7,6 +7,7 @@ import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/op
 import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { syncChannelAudio } from "@/lib/stt-channel";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
 import { getSttPrimary, isSttEngine, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
 
@@ -82,7 +83,13 @@ export async function POST(req: Request) {
   // person's decision — off the box or not — so the agent is not allowed to
   // make it, whatever it has been told. Same helper and rule as
   // coding-agent/enable.
-  if (!(await hasOwnerSession(req))) {
+  //
+  // AND SAME-ORIGIN. `hasOwnerSession` answers "the owner is signed in", not
+  // "the owner asked for this": the session cookie is `SameSite=Lax`, which
+  // stops the ordinary cross-SITE POST but not a page on a different ORIGIN of
+  // the same site. This route moves where the owner's recordings are sent, so
+  // it takes the same second guard the ClawKeep mutation routes take.
+  if (!(await hasOwnerSession(req)) || !isSameOriginRequest(req)) {
     return NextResponse.json(
       { error: "Changing the transcription engine needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },
@@ -107,15 +114,28 @@ export async function POST(req: Request) {
     if (primary === "local" && !local.installed) {
       return NextResponse.json({ error: local.detail }, { status: 409 });
     }
-    // Gateway first, preference second, so a failed CLI write leaves the
-    // stored preference describing what the box still does.
-    const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(primary), local.installed);
-    await setSttPrimary(primary);
     // WHO DECIDED, beside WHAT was decided. A person pinning the engine on the
     // box is what stops the ClawBox AI cloud default from moving it back at the
     // next boot; picking the cloud hands the capability back to that default,
     // which is not the same as never having been asked (see clearOwnerChoice).
-    await (primary === "local" ? noteOwnerChoice("stt") : clearOwnerChoice("stt"));
+    //
+    // THE PIN GOES FIRST, and only the pin. On a box whose `stt_choice_source`
+    // already reads `auto` — anyone who has ever picked the cloud here — a
+    // successful engine write followed by a failed `noteOwnerChoice` left that
+    // `auto` standing, `ownerChoiceFrom("auto", true)` answered false, and the
+    // next boot's cloud default promoted the box straight back off the engine
+    // the owner had just chosen. Writing it BEFORE the engine cannot lose the
+    // decision: the worst a later failure leaves is a pin over an unchanged
+    // engine, which the applier reads as "leave this box alone" — the safe
+    // direction. Releasing the capability back to the default is the opposite
+    // case and stays AFTER its write, because a cleared pin over an engine that
+    // did not move is the one that loses a decision.
+    if (primary === "local") await noteOwnerChoice("stt");
+    // Gateway first, preference second, so a failed CLI write leaves the
+    // stored preference describing what the box still does.
+    const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(primary), local.installed);
+    await setSttPrimary(primary);
+    if (primary !== "local") await clearOwnerChoice("stt");
     if (wrote) {
       try {
         // Media-understanding config is read at gateway start, so a restart is
