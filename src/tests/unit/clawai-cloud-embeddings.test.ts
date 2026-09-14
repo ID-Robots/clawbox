@@ -78,6 +78,30 @@ describe("cloudEmbeddingsUrl", () => {
     expect(embeddingsBaseUrlOf("https://clawbox.test/api/ai/embeddings")).toBe("https://clawbox.test/api/ai");
     expect(embeddingsBaseUrlOf("https://clawbox.test/api/ai/")).toBe("https://clawbox.test/api/ai");
   });
+
+  it("keeps plain http, which is the LAN staging contract", () => {
+    // Deliberately NOT narrowed to loopback: the override exists so a staging
+    // image can be pointed at a proxy on a trusted LAN. HTTPS outside that is
+    // the operator's to honour — see the trust boundary on `usableEndpoint`.
+    process.env.CLAWBOX_AI_EMBEDDINGS_URL = "http://staging.lan:8080/v1/embeddings";
+    expect(cloudEmbeddingsUrl()).toBe("http://staging.lan:8080/v1/embeddings");
+  });
+
+  it("refuses an override that is not an http(s) address, and falls back to its own account's route", () => {
+    // The endpoint is the destination of a request carrying this box's bearer,
+    // so a scheme that is not a network fetch, a string that is not a URL, and
+    // a length nothing legitimate needs are all treated as "nobody set one".
+    for (const bad of [
+      "file:///etc/passwd",
+      "data:text/plain,collect",
+      "javascript:fetch(1)",
+      "not a url at all",
+      `https://staging.test/${"a".repeat(2100)}`,
+    ]) {
+      process.env.CLAWBOX_AI_EMBEDDINGS_URL = bad;
+      expect(cloudEmbeddingsUrl()).toBe("https://clawbox.test/api/ai/embeddings");
+    }
+  });
 });
 
 describe("probeCloudEmbeddings", () => {
@@ -110,5 +134,20 @@ describe("probeCloudEmbeddings", () => {
     vi.stubGlobal("fetch", fetchMock);
     await expect(probeCloudEmbeddings()).resolves.toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends the box's bearer only to the validated address, and a bounded body", async () => {
+    process.env.CLAWBOX_AI_EMBEDDINGS_URL = "https://staging.test/v1/embeddings";
+    const fetchMock = answer({ data: [{ embedding: [0.5] }] });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(probeCloudEmbeddings()).resolves.toBe(true);
+    const [target, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(target).toBe("https://staging.test/v1/embeddings");
+    // The probe body is a literal and a vetted model id — nothing the owner
+    // wrote and nothing read out of a file travels in it. The one file-derived
+    // value is the bearer, which is this box's own credential for its own
+    // account and is the point of the request.
+    expect(JSON.parse(String(init.body))).toEqual({ model: "text-embedding-3-large", input: "clawbox" });
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer claw_test");
   });
 });

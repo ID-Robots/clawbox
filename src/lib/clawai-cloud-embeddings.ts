@@ -14,7 +14,10 @@
  * The route is `POST <proxy>/embeddings`, OpenAI-compatible (`input`, `model`,
  * `data[].embedding`, `usage`) with the box's own `claw_` token as the bearer.
  * WHERE it is comes from the environment and never from a file — see
- * `CLAWAI_CLOUD_EMBEDDINGS_KEY` for why that distinction is load-bearing.
+ * `CLAWAI_CLOUD_EMBEDDINGS_KEY` for why that distinction is load-bearing, and
+ * `usableEndpoint` for the trust boundary the address sits on: who may set it,
+ * what it may be, and which half of that is enforced here rather than owed by
+ * the operator.
  * It is shipping separately on the website side; until it does, every probe here
  * answers false and the resolver leaves the index on the model on this box. That
  * is the whole reason the probe exists rather than a flag someone flips: a box
@@ -26,16 +29,30 @@ import { get } from "@/lib/config-store";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 
 /**
+ * What a model id may look like. A bound on the request body rather than a
+ * guess at a vendor's format: this string is env-supplied and is serialised
+ * into every probe, so an id outside this charset or past this length is a
+ * misconfigured image and the shipped default is the safer answer.
+ */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+
+/** What a device build embeds with when nothing overrides it. */
+const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large";
+
+/**
  * The cloud embedding model.
  *
  * `text-embedding-3-large` at 3,072 dimensions — the same model the owner's own
  * OpenClaw memory search uses, so an index built here and one built there are
  * comparable. Env-overridable so a staging proxy can serve something else
  * without a code change; the DIMENSION travels with it, because a model with a
- * different one is a different index and not a different setting.
+ * different one is a different index and not a different setting. An override
+ * that is not a plausible id is ignored rather than sent — see {@link MODEL_ID}.
  */
-export const CLOUD_EMBEDDING_MODEL =
-  process.env.CLAWBOX_AI_EMBEDDING_MODEL?.trim() || "text-embedding-3-large";
+export const CLOUD_EMBEDDING_MODEL = (() => {
+  const override = process.env.CLAWBOX_AI_EMBEDDING_MODEL?.trim();
+  return override && MODEL_ID.test(override) ? override : DEFAULT_EMBEDDING_MODEL;
+})();
 
 /** What the model above answers with, for the index-rebuild rule. */
 export const CLOUD_EMBEDDING_DIMENSIONS = 3072;
@@ -65,14 +82,64 @@ export const CLOUD_EMBEDDING_ENGINE = "ClawBox AI";
 export const CLAWAI_CLOUD_EMBEDDINGS_KEY = "clawai_cloud_embeddings";
 
 /**
+ * The longest endpoint this box will send to, and the charset a model id may
+ * use. Both are bounds on what reaches the network, not guesses at a format:
+ * a URL past this length or a model id outside this charset is a misconfigured
+ * image, and sending either is strictly worse than falling back to the built-in
+ * route.
+ */
+const MAX_ENDPOINT_CHARS = 2048;
+
+/**
+ * THE TRUST BOUNDARY for the cloud embedder's address.
+ *
+ * WHO MAY SET IT. `CLAWBOX_AI_EMBEDDINGS_URL` is read from the environment the
+ * image was built with, which is root's and not the `clawbox` account's —
+ * deliberately, and it is the whole reason the device store gets a SWITCH and
+ * not an address (see `CLAWAI_CLOUD_EMBEDDINGS_KEY`). Everything the owner has
+ * indexed becomes the body of requests to whatever this names, so only an
+ * operator who is already trusted with the image may configure it. A
+ * prompt-injected coding run, a hand-edited `data/config.json` and a restored
+ * backup all reach the store and none of them reaches here.
+ *
+ * WHAT IT MAY BE. Plain `http:` is accepted, for the one case it exists for: a
+ * staging proxy on a trusted LAN. That is a STAGING CONTRACT and not a
+ * loopback restriction — pinning it to loopback would delete the staging setup
+ * it was added for. Outside a trusted LAN the endpoint must be `https:`,
+ * because the request carries the box's `claw_` bearer and the text being
+ * embedded in cleartext otherwise (CWE-319). Nothing here can tell a trusted
+ * LAN from the open internet, so that half is the operator's to honour.
+ *
+ * WHAT IS ENFORCED. The scheme must be `http:` or `https:` and the whole URL
+ * must parse and stay under {@link MAX_ENDPOINT_CHARS}. Anything else — a
+ * `file:`, a `data:`, an unparseable string, a length nothing legitimate needs
+ * — is refused and this box falls back to the built-in proxy route, which is
+ * its own account's endpoint and never a third party's.
+ */
+function usableEndpoint(raw: string | undefined): string | null {
+  const candidate = raw?.trim();
+  if (!candidate || candidate.length > MAX_ENDPOINT_CHARS) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return null;
+  }
+  return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+}
+
+/**
  * The endpoint.
  *
  * From the environment or from the proxy constant, never from a file — see the
  * key above. `CLAWBOX_AI_EMBEDDINGS_URL` is for a staging image pointed at a
- * proxy of its own; a device build sets neither and gets the line below.
+ * proxy of its own; a device build sets neither and gets the line below. An
+ * override that does not pass {@link usableEndpoint} is treated as absent
+ * rather than sent to: the built-in route is this box's own account, so falling
+ * back is the conservative direction.
  */
 export function cloudEmbeddingsUrl(): string {
-  const override = process.env.CLAWBOX_AI_EMBEDDINGS_URL?.trim();
+  const override = usableEndpoint(process.env.CLAWBOX_AI_EMBEDDINGS_URL);
   return override || `${CLAWBOX_AI_PROXY_URL.replace(/\/+$/, "")}/embeddings`;
 }
 
@@ -137,11 +204,25 @@ export async function probeCloudEmbeddings(): Promise<boolean> {
   return ok;
 }
 
+/**
+ * The one request this module makes, and everything about it is bounded.
+ *
+ * The destination is re-checked against {@link usableEndpoint} here as well as
+ * where it was resolved: this is the function that actually opens the socket,
+ * and a fence with one gate is a fence. The BODY is a seven-character literal
+ * and a model id that has passed {@link MODEL_ID} — nothing the owner has
+ * written, and nothing read out of a file, travels in it. What is file-derived
+ * is the `claw_` bearer, which is the box's own credential for its own account
+ * and is the point of the request; it goes in a header to a destination the
+ * device store cannot name.
+ */
 async function askCloudEmbedder(endpoint: string): Promise<boolean> {
+  const target = usableEndpoint(endpoint);
+  if (!target) return false;
   const token = await resolveClawaiToken();
   if (!token) return false;
   try {
-    const res = await fetch(endpoint, {
+    const res = await fetch(target, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ model: CLOUD_EMBEDDING_MODEL, input: "clawbox" }),
