@@ -126,6 +126,7 @@ beforeEach(() => {
   readStateMock.mockReset().mockResolvedValue({ choice: "auto" });
   writeStateMock.mockReset().mockResolvedValue(undefined);
   preferenceMock.mockReset().mockResolvedValue(undefined);
+  choiceSourceMock.mockReset().mockResolvedValue(undefined);
   wireMock.mockReset().mockResolvedValue({ ok: true, provider: {} });
   autoReplyMock.mockReset().mockResolvedValue(true);
   setAutoReplyMock.mockReset().mockResolvedValue(undefined);
@@ -372,6 +373,106 @@ describe("POST /setup-api/tts — select", () => {
     expect((await POST(post({ action: "teleport" }))).status).toBe(400);
     // The Check button is gone from the panel, and so is the action behind it.
     expect((await POST(post({ action: "check" }))).status).toBe(400);
+  });
+});
+
+/**
+ * WHO DECIDED, and when it is written down.
+ *
+ * The owner pinning the box's own voice is the only thing that stops the
+ * ClawBox AI cloud default from moving it at the next boot. The pin used to be
+ * written AFTER the provider transition, by a helper that swallowed its own
+ * failure — so on a box whose `tts_choice_source` already read `auto` (anyone
+ * who has ever selected Auto or the cloud voice), a successful local pick whose
+ * pin did not land came out still reading `auto`. `ownerChoiceFrom("auto", true)`
+ * answers false, so the next boot's applier called `promoteTts()` and put the
+ * cloud voice back — silently undoing a decision the owner had been told was
+ * saved. The stored `local` choice only grandfathers a box whose key is ABSENT,
+ * so it does not catch this one.
+ *
+ * So the pin is part of the selection boundary: written first, undone on every
+ * way out that is not a completed selection, and a store that will not take it
+ * is a refused selection rather than a quiet one.
+ */
+describe("POST /setup-api/tts — the owner pin is part of the selection", () => {
+  /** A box on the cloud voice, with its own voice installed and wired. */
+  function onCloud() {
+    readConfigMock.mockResolvedValue(config({
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } },
+    }));
+  }
+
+  /** Every `set` this route made, as [key, value] pairs. */
+  function writes(): [string, unknown][] {
+    return choiceSourceMock.mock.calls as [string, unknown][];
+  }
+
+  it("records the pin before it touches the provider", async () => {
+    onCloud();
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "local" }))).status).toBe(200);
+    expect(writes()).toEqual([["tts_choice_source", "owner"]]);
+    // Written first, so no failure between here and the end can leave the pick
+    // standing without the mark that protects it.
+    expect(choiceSourceMock.mock.invocationCallOrder[0])
+      .toBeLessThan(configSetMock.mock.invocationCallOrder[0]);
+  });
+
+  it("undoes the pin when the provider write failed", async () => {
+    onCloud();
+    configSetMock.mockRejectedValue(new Error("ConfigMutationConflictError"));
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "local" }))).status).toBe(500);
+    // Back to absent, which is what the key held before the attempt — NOT
+    // `auto`, which is itself a decision.
+    expect(writes()).toEqual([["tts_choice_source", "owner"], ["tts_choice_source", undefined]]);
+    expect(writeStateMock).not.toHaveBeenCalled();
+  });
+
+  it("undoes the pin to exactly what the key held, not to a fresh default", async () => {
+    onCloud();
+    preferenceMock.mockResolvedValue("auto");
+    writeStateMock.mockRejectedValue(new Error("EROFS: read-only file system"));
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "local" }))).status).toBe(500);
+    expect(writes()).toEqual([["tts_choice_source", "owner"], ["tts_choice_source", "auto"]]);
+  });
+
+  it("refuses the selection outright when the pin cannot be stored", async () => {
+    onCloud();
+    choiceSourceMock.mockRejectedValue(new Error("EROFS: read-only file system"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("cannot_change");
+    // A pick the boot applier would undo is not a pick that was saved, so
+    // nothing moves rather than reporting a change that will not survive.
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(writeStateMock).not.toHaveBeenCalled();
+  });
+
+  it("releases the capability to the default only once the cloud selection landed", async () => {
+    readConfigMock.mockResolvedValue(config({ models: { providers: { openai: { apiKey: "sk-live-abc" } } } }));
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "cloud" }))).status).toBe(200);
+    expect(writes()).toEqual([["tts_choice_source", "auto"]]);
+    // The opposite order from the pin: a clear that lands over a write that did
+    // not is the one that loses a decision.
+    expect(choiceSourceMock.mock.invocationCallOrder[0])
+      .toBeGreaterThan(configSetMock.mock.invocationCallOrder[0]);
+  });
+
+  it("leaves the pin alone when the pick could not be honoured at all", async () => {
+    // No engine to select: the box settles on Auto, and Auto is the default's
+    // to move — so this records a release, never a pin.
+    ttsInventoryMock.mockResolvedValue([]);
+    readConfigMock.mockResolvedValue(config({
+      tts: { provider: "openai", providers: { openai: { model: "gpt-4o-mini-tts" } } },
+      models: { providers: { openai: { apiKey: "sk-live-abc" } } },
+    }));
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "local" }))).status).toBe(200);
+    expect(writes()).toEqual([["tts_choice_source", "auto"]]);
   });
 });
 
