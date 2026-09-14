@@ -8576,7 +8576,7 @@ ensure_local_embeddings() {
   # left a partial model and a half-built index, which the next run had to redo
   # from the start. The helper has its OWN internal wait for the proxy and exits
   # 0 on every soft failure, so it ends by itself; `|| true` covers the rest.
-  as_clawbox_login "$helper" || true
+  as_clawbox_login "$helper" </dev/null || true
   # The helper exits 0 on every soft failure by design, so its exit code says
   # nothing about the outcome; ask the core. Best-effort: "could not read an
   # embedder" is reported as itself, never as a verdict. The status is the
@@ -8584,7 +8584,14 @@ ensure_local_embeddings() {
   # non-zero exit discards output that describes nothing anyone should vouch
   # for, and errexit stays suppressed.
   local EMBED_JSON EMBED_STATE
-  if ! EMBED_JSON="$(as_clawbox "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null)"; then
+  # `</dev/null`, and no clock. The CLI is what decides how long this takes —
+  # `--deep` walks the whole index, so the 60 s cap this used to carry reported
+  # "could not read an embedder" about a healthy one on a box whose index was
+  # merely large, which is the false verdict the block below exists not to
+  # invent. What IS closed off is the one way a non-interactive CLI hangs
+  # without doing anything: a prompt on stdin, which it would otherwise inherit
+  # from the root step and wait on for ever.
+  if ! EMBED_JSON="$(as_clawbox "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
     EMBED_JSON=""
   fi
   # `command -v` first, and a state of its own: without the interpreter the

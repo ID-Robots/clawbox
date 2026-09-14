@@ -467,7 +467,12 @@ describe("ensure_local_embeddings never fails the update", () => {
     // true` here, which is what keeps its outcome out of this step's verdict.
     const body = shellCode(extractShellFunction("ensure_local_embeddings"));
     expect(body).not.toMatch(/\btimeout\b/);
-    expect(body).toMatch(/as_clawbox_login "\$helper" \|\| true/);
+    expect(body).toMatch(/as_clawbox_login "\$helper" <\/dev\/null \|\| true/);
+    // `</dev/null` on both the helper and the status probe: no clock closes off
+    // the one way a non-interactive CLI hangs without doing any work — a prompt
+    // on the stdin it inherits from the root step, which it would wait on for
+    // ever. That is a bound on a STALL, not on slowness.
+    expect(body).toMatch(/memory status --agent main --deep --json 2>\/dev\/null <\/dev\/null/);
   });
 
   it("puts no verdict on a core that never answers", () => {
