@@ -59,4 +59,48 @@ describe("CodingTeamTree", () => {
     expect(within(svg).queryByTestId("coding-team-tree-reviewer")).toBeNull();
     expect(svg.textContent).toContain(`${t("codingAgent.team.artReviewers")} · 0`);
   });
+
+  // The caption used to read the CAPPED number, so a board of nine workers was
+  // captioned "Workers · 5" beside a card stating nine.
+  it("captions what there is, even past the cap it draws", () => {
+    render(<CodingTeamTree workers={MAX_TREE_WORKERS + 4} reviewers={MAX_TREE_REVIEWERS + 2} />);
+    const svg = screen.getByTestId("coding-team-tree");
+    expect(within(svg).getAllByTestId("coding-team-tree-worker")).toHaveLength(MAX_TREE_WORKERS);
+    expect(svg.textContent).toContain(`${t("codingAgent.team.artWorkers")} · ${MAX_TREE_WORKERS + 4}`);
+    expect(svg.textContent).toContain(`${t("codingAgent.team.artReviewers")} · ${MAX_TREE_REVIEWERS + 2}`);
+  });
+
+  /**
+   * A run with no team is still a picture worth drawing: the assistant, the
+   * Coding Agent and the helpers that run sent out itself. Same strokes, same
+   * nodes, three columns — so the run page never shows a gap where the chart
+   * is, and a team run and a solo run read as the same kind of thing.
+   */
+  describe('the "run" shape', () => {
+    it("drops the planner and the reviewers and captions the run's own helpers", () => {
+      render(<CodingTeamTree shape="run" workers={3} activeWorkers={1} />);
+      const svg = screen.getByTestId("coding-team-tree");
+      expect(svg).toHaveAttribute("data-shape", "run");
+      expect(within(svg).queryByTestId("coding-team-tree-planner")).toBeNull();
+      expect(within(svg).queryByTestId("coding-team-tree-reviewer")).toBeNull();
+      const helpers = within(svg).getAllByTestId("coding-team-tree-worker");
+      expect(helpers).toHaveLength(3);
+      expect(helpers.filter((h) => h.getAttribute("data-live") === "true")).toHaveLength(1);
+      expect(svg.textContent).toContain(`${t("codingAgent.statHelpers")} · 3`);
+      expect(svg.textContent).not.toContain(t("codingAgent.team.artPlanner"));
+      expect(svg.textContent).not.toContain(t("codingAgent.team.artReviewers"));
+    });
+
+    it("draws no fan at all for a run that sent nobody out", () => {
+      render(<CodingTeamTree shape="run" workers={0} />);
+      const svg = screen.getByTestId("coding-team-tree");
+      expect(svg).toHaveAttribute("data-workers", "0");
+      expect(within(svg).queryByTestId("coding-team-tree-worker")).toBeNull();
+      // No column caption for a column that is not there.
+      expect(svg.textContent).not.toContain(t("codingAgent.statHelpers"));
+      // The two that ARE there stay.
+      expect(svg.textContent).toContain(t("codingAgent.team.artMain"));
+      expect(svg.textContent).toContain(t("codingAgent.title"));
+    });
+  });
 });

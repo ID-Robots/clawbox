@@ -105,6 +105,39 @@ describe("CodingRunTimeline", () => {
     expect(within(detail).getByText(RUNNER_STEP.started("deepseek-v4-pro[1m]"))).toBeTruthy();
   });
 
+  /**
+   * Every row used to read "+8m 3s" from the run's start, so answering "what
+   * time did it read the folder" meant adding minutes to a start time that is
+   * elsewhere on the page. A log prints the clock; so does this. The distance
+   * from the start is still kept, as the cell's title and spelled out in the
+   * opened step.
+   */
+  it("reads the wall clock, 24-hour, with the elapsed behind it", () => {
+    pack = PACK;
+    draw();
+    const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+    const cells = screen.getAllByTestId("coding-agent-run-activity-time");
+    expect(cells).toHaveLength(LINES.length);
+    expect(cells[0].textContent).toBe(clock(TIMES[0]));
+    expect(cells[4].textContent).toBe(clock(TIMES[4]));
+    // Four digits and two colons, never "+4s".
+    expect(cells[4].textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    for (const cell of cells) expect(cell.textContent).not.toContain("+");
+    // The machine-readable instant, and the elapsed as the secondary reading.
+    expect(cells[4]).toHaveAttribute("datetime", new Date(TIMES[4]).toISOString());
+    expect(cells[4]).toHaveAttribute("title", "+4s");
+    expect(cells[0]).toHaveAttribute("title", "+0s");
+  });
+
+  it("spells both out when a step is opened — the clock, then how far into the run it was", () => {
+    pack = PACK;
+    draw();
+    fireEvent.click(screen.getAllByTestId("coding-agent-run-activity-step")[3]);
+    const detail = screen.getByTestId("coding-agent-run-activity-detail");
+    const clock = new Date(TIMES[3]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+    expect(detail.textContent).toContain(`${clock} · +3s`);
+  });
+
   it("words the live step too — it is the one drawn in full", () => {
     pack = PACK;
     draw(true);

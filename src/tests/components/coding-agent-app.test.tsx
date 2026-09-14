@@ -1181,9 +1181,12 @@ describe("CodingAgentApp", () => {
       expect(buttons[0].getAttribute("title")).toMatch(/\+12s$/);
       expect(buttons[1].getAttribute("title")).toMatch(/\+3m 5s$/);
       expect(buttons[1].getAttribute("title")).toMatch(/\d{1,2}:\d{2}:\d{2}/);
-      // The time is on every step, not behind a hover.
+      // The clock is on every step, not behind a hover — and it is a clock,
+      // the way a log prints one, with the distance from the start behind it.
       const times = within(steps).getAllByTestId("coding-agent-run-activity-time");
-      expect(times.map((el) => el.textContent)).toEqual(["+12s", "+3m 5s"]);
+      const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+      expect(times.map((el) => el.textContent)).toEqual([clock(startedAt + 12_000), clock(startedAt + 3 * 60_000 + 5_000)]);
+      expect(times.map((el) => el.getAttribute("title"))).toEqual(["+12s", "+3m 5s"]);
       expect(times[0]).toHaveAttribute("datetime", new Date(startedAt + 12_000).toISOString());
       expect(times[0].className).not.toContain("opacity-0");
       // A step opens on a click: the clock in full, its kind, its whole line; and closes again.
@@ -1278,10 +1281,13 @@ describe("CodingAgentApp", () => {
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
       const card = await screen.findByTestId("coding-agent-run-agents");
-      // Working: the run and its live helper. Finished: the two back.
-      expect(screen.getByTestId("coding-agent-run-agents-count").textContent).toContain(t("codingAgent.agentsWorking", { n: 2 }));
-      expect(screen.getByTestId("coding-agent-run-agents-count").textContent).toContain(t("codingAgent.agentsFinished", { n: 2 }));
+      // No tally in the header: the tree pulses for whoever is at work and
+      // every row carries its own state, so a third count of the same thing
+      // was only one more number to keep right.
+      expect(screen.queryByTestId("coding-agent-run-agents-count")).toBeNull();
       expect(within(card).getByText(t("codingAgent.agentMain"))).toBeInTheDocument();
+      // A solo run still gets the picture — the three columns it has.
+      expect(within(card).getByTestId("coding-team-tree")).toHaveAttribute("data-shape", "run");
       const live = within(card).getAllByTestId("coding-agent-subagent-live");
       expect(live).toHaveLength(1);
       expect(live[0].textContent).toContain("Review the toggle");
@@ -1293,6 +1299,63 @@ describe("CodingAgentApp", () => {
       expect(done[0].textContent).toContain(t("codingAgent.helperRefused"));
       expect(done[1].textContent).toContain("Map the components folder");
       expect(done[1].textContent).toContain(t("codingAgent.helperFor", { t: "1m 0s" }));
+    });
+
+    /**
+     * What the box actually knows about an agent, on hover AND on tap — the
+     * box is used on a touchscreen, where a title attribute is no affordance
+     * at all. Only fields with an answer: the run record keeps no per-helper
+     * model and no per-helper token count, and "Tokens: 0" would be a figure
+     * the page invented.
+     */
+    it("says what is known about each agent, on hover and on tap, and nothing it does not know", async () => {
+      const run = {
+        ...RUN,
+        tokensUsed: 42_000,
+        modelsUsed: ["claude-opus-5"],
+        subagentsTotal: 1,
+        subagents: [{ type: "explorer", description: "Map the components folder and report where the run page lives", startedAt: Date.now() - 300_000, endedAt: Date.now() - 240_000, refused: false }],
+      };
+      stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const card = await screen.findByTestId("coding-agent-run-agents");
+      const main = within(card).getByTestId("coding-agent-agent-main-row");
+      const title = main.getAttribute("title") ?? "";
+      expect(title).toContain(`${t("codingAgent.agentModel")}: claude-opus-5`);
+      expect(title).toContain(`${t("codingAgent.statTokens")}: 42k`);
+      expect(title).toContain(`${t("codingAgent.agentState")}: ${t("codingAgent.statusCompleted")}`);
+      expect(main).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(main);
+      expect(main).toHaveAttribute("aria-expanded", "true");
+      const detail = within(card).getByTestId("coding-agent-agent-main-row-detail");
+      expect(detail.textContent).toContain("claude-opus-5");
+      expect(detail.textContent).toContain("42k");
+
+      const helper = within(card).getByTestId("coding-agent-subagent-done-row");
+      const helperTitle = helper.getAttribute("title") ?? "";
+      expect(helperTitle).toContain(`${t("codingAgent.agentAsked")}: Map the components folder`);
+      expect(helperTitle).toContain(`${t("codingAgent.agentState")}: ${t("codingAgent.agentFinished")}`);
+      // No model and no token figure for a helper: the record keeps neither.
+      expect(helperTitle).not.toContain(t("codingAgent.agentModel"));
+      expect(helperTitle).not.toContain(t("codingAgent.statTokens"));
+      fireEvent.click(helper);
+      expect(within(card).getByTestId("coding-agent-subagent-done-row-detail").querySelectorAll("dt")).toHaveLength(2);
+    });
+
+    it("reads an empty figure as a state rather than as a dash, and carries no zero nobody acts on", async () => {
+      const fresh = { ...RUN, status: "running", completedAt: null, commit: null, tokensUsed: 0, permissionDenials: 0, deniedActions: [] };
+      stubFetch({ enabled: true, readiness: READY }, [fresh], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+      const figures = await screen.findByTestId("coding-agent-run-figures");
+      expect(within(figures).getByTestId("coding-agent-stat-commit").textContent).toContain(t("codingAgent.statNone"));
+      expect(figures.textContent).not.toContain("—");
+      // Nothing was refused, so the rail carries no figure about it — the card
+      // below is where a refusal is spelled out.
+      expect(within(figures).queryByTestId("coding-agent-stat-denied")).toBeNull();
     });
 
     it("opens a run's own page from its row: figures, summary, files and evidence, and Back returns", async () => {
@@ -1318,8 +1381,10 @@ describe("CodingAgentApp", () => {
       const figures = screen.getByTestId("coding-agent-run-figures").textContent ?? "";
       expect(figures).toContain("1.3M");
       expect(figures).toContain("caea00d");
-      expect(figures).toContain("2× explorer, 1× reviewer");
       expect(figures).toContain("deepseek-v4-pro[1m] + deepseek-v4-flash");
+      // The helpers are named one row each in the Agents card now, so the rail
+      // no longer repeats them as a breakdown nobody could act on.
+      expect(figures).not.toContain("2× explorer");
       expect(screen.getByTestId("coding-agent-summary").textContent).toContain("Added the toggle");
       // The rail carries the COUNT, not the roster. A run that touched 29
       // files filled the column with chips and told the reader nothing the
@@ -2161,7 +2226,9 @@ describe("CodingAgentApp — the run page's honesty", () => {
     // 40 of the 60, starting at "+28m 59s", is what the owner used to get.
     expect(steps).toHaveLength(60);
     expect(steps[0].getAttribute("data-at")).toBe(String(started));
-    expect(within(timeline).getAllByTestId("coding-agent-run-activity-time")[0].textContent).toBe("+0s");
+    const first = within(timeline).getAllByTestId("coding-agent-run-activity-time")[0];
+    expect(first.textContent).toBe(new Date(started).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }));
+    expect(first).toHaveAttribute("title", "+0s");
     expect(within(timeline).getByText("60")).toBeInTheDocument();
   });
 

@@ -40,21 +40,27 @@ function stub() {
 }
 
 describe("CodingRunTeamMembers", () => {
-  it("lists every member with its role, at work or done, names this run without a link and opens the others", async () => {
+  it("draws the board as the tree and lists the TEAMMATES — never this run, which the card already names", async () => {
     const calls = stub();
     const onOpenRun = vi.fn();
     render(<CodingRunTeamMembers teamId="team-1" runId="run-w2" runs={RUNS} live onOpenRun={onOpenRun} />);
     const list = await screen.findByTestId("coding-agent-run-team-members");
     expect(calls[0]).toBe("/setup-api/coding-agent/team?id=team-1");
     expect(list).toHaveAttribute("data-working", "2");
-    expect(list.textContent).toContain(t("codingAgent.agentsWorking", { n: 2 }));
-    expect(list.textContent).toContain(t("codingAgent.agentsFinished", { n: 2 }));
+    // The Team tab's own drawing, sized by THIS board: two workers, one
+    // reviewer, and the pair that are at work lit.
+    const tree = within(list).getByTestId("coding-team-tree");
+    expect(tree).toHaveAttribute("data-shape", "team");
+    expect(tree).toHaveAttribute("data-workers", "2");
+    expect(tree).toHaveAttribute("data-reviewers", "1");
+    expect(tree).toHaveAttribute("data-active", "1");
+    expect(tree).toHaveAttribute("data-active-reviewers", "1");
+    // Three rows, not four: run-w2 is the page this is on.
     const rows = within(list).getAllByTestId("coding-agent-team-member");
-    expect(rows.map((r) => r.getAttribute("data-role"))).toEqual(["planner", "worker", "worker", "reviewer"]);
-    expect(rows.map((r) => r.getAttribute("data-live"))).toEqual([null, null, "true", "true"]);
-    expect(rows[2]).toHaveAttribute("data-me", "true");
-    expect(within(rows[2]).queryByRole("button")).toBeNull();
-    expect(rows[3].textContent).toContain(t("codingAgent.team.roleReviewer", { task: "t1" }));
+    expect(rows.map((r) => r.getAttribute("data-role"))).toEqual(["planner", "worker", "reviewer"]);
+    expect(rows.map((r) => r.getAttribute("data-live"))).toEqual([null, null, "true"]);
+    expect(list.textContent).not.toContain("run-w2");
+    expect(rows[2].textContent).toContain(t("codingAgent.team.roleReviewer", { task: "t1" }));
     fireEvent.click(within(rows[0]).getByRole("button", { name: "run-plan" }));
     expect(onOpenRun).toHaveBeenCalledWith("run-plan");
   });
@@ -69,18 +75,32 @@ describe("CodingRunTeamMembers", () => {
       { id: "run-w2", status: "stopped" as const },
       { id: "run-rev", status: "running" as const },
     ];
+    // On the planner's own page, so the three rows are its teammates.
     render(<CodingRunTeamMembers teamId="team-1" runId="run-plan" runs={runs} live onOpenRun={() => {}} />);
     const list = await screen.findByTestId("coding-agent-run-team-members");
     const rows = within(list).getAllByTestId("coding-agent-team-member");
-    expect(rows.map((r) => r.getAttribute("data-outcome"))).toEqual(["completed", "unfinished", "unfinished", "working"]);
+    expect(rows.map((r) => r.getAttribute("data-outcome"))).toEqual(["unfinished", "unfinished", "working"]);
     const glyph = (row: HTMLElement) => row.querySelector(".material-symbols-rounded") as HTMLElement;
-    expect(glyph(rows[0]).textContent).toBe("check_circle");
-    expect(glyph(rows[0]).className).toContain("text-emerald-400/80");
     // The two that did not finish: no tick, and nothing green about them.
-    for (const row of [rows[1], rows[2]]) {
+    for (const row of [rows[0], rows[1]]) {
       expect(glyph(row).textContent).toBe("error");
       expect(glyph(row).className).not.toContain("emerald");
     }
+    expect(glyph(rows[2]).textContent).toBe("sync");
+  });
+
+  // A teammate's role, its run and whether it is at work are ALL the board
+  // records about it: a chevron promising more would open on an empty panel.
+  it("gives a teammate row no disclosure, and keeps its run one tap away", async () => {
+    stub();
+    render(<CodingRunTeamMembers teamId="team-1" runId="run-w2" runs={RUNS} live onOpenRun={() => {}} />);
+    const list = await screen.findByTestId("coding-agent-run-team-members");
+    const rows = within(list).getAllByTestId("coding-agent-team-member");
+    for (const row of rows) {
+      expect(within(row).queryByRole("button", { expanded: false })).toBeNull();
+      expect(row.textContent).not.toContain("expand_more");
+    }
+    expect(within(rows[0]).getByRole("button", { name: "run-plan" })).toBeInTheDocument();
   });
 
   it("drops an older reply that lands after a newer one", async () => {

@@ -38,6 +38,8 @@ import type { PipelineState } from "@/lib/coding-pipeline";
 import VercelProjectCard from "./VercelProjectCard";
 import VercelDeployPanel from "./VercelDeployPanel";
 import CodingRunTeamMembers from "./CodingRunTeamMembers";
+import CodingTeamTree from "./CodingTeamTree";
+import CodingAgentRosterRow from "./CodingAgentRosterRow";
 import {
   OPEN_CODING_RUN_EVENT,
   dispatchOpenApp,
@@ -285,6 +287,16 @@ function duration(run: Run): string {
   return `${m}m ${total % 60}s`;
 }
 
+/**
+ * Which model or models did the work — what actually ANSWERED, falling back to
+ * what the run was started with when the record predates `modelsUsed`. Null
+ * rather than a dash: a caller that has nothing to say says nothing.
+ */
+function runModels(run: Run): string | null {
+  if (run.modelsUsed?.length) return run.modelsUsed.join(" + ");
+  return run.model ?? run.requestedModel ?? null;
+}
+
 /** Compact token counts: 1.3M reads better than 1,317,787 in a list row. */
 function tokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -427,22 +439,46 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
 }
 
 /**
- * One cell of the run page's figures grid.
+ * One of the four figures a run is WATCHED by: steps, files, duration, tokens.
  *
- * Nothing here truncates. The tiles are ~118 px wide in the rail, and a model
- * name ("deepseek-v4-pro[1m]", 170 px), a Bulgarian label ("Променени
- * файлове", 128 px) and a Japanese hint ("思考中 · 166821 トークン") all
- * overflowed it — ellipsised in every locale, with the hint carrying no
- * `title` and a phone offering no hover at all, so the figure was simply
- * unreadable. A tile that grows a line is the cheaper answer than a figure
- * nobody can read; the grid stretches its row to match.
+ * Bigger than the rest of the rail on purpose — these are the numbers that
+ * move while a run works, and in a grid where every value was the same 14 px
+ * they had to be hunted for among a commit hash and a model identifier.
+ *
+ * Nothing here truncates. The tiles are ~118 px wide in the rail, and a
+ * Bulgarian label ("Променени файлове", 128 px) and a Japanese hint ("思考中 ·
+ * 166821 トークン") both overflowed it — ellipsised in every locale, with the
+ * hint carrying no `title` and a phone offering no hover at all, so the figure
+ * was simply unreadable. A tile that grows a line is the cheaper answer than a
+ * figure nobody can read; the grid stretches its row to match.
  */
 function StatTile({ label, value, hint, testId }: { label: string; value: ReactNode; hint?: string; testId?: string }) {
   return (
     <div className={`${CARD_SURFACE} px-3 py-2 min-w-0`} data-testid={testId}>
       <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] break-words">{label}</div>
-      <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] break-words" title={hint ?? (typeof value === "string" ? value : undefined)}>{value}</div>
-      {hint && <div className="text-[10px] text-[var(--text-muted)] break-words" title={hint}>{hint}</div>}
+      <div className="mt-0.5 text-lg leading-tight font-semibold text-[var(--text-primary)] break-words" title={hint ?? (typeof value === "string" ? value : undefined)}>{value}</div>
+      {hint && <div className="mt-0.5 text-[10px] text-[var(--text-muted)] break-words" title={hint}>{hint}</div>}
+    </div>
+  );
+}
+
+/**
+ * A figure that is looked UP rather than watched — the models that answered,
+ * the commit, what was refused.
+ *
+ * A row across the full width of the rail rather than a tile: the longest
+ * value on the whole page is a model identifier, and in a ~118 px tile it had
+ * nowhere to go. Here it has the rail's width and wraps at its own hyphens,
+ * which is where a name like `deepseek-v4-pro[1m]` wants to break.
+ */
+function StatLine({ label, value, hint, mono = false, testId }: { label: string; value: string; hint?: string; mono?: boolean; testId?: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-1.5 min-w-0" data-testid={testId}>
+      <dt className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</dt>
+      <dd className={`min-w-0 text-right text-[11px] text-[var(--text-secondary)] break-words ${mono ? "font-mono" : ""}`}>
+        {value}
+        {hint && <span className="block text-[10px] text-[var(--text-muted)] break-words">{hint}</span>}
+      </dd>
     </div>
   );
 }
@@ -1161,6 +1197,13 @@ export default function CodingAgentApp() {
   const STATUS_LABEL_KEY: Partial<Record<Run["status"], string>> = { gave_up: "codingAgent.statusGaveUp" };
   const statusLabel = (s: Run["status"]) =>
     t(STATUS_LABEL_KEY[s] ?? `codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
+
+  /** "Team worker · t3" — a run's place on the board it was spawned by. */
+  const teamRole = (team: NonNullable<Run["team"]>) => team.role === "planner"
+    ? t("codingAgent.team.rolePlanner")
+    : team.role === "reviewer"
+      ? t("codingAgent.team.roleReviewer", { task: team.taskId ?? "" })
+      : t("codingAgent.team.roleWorker", { task: team.taskId ?? "" });
 
   /** Open a run's page — from its row, a review chip, or the desktop. */
   const showRun = (id: string) => {
@@ -2187,7 +2230,22 @@ export default function CodingAgentApp() {
           // narration, and a download is not how you check what it says.
           const clips = shownArtifacts.filter((a) => a.kind === "audio");
           const files = shownArtifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
-          const helpers = Object.entries(run.subagentsByType ?? {});
+          // How many helpers the run sent out in all — the tally the record
+          // keeps, or the ones it can still name when it predates the tally.
+          const helperCount = run.subagentsTotal ?? ((run.activeSubagents?.length ?? 0) + (run.subagents?.length ?? 0));
+          // What a figure with no answer reads as. An em dash is what a
+          // spreadsheet prints; this is a page someone watches a run on, and
+          // "no commit yet" is a state, not a missing cell.
+          const nothingYet = t("codingAgent.statNone");
+          // This run and the helpers it sent out, as the Team tab's own
+          // drawing. It is what a solo run's page shows, and what a team run
+          // falls back to while its board cannot be read — the page never has
+          // a hole where the picture goes.
+          const runTree = (
+            <div className="mt-2 flex justify-center" data-testid="coding-agent-run-solo-tree">
+              <CodingTeamTree shape="run" workers={helperCount} activeWorkers={run.activeSubagents?.length ?? 0} />
+            </div>
+          );
           // The run's report — its closing message filed as Markdown, or a
           // fuller one it wrote — is what the Summary card draws.
           const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
@@ -2604,50 +2662,26 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {/* The agents: the run itself and every helper it sent out —
-                  the ones still working, and the ones back with how long
-                  they took. The owner asked to see how many and what each
-                  did, not a count. */}
-              {(isLive(run.status) || run.team || (run.activeSubagents?.length ?? 0) > 0 || (run.subagents?.length ?? 0) > 0 || (run.subagentsTotal ?? 0) > 0) && (
+              {/* Who is working on this run, in one picture.
+
+                  A run can be BOTH: a member of a coding team (planner,
+                  workers, reviewers) and the sender of its own Claude Code
+                  helpers. This card covers both — the team's board as the tree
+                  the Team tab draws, then the run itself and every helper it
+                  sent out — and every one of them is the same row, so the eye
+                  reads one list rather than two widgets that happened to be
+                  stacked. A solo run keeps the picture: its tree is the three
+                  columns it actually has.
+
+                  No tally in the header: the tree pulses for whoever is at
+                  work and every row carries its own state, so a third
+                  statement of the same thing was only ever one more number to
+                  keep right — and on a team run it was wrong, counting the run
+                  and its helpers while six teammates worked beside it. */}
+              {started && (
                 <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-agents">
-                  <p className={SECTION_LABEL}>
-                    {t("codingAgent.agentsTitle")}
-                    <span className="normal-case tracking-normal font-normal text-[var(--text-secondary)]" data-testid="coding-agent-run-agents-count">
-                      {t("codingAgent.agentsWorking", { n: isLive(run.status) ? 1 + (run.activeSubagents?.length ?? 0) : 0 })}
-                      {" · "}
-                      {t("codingAgent.agentsFinished", { n: (run.subagents?.length ?? 0) + (isLive(run.status) ? 0 : 1) })}
-                      {(run.subagentsTotal ?? 0) > 0 && ` · ${helpers.map(([k, n]) => `${n}× ${k}`).join(", ")}`}
-                    </span>
-                  </p>
-                  <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
-                    {/* A tick for a run that did not finish is a lie the
-                        status chip above already contradicts: only a
-                        completed run gets one, a failed or stopped one gets
-                        the error glyph, and a paused run or a draft is still
-                        waiting rather than done. */}
-                    <li className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-agent-main" data-outcome={mainOutcome}>
-                      <span className={`material-symbols-rounded shrink-0 ${MAIN_AGENT_GLYPH[mainOutcome].className}`} style={{ fontSize: 13 }} aria-hidden="true">{MAIN_AGENT_GLYPH[mainOutcome].icon}</span>
-                      <span className="text-[var(--text-primary)] font-medium shrink-0">{t("codingAgent.agentMain")}</span>
-                      <span className="text-[var(--text-muted)] break-words min-w-0">{run.model ?? run.modelsUsed?.[0] ?? ""}{started ? ` · ${duration(run)}` : ""}</span>
-                    </li>
-                    {run.activeSubagents?.map((a, i) => (
-                      <li key={`live-${i}`} className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-subagent-live">
-                        <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">sync</span>
-                        <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
-                        <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
-                        <span className="ml-auto shrink-0 text-[var(--text-muted)]">{t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, now) })}</span>
-                      </li>
-                    ))}
-                    {[...(run.subagents ?? [])].reverse().map((a, i) => (
-                      <li key={`done-${i}`} className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-subagent-done" data-refused={a.refused || undefined}>
-                        <span className={`material-symbols-rounded shrink-0 ${a.refused ? "text-amber-400" : "text-emerald-400/80"}`} style={{ fontSize: 13 }} aria-hidden="true">{a.refused ? "block" : "check_circle"}</span>
-                        <span className={`font-medium shrink-0 ${a.refused ? "text-amber-300" : "text-emerald-300/90"}`}>{a.type}</span>
-                        <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
-                        <span className="ml-auto shrink-0 text-[var(--text-muted)]">{a.refused ? t("codingAgent.helperRefused") : t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, a.endedAt) })}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  {run.team && (
+                  <p className={SECTION_LABEL}>{t("codingAgent.agentsTitle")}</p>
+                  {run.team ? (
                     <CodingRunTeamMembers
                       key={`${run.id}/${run.team.id}`}
                       teamId={run.team.id}
@@ -2655,8 +2689,69 @@ export default function CodingAgentApp() {
                       runs={runs.map((r) => ({ id: r.id, status: r.status }))}
                       live={isLive(run.status)}
                       onOpenRun={showRun}
+                      whileUnknown={runTree}
                     />
-                  )}
+                  ) : runTree}
+                  <ul className="mt-2 space-y-0.5" data-testid="coding-agent-active-subagents">
+                    {/* A tick for a run that did not finish is a lie the
+                        status chip above already contradicts: only a
+                        completed run gets one, a failed or stopped one gets
+                        the error glyph, and a paused run or a draft is still
+                        waiting rather than done. */}
+                    <li className="min-w-0" data-testid="coding-agent-agent-main" data-outcome={mainOutcome}>
+                      <CodingAgentRosterRow
+                        icon={MAIN_AGENT_GLYPH[mainOutcome].icon}
+                        iconClassName={MAIN_AGENT_GLYPH[mainOutcome].className}
+                        testId="coding-agent-agent-main-row"
+                        name={t("codingAgent.agentMain")}
+                        // Its role on the board is the one thing about this run
+                        // that is written nowhere else on the page.
+                        what={run.team ? teamRole(run.team) : undefined}
+                        meta={duration(run)}
+                        fields={[
+                          { label: t("codingAgent.agentModel"), value: runModels(run) ?? "", mono: true },
+                          { label: t("codingAgent.statTokens"), value: (run.tokensUsed ?? 0) > 0 ? tokens(run.tokensUsed ?? 0) : "" },
+                          { label: t("codingAgent.agentState"), value: statusLabel(run.status) },
+                        ]}
+                      />
+                    </li>
+                    {run.activeSubagents?.map((a, i) => (
+                      <li key={`live-${i}`} className="min-w-0" data-testid="coding-agent-subagent-live">
+                        <CodingAgentRosterRow
+                          testId="coding-agent-subagent-live-row"
+                          icon="sync"
+                          iconClassName="text-sky-400 animate-pulse"
+                          name={a.type}
+                          nameClassName="text-sky-300"
+                          what={a.description}
+                          meta={t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, now) })}
+                          fields={[
+                            { label: t("codingAgent.agentAsked"), value: a.description },
+                            { label: t("codingAgent.agentState"), value: t("codingAgent.agentStillWorking") },
+                          ]}
+                        />
+                      </li>
+                    ))}
+                    {[...(run.subagents ?? [])].reverse().map((a, i) => (
+                      <li key={`done-${i}`} className="min-w-0" data-testid="coding-agent-subagent-done" data-refused={a.refused || undefined}>
+                        <CodingAgentRosterRow
+                          testId="coding-agent-subagent-done-row"
+                          icon={a.refused ? "block" : "check_circle"}
+                          iconClassName={a.refused ? "text-amber-400" : "text-emerald-400/80"}
+                          name={a.type}
+                          nameClassName={a.refused ? "text-amber-300" : "text-emerald-300/90"}
+                          what={a.description}
+                          meta={a.refused ? t("codingAgent.helperRefused") : t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, a.endedAt) })}
+                          fields={[
+                            { label: t("codingAgent.agentAsked"), value: a.description },
+                            // A refused helper says so on the row already, in
+                            // amber; the panel would only say it twice.
+                            !a.refused && { label: t("codingAgent.agentState"), value: t("codingAgent.agentFinished") },
+                          ]}
+                        />
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
@@ -2762,35 +2857,48 @@ export default function CodingAgentApp() {
 
                 </div>
                 <aside className="min-w-0" data-testid="coding-agent-run-rail">
-              {/* The figures. */}
-              <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2" data-testid="coding-agent-run-figures">
-                <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : "—"} />
-                <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} testId="coding-agent-stat-files" />
-                <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />
-                <StatTile
-                  label={t("codingAgent.statTokens")}
-                  value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : "—"}
-                  hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
-                />
-                <StatTile
-                  label={t("codingAgent.statHelpers")}
-                  value={String(run.subagentsTotal ?? 0)}
-                  hint={helpers.length > 0 ? helpers.map(([k, n]) => `${n}× ${k}`).join(", ") : undefined}
-                />
-                <StatTile label={t("codingAgent.statCommit")} value={run.commit ?? "—"} />
-                <StatTile
-                  label={t("codingAgent.deniedTitle")}
-                  value={String(run.permissionDenials)}
-                />
-                <StatTile
-                  label={t("codingAgent.statModels")}
-                  value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : (run.requestedModel ?? "—")}
-                  // What the run ASKED for, beside what actually answered: on
-                  // ClawBox AI the plan picks the model and these differ by
-                  // design, so the hint is the only place the owner's own
-                  // choice is visible after the fact.
-                  hint={run.requestedModel && run.modelsUsed?.length ? run.requestedModel : undefined}
-                />
+              {/* The figures, in two weights.
+
+                  Eight tiles of identical weight is a wall: the steps someone
+                  watches tick sat at exactly the same size as a commit hash
+                  nobody reads twice, and the longest value on the page — a
+                  model identifier — was in the narrowest box of all. So the
+                  four figures a run is watched BY are tiles, and the
+                  three that are looked up once are quiet rows across the full
+                  width of the rail, where a model name has room to wrap at its
+                  own hyphens instead of breaking mid-word. */}
+              <div className="mt-3" data-testid="coding-agent-run-figures">
+                <div className="grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2">
+                  <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : nothingYet} />
+                  <StatTile label={t("codingAgent.statFiles")} value={run.filesTouched.length > 0 ? String(run.filesTouched.length) : nothingYet} testId="coding-agent-stat-files" />
+                  <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : nothingYet} />
+                  <StatTile
+                    label={t("codingAgent.statTokens")}
+                    value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : nothingYet}
+                    hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
+                  />
+                </div>
+                <dl className={`mt-2 ${CARD_SURFACE} px-3 divide-y divide-white/[0.05]`}>
+                  {/* What the run ASKED for, beside what actually answered: on
+                      ClawBox AI the plan picks the model and these differ by
+                      design, so the hint is the only place the owner's own
+                      choice is visible after the fact. Only when they DO
+                      differ — a run that got what it asked for drew the same
+                      identifier twice, one under the other. */}
+                  <StatLine
+                    label={t("codingAgent.statModels")}
+                    value={runModels(run) ?? nothingYet}
+                    hint={run.requestedModel && run.modelsUsed?.length && !run.modelsUsed.includes(run.requestedModel) ? run.requestedModel : undefined}
+                    mono
+                  />
+                  <StatLine label={t("codingAgent.statCommit")} value={run.commit ?? nothingYet} mono testId="coding-agent-stat-commit" />
+                  {/* Only when something WAS refused: "Not allowed — 0" is a
+                      figure nobody has ever acted on, and the card below spells
+                      out every refusal there was. */}
+                  {run.permissionDenials > 0 && (
+                    <StatLine label={t("codingAgent.deniedTitle")} value={String(run.permissionDenials)} testId="coding-agent-stat-denied" />
+                  )}
+                </dl>
               </div>
 
               {/* What was refused, spelled out — and, where this box can

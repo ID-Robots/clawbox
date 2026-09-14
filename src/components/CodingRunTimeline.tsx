@@ -146,7 +146,7 @@ interface Props {
   lines: string[];
   /** When each line happened, one for one with `lines`; empty when the record predates the times. */
   times?: number[];
-  /** When the run started, for the "+3m 12s" beside a step's clock time. */
+  /** When the run started — the "+3m 12s" a step's clock time carries in its title. */
   startedAt?: number;
   /** The run is still going: the newest step is the one happening now. */
   live: boolean;
@@ -159,6 +159,23 @@ interface Props {
 
 /** A store that never changes: the one `useSyncExternalStore` needs to tell "hydrated" from "server". */
 const subscribeNever = () => () => {};
+
+/**
+ * The clock, before the browser has said which zone it is in.
+ *
+ * A log's column never moves, so the un-hydrated pass reserves the same eight
+ * monospace characters the real time will take rather than collapsing the row
+ * and jumping it a frame later.
+ */
+const CLOCK_PENDING = "--:--:--";
+
+/**
+ * A step's wall clock, the way a log prints one: 24-hour HH:MM:SS in the
+ * browser's own zone, never the 12-hour form some locales default to — these
+ * rows are read as a column, and "8:04:11 PM" beside "11:59:02 AM" does not
+ * line up or sort by eye.
+ */
+const CLOCK_FORMAT: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" };
 
 /** "+3m 12s" — a step's distance from the run's start. */
 function sinceStart(at: number, startedAt: number): string {
@@ -189,11 +206,11 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
   }, [live, lines.length]);
   if (lines.length === 0 && !working) return null;
   const timed = times.length === lines.length;
-  // The clock time is the BROWSER's — its locale, its zone — so it is
-  // formatted only once hydrated; the server, which may pre-render this,
-  // would say a different time and the markup would not match. The "+3m
-  // 12s" beside each step is arithmetic and stable on both.
-  const clockOf = (i: number) => (timed && hydrated ? new Date(times[i]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null);
+  // The clock time is the BROWSER's — its zone — so it is formatted only once
+  // hydrated; the server, which may pre-render this, would say a different
+  // time and the markup would not match. The "+3m 12s" the row carries in its
+  // title is arithmetic and stable on both.
+  const clockOf = (i: number) => (timed && hydrated ? new Date(times[i]).toLocaleTimeString([], CLOCK_FORMAT) : null);
   const when = (i: number) => {
     if (!timed) return null;
     const clock = clockOf(i);
@@ -286,14 +303,19 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
                   <span className={full ? "whitespace-normal break-words" : "truncate"}>{full && step.kind === "text" && !step.labelKey ? line : label(step)}</span>
                   {detail(step) && <span className={`opacity-75 ${full ? "whitespace-normal break-all" : "truncate"}`}>{detail(step)}</span>}
                 </span>
-                {timed && startedAt !== undefined && (
-                  // Always on: when a step happened is part of the step.
+                {timed && (
+                  // The wall clock, the way a log reads: "when did this
+                  // happen" is a time of day, not a distance from a start the
+                  // owner has to hold in their head. How far into the run it
+                  // was is still there — as the cell's own title, and spelled
+                  // out beside the clock when the step is opened.
                   <time
                     dateTime={new Date(times[i]).toISOString()}
+                    title={startedAt !== undefined ? sinceStart(times[i], startedAt) : undefined}
                     className="ml-auto shrink-0 font-mono text-[10px] text-[var(--text-muted)] pr-1"
                     data-testid={`${testId}-time`}
                   >
-                    {sinceStart(times[i], startedAt)}
+                    {clockOf(i) ?? CLOCK_PENDING}
                   </time>
                 )}
               </button>
