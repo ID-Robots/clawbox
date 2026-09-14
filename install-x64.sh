@@ -386,6 +386,19 @@ ensure_playwright_chromium() {
 # failed the step outright. A line every 30 s says what is being waited for.
 WAIT_NOTE_EVERY_S=30
 WAIT_NOTE_LAST=""
+
+# Is this unit still on its way somewhere, or has it stopped trying? The
+# non-time exit wait_for_http uses in place of an attempt cap. Both halves are
+# needed: `is-active` EXITS 0 for an active unit, and PRINTS `activating` while
+# exiting non-zero.
+unit_is_coming_up() {
+  local state
+  state="$(systemctl is-active "$1" 2>/dev/null)" && return 0
+  case "$state" in
+    active|activating|reloading|deactivating) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 wait_note() {
   local elapsed="$1" key
   [ "$elapsed" -gt 0 ] 2>/dev/null || return 0
@@ -1474,10 +1487,7 @@ wait_for_http() {
       fi
       echo "  $label opened its port but restarted; continuing readiness checks..."
     fi
-    case "$(systemctl is-active "$log_unit" 2>/dev/null || true)" in
-      active|activating|reloading|deactivating) ;;
-      *) break ;;
-    esac
+    unit_is_coming_up "$log_unit" || break
     sleep 1
     waited=$((waited + 1))
     wait_note "$waited" "$label to answer at $url"

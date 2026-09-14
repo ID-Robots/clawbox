@@ -3930,10 +3930,7 @@ hermes_dashboard_restart_after_install() {
       # A unit that is no longer active or activating is not on its way to a new
       # main process, and nothing will change by waiting for one. Asked first, so
       # the ordinary failure is answered by a fact rather than by the clock.
-      case "$(systemctl is-active "$unit" 2>/dev/null || true)" in
-        active|activating|reloading|deactivating) ;;
-        *) break ;;
-      esac
+      unit_is_coming_up "$unit" || break
       [ "$SECONDS" -lt "$budget" ] || break
       sleep 1
     done

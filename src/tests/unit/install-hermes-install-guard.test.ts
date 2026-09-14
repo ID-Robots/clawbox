@@ -702,7 +702,11 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       // cannot find them. Listing them by name is deliberate — renaming one
       // without updating this fails loudly here rather than silently skipping
       // the restart on a box.
-      "sed -n '/^hermes_dashboard_restart_warn() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      // The non-time exit the pid poll asks before its own window: has the unit
+      // stopped trying? Sliced like the rest, so a rename fails loudly here
+      // rather than turning the poll into a 127 that breaks on probe one.
+      "sed -n '/^unit_is_coming_up() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      "sed -n '/^hermes_dashboard_restart_warn() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^hermes_dashboard_restart_after_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       '. "$1/fn.sh"',
