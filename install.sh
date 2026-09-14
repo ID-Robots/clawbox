@@ -2565,9 +2565,10 @@ restore_previous_build() {
         return 0
         ;;
     esac
-    # The fact, asked before the clock: `Restart=always` means `activating` and
-    # `active` are both "still coming", but a unit that has hit its start limit,
-    # been stopped, or has no unit file at all is never going to answer.
+    # The fact, which is what ends an ORDINARY failure without spending the
+    # window above on it: `Restart=always` means `activating` and `active` are
+    # both "still coming", but a unit that has hit its start limit, been
+    # stopped, or has no unit file at all is never going to answer.
     if ! unit_is_coming_up clawbox-setup.service; then
       echo "  $what, but clawbox-setup is not running (last HTTP $http_code) — the dashboard is DOWN" >&2
       return 1

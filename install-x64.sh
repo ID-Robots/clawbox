@@ -1509,8 +1509,9 @@ wait_for_http() {
   # rather than reset, so a caller's clock is never disturbed.
   local started=$SECONDS
   while :; do
-    # Asked FIRST, and again before the stability sleep: a deadline checked only
-    # at the bottom is overshot by the length of whatever the iteration did.
+    # Asked FIRST, so the 20 s stability sleep below cannot start on a window
+    # that is already spent: a deadline read only at the bottom is overshot by
+    # the length of whatever the iteration did.
     [ $(( SECONDS - started )) -lt "$window" ] || break
     if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
       local ready_pid

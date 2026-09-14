@@ -179,12 +179,17 @@ describe("the installers kill no work on a clock", () => {
     expect(body, "the loop still counts iterations").not.toMatch(/waited=\$\(\(waited \+ 1\)\)/);
 
     // The deadline is the first thing inside the loop, before the probe and
-    // before any sleep.
-    const loop = body.indexOf("while :; do");
+    // before any sleep. Positions are read from the CODE only — the prose
+    // around it says "sleep" and "curl" too, and a comment is not an ordering.
+    const code = body
+      .split(NL)
+      .map((l) => (/^\s*#/.test(l) ? "" : l))
+      .join(NL);
+    const loop = code.indexOf("while :; do");
     expect(loop).toBeGreaterThan(-1);
-    const deadline = body.indexOf(`SECONDS - started )) `, loop);
-    const firstSleep = body.indexOf("sleep ", loop);
-    const firstProbe = body.indexOf("curl ", loop);
+    const deadline = code.indexOf(`SECONDS - started )) `, loop);
+    const firstSleep = code.indexOf("sleep ", loop);
+    const firstProbe = code.indexOf("curl ", loop);
     expect(deadline, `${fn} never consults ${window} inside its loop`).toBeGreaterThan(loop);
     expect(deadline, "the deadline is read after the probe").toBeLessThan(firstProbe);
     expect(deadline, "the deadline is read after a sleep").toBeLessThan(firstSleep);
