@@ -1260,4 +1260,19 @@ export const bg: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Премахването на проектна папка изисква влязла сесия в браузъра.",
   "codingAgent.delete.refusal.crossOrigin": "Проектна папка може да се премахне само от собствените страници на тази ClawBox.",
   "codingAgent.delete.refusal.trashFailed": "Тази ClawBox не можа да премести папката настрани, затова нищо не беше премахнато.",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "Агент за код",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "Агентът за код поема цяла задача и я изпълнява на тази ClawBox — пише файловете, пуска тестовете и се отчита. Достъпно с плановете Pro и Max.",
+  "paidGate.memoryShardDescription": "Memory Shard индексира избраните от вас папки, за да може асистентът да търси във вашите собствени документи. Достъпно с плановете Pro и Max.",
+  "paidGate.signInTitle": "Свържете своя ClawBox профил",
+  "paidGate.signInBody": "{feature} изисква план ClawBox Pro или Max. Свържете тази ClawBox с профила си, след което включете функцията.",
+  "paidGate.signInButton": "Свързване с ClawBox AI",
+  "paidGate.signInCancel": "Отказ",
+  "paidGate.signInStarting": "Заявява се код…",
+  "paidGate.buttonBlocked": "Изисква план ClawBox Pro или Max",
+  "paidGate.requiresPlan": "Изисква план Pro или Max",
+  "paidGate.upgradeLink": "Надграждане",
+  "paidGate.loading": "Планът се проверява…",
 };

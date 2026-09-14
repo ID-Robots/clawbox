@@ -1285,4 +1285,19 @@ export const it: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Per rimuovere una cartella di progetto serve una sessione del browser autenticata.",
   "codingAgent.delete.refusal.crossOrigin": "Una cartella di progetto può essere rimossa solo dalle pagine di questa ClawBox.",
   "codingAgent.delete.refusal.trashFailed": "Questa ClawBox non è riuscita a spostare da parte quella cartella, quindi non è stato rimosso nulla.",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "Agente di codice",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "L'agente di codice prende in carico un intero compito su questo ClawBox: scrive i file, esegue i test e riferisce. Disponibile con i piani Pro e Max.",
+  "paidGate.memoryShardDescription": "Memory Shard indicizza le cartelle che scegli, così l'assistente può cercare nei tuoi documenti. Disponibile con i piani Pro e Max.",
+  "paidGate.signInTitle": "Collega il tuo account ClawBox",
+  "paidGate.signInBody": "{feature} richiede un piano ClawBox Pro o Max. Collega questo ClawBox al tuo account, poi attiva la funzione.",
+  "paidGate.signInButton": "Collega ClawBox AI",
+  "paidGate.signInCancel": "Annulla",
+  "paidGate.signInStarting": "Richiesta di un codice…",
+  "paidGate.buttonBlocked": "Richiede un piano ClawBox Pro o Max",
+  "paidGate.requiresPlan": "Richiede un piano Pro o Max",
+  "paidGate.upgradeLink": "Passa a un piano superiore",
+  "paidGate.loading": "Verifica del piano…",
 };

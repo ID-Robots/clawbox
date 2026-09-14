@@ -134,6 +134,7 @@ describe("translations", () => {
         "systemProfile",
         "codingAgent",
         "shellScan",
+        "paidGate",
       ]);
 
       for (const key of Object.keys(translations.en)) {

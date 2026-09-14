@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { bodyWouldEnable } from "@/lib/paid-plan-gate";
+import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
 import {
   clearHarnessFault,
   CodingAgentError,
@@ -202,6 +204,20 @@ export async function POST(request: Request) {
       },
       { status: 400 },
     );
+  }
+  // The paid-plan gate, checked before any setter runs and ONLY for a body
+  // that would switch the feature on or finish its wizard (`bodyWouldEnable`).
+  // Owner's decision, 2026-09-14: the coding agent is a Pro-or-Max feature.
+  //
+  // Deliberately not "refuse every write". A box that was already switched on
+  // and whose subscription later lapsed is not auto-disabled — that is the
+  // owner's own consent and their own runs — so its settings, including the
+  // switch that turns it OFF, stay writable. What a Free or unconnected
+  // account cannot do is turn it on or mark setup complete, which is what
+  // stops a new box from getting through the wizard.
+  if (bodyWouldEnable(fields as { enabled?: unknown; setupComplete?: unknown })) {
+    const gate = await readPlanGate();
+    if (!gate.satisfied) return refusePaidPlan("coding_agent", gate);
   }
   if (typeof fields.defaultDirectory === "string" && fields.defaultDirectory.length > MAX_DIRECTORY_CHARS) {
     return NextResponse.json({ error: "The folder path is too long.", kind: "invalid" }, { status: 400 });

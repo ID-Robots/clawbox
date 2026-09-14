@@ -1284,4 +1284,19 @@ export const zh: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "移除项目文件夹需要已登录的浏览器会话。",
   "codingAgent.delete.refusal.crossOrigin": "项目文件夹只能从此 ClawBox 自己的页面上移除。",
   "codingAgent.delete.refusal.trashFailed": "此 ClawBox 无法把该文件夹挪到一旁，因此什么都没有被移除。",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "编码助手",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "编码助手会在这台 ClawBox 上承担整项任务——编写文件、运行测试并汇报结果。Pro 和 Max 计划可用。",
+  "paidGate.memoryShardDescription": "Memory Shard 会为你选择的文件夹建立索引，让助手能够搜索你自己的文档。Pro 和 Max 计划可用。",
+  "paidGate.signInTitle": "连接你的 ClawBox 账户",
+  "paidGate.signInBody": "{feature} 需要 ClawBox Pro 或 Max 计划。请先把这台 ClawBox 连接到你的账户，然后再开启该功能。",
+  "paidGate.signInButton": "连接 ClawBox AI",
+  "paidGate.signInCancel": "取消",
+  "paidGate.signInStarting": "正在请求代码…",
+  "paidGate.buttonBlocked": "需要 ClawBox Pro 或 Max 计划",
+  "paidGate.requiresPlan": "需要 Pro 或 Max 计划",
+  "paidGate.upgradeLink": "升级",
+  "paidGate.loading": "正在检查你的计划…",
 };

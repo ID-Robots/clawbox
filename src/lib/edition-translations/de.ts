@@ -1273,4 +1273,19 @@ export const de: Record<string, string> = {
   "codingAgent.delete.refusal.ownerOnly": "Zum Entfernen eines Projektordners ist eine angemeldete Browsersitzung nötig.",
   "codingAgent.delete.refusal.crossOrigin": "Ein Projektordner kann nur von den eigenen Seiten dieser ClawBox entfernt werden.",
   "codingAgent.delete.refusal.trashFailed": "Diese ClawBox konnte den Ordner nicht beiseiteschieben, deshalb wurde nichts entfernt.",
+
+  // ── The paid-plan gate (Coding agent, Memory Shard) ──
+  "paidGate.featureCodingAgent": "Coding-Agent",
+  "paidGate.featureMemoryShard": "Memory Shard",
+  "paidGate.codingAgentDescription": "Der Coding-Agent übernimmt eine ganze Aufgabe und erledigt sie auf dieser ClawBox — er schreibt die Dateien, führt die Tests aus und berichtet zurück. Verfügbar mit den Plänen Pro und Max.",
+  "paidGate.memoryShardDescription": "Memory Shard indiziert die von Ihnen gewählten Ordner, damit der Assistent Ihre eigenen Dokumente durchsuchen kann. Verfügbar mit den Plänen Pro und Max.",
+  "paidGate.signInTitle": "Verbinden Sie Ihr ClawBox-Konto",
+  "paidGate.signInBody": "{feature} benötigt einen ClawBox-Plan Pro oder Max. Verbinden Sie diese ClawBox mit Ihrem Konto und schalten Sie die Funktion dann ein.",
+  "paidGate.signInButton": "ClawBox AI verbinden",
+  "paidGate.signInCancel": "Abbrechen",
+  "paidGate.signInStarting": "Code wird angefordert …",
+  "paidGate.buttonBlocked": "Benötigt einen ClawBox-Plan Pro oder Max",
+  "paidGate.requiresPlan": "Benötigt den Plan Pro oder Max",
+  "paidGate.upgradeLink": "Upgrade",
+  "paidGate.loading": "Ihr Plan wird geprüft …",
 };
