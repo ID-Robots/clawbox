@@ -10,7 +10,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const store = new Map<string, unknown>();
-vi.mock("@/lib/config-store", () => ({ get: async (key: string) => store.get(key) }));
+// BOTH halves of the store, not just the half this file reads. The credential
+// reader behind `@/lib/harness/credentials` takes `get` AND `set` off this
+// module, and both of its calls sit inside a catch that answers a DEFAULT — so
+// a factory naming only `get` does not fail the suite, it quietly puts every
+// case here on the "no refusal on record" branch. That is the hole
+// `openclaw-config-mock-completeness` exists to catch. A real Map stands in, so
+// a write is visible to the next read.
+vi.mock("@/lib/config-store", () => ({
+  get: async (key: string) => store.get(key),
+  set: async (key: string, value: unknown) => {
+    store.set(key, value);
+  },
+}));
 vi.mock("@/lib/harness/credentials", () => ({
   CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
   resolveClawaiToken: async () => "claw_test",
