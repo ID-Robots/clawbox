@@ -226,6 +226,10 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
   if (options.credentialChanged) forgetCloudEmbeddingsProbe();
   return await withApply(async () => {
     const applied: CloudDefaultsApplied = { moved: [], failed: [] };
+    // A box with no credential can promote nothing, and this runs at every
+    // boot: reading the whole state there would be a voice inventory and an
+    // openclaw.json read bought for an answer that is already known.
+    if ((await resolveClawaiToken()) === null) return applied;
     let status: CloudDefaultsStatus;
     try {
       status = await readCloudDefaultsStatus();
@@ -237,7 +241,15 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
       const state = status.capabilities[capability];
       // PROMOTE ONLY — see the file's docblock. An owner pick has already been
       // folded into `target`, so this one condition covers both properties.
-      if (state.ownerChoice || state.target !== "cloud" || state.source === "cloud") continue;
+      //
+      // Deliberately NOT also skipping on `state.source === "cloud"`: a
+      // capability can be reported as on the cloud and still have a half of it
+      // pointing at the box — transcription is TWO settings, and a box whose
+      // `stt_primary` has always said cloud can carry a channel audio list that
+      // tries the on-device row first. Each promoter below answers whether it
+      // wrote anything, so a capability with nothing left to do costs nothing
+      // and is not reported as moved.
+      if (state.ownerChoice || state.target !== "cloud") continue;
       try {
         if (await promote(capability)) {
           applied.moved.push(capability);
@@ -321,6 +333,9 @@ async function promoteTts(): Promise<boolean> {
  * gateway restart bought for nothing.
  */
 async function promoteEmbeddings(): Promise<boolean> {
+  // Already pointed off the box: nothing to write, and writing anyway would
+  // invalidate a perfectly good index and buy a reindex for nothing.
+  if ((await currentEmbeddingSource()) === "cloud") return false;
   if (!(await getMemoryShardEnabled())) return false;
   const token = await resolveClawaiToken();
   if (!token) return false;
