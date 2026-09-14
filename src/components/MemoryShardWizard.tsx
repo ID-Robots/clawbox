@@ -130,9 +130,10 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
    */
   const provision = async () => {
     // Re-read at the moment of the act, not only at the render that drew the
-    // button: the effect above sends the owner back on any change, and this is
-    // the one that would otherwise race it.
-    if (gated) { setStep("intro"); return; }
+    // button. The derived step already puts the intro on screen, so there is
+    // nothing to set here — this only catches a click whose handler was
+    // already in flight when the gate closed under it.
+    if (gated) return;
     provisionAbort.current?.abort();
     const ctl = new AbortController();
     provisionAbort.current = ctl;

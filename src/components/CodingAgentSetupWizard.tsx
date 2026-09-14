@@ -366,8 +366,9 @@ export default function CodingAgentSetupWizard({
     // The plan is re-read at the moment of the act, not only at the render
     // that drew the button: `setupComplete: true` is one of the two bodies the
     // route refuses, and sending it after a subscription lapsed mid-wizard
-    // would spend a 402 on a question the box can answer itself.
-    if (gated) { setStep("intro"); return; }
+    // would spend a 402 on a question the box can answer itself. The derived
+    // step has already put the intro on screen, so there is nothing to set.
+    if (gated) return;
     setBusy("finish");
     setError(null);
     try {
