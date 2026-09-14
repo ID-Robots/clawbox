@@ -170,6 +170,34 @@ const PROBE_FAIL_TTL_MS = 30 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 8000;
 
 /**
+ * THE MOST OF AN ANSWER THIS BOX WILL HOLD IN MEMORY: 256 KiB.
+ *
+ * {@link PROBE_TIMEOUT_MS} bounds how LONG the probe may take and nothing else.
+ * A responder that answers fast and never stops — a staging proxy on a LAN, an
+ * intermediary, anything on the far side of a plain `http:` hop that the
+ * staging contract on {@link usableEndpoint} deliberately allows — can send
+ * gigabytes inside those eight seconds, and `res.json()` buffers every byte of
+ * it before anything gets to look at the shape. On a box this size that is the
+ * whole device, not one request.
+ *
+ * 256 KiB is chosen against what a legitimate answer actually weighs. The one
+ * this probe asks for is a single {@link CLOUD_EMBEDDING_DIMENSIONS}-dimension
+ * vector: 3,072 JSON numbers run to roughly 60 KiB even printed at full
+ * `double` precision, so the cap accepts the real answer about four times over
+ * and still leaves room for the `model` and `usage` fields around it. It is a
+ * bound on a PROBE, not on embedding traffic — nothing else in this module
+ * reads a body.
+ */
+const MAX_PROBE_BYTES = 256 * 1024;
+
+/**
+ * The cap, exported for the regression test that pins the boundary exactly.
+ * Nothing in the app reads it; a test that hard-coded the number would keep
+ * passing if the constant above ever moved.
+ */
+export const CLOUD_PROBE_MAX_BYTES = MAX_PROBE_BYTES;
+
+/**
  * Module-level rather than in `process-store.ts`: the two copies Next compiles
  * of this file would each keep their own answer, and the cost of that is one
  * extra HTTP request every few hours. Nothing here holds a handle on live work
@@ -205,6 +233,89 @@ export async function probeCloudEmbeddings(): Promise<boolean> {
 }
 
 /**
+ * Stop reading, and DO NOT WAIT TO FIND OUT WHETHER STOPPING WORKED.
+ *
+ * `cancel()` resolves when the far side has been torn down, and the far side
+ * here is exactly the thing already suspected of misbehaving: a responder that
+ * never stops sending is one that can leave this promise pending, and awaiting
+ * it would hand back the hang that the byte cap just refused. So the refusal
+ * returns immediately and the teardown is left to settle on its own, with its
+ * rejection swallowed — an already-closed, already-errored or already-locked
+ * stream is not news, it is the outcome being asked for.
+ */
+function stopReading(target: { cancel: (reason?: unknown) => unknown } | null | undefined): void {
+  if (!target) return;
+  try {
+    const settled = target.cancel();
+    if (settled && typeof (settled as Promise<unknown>).catch === "function") {
+      void (settled as Promise<unknown>).catch(() => {});
+    }
+  } catch {
+    // Already closed, errored, or locked by a reader that is itself gone.
+  }
+}
+
+/**
+ * Read at most {@link MAX_PROBE_BYTES} of a response, or refuse it.
+ *
+ * Both halves are load-bearing, because each one alone is bypassable:
+ *
+ * `Content-Length` IS CHECKED FIRST, so an answer that admits up front to being
+ * too big is refused before a single byte of it is pulled. A responder that
+ * tells the truth costs this box nothing at all.
+ *
+ * THE BYTES ARE THEN COUNTED AS THEY ARRIVE, because the header is the
+ * responder's claim and not a fact. A chunked answer carries no length, a
+ * hostile one can advertise `12` and send forever, and a compressed one is
+ * checked by `fetch` against the length of the COMPRESSED body while what lands
+ * in memory here is the inflated stream. The running total is the only figure
+ * this box can actually vouch for, so it is the one that decides, and the chunk
+ * that crosses the line is dropped rather than kept — peak memory is the cap
+ * plus one chunk, not the cap plus whatever arrived last.
+ *
+ * On any refusal the stream is cancelled (see {@link stopReading}) and `null`
+ * comes back, so the caller never reaches `JSON.parse` on an oversized payload:
+ * the parse happens only after a read that finished INSIDE the bound. A body
+ * that is absent, errors mid-stream, or decodes to nothing readable fails the
+ * same closed way, which is the contract the probe already had.
+ */
+async function readBoundedText(res: Response, limit: number): Promise<string | null> {
+  const advertised = Number(res.headers.get("content-length"));
+  if (Number.isFinite(advertised) && advertised > limit) {
+    stopReading(res.body);
+    return null;
+  }
+  const body = res.body;
+  if (!body) return null;
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > limit) {
+        stopReading(reader);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    stopReading(reader);
+    return null;
+  }
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
+/**
  * The one request this module makes, and everything about it is bounded.
  *
  * The destination is re-checked against {@link usableEndpoint} here as well as
@@ -215,6 +326,11 @@ export async function probeCloudEmbeddings(): Promise<boolean> {
  * is the `claw_` bearer, which is the box's own credential for its own account
  * and is the point of the request; it goes in a header to a destination the
  * device store cannot name.
+ *
+ * The ANSWER is bounded too, and separately: the timeout says how long the far
+ * side may take, {@link readBoundedText} says how much of it this box will hold
+ * while it takes it. Nothing is parsed until that read has finished inside the
+ * cap.
  */
 async function askCloudEmbedder(endpoint: string): Promise<boolean> {
   const target = usableEndpoint(endpoint);
@@ -228,8 +344,15 @@ async function askCloudEmbedder(endpoint: string): Promise<boolean> {
       body: JSON.stringify({ model: CLOUD_EMBEDDING_MODEL, input: "clawbox" }),
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
-    if (!res.ok) return false;
-    const payload = (await res.json()) as { data?: { embedding?: unknown }[] };
+    if (!res.ok) {
+      // Nothing here wants the body of a 404, and leaving it unread leaves the
+      // connection held open until the far side or the GC gives up on it.
+      stopReading(res.body);
+      return false;
+    }
+    const text = await readBoundedText(res, MAX_PROBE_BYTES);
+    if (text === null) return false;
+    const payload = JSON.parse(text) as { data?: { embedding?: unknown }[] };
     const vector = Array.isArray(payload?.data) ? payload.data[0]?.embedding : null;
     return Array.isArray(vector) && vector.length > 0 && vector.every((n) => typeof n === "number");
   } catch {
