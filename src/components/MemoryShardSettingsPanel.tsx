@@ -6,6 +6,8 @@ import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import HelpTip from "./HelpTip";
 import MemoryShardFolders from "./MemoryShardFolders";
 import StatusMessage from "./StatusMessage";
+import { PaidPlanNotice } from "./PaidFeatureGate";
+import { isPlanGate, type PlanGate } from "@/lib/paid-plan-gate";
 import { BTN_DANGER, BTN_SECONDARY, CARD } from "./coding-agent-ui";
 
 /**
@@ -23,6 +25,10 @@ import { BTN_DANGER, BTN_SECONDARY, CARD } from "./coding-agent-ui";
 export interface MemoryShardSettingsState {
   enabled: boolean;
   setupComplete: boolean;
+  /** Does this box's ClawBox AI plan cover Memory Shard, and which plan is on
+   *  record? Optional: a server that predates the gate answers with none, and
+   *  nothing is then drawn rather than a warning being invented. */
+  planGate?: PlanGate;
 }
 
 /** How long the reset stays armed after the first tap. */
@@ -105,10 +111,14 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
       // What the ROUTE says, never what was clicked: this switch is the
       // owner's consent for the box to read their documents, and a switch that
       // showed On over a write the box refused would be a lie about that.
-      const body = await res.json() as { enabled?: unknown; setupComplete?: unknown };
+      const body = await res.json() as { enabled?: unknown; setupComplete?: unknown; planGate?: unknown };
       onChanged({
         enabled: typeof body.enabled === "boolean" ? body.enabled : next,
         setupComplete: typeof body.setupComplete === "boolean" ? body.setupComplete : state.setupComplete,
+        // The route re-reads the gate beside the two flags; an older server
+        // sends none, and the previous reading is then kept rather than the
+        // notice flickering off on every save.
+        planGate: isPlanGate(body.planGate) ? body.planGate : state.planGate,
       });
       // Another Memory Shard window — or the same app open at
       // /app/memory-shard on a phone — follows the switch it did not flip.
@@ -164,6 +174,11 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
             <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">
               {t("clawkeep.memory.settings.switchHint")}
             </p>
+            {/* The plan does not cover this. Beside the switch, for the reason
+                the Coding Agent's identical line is: an already-indexing box
+                is never auto-disabled, so this can sit over a switch that is
+                on, and that is the state worth naming. */}
+            <PaidPlanNotice gate={state.planGate} />
           </div>
           <Switch
             checked={state.enabled}

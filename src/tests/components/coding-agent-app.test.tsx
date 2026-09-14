@@ -71,6 +71,17 @@ const PROJECT = {
   latestRun: null,
 };
 
+/**
+ * Leave the wizard's intro. The button is behind the paid-plan gate, whose own
+ * poll has to answer before it is anything but disabled — `useClawboxLogin`
+ * starts every mount at "not signed in" and only the first tick settles it.
+ */
+async function leaveWizardIntro() {
+  const enable = await screen.findByTestId("coding-agent-wizard-enable");
+  await waitFor(() => expect(enable).not.toBeDisabled());
+  fireEvent.click(enable);
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -138,6 +149,12 @@ function stubFetch(
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     if (url.startsWith("/setup-api/coding-agent/status")) return json(payload());
+    // The wizard's first step is behind the paid-plan gate (owner's decision,
+    // 2026-09-14), so every box in this suite is on a paid plan. `flash` is
+    // the plan marketed as Pro — the internal names are off by one.
+    if (url === "/setup-api/ai-models/status") {
+      return json({ clawaiConfigured: true, clawaiAccountTier: "flash" });
+    }
     if (url.startsWith("/setup-api/coding-agent/runs") && init?.method === "DELETE") {
       posts.push({ url: "/setup-api/coding-agent/runs", body: "DELETE" });
       const before = runs.length;
@@ -337,7 +354,7 @@ describe("CodingAgentApp", () => {
     it("starts the steps from the Enable button, GitHub first", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      await leaveWizardIntro();
       expect(screen.getByTestId("coding-agent-wizard-github")).toBeInTheDocument();
       // GitHub is what a run pushes with, not what it needs to start, so the
       // step can be passed without an account.
@@ -349,7 +366,7 @@ describe("CodingAgentApp", () => {
     it("proposes Ultracode and says what it costs", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      await leaveWizardIntro();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
       expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
@@ -361,7 +378,7 @@ describe("CodingAgentApp", () => {
     it("saves the folder, the effort and the switch in ONE post, and marks setup done", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      await leaveWizardIntro();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
       fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
@@ -389,7 +406,7 @@ describe("CodingAgentApp", () => {
     it("finishes on Skip without starting a run", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      await leaveWizardIntro();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
@@ -408,7 +425,7 @@ describe("CodingAgentApp", () => {
     it("runs the harness test and finishes when the owner asks for it", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
-      fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
+      await leaveWizardIntro();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));

@@ -26,13 +26,28 @@ const PULL_FAILED = "clawkeep.memory.setup.pullFailed";
 // cancelled a request it no longer had a window for.
 let posts: { url: string; body: unknown; signal?: AbortSignal | null }[] = [];
 
-function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean } = {}) {
+/**
+ * The ClawBox AI account this box is on, as /setup-api/ai-models/status
+ * answers it. The wizard's first step is behind the paid-plan gate (owner's
+ * decision, 2026-09-14), so every walk through it needs a paid plan on record;
+ * `plan: "free"` and `plan: "none"` are the two refusals.
+ */
+type Plan = "flash" | "pro" | "free" | "none";
+
+function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean; plan?: Plan } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (value: unknown, status = 200) =>
       new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
+    if (url === "/setup-api/ai-models/status") {
+      const plan = opts.plan ?? "flash";
+      return json({
+        clawaiConfigured: plan !== "none",
+        clawaiAccountTier: plan === "flash" || plan === "pro" ? plan : null,
+      });
+    }
     if (url.startsWith("/setup-api/clawkeep/memory/sources")) {
       if (init?.method) posts.push({ url: "/setup-api/clawkeep/memory/sources", body: JSON.parse(String(init.body)) });
       return json({ paths: [] });
@@ -76,13 +91,24 @@ function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: 
   }));
 }
 
+/**
+ * Leave the intro. The first step is behind the paid-plan gate, and the gate's
+ * own poll has to answer before the button is anything but disabled — the hook
+ * starts every mount at "not signed in" and only the first tick settles it.
+ */
+async function leaveIntro() {
+  const enable = await screen.findByTestId("memory-shard-enable");
+  await waitFor(() => expect(enable).not.toBeDisabled());
+  fireEvent.click(enable);
+}
+
 beforeEach(() => stub());
 afterEach(() => vi.unstubAllGlobals());
 
 /** Intro -> folders -> schedule -> provision, and press the button. */
 async function runProvision(done: () => void) {
   const rendered = render(<MemoryShardWizard onDone={done} />);
-  fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+  await leaveIntro();
   fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
   fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
   fireEvent.click(screen.getByTestId("memory-shard-index-now"));
@@ -98,7 +124,7 @@ describe("MemoryShardWizard", () => {
 
   it("walks intro -> folders -> schedule -> provision", async () => {
     render(<MemoryShardWizard onDone={() => {}} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    await leaveIntro();
     expect(screen.getByTestId("memory-shard-browse")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
     expect(screen.getByTestId("memory-shard-time")).toBeInTheDocument();
@@ -108,7 +134,7 @@ describe("MemoryShardWizard", () => {
 
   it("adds a folder through the picker", async () => {
     render(<MemoryShardWizard onDone={() => {}} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    await leaveIntro();
     fireEvent.click(screen.getByTestId("memory-shard-browse"));
     fireEvent.click(await screen.findByTestId("memory-shard-pick"));
     await waitFor(() => expect(posts.some((p) => p.url.endsWith("/sources"))).toBe(true));
@@ -220,7 +246,7 @@ describe("MemoryShardWizard", () => {
       return inner(input, init);
     }));
     render(<MemoryShardWizard onDone={vi.fn()} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    await leaveIntro();
     fireEvent.click(screen.getByTestId("memory-shard-browse"));
     fireEvent.click(await screen.findByTestId("memory-shard-pick"));
 
@@ -236,7 +262,7 @@ describe("MemoryShardWizard", () => {
     // hour the owner had picked was quietly gone.
     const done = vi.fn();
     render(<MemoryShardWizard onDone={done} />);
-    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    await leaveIntro();
     fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
     const field = screen.getByTestId("memory-shard-time") as HTMLInputElement;
     fireEvent.change(field, { target: { value: "04:30" } });

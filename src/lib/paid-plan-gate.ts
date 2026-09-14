@@ -83,6 +83,22 @@ export function planGateFor(
 }
 
 /**
+ * A `planGate` off the wire, or nothing — never a half-read object.
+ *
+ * Both apps poll a route that may be answered by an OLDER server (a tab left
+ * open across an update), where the field is simply absent. That is "do not
+ * draw the notice", not "this box has no plan", so the guard is total and the
+ * callers keep whatever they had.
+ */
+export function isPlanGate(value: unknown): value is PlanGate {
+  if (typeof value !== "object" || value === null) return false;
+  const gate = value as Partial<PlanGate>;
+  return typeof gate.required === "boolean"
+    && typeof gate.satisfied === "boolean"
+    && (typeof gate.plan === "string" || gate.plan === null);
+}
+
+/**
  * Would this request switch the feature ON, or finish its wizard?
  *
  * The gate's shape, and the reason it is not "refuse every write": an owner

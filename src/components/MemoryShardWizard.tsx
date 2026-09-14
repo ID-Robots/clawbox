@@ -4,10 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardFolders from "./MemoryShardFolders";
+import PaidFeatureGate, { paidGateFace } from "./PaidFeatureGate";
 import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { type ProvisionPhase, TIME_OF_DAY } from "@/lib/memory-shard-state";
+import { useClawboxLogin } from "@/lib/use-clawbox-login";
 
 /**
  * Memory Shard's first-run wizard: what it is, which folders to read, when to
@@ -27,6 +29,12 @@ interface PullLine { status?: string; success?: boolean; error?: string }
 
 export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const { t } = useT();
+  // The paid-plan gate (owner's decision, 2026-09-14). Same shape and same
+  // reason as the coding agent's wizard: polled, so an owner who subscribes in
+  // another tab is let through without reopening the window, and mirrored
+  // server-side by /setup-api/clawkeep/memory/enable.
+  const clawboxLogin = useClawboxLogin();
+  const gated = paidGateFace(clawboxLogin) !== "satisfied";
   const [step, setStep] = useState<Step>("intro");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -241,11 +249,23 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             <p className="mt-2.5 text-xs leading-[1.7] text-[var(--text-secondary)]">
               {t("clawkeep.memory.setup.introBody")}
             </p>
+            {/* See CodingAgentSetupWizard for the whole of the reasoning: the
+                gate takes the place the first step would have led to, and the
+                button stays on screen, disabled, so the card underneath is
+                the answer to "why can I not start this". */}
+            {gated && (
+              <div className="mt-6">
+                <PaidFeatureGate feature="memory_shard" login={clawboxLogin} />
+              </div>
+            )}
             <button
               type="button"
               onClick={() => setStep("folders")}
               data-testid="memory-shard-enable"
-              className={`${BTN_PRIMARY} mt-7`}
+              disabled={gated}
+              aria-disabled={gated}
+              title={gated ? t("paidGate.buttonBlocked") : undefined}
+              className={`${BTN_PRIMARY} mt-7 disabled:opacity-50 disabled:cursor-default`}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">rocket_launch</span>
               {t("clawkeep.memory.setup.enable")}

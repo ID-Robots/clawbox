@@ -6,9 +6,11 @@ import { notifyCodingAgentChanged, notifyCodingRunStarted } from "@/lib/ui-event
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
+import PaidFeatureGate, { paidGateFace } from "./PaidFeatureGate";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 import { browserErrorText, runBrowserAction } from "@/lib/browser-actions";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
+import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import {
   devicePollSeconds,
   type AgentStatus,
@@ -54,6 +56,13 @@ export default function CodingAgentSetupWizard({
   onDone: (runId?: string | null) => void;
 }) {
   const { t } = useT();
+  // The paid-plan gate (owner's decision, 2026-09-14). Polled rather than read
+  // off `status`, so an owner who subscribes in another tab is let through
+  // without reopening the window; the server refuses the same three states in
+  // /setup-api/coding-agent/enable.
+  const clawboxLogin = useClawboxLogin();
+  const gateFace = paidGateFace(clawboxLogin);
+  const gated = gateFace !== "satisfied";
   const [step, setStep] = useState<Step>("intro");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -412,11 +421,25 @@ export default function CodingAgentSetupWizard({
             <p className="mt-2.5 text-xs leading-[1.7] text-[var(--text-secondary)]">
               {t("codingAgent.wizardIntro")}
             </p>
+          {/* Nothing on the intro changes for a paid box. For every other
+              state the gate takes the place the first step would have led to:
+              a box with no ClawBox AI account gets the device-code handoff, a
+              Free one the upgrade card. The button stays on screen and
+              disabled rather than vanishing, because "why can I not start
+              this" is the question the card underneath answers. */}
+          {gated && (
+            <div className="mt-6">
+              <PaidFeatureGate feature="coding_agent" login={clawboxLogin} />
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setStep("github")}
             data-testid="coding-agent-wizard-enable"
-            className={`${PRIMARY} mt-7`}
+            disabled={gated}
+            aria-disabled={gated}
+            title={gated ? t("paidGate.buttonBlocked") : undefined}
+            className={`${PRIMARY} mt-7 disabled:opacity-50 disabled:cursor-default`}
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">rocket_launch</span>
             {t("codingAgent.wizardEnable")}

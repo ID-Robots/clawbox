@@ -78,6 +78,12 @@ function stubDevice(
     openFails?: boolean;
     /** The coding-agent route refuses the preference write itself. */
     settingFails?: boolean;
+    /**
+     * The ClawBox AI account this box is on. The wizard's first step is behind
+     * the paid-plan gate (owner's decision, 2026-09-14), so the default here is
+     * a paid plan; "free" and "none" are the two refusals.
+     */
+    plan?: "flash" | "pro" | "free" | "none";
   } = {},
 ) {
   calls = [];
@@ -87,6 +93,13 @@ function stubDevice(
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     if (init?.method === "POST") calls.push({ url, body });
 
+    if (url === "/setup-api/ai-models/status") {
+      const plan = opts.plan ?? "flash";
+      return json({
+        clawaiConfigured: plan !== "none",
+        clawaiAccountTier: plan === "flash" || plan === "pro" ? plan : null,
+      });
+    }
     if (url.startsWith("/setup-api/coding-agent/git")) return json({ installed: true, connected: false, login: null, loginCommand: "gh auth login" });
     if (url === "/setup-api/coding-agent/enable") {
       if (opts.settingFails && body && "realBrowser" in body) {
@@ -125,7 +138,12 @@ const browserSettings = () =>
 /** Walk the wizard as an owner does, up to the browser step. */
 async function reachBrowserStep() {
   render(<CodingAgentSetupWizard status={STATUS} onDone={vi.fn()} />);
-  fireEvent.click(screen.getByTestId("coding-agent-wizard-enable"));
+  // The first step is behind the paid-plan gate, and the gate's own poll has
+  // to answer before the button is anything but disabled — the hook starts
+  // every mount at "not signed in" and only the first tick settles it.
+  const enable = screen.getByTestId("coding-agent-wizard-enable");
+  await waitFor(() => expect(enable).not.toBeDisabled());
+  fireEvent.click(enable);
   fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
   fireEvent.click(await screen.findByTestId("coding-agent-wizard-next-harness"));
   await screen.findByTestId("coding-agent-wizard-browser-enable");
