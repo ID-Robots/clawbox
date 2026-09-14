@@ -3794,25 +3794,33 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // the applier's own contract is that it never rejects and never demotes.
     // The boot hook runs the same pass 45 s into every start, so a box this
     // misses is put right by its next restart rather than left behind.
+    //
+    // DETACHED, which is what the paragraph above always claimed and the code
+    // did not do: it `await`ed. The applier walks three capabilities in series —
+    // the embedder probe waits up to 8 s on its own, and each openclaw CLI write
+    // behind it costs 10–12 s normally against a 30 s timeout — so the full
+    // timeout path held this response for minutes while the first-boot wizard
+    // sat on a save that had already landed. Nothing in the answer depends on
+    // it, and the boot hook re-runs the same pass 45 s into every start.
     if (isClawAI) {
-      try {
-        const { applyClawaiCloudDefaults } = await import("@/lib/clawai-cloud-defaults");
-        await applyClawaiCloudDefaults({
-          trigger: "link",
-          // The credential may be a different account's, so anything this box
-          // has learned about what the last one could reach is about somebody
-          // else.
-          credentialChanged: previousClawaiToken !== clawboxAiToken,
+      void import("@/lib/clawai-cloud-defaults")
+        .then(({ applyClawaiCloudDefaults }) =>
+          applyClawaiCloudDefaults({
+            trigger: "link",
+            // The credential may be a different account's, so anything this box
+            // has learned about what the last one could reach is about somebody
+            // else.
+            credentialChanged: previousClawaiToken !== clawboxAiToken,
+          }),
+        )
+        .catch((err) => {
+          // The save has LANDED by the time this runs. An unhandled rejection
+          // here would report a box that is configured as one that is not.
+          console.warn(
+            "[configure] could not apply the ClawBox AI cloud defaults:",
+            err instanceof Error ? logSafe(err.message) : err,
+          );
         });
-      } catch (err) {
-        // The save has LANDED by the time this runs. The outer catch turns a
-        // throw here into a failed configure, which would report a box that is
-        // configured as one that is not.
-        console.warn(
-          "[configure] could not apply the ClawBox AI cloud defaults:",
-          err instanceof Error ? logSafe(err.message) : err,
-        );
-      }
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
