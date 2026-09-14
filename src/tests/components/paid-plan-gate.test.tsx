@@ -329,3 +329,61 @@ describe("the gate holds for the whole wizard, not just its front door", () => {
     }, 15_000);
   }
 });
+
+describe("a plan that comes back after it stopped a provision", () => {
+  /**
+   * Memory Shard is the one wizard with work to interrupt: its last step
+   * downloads the embedding model, and a plan that closes mid-download aborts
+   * that request.
+   *
+   * What the abort must NOT leave behind is the state the stopped run had
+   * reached. The gated intro reads idle because the step, the busy flag and
+   * the phase are all derived from the gate — but `chosenStep` is deliberately
+   * KEPT, so an owner who subscribes in the other tab lands back on the step
+   * they were on. If the run's own `busy`/`phase` were kept with it, that step
+   * would draw a spinner and a disabled button over a request that was
+   * cancelled minutes ago, with nothing left that could ever clear them.
+   */
+  it("puts Memory Shard back on a step the owner can actually press", async () => {
+    let paid = true;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === "/setup-api/ai-models/status") {
+        return json({ clawaiConfigured: true, clawaiAccountTier: paid ? "flash" : null });
+      }
+      // The provisioning flow's first call, held open so the plan can close
+      // while it is still in flight. It answers the abort and nothing else,
+      // the way a real request in mid-download would.
+      if (url === "/setup-api/embed/status") {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")));
+        });
+      }
+      return json({ installed: true, connected: false, login: null, paths: [] });
+    }));
+
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    const enable = await screen.findByTestId("memory-shard-enable");
+    await waitFor(() => expect(enable).not.toBeDisabled());
+    fireEvent.click(enable);
+    fireEvent.click(await screen.findByTestId("memory-shard-next-schedule"));
+    fireEvent.click(await screen.findByTestId("memory-shard-next-provision"));
+
+    // Provisioning, and visibly so.
+    fireEvent.click(await screen.findByTestId("memory-shard-index-now"));
+    await waitFor(() => expect(screen.getByTestId("memory-shard-index-now")).toBeDisabled());
+    expect(screen.getByTestId("memory-shard-progress")).toBeInTheDocument();
+
+    paid = false;
+    await waitFor(() =>
+      expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "upgrade"), { timeout: 10_000 });
+
+    paid = true;
+    // Back on the step they were on, idle: a live button and no progress over
+    // a download that was stopped.
+    const retry = await screen.findByTestId("memory-shard-index-now", undefined, { timeout: 10_000 });
+    await waitFor(() => expect(retry).not.toBeDisabled());
+    expect(screen.queryByTestId("memory-shard-progress")).toBeNull();
+  }, 20_000);
+});

@@ -75,12 +75,14 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
    *
    * This one IS an effect, because aborting a request is a side effect on an
    * external system rather than a correction of React's own state — and it
-   * sets none: the step and the phase the owner then sees are derived.
+   * sets none: the step and the phase the owner then sees are derived, and
+   * what the stopped run leaves behind is cleared by that run's own cleanup
+   * (see `provision`'s `finally`), which is the only place that knows whether
+   * the controller it is holding is still the current one.
    */
   useEffect(() => {
     if (!gated) return;
     provisionAbort.current?.abort();
-    provisionAbort.current = null;
   }, [gated]);
 
   // ─── Step 3: when it runs ───
@@ -113,7 +115,12 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const [reachedPhase, setPhase] = useState<ProvisionPhase>("idle");
   const [progress, setProgress] = useState<number | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
-  /** Derived like the step above: the request was aborted, so nothing is running. */
+  /**
+   * Derived like the step above, and for the one tick the derivation alone
+   * covers: `abort()` is synchronous but the aborted request's cleanup is a
+   * microtask later, so without this the gated intro would paint once with
+   * the phase the run had reached. The lasting reset is that cleanup's.
+   */
   const phase: ProvisionPhase = gated ? "idle" : reachedPhase;
 
   /**
@@ -251,7 +258,21 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
       setPhase("failed");
       setError(err instanceof Error ? err.message : t("clawkeep.memory.setup.provisionFailed"));
     } finally {
-      if (!signal.aborted) setBusy(null);
+      // Controller IDENTITY, not `signal.aborted`: a second provision installs
+      // its own controller before this one's cleanup runs, and a superseded
+      // run must never clear the new run's busy state.
+      //
+      // While this IS still the current controller the run is over however it
+      // ended, so an ABORTED one has to leave the wizard idle rather than
+      // frozen mid-phase. The gate can reopen — an owner who subscribes in the
+      // other tab — and `startedBusy`/`reachedPhase` preserved from a run that
+      // was stopped would put them back on a dead button with a progress line
+      // behind it and nothing running.
+      if (provisionAbort.current === ctl) {
+        provisionAbort.current = null;
+        setBusy(null);
+        if (signal.aborted) setPhase("idle");
+      }
     }
   };
 
