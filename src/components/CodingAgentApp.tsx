@@ -3062,12 +3062,20 @@ export default function CodingAgentApp() {
                   used — the settings belong beside the thing they govern, and
                   the card draws nothing at all on a project no link can be
                   attached to. */}
-              <VercelProjectCard key={projectQuery} query={projectQuery} t={t} />
+              {/* Keyed by the project the card is about, which is the card's
+                  own contract (VercelProjectCard.tsx: it holds no state across
+                  projects because the host keys it) — PREFIXED, because the
+                  workspace below is keyed by the same project and two SIBLINGS
+                  under one parent with the same key are not reconciled: the
+                  first of them is neither matched nor deleted, so switching
+                  projects from the sidebar left its node on the page and
+                  mounted a second card beside it. */}
+              <VercelProjectCard key={`vercel-${projectQuery}`} query={projectQuery} t={t} />
               {/* Four tabs, each with the whole width: the folder, what changed,
                   the runs, the team. The runs sat in a 22rem rail before and
                   their rows wrapped three deep. */}
               <CodingProjectWorkspace
-                key={projectQuery}
+                key={`workspace-${projectQuery}`}
                 query={projectQuery}
                 live={projectLive}
                 fill
