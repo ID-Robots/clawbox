@@ -4614,111 +4614,116 @@ print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
 PY
 )" || CODEX_PLUGIN_ENABLED=1
 fi
-# ── OpenClaw 2's three background jobs, opted out of ONCE ───────────────────
+# ── OpenClaw 2's three background jobs, brought to their defaults ONCE ─────
 #
-# TASK-609, owner ruling 2026-09-03. The 2026.8.1 upgrade switches three things
-# on by default, and every one of them spends the owner's tokens or messages him
-# without being asked:
+# Owner ruling 2026-09-15, reversing TASK-609's opt-outs of 2026-09-03: the box
+# WORKS ON ITS OWN by default. OpenClaw 2 arrives with three such jobs on, and
+# each is the core's own documented key:
 #
 #   heartbeat        `agents.defaults.heartbeat.every` — a recurring agent turn,
 #                    30 m by default (1 h on Anthropic OAuth), whose alerts go to
-#                    the operator's DM. Measured on a box: "[heartbeat] started"
-#                    in the gateway journal at 15:41 and again at 21:08, with
-#                    commands.ownerAllowFrom naming exactly one Telegram user.
+#                    the operator's DM.
 #   dreaming         `plugins.entries.memory-core.config.dreaming.enabled` —
-#                    background memory consolidation on the DEFAULT model, which
-#                    on a linked box is the owner's own subscription. The core
-#                    logs "[plugins] memory-core: created managed dreaming cron
-#                    job." the first time it runs.
+#                    background memory consolidation on the DEFAULT model. The
+#                    core logs "[plugins] memory-core: created managed dreaming
+#                    cron job." the first time it runs.
 #   self-learning    `skills.workshop.autonomous.mode` — `auto` by default, and
 #                    the core's own table says `auto` "also enables weekly
-#                    collection review", which is the `skill-collection-review`
-#                    cron row found enabled in state/openclaw.sqlite.
+#                    collection review".
 #
-# SEEDED ONCE PER BOX, AND ONLY THEN. The first boot writes the three opt-outs
-# for the keys the owner has said nothing about; after that this step is done
-# and the harness keys are left alone for ever.
+# TASK-609 seeded the OPT-OUTS once per box — `0m`, `false`, `off` — and
+# recorded it in `data/background-optouts.json` as `{"seeded": [<key>...]}`.
+# This is the SECOND GENERATION of that record: the direction flips, a box is
+# brought to all three ON once, and from then on the harness keys are the
+# owner's for ever — Settings → Harness switches each of them either way.
 #
-# NOT "seed whenever the key is absent", which is what this was first written as
-# and is a ONE-WAY switch: turning the check-ins back on means REMOVING
-# `agents.defaults.heartbeat.every` — the core's default cadence is 30 m, or an
-# hour on Anthropic OAuth, and that distinction applies only while the key is
-# unset, so ClawBox has no business freezing it — and an absence gate then reads
-# the owner's "on" as "no opinion". Worse, that write is followed by a gateway
-# restart whose ExecStartPre is THIS SCRIPT, so the seed would put `0m` back
-# before the gateway even started: switch on, panel says on, reload Settings and
-# it is off again, for ever.
+# WHAT ONE BOOT DOES, by what the record says:
+#   generation 2       DONE. One small file read and nothing else — this is a
+#                      blocking ExecStartPre and a CLI cold start is 10-12 s on
+#                      a Jetson.
+#   generation absent  the previous build's record, so the opt-outs were
+#                      ClawBox's: every key still AT its opt-out literal is
+#                      flipped ON — check-ins by REMOVING the key, dreaming to
+#                      `true`, the mode to `auto` — and a key whose value is
+#                      anything else is the owner's own and is left exactly
+#                      there. Then generation 2 is recorded.
+#   no record          a fresh box, whose core defaults are already on, so
+#                      nothing is seeded into the config — but a config
+#                      restored from a backup of an opted-out box carries the
+#                      literals, and those are flipped exactly as above. Then
+#                      generation 2 is recorded.
+#   unusable           there and unreadable: nothing is written to the config,
+#                      nothing is recorded, and the WARN says so. That record
+#                      may be a generation 2 whose owner has since switched a
+#                      job off, and flipping it would undo him.
 #
-# The record is `data/background-optouts.json`, ClawBox's own file rather than a
-# key in the harness's config, because it is a fact about what CLAWBOX did — and
-# a factory reset empties `data/`, so a box whose `~/.openclaw` was wiped is
-# offered the opt-outs again, which is right.
+# CLAWBOX MUST NEVER WRITE `0m` HERE. Switching check-ins ON in the panel
+# REMOVES `agents.defaults.heartbeat.every` — the core's default cadence is
+# 30 m, or an hour on Anthropic OAuth, and that distinction applies only while
+# the key is unset, so ClawBox has no business freezing it — and that write is
+# followed by a gateway restart whose ExecStartPre is THIS SCRIPT. A boot that
+# re-seeded `0m` into the absent key would undo the owner's ON before the
+# gateway even started: switch on, panel says on, reload Settings and it is
+# off again, for ever. The flip goes the other way for the same reason: an
+# absent key is already the core's default and is left absent.
 #
-# HARNESS FIRST: all three are the core's own documented keys
-# (docs/gateway/heartbeat.md, docs/concepts/dreaming.md, docs/tools/self-learning.md)
-# and they are written through the core's own `config set --batch-json`, which
-# validates against the schema and applies the whole batch or none of it. One
-# CLI start for up to three keys, and only on a box that has not been seeded — a
-# seeded box pays nothing at all, which matters inside a blocking ExecStartPre.
+# The record stays ClawBox's own file rather than a key in the harness's config,
+# because it is a fact about what CLAWBOX did — and a factory reset empties
+# `data/`, so a wiped box is judged again as a fresh one, which is right.
+# `seeded` keeps its name and shape so every reader of the file — this block,
+# `register-mcp.sh`'s Hermes half on a dual box, an older build mid-upgrade —
+# still parses it; at generation 2 it lists the keys each half has brought to
+# the default, and a half is done only when a generation-2 record names ITS
+# keys, because on a dual box each half must judge its own harness: a single
+# "done" flag written by whichever half finished first would tell the other it
+# had nothing to do.
+#
+# HARNESS FIRST: the two explicit values go through the core's own `config set
+# --batch-json`, which validates against the schema and applies the whole
+# batch or none of it; the check-ins key is REMOVED with `config unset` — the
+# same verb the panel's ON uses (`runOpenclawConfigUnset`) — because a batch
+# entry must carry a value and the CLI has no batch form that removes one. At
+# most two CLI starts, and only on the one boot that migrates.
 CLAWBOX_OPTOUT_STATE="$CLAWBOX_ROOT/data/background-optouts.json"
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-  CLAWBOX_OPTOUT_BATCH="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
+  CLAWBOX_JOBS_PLAN="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
 import json, os, sys
 
-# path -> the value ClawBox seeds when the owner has expressed no opinion.
-# `0m` rather than removing the key: the core reads an absent `every` as its own
-# default, so silence is not an opt-out (docs/gateway/heartbeat.md).
-# The third field is whether the OWNER'S "on" is the ABSENCE of the key, which is
-# what makes one of these three impossible to re-offer safely without the record:
-# switching check-ins on REMOVES `heartbeat.every`, so an absent value there means
-# either "never seeded" or "he turned it on". The other two are written
-# explicitly in both directions, so an absent value can only mean "no opinion
-# expressed" and is always safe to seed.
+# path -> the opt-out literal TASK-609 seeded, and what brings the key to the
+# core's default. `None` means REMOVE the key: the only honest ON for the
+# cadence, because the core's default depends on the auth mode and applies
+# only while the key is unset (see the block comment).
 WANTED = [
-    (("agents", "defaults", "heartbeat", "every"), "0m", True),
-    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False, False),
-    (("skills", "workshop", "autonomous", "mode"), "off", False),
+    (("agents", "defaults", "heartbeat", "every"), "0m", None),
+    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False, True),
+    (("skills", "workshop", "autonomous", "mode"), "off", "auto"),
 ]
+GENERATION = 2
+KEYS = [".".join(path) for path, _, _ in WANTED]
 
-try:
-    with open(sys.argv[1], encoding="utf-8") as fh:
-        cfg = json.load(fh)
-except (OSError, json.JSONDecodeError):
-    # No config, or one this script cannot read: seeding into it is not this
-    # step's business, and the blocks above have already reported on it.
-    print("")
-    raise SystemExit(0)
 
-def read_seeded(path):
-    """The keys this box has already been offered, or None if the record is unusable.
+def read_record(path):
+    """(seeded keys, generation) — absent is (set(), 0); None if the record is unusable.
 
-    THREE DIFFERENT FACTS, and only one of them means "the owner has never been
-    asked". An ABSENT record is the normal first boot, so seed. A record that is
+    THREE DIFFERENT FACTS. An ABSENT record is a fresh box. A record that is
     THERE but cannot be used — unreadable, undecodable, or valid JSON that is
-    not `{"seeded": [<string>, ...]}` — is neither: reading it as "nothing has
-    been seeded" would re-seed a box that has been, and for the check-ins key
-    that is not a harmless rewrite of a value the config already carries.
-    Switching check-ins ON REMOVES `agents.defaults.heartbeat.every` (the core's
-    default cadence is what should decide it), so `present()` is false for
-    exactly the key the owner has just turned on, and a re-seed writes `0m` back
-    over his choice. So: say so, and change nothing.
+    not `{"seeded": [<string>, ...]}` with an integer `generation` or none — is
+    neither: reading it as "fresh" could flip a job the owner switched off
+    after a migration this box has forgotten. So: say so, and change nothing.
 
     The membership test also has to be TOTAL, because the caller's `|| true`
-    swallows anything raised here and the box then neither seeds nor explains
-    itself — the failure this whole function exists to end. `set()` raises on a
-    list of unhashable elements and `sorted()` raises on mixed types, so the
-    rows must be strings all the way down before either is reached.
+    swallows anything raised here and the box then neither acts nor explains
+    itself. `set()` raises on a list of unhashable elements and `sorted()`
+    raises on mixed types, so the rows must be strings all the way down.
     """
     try:
         with open(path, encoding="utf-8") as fh:
             record = json.load(fh)
     except FileNotFoundError:
-        return set()
+        return set(), 0
     # ValueError covers json.JSONDecodeError AND UnicodeDecodeError — a record
     # written in another encoding is unusable, not absent — and RecursionError
-    # covers a document nested past the decoder's limit. Nothing may escape:
-    # the caller's `|| true` swallows it and the box then neither seeds nor
-    # explains itself.
+    # covers a document nested past the decoder's limit.
     except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(record, dict):
@@ -4726,65 +4731,86 @@ def read_seeded(path):
     rows = record.get("seeded")
     if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
         return None
-    return set(rows)
+    generation = record.get("generation", 0)
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        return None
+    return set(rows), generation
 
-record = read_seeded(os.environ["CLAWBOX_OPTOUT_STATE"])
-unusable = record is None
-seeded = set() if unusable else record
-if unusable:
-    # Says what happened on THIS boot. The "recorded as settled" half is
-    # downstream of a `config set` that may still fail, and a WARN that promises
-    # it would be a false success in an operator message: on the failing path
-    # nothing is recorded and every later boot repeats this.
-    print("  WARN: the background-job opt-out record exists but cannot be read; the check-ins"
-          " opt-out is being SKIPPED this boot — an absent heartbeat cadence is also what"
-          " 'switched on' looks like, and re-seeding it could undo that. It is recorded as"
-          " settled, and so stops being offered, once this boot's write and its record both"
-          " land; the messages below say whether they did. Switch check-ins off in Settings if"
-          " that is what you want.", file=sys.stderr)
 
-def present(path):
+record = read_record(os.environ["CLAWBOX_OPTOUT_STATE"])
+if record is None:
+    # Says what happens on THIS boot and every later one, because nothing here
+    # repairs the file: a record this block cannot read is left for a person.
+    print("  WARN: the background-job record (data/background-optouts.json) exists but cannot be read;"
+          " the OpenClaw 2 background jobs are left exactly as they are and nothing is recorded."
+          " Settings → Harness switches each of them.", file=sys.stderr)
+    print("")
+    raise SystemExit(0)
+seeded, generation = record
+if generation >= GENERATION and all(key in seeded for key in KEYS):
+    # Done. This is the cost of every boot after the first, and it has to stay
+    # one small file read: nothing below is reached.
+    print("")
+    raise SystemExit(0)
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (OSError, ValueError, RecursionError):
+    # No config, or one this script cannot read: writing into it is not this
+    # step's business, and the blocks above have already reported on it.
+    print("")
+    raise SystemExit(0)
+
+
+def current(path):
     node = cfg
     for part in path:
         if not isinstance(node, dict) or part not in node:
-            return False
+            return None
         node = node[part]
-    return node is not None
+    return node
 
+
+def at_optout(value, literal):
+    # The panel's own reading of each key: a cadence is off at `0m`, the mode
+    # at `off` (case aside), dreaming at a real JSON `false` — never at `0`,
+    # `null` or an absence, none of which ClawBox ever wrote.
+    if isinstance(literal, str):
+        return isinstance(value, str) and value.strip().lower() == literal
+    return value is literal
+
+
+# Only a key still AT the literal ClawBox seeded is ClawBox's to take back.
+# Anything else — absent (the core's default, already on), the owner's own
+# cadence, `propose` — is his and is left exactly where it is. The seeded list
+# is deliberately NOT the gate: a fresh box's config restored from an opted-out
+# backup carries the same literals with no record at all, and the two cases
+# want the same answer.
 batch = []
-# Everything not already recorded is DONE with after this boot, whether it was
-# written or was already the owner's. A path he had set on the first boot used
-# to be skipped and never recorded, so removing it later — which is what
-# turning check-ins back on does — offered the seed all over again. Recording
-# it is the same statement the batch makes: ClawBox has had its say about this
-# key.
-settled = []
-for path, value, absence_is_on in WANTED:
-    key = ".".join(path)
-    if key in seeded:
+unset_heartbeat = False
+flipped = []
+for path, literal, default in WANTED:
+    if not at_optout(current(path), literal):
         continue
-    settled.append(key)
-    if unusable and absence_is_on:
-        # The record is there and cannot be read, and for THIS key an absent
-        # value is also what the owner's "on" looks like. Recorded as settled so
-        # it is never offered again — writing `0m` here could revert his choice,
-        # and giving up one opt-out on a box whose record is corrupt is the
-        # cheaper of the two mistakes. The WARN above says so.
-        continue
-    if not present(path):
-        batch.append({"path": key, "value": value})
-print(json.dumps({"batch": batch, "settled": settled}) if settled else "")
+    flipped.append(".".join(path))
+    if default is None:
+        unset_heartbeat = True
+    else:
+        batch.append({"path": ".".join(path), "value": default})
+print(json.dumps({"batch": batch, "unsetHeartbeat": unset_heartbeat, "flipped": flipped, "settled": KEYS}))
 SEEDPY
 )"
-  if [ -n "$CLAWBOX_OPTOUT_BATCH" ]; then
+  if [ -n "$CLAWBOX_JOBS_PLAN" ]; then
     # Non-fatal like every other CLI call here: this is a blocking ExecStartPre,
-    # and a box that keeps its noisy defaults is far better than one with no
-    # gateway. The next boot tries again, because the keys are still absent.
+    # and a box that keeps its opt-outs one more boot is far better than one
+    # with no gateway. The next boot tries again, because nothing is recorded
+    # until the writes land.
+    #
     # GUARDED like every other Python call in this block (SEEDPY with `|| true`,
-    # STATEPY inside an `if !`), and for the reason stated just above: under
-    # `set -euo pipefail` a failing reader here aborted gateway-pre-start.sh
-    # outright, which as a blocking ExecStartPre means NO GATEWAY — the one
-    # outcome this block's own policy refuses.
+    # STATEPY inside an `if !`): under `set -euo pipefail` a failing reader here
+    # aborted gateway-pre-start.sh outright, which as a blocking ExecStartPre
+    # means NO GATEWAY — the one outcome this block's own policy refuses.
     #
     # The `|| true` alone is not enough. It removes the invariant that this
     # variable is `json.dumps` output, and a reader that fails can still have
@@ -4792,53 +4818,80 @@ SEEDPY
     # variable and an emptiness test does not fire. So the SHAPE is what is
     # checked, not the length: anything that is not a JSON array is "cannot tell
     # what to write", nothing is recorded, and the next boot tries again.
-    CLAWBOX_OPTOUT_WRITES="$(printf %s "$CLAWBOX_OPTOUT_BATCH" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["batch"]))' || true)"
-    case "$CLAWBOX_OPTOUT_WRITES" in
+    CLAWBOX_JOBS_WRITES="$(printf %s "$CLAWBOX_JOBS_PLAN" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["batch"]))' || true)"
+    case "$CLAWBOX_JOBS_WRITES" in
       "["*"]") ;;
-      *) CLAWBOX_OPTOUT_WRITES="" ;;
+      *) CLAWBOX_JOBS_WRITES="" ;;
     esac
-    if [ -z "$CLAWBOX_OPTOUT_WRITES" ]; then
-      echo "  WARN: could not read the background-job opt-out batch; leaving the harness keys alone this boot" >&2
-    # Nothing to write — every key was already the owner's — so record and move
-    # on without paying a CLI start for it.
-    elif [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
-      || timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_OPTOUT_WRITES" >/dev/null 2>&1; then
-      [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
-        || echo "  Seeded the OpenClaw 2 background-job opt-outs (heartbeat, memory dreaming, self-learning) — Settings can switch any of them back on"
-      # RECORDED ONLY AFTER THE WRITE LANDED, and merged with what is there: a
-      # seed that failed must be offered again next boot, and a box seeded key
-      # by key over several boots must not lose the earlier ones.
-      if ! CLAWBOX_OPTOUT_BATCH="$CLAWBOX_OPTOUT_BATCH" \
-        CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - <<'STATEPY'
+    # The one key that is brought to its default by REMOVAL travels as a flag,
+    # never as text: the path is a literal in the `config unset` below, so a
+    # reader that failed with a banner on its stdout cannot hand the config
+    # writer a path of its own making. Anything but the two spellings is the
+    # same "cannot tell" as a malformed batch.
+    CLAWBOX_JOBS_UNSET="$(printf %s "$CLAWBOX_JOBS_PLAN" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin)["unsetHeartbeat"] is True else "0")' || true)"
+    case "$CLAWBOX_JOBS_UNSET" in
+      0|1) ;;
+      *) CLAWBOX_JOBS_WRITES="" ;;
+    esac
+    if [ -z "$CLAWBOX_JOBS_WRITES" ]; then
+      echo "  WARN: could not read the background-job plan; leaving the harness keys alone this boot" >&2
+    else
+      # The batch first, then the removal, each only when there is one; a boot
+      # that lands one and not the other records nothing, and the next boot
+      # finds the landed key no longer at its literal and retries only the rest.
+      CLAWBOX_JOBS_OK=1
+      if [ "$CLAWBOX_JOBS_WRITES" != "[]" ] \
+        && ! timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_JOBS_WRITES" >/dev/null 2>&1; then
+        CLAWBOX_JOBS_OK=0
+      fi
+      if [ "$CLAWBOX_JOBS_OK" = "1" ] && [ "$CLAWBOX_JOBS_UNSET" = "1" ] \
+        && ! timeout -k 5 90 "$OPENCLAW_BIN" config unset agents.defaults.heartbeat.every >/dev/null 2>&1; then
+        CLAWBOX_JOBS_OK=0
+      fi
+      if [ "$CLAWBOX_JOBS_OK" != "1" ]; then
+        echo "  WARN: could not bring the OpenClaw 2 background jobs to their defaults; the box keeps its opt-outs until the next boot or until Settings is used" >&2
+      else
+        if [ "$CLAWBOX_JOBS_WRITES" != "[]" ] || [ "$CLAWBOX_JOBS_UNSET" = "1" ]; then
+          echo "  Brought the OpenClaw 2 background jobs (check-ins, memory dreaming, self-learning) to their defaults — on; Settings → Harness switches any of them off"
+        fi
+        # RECORDED ONLY AFTER THE WRITES LANDED, and merged with what is there:
+        # a flip that failed must be tried again next boot, and on a dual box
+        # `register-mcp.sh` keeps its own keys in this file.
+        if ! CLAWBOX_JOBS_PLAN="$CLAWBOX_JOBS_PLAN" \
+          CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - <<'STATEPY'
 import json, os, tempfile
 
 path = os.environ["CLAWBOX_OPTOUT_STATE"]
-# Same predicate as the reader above, and TOTAL for the same reason: this runs
-# after a write that landed, and a record that cannot be used must not stop the
-# recording of it — `sorted()` on a mixed list raises, the `if !` below turns
-# that into a WARN, and the same seed is then offered at every boot for ever.
-# Anything that is not `{"seeded": [<string>, ...]}` is replaced.
-#
-# The except list matches `read_seeded`'s deliberately. SEEDPY used to exit on an
-# unusable record, so this half never saw one; now that it continues, a record
-# whose bytes are not valid UTF-8 — the shape a power cut mid-write leaves —
-# reaches here, and the narrow guard let `UnicodeDecodeError` out as a raw
-# traceback that no boot ever repaired.
+GENERATION = 2
+# RE-READ rather than reused from SEEDPY: on a dual box `register-mcp.sh`
+# writes this file too, and neither half locks it, so the window is kept as
+# narrow as it gets. TOTAL for the reason the reader is: this runs after writes
+# that landed, and a record that cannot be used must not stop the recording of
+# them, or the same flips are offered at every boot for ever.
 try:
     with open(path, encoding="utf-8") as fh:
         record = json.load(fh)
 except (OSError, ValueError, RecursionError):
     record = None
 rows = record.get("seeded") if isinstance(record, dict) else None
-seeded = {row for row in rows if isinstance(row, str)} if isinstance(rows, list) else set()
-seeded.update(json.loads(os.environ["CLAWBOX_OPTOUT_BATCH"])["settled"])
+generation = record.get("generation") if isinstance(record, dict) else None
+# Rows are carried forward ONLY from a generation-2 record. At generation 2 the
+# list means "brought to the default by this build", and a row carried over
+# from the previous build's opt-out list would tell the other half of a dual
+# box it was done when it had not yet looked. Nothing is lost by the drop: the
+# flips are decided off the config's own values, never off the list.
+keep = set()
+if (isinstance(rows, list) and isinstance(generation, int)
+        and not isinstance(generation, bool) and generation >= GENERATION):
+    keep = {row for row in rows if isinstance(row, str)}
+keep.update(json.loads(os.environ["CLAWBOX_JOBS_PLAN"])["settled"])
 
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=directory, prefix=".background-optouts.", suffix=".tmp")
 try:
     with os.fdopen(fd, "w") as fh:
-        json.dump({"seeded": sorted(seeded)}, fh, indent=2)
+        json.dump({"seeded": sorted(keep), "generation": GENERATION}, fh, indent=2)
         fh.write("\n")
     os.replace(tmp, path)
 except Exception:
@@ -4848,11 +4901,10 @@ except Exception:
         pass
     raise
 STATEPY
-      then
-        echo "  WARN: could not record the background-job opt-out seeding; the next boot may re-seed a switch the owner has since turned on" >&2
+        then
+          echo "  WARN: could not record the background-job defaults; the next boot looks at the keys again (a switch the owner turns off meanwhile is judged as his)" >&2
+        fi
       fi
-    else
-      echo "  WARN: could not seed the OpenClaw 2 background-job opt-outs; the box may send unprompted check-ins and spend tokens on background jobs until Settings is used" >&2
     fi
   fi
 fi
