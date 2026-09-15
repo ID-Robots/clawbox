@@ -11,6 +11,7 @@ import {
   uuid,
 } from '@/lib/chat-history-cache'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
+import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
@@ -178,6 +179,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
+  // Everything else that grows the transcript — pills, cards, pictures that
+  // load late — followed only while the reader is at the bottom. The full page
+  // is always on screen, so the observers are always attached.
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  useStickToBottom(transcriptRef, true)
 
   // `?email=<uid>` opens that message on arrival — the other end of a card on
   // the gateway's own Control UI chat (TASK-700). That page is a third `webchat`
@@ -1098,7 +1104,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       )}
 
       {/* Messages area */}
-      <div style={{
+      <div ref={transcriptRef} style={{
         flex: 1, overflowY: 'auto', padding: '12px 14px',
         display: 'flex', flexDirection: 'column', gap: 10,
         scrollbarWidth: 'thin',
