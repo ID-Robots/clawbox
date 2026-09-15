@@ -437,7 +437,7 @@ export const nl: Record<string, string> = {
   "systemProfile.desktopLabel": "Bureaubladomgeving",
   "systemProfile.desktopHelp": "Draait het volledige GNOME-bureaublad op de HDMI-uitgang van de box en in Extern bureaublad. Zet het uit om headless te draaien en ongeveer 700 MB geheugen terug te krijgen — er wordt niets verwijderd, dus je kunt het altijd weer aanzetten.",
   "systemProfile.performanceLabel": "Prestatiemodus",
-  "systemProfile.performanceHelp": "Zet de klok van processor en GPU vast op het maximum in plaats van die te laten schalen. Het eerste token komt sneller, maar het bord blijft dan op ongeveer 7,2 W in rust en aanhoudende lokale inferentie werd gemeten op 74,8 °C, net boven de grens van 74 °C voor passieve koeling. Laat het uit staan, tenzij je lange taken draait en voor luchtstroom zorgt.",
+  "systemProfile.performanceHelp": "Zet de klok van processor en GPU vast op het maximum in plaats van die te laten schalen. Het eerste token komt sneller, maar het bord blijft dan op ongeveer 7,2 W in rust en aanhoudende lokale inferentie werd gemeten op 74,8 °C, net boven de grens van 74 °C voor passieve koeling. Staat standaard aan; zet het uit als de box warm wordt of ergens zonder luchtstroom staat.",
   "systemProfile.rebootRequired": "Start de box opnieuw op om deze wijziging toe te passen.",
   "systemProfile.unsupported": "Niet beschikbaar op dit apparaat.",
   "systemProfile.powerState": "Energieprofiel: {profile} · klok: {clocks}",

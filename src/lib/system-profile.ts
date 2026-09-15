@@ -162,7 +162,12 @@ async function persistedDesktopIntent(): Promise<boolean> {
 
 async function persistedPowerIntent(): Promise<PowerMode> {
   const stored = await configStore.get(POWER_CONFIG_KEY);
-  return isPowerMode(stored) ? stored : "balanced";
+  // Default PERFORMANCE — the owner's ruling of 2026-09-15 and the script's
+  // own DEFAULT_MODE, so a box whose script cannot be read (no nvpmodel in
+  // dev/CI, a --check that failed) renders the switch the way a box actually
+  // ships. "balanced" is only ever here because the owner chose it, and is
+  // honoured as such.
+  return isPowerMode(stored) ? stored : "performance";
 }
 
 export async function readDesktopMode(): Promise<DesktopModeStatus> {

@@ -433,7 +433,7 @@ export const sv: Record<string, string> = {
   "systemProfile.desktopLabel": "Skrivbordsmiljö",
   "systemProfile.desktopHelp": "Kör hela GNOME-skrivbordet på boxens HDMI-utgång och i Fjärrskrivbord. Stäng av det för att köra utan skärm och få tillbaka ungefär 700 MB minne — inget avinstalleras, så du kan slå på det igen när du vill.",
   "systemProfile.performanceLabel": "Prestandaläge",
-  "systemProfile.performanceHelp": "Låser processorn och GPU:n på högsta klockfrekvens i stället för att låta dem variera. Första token kommer snabbare, men kortet ligger då på ungefär 7,2 W i vila och ihållande lokal inferens uppmättes till 74,8 °C, precis över gränsen på 74 °C för passiv kylning. Låt det vara av om du inte kör långa jobb och har luftflöde.",
+  "systemProfile.performanceHelp": "Låser processorn och GPU:n på högsta klockfrekvens i stället för att låta dem variera. Första token kommer snabbare, men kortet ligger då på ungefär 7,2 W i vila och ihållande lokal inferens uppmättes till 74,8 °C, precis över gränsen på 74 °C för passiv kylning. På som standard; stäng av det om boxen blir varm eller står någonstans utan luftflöde.",
   "systemProfile.rebootRequired": "Starta om boxen för att tillämpa ändringen.",
   "systemProfile.unsupported": "Inte tillgängligt på den här enheten.",
   "systemProfile.powerState": "Strömprofil: {profile} · klockor: {clocks}",

@@ -436,7 +436,7 @@ export const de: Record<string, string> = {
   "systemProfile.desktopLabel": "Desktop-Umgebung",
   "systemProfile.desktopHelp": "Startet den vollständigen GNOME-Desktop am HDMI-Ausgang der Box und im Remote-Desktop. Ausschalten, um die Box ohne Bildschirm zu betreiben und rund 700 MB Arbeitsspeicher zurückzubekommen — es wird nichts deinstalliert, Sie können ihn jederzeit wieder einschalten.",
   "systemProfile.performanceLabel": "Leistungsmodus",
-  "systemProfile.performanceHelp": "Fixiert CPU und GPU auf ihren höchsten Takt, statt sie regeln zu lassen. Schneller beim ersten Token, aber das Board liegt dann im Leerlauf bei etwa 7,2 W, und dauerhafte lokale Inferenz wurde mit 74,8 °C gemessen — knapp über der Grenze von 74 °C für passive Kühlung. Lassen Sie ihn aus, außer bei langen Aufgaben mit ausreichender Belüftung.",
+  "systemProfile.performanceHelp": "Fixiert CPU und GPU auf ihren höchsten Takt, statt sie regeln zu lassen. Schneller beim ersten Token, aber das Board liegt dann im Leerlauf bei etwa 7,2 W, und dauerhafte lokale Inferenz wurde mit 74,8 °C gemessen — knapp über der Grenze von 74 °C für passive Kühlung. Standardmäßig eingeschaltet; schalten Sie ihn aus, wenn die Box warm wird oder ohne Belüftung steht.",
   "systemProfile.rebootRequired": "Starten Sie die Box neu, um diese Änderung anzuwenden.",
   "systemProfile.unsupported": "Auf diesem Gerät nicht verfügbar.",
   "systemProfile.powerState": "Energieprofil: {profile} · Takt: {clocks}",

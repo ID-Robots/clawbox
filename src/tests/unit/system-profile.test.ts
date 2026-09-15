@@ -141,17 +141,29 @@ describe("readPowerMode", () => {
     });
   });
 
-  it("defaults to balanced, never to the pinned profile", async () => {
+  it("defaults to performance when the script cannot be read", async () => {
+    // The owner's ruling of 2026-09-15: performance is what a ClawBox runs by
+    // default, so an unreadable box renders the switch the way the box
+    // actually ships rather than as an opt-out nobody made. The pinning
+    // itself is still the script's word alone — nothing is claimed about it.
     responses = [{ match: "--check", error: new Error("no nvpmodel") }];
     const status = await sp.readPowerMode();
     expect(status.supported).toBe(false);
-    expect(status.mode).toBe("balanced");
+    expect(status.mode).toBe("performance");
     expect(status.clocksPinned).toBe(false);
+  });
+
+  it("honours a persisted balanced when the script is unreadable", async () => {
+    // The opt-out is the owner's choice and survives the default flip here as
+    // it does in the script's own read_mode.
+    store.set(sp.POWER_CONFIG_KEY, "balanced");
+    responses = [{ match: "--check", error: new Error("boom") }];
+    expect((await sp.readPowerMode()).mode).toBe("balanced");
   });
 
   it("ignores a mode the script should never emit", async () => {
     responses = [{ match: "--check", stdout: JSON.stringify({ supported: true, mode: "MAXN_SUPER" }) }];
-    expect((await sp.readPowerMode()).mode).toBe("balanced");
+    expect((await sp.readPowerMode()).mode).toBe("performance");
   });
 });
 

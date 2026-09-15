@@ -49,8 +49,14 @@ describe("clawbox-performance.service", () => {
 describe("the power script's default", () => {
   const script = read("scripts", "clawbox-power-mode.sh");
 
-  it("is balanced, so an unconfigured or corrupted state file stays cool", () => {
-    expect(script).toContain('DEFAULT_MODE="balanced"');
+  it("is performance since 2026-09-15, with balanced kept as the owner's opt-out", () => {
+    // The owner's ruling: an unconfigured or corrupted state file resolves to
+    // the pinned profile, and step_performance_mode's --apply on every update
+    // is what carries that onto a box already in the field.
+    expect(script).toContain('DEFAULT_MODE="performance"');
+    // A persisted literal is returned untouched, so an owner's `balanced`
+    // survives the update that flipped the default.
+    expect(codeOnly(script)).toMatch(/balanced\|performance\)\s*echo "\$raw"/);
   });
 
   it("persists the choice root-owned, next to the edition lock", () => {

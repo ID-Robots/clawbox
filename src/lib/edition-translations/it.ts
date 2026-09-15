@@ -448,7 +448,7 @@ export const it: Record<string, string> = {
   "systemProfile.desktopLabel": "Ambiente desktop",
   "systemProfile.desktopHelp": "Avvia il desktop GNOME completo sull'uscita HDMI della box e nel Desktop remoto. Disattivalo per lavorare senza schermo e recuperare circa 700 MB di memoria: non viene disinstallato nulla, puoi riattivarlo quando vuoi.",
   "systemProfile.performanceLabel": "Modalità prestazioni",
-  "systemProfile.performanceHelp": "Blocca CPU e GPU alla frequenza massima invece di lasciarle variare. Il primo token arriva prima, ma la scheda resta a circa 7,2 W da ferma e l'inferenza locale prolungata è stata misurata a 74,8 °C, appena sopra il limite di 74 °C del raffreddamento passivo. Lasciala disattivata a meno che tu non esegua lavori lunghi con una buona ventilazione.",
+  "systemProfile.performanceHelp": "Blocca CPU e GPU alla frequenza massima invece di lasciarle variare. Il primo token arriva prima, ma la scheda resta a circa 7,2 W da ferma e l'inferenza locale prolungata è stata misurata a 74,8 °C, appena sopra il limite di 74 °C del raffreddamento passivo. Attiva per impostazione predefinita; disattivala se il box si scalda o si trova in un posto senza ventilazione.",
   "systemProfile.rebootRequired": "Riavvia la box per applicare la modifica.",
   "systemProfile.unsupported": "Non disponibile su questo dispositivo.",
   "systemProfile.powerState": "Profilo di alimentazione: {profile} · frequenze: {clocks}",

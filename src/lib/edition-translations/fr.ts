@@ -437,7 +437,7 @@ export const fr: Record<string, string> = {
   "systemProfile.desktopLabel": "Environnement de bureau",
   "systemProfile.desktopHelp": "Lance le bureau GNOME complet sur la sortie HDMI de la box et dans le Bureau à distance. Désactivez-le pour fonctionner sans écran et récupérer environ 700 Mo de mémoire — rien n'est désinstallé, vous pouvez le réactiver à tout moment.",
   "systemProfile.performanceLabel": "Mode performance",
-  "systemProfile.performanceHelp": "Fige le processeur et le GPU à leur fréquence maximale au lieu de les laisser varier. Le premier jeton arrive plus vite, mais la carte reste alors à environ 7,2 W au repos et l'inférence locale prolongée a été mesurée à 74,8 °C, juste au-dessus de la limite de 74 °C du refroidissement passif. Laissez-le désactivé sauf pour de longues tâches avec une bonne ventilation.",
+  "systemProfile.performanceHelp": "Fige le processeur et le GPU à leur fréquence maximale au lieu de les laisser varier. Le premier jeton arrive plus vite, mais la carte reste alors à environ 7,2 W au repos et l'inférence locale prolongée a été mesurée à 74,8 °C, juste au-dessus de la limite de 74 °C du refroidissement passif. Activé par défaut ; désactivez-le si le boîtier chauffe ou se trouve dans un endroit sans ventilation.",
   "systemProfile.rebootRequired": "Redémarrez la box pour appliquer ce changement.",
   "systemProfile.unsupported": "Non disponible sur cet appareil.",
   "systemProfile.powerState": "Profil d'alimentation : {profile} · fréquences : {clocks}",
