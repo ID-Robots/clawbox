@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   diskVerdict,
-  isHfGgufFile,
+  isGgufName,
   isHfRepo,
-  isLocalGgufName,
   isWhisperSize,
   OLLAMA_PRESET_MODELS,
-  safeHfGgufFile,
+  safeGgufName,
   safeHfRepo,
-  safeLocalGgufName,
   safeWhisperSize,
   WHISPER_SIZES,
   whisperSize,
@@ -50,22 +48,21 @@ describe("local-install: what may be asked for", () => {
   it("refuses a reference that would escape, or that a downloader would read as a flag", () => {
     expect(isHfRepo("owner/../etc")).toBe(false);
     expect(isHfRepo("../owner")).toBe(false);
-    expect(isHfGgufFile("../../etc/passwd.gguf")).toBe(false);
-    expect(isHfGgufFile("./model.gguf")).toBe(false);
+    expect(isGgufName("../../etc/passwd.gguf")).toBe(false);
+    expect(isGgufName("./model.gguf")).toBe(false);
     // A leading dash is an option to `hf download`, not a name.
     expect(isHfRepo("-oops/name")).toBe(false);
-    expect(isHfGgufFile("-rf.gguf")).toBe(false);
-    expect(isLocalGgufName("-rf.gguf")).toBe(false);
+    expect(isGgufName("-rf.gguf")).toBe(false);
   });
 
-  it("takes only a .gguf as the file, and only a plain name as a local one", () => {
-    expect(isHfGgufFile("gemma-4-E2B_q4_0-it.gguf")).toBe(true);
-    expect(isHfGgufFile("sub/dir/model.gguf")).toBe(true);
-    expect(isHfGgufFile("README.md")).toBe(false);
-    // The DELETE target addresses something already on disk: no directory part.
-    expect(isLocalGgufName("model.gguf")).toBe(true);
-    expect(isLocalGgufName("sub/model.gguf")).toBe(false);
-    expect(isLocalGgufName("model.bin")).toBe(false);
+  it("takes a .gguf as one path segment, going either way", () => {
+    expect(isGgufName("gemma-4-E2B_q4_0-it.gguf")).toBe(true);
+    expect(isGgufName("README.md")).toBe(false);
+    expect(isGgufName("model.bin")).toBe(false);
+    // The SAME rule names a file inside a repository and a file in this box's
+    // library: a nested reference downloads to a path the listing would never
+    // show and the removal would never accept.
+    expect(isGgufName("sub/dir/model.gguf")).toBe(false);
   });
 
   it("keeps one list of the models the wizard and Settings both offer", () => {
@@ -104,11 +101,8 @@ describe("local-install: what a path and a URL are made of", () => {
     for (const bad of ["owner/../etc", "-oops/name", "too/many/slashes", "bare", "", 7]) {
       expect(safeHfRepo(bad)).toBeNull();
     }
-    for (const bad of ["../x.gguf", "-rf.gguf", "README.md", ""]) {
-      expect(safeHfGgufFile(bad)).toBeNull();
-    }
-    for (const bad of ["sub/model.gguf", "..", "model.bin"]) {
-      expect(safeLocalGgufName(bad)).toBeNull();
+    for (const bad of ["../x.gguf", "-rf.gguf", "README.md", "", "sub/model.gguf", ".."]) {
+      expect(safeGgufName(bad)).toBeNull();
     }
   });
 

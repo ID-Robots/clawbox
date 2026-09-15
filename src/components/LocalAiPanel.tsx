@@ -471,7 +471,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     llm: (
       <>
         <OllamaModelsCard onChanged={afterInstall} />
-        <GgufLibraryCard />
+        <GgufLibraryCard onChanged={afterInstall} />
       </>
     ),
     stt: <WhisperSizesCard onChanged={afterInstall} />,

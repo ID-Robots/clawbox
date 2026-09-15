@@ -1,9 +1,8 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { DATA_DIR } from "@/lib/config-store";
 import { checkInstallDisk } from "@/lib/install-disk";
-import { ensureLocalAiReady, getOllamaBaseUrl } from "@/lib/local-ai-runtime";
+import { ensureLocalAiReady, getOllamaBaseUrl, getOllamaModelsDir } from "@/lib/local-ai-runtime";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
@@ -91,11 +90,16 @@ export async function POST(request: Request) {
     //
     // Ollama is the one install here whose size cannot be known before it
     // starts — the registry manifest is not something to resolve by hand — so
-    // the check is made on the FIRST `total` the pull reports, which arrives
-    // within the first few lines and long before the bytes do. A model that
-    // will not fit is stopped there, with the same `disk_full` shape every
-    // other install route refuses with, instead of filling the disk and taking
-    // the box's own update build with it.
+    // the check is made on the `total` the pull reports, which arrives within
+    // the first few lines and long before the bytes do. A model that will not
+    // fit is stopped there, with the same `disk_full` shape every other install
+    // route refuses with, instead of filling the disk and taking the box's own
+    // update build with it.
+    //
+    // EVERY layer, not only the first. A model is several blobs and the stream
+    // reports a `total` per digest, so checking once let the rest through; and
+    // the free space is re-measured each time rather than compared against the
+    // first reading, because the layers before it have just spent some of it.
     const reader = ollamaRes.body?.getReader();
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -106,7 +110,7 @@ export async function POST(request: Request) {
         }
         const decoder = new TextDecoder();
         let buffered = "";
-        let checkedDisk = false;
+        const checkedDigests = new Set<string>();
         const send = (payload: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
 
         /** Answers a refusal to emit, or null to carry on. */
@@ -118,15 +122,18 @@ export async function POST(request: Request) {
             return null;
           }
           if (typeof parsed.error === "string") return { error: parsed.error };
-          if (checkedDisk) return null;
           const total = parsed.total;
           if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) return null;
-          checkedDisk = true;
+          // A digest is re-reported on every progress line; one check each is
+          // the point, and a stream with no digest at all still gets one.
+          const digest = typeof parsed.digest === "string" ? parsed.digest : "";
+          if (checkedDigests.has(digest)) return null;
+          checkedDigests.add(digest);
           // What is already downloaded does not have to be found again, so the
           // requirement is what is LEFT — otherwise a resumed pull of a model
           // mostly on disk is refused for room it does not need.
           const done = typeof parsed.completed === "number" && parsed.completed > 0 ? parsed.completed : 0;
-          const verdict = await checkInstallDisk(DATA_DIR, Math.max(0, total - done));
+          const verdict = await checkInstallDisk(getOllamaModelsDir(), Math.max(0, total - done));
           if (verdict.ok) return null;
           return {
             error: "There is not enough room on this box for that model.",

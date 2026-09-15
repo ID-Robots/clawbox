@@ -80,7 +80,7 @@ export const OLLAMA_PRESET_MODELS: readonly { id: string; label: string }[] = [
  *  - an empty string.
  */
 const HF_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/";
-/** The same, without the separator: a file already on this box has no directory part. */
+/** The same, without the separator: a GGUF's name is one path segment, going either way. */
 const LOCAL_NAME_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
 const MAX_HF_REF_CHARS = 200;
 
@@ -108,24 +108,24 @@ export function safeHfRepo(value: unknown): string | null {
 }
 
 /**
- * A file inside that repo, rebuilt. It must end in `.gguf`: this library is the
- * llama.cpp model directory, `start-llamacpp.sh` passes its entries to
- * `llama-server --model`, and a repo's README or tokenizer downloaded into it
- * is a file the owner has to notice and delete by hand.
+ * A GGUF's file name — the SAME rule in both directions, which is the point.
+ *
+ * It names a file inside a repository on the way in and a file in this box's
+ * library on the way out, and it must be one path segment either way. A
+ * reference with a directory in it downloads to `<models>/<sub>/<name>.gguf`,
+ * which `listLibrary` (top level only) would never show and `DELETE` would
+ * never accept — disk spent on a file the owner can neither see nor remove
+ * from this page. One rule is what keeps everything in the library listable
+ * and removable. A repo that only publishes its GGUFs in sub-directories is
+ * out of reach from here, which is a stated limitation rather than a silent
+ * leak.
+ *
+ * `.gguf` because this is the llama.cpp model directory and
+ * `start-llamacpp.sh` passes its entries to `llama-server --model`; a repo's
+ * README or tokenizer landing in it is a file the owner has to notice and
+ * delete by hand.
  */
-export function safeHfGgufFile(value: unknown): string | null {
-  const safe = rebuild(value, HF_ALPHABET, MAX_HF_REF_CHARS);
-  if (safe === null || !shapeOk(safe)) return null;
-  return /\.gguf$/i.test(safe) ? safe : null;
-}
-
-/**
- * A GGUF already on the box, named the way `DELETE` takes it: the plain file
- * name `hf download --local-dir` left behind, with no directory part at all.
- * Kept separate from `safeHfGgufFile` — that one may carry the repo's own
- * sub-directory, this one addresses something already on disk.
- */
-export function safeLocalGgufName(value: unknown): string | null {
+export function safeGgufName(value: unknown): string | null {
   const safe = rebuild(value, LOCAL_NAME_ALPHABET, MAX_HF_REF_CHARS);
   if (safe === null || safe.startsWith("-") || safe === "." || safe === "..") return null;
   return /\.gguf$/i.test(safe) ? safe : null;
@@ -146,12 +146,8 @@ export function isHfRepo(value: unknown): value is string {
   return safeHfRepo(value) !== null;
 }
 
-export function isHfGgufFile(value: unknown): value is string {
-  return safeHfGgufFile(value) !== null;
-}
-
-export function isLocalGgufName(value: unknown): value is string {
-  return safeLocalGgufName(value) !== null;
+export function isGgufName(value: unknown): value is string {
+  return safeGgufName(value) !== null;
 }
 
 export interface DiskVerdict {

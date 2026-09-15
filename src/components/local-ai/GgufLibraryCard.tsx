@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { formatBytes } from "@/lib/format-bytes";
 import { useT } from "@/lib/i18n";
-import { isHfGgufFile, isHfRepo } from "@/lib/local-install";
+import { isGgufName, isHfRepo } from "@/lib/local-install";
 import { BUTTON, CARD, CardHeading, INPUT, InstallOutcomeView, InstallProgressView, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 import { describeRefusal, useStreamedInstall } from "@/components/local-ai/use-streamed-install";
 
@@ -49,7 +49,7 @@ function isLibrary(value: unknown): value is Library {
   return Array.isArray(v.files) && typeof v.defaultFile === "string";
 }
 
-export default function GgufLibraryCard() {
+export default function GgufLibraryCard({ onChanged }: { onChanged?: () => void }) {
   const { t, locale } = useT();
   const [library, setLibrary] = useState<Library | null>(null);
   const [repo, setRepo] = useState("");
@@ -74,7 +74,7 @@ export default function GgufLibraryCard() {
 
   // Validated on THIS side with the same module the route validates with, so a
   // typo is answered instantly instead of costing a round trip.
-  const named = isHfRepo(repo.trim()) && isHfGgufFile(file.trim());
+  const named = isHfRepo(repo.trim()) && isGgufName(file.trim());
 
   const clearProbe = () => {
     setProbe(null);
@@ -119,6 +119,10 @@ export default function GgufLibraryCard() {
       setProbe(null);
       setRepo("");
       setFile("");
+      // The file just fetched may BE the one the runtime is configured with —
+      // a box whose Gemma GGUF was missing now has it, and the inventory row
+      // above this card says "Not installed" until something asks again.
+      onChanged?.();
     }
   };
 

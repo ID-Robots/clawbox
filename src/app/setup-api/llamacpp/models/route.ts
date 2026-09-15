@@ -6,7 +6,7 @@ import path from "path";
 import { NextResponse } from "next/server";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
 import { getLlamaCppLaunchSpec } from "@/lib/llamacpp-server";
-import { safeHfGgufFile, safeHfRepo, safeLocalGgufName } from "@/lib/local-install";
+import { safeGgufName, safeHfRepo } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -134,7 +134,7 @@ export async function GET(request: Request) {
     // play and only these two are used — in a path, and in a URL this box
     // fetches.
     const repo = safeHfRepo(askedRepo);
-    const file = safeHfGgufFile(askedFile);
+    const file = safeGgufName(askedFile);
     if (repo === null || file === null) {
       return NextResponse.json({ error: "That is not a Hugging Face repository and GGUF file.", code: "invalid" }, { status: 400 });
     }
@@ -200,7 +200,7 @@ export async function POST(req: Request) {
   // Rebuilt from the alphabet, so what reaches `path.join`, `fetch` and
   // `execFile` below is made of those characters and nothing the caller sent.
   const repo = safeHfRepo(body.repo);
-  const file = safeHfGgufFile(body.file);
+  const file = safeGgufName(body.file);
   if (repo === null || file === null) {
     return NextResponse.json(
       { error: "Name the model as a Hugging Face repository and a .gguf file inside it.", code: "invalid" },
@@ -215,6 +215,8 @@ export async function POST(req: Request) {
       { status: 409 },
     );
   }
+  // One path segment, so what lands is a file `listLibrary` shows and `DELETE`
+  // can take away — see `safeGgufName`.
   const target = path.join(spec.modelDir, file);
   if (await exists(target)) {
     return NextResponse.json({ error: "That file is already in this box's model library.", code: "already_here" }, { status: 409 });
@@ -298,7 +300,7 @@ export async function DELETE(req: Request) {
   // The plain file name only. Rebuilt from the alphabet rather than tested and
   // passed through, so no caller's string ever reaches `path.join` — the rule
   // `safeAppId` and `safeSkillName` keep for the same reason.
-  const name = safeLocalGgufName(new URL(req.url).searchParams.get("file"));
+  const name = safeGgufName(new URL(req.url).searchParams.get("file"));
   if (name === null) {
     return NextResponse.json({ error: "That is not a model file in this box's library.", code: "invalid" }, { status: 400 });
   }

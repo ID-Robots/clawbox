@@ -4,6 +4,7 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 vi.mock("@/lib/local-ai-runtime", () => ({
   ensureLocalAiReady: vi.fn(),
   getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
+  getOllamaModelsDir: vi.fn(() => "/usr/share/ollama/.ollama/models"),
 }));
 
 // Pulling a model is the OWNER's verb: `requireSession` here also admitted the
@@ -11,9 +12,15 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 const owner = { value: true };
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
 
-// The disk check the route makes on the first `total` the pull reports.
+// The disk check the route makes on each layer's `total`.
 const free = { bytes: 100 * 1024 * 1024 * 1024 };
-vi.mock("@/lib/project-import", () => ({ freeBytes: async () => free.bytes }));
+const measured: string[] = [];
+vi.mock("@/lib/project-import", () => ({
+  freeBytes: async (dir: string) => {
+    measured.push(dir);
+    return free.bytes;
+  },
+}));
 
 describe("POST /setup-api/ollama/pull", () => {
   let ollamaPullPost: (req: Request) => Promise<Response>;
@@ -31,6 +38,7 @@ describe("POST /setup-api/ollama/pull", () => {
     vi.resetModules();
     owner.value = true;
     free.bytes = 100 * 1024 * 1024 * 1024;
+    measured.length = 0;
     session = installSessionFixture();
     vi.stubGlobal("fetch", vi.fn());
     const mod = await import("@/app/setup-api/ollama/pull/route");
@@ -312,6 +320,55 @@ describe("POST /setup-api/ollama/pull", () => {
 
     expect(res.status).toBe(403);
     expect(body.code).toBe("cross_origin");
+  });
+
+  it("measures the filesystem Ollama's own blobs land on, not data/", async () => {
+    // ollama.service runs as its own account with its own home, which on this
+    // box need not be the mount `data/` sits on.
+    const mockReader = {
+      cancel: vi.fn(() => Promise.resolve()),
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(JSON.stringify({ status: "pulling", completed: 1, total: 1024 }) + "\n") })
+        .mockResolvedValue({ done: true }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => mockReader } }));
+
+    await readAll(await ollamaPullPost(jsonRequest({ model: "small" })));
+    expect(measured).not.toHaveLength(0);
+    for (const dir of measured) expect(dir).not.toContain("/data");
+  });
+
+  it("checks every layer, not only the first", async () => {
+    // A model is several blobs and the stream reports a `total` per digest; a
+    // check that fired once let every later layer through.
+    const chunks = [
+      JSON.stringify({ status: "pulling", digest: "sha256:aaa", completed: 0, total: 1024 }) + "\n",
+      JSON.stringify({ status: "pulling", digest: "sha256:aaa", completed: 512, total: 1024 }) + "\n",
+      JSON.stringify({ status: "pulling", digest: "sha256:bbb", completed: 0, total: 40 * 1024 * 1024 * 1024 }) + "\n",
+    ];
+    let index = 0;
+    const cancel = vi.fn(() => Promise.resolve());
+    const mockReader = {
+      cancel,
+      read: vi.fn().mockImplementation(() => {
+        if (index < chunks.length) {
+          return Promise.resolve({ done: false, value: new TextEncoder().encode(chunks[index++]) });
+        }
+        return Promise.resolve({ done: true });
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => mockReader } }));
+    free.bytes = 4 * 1024 * 1024 * 1024;
+
+    const lines = (await readAll(await ollamaPullPost(jsonRequest({ model: "layered" }))))
+      .trim().split("\n").map((l) => JSON.parse(l));
+
+    // The first layer fits and goes through; the second does not and stops it.
+    expect(lines[0]).toMatchObject({ digest: "sha256:aaa" });
+    expect(lines.at(-1)).toMatchObject({ code: "disk_full" });
+    // One check per digest, not one per progress line.
+    expect(measured).toHaveLength(2);
+    expect(cancel).toHaveBeenCalled();
   });
 
   it("stops a pull that would not fit, on the first total it sees", async () => {

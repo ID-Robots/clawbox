@@ -164,7 +164,14 @@ describe("GET /setup-api/llamacpp/models", () => {
 
   it("refuses a reference that is not owner/name plus a .gguf", async () => {
     const { GET } = await load();
-    for (const query of ["repo=owner&file=other.gguf", "repo=owner/name&file=README.md", "repo=owner/../x&file=a.gguf"]) {
+    for (const query of [
+      "repo=owner&file=other.gguf",
+      "repo=owner/name&file=README.md",
+      "repo=owner/../x&file=a.gguf",
+      // Nested: it would download to a path the listing never shows and the
+      // removal never accepts.
+      "repo=owner/name&file=sub%2Fmodel.gguf",
+    ]) {
       const res = await GET(new Request(`http://localhost/setup-api/llamacpp/models?${query}`));
       expect(res.status).toBe(400);
     }
@@ -225,6 +232,15 @@ describe("POST /setup-api/llamacpp/models", () => {
     const res = await POST(post({ repo: "owner/name", file: "other.gguf" }));
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("no_downloader");
+  });
+
+  it("refuses a nested reference rather than spending disk on a file it could not list", async () => {
+    const { POST } = await load();
+    const res = await POST(post({ repo: "owner/name", file: "sub/model.gguf" }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("invalid");
+    expect(fs.existsSync(path.join(modelDir, "sub"))).toBe(false);
   });
 
   it("refuses a file that is already in the library", async () => {

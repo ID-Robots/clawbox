@@ -80,6 +80,26 @@ export function getOllamaBaseUrl(): string {
   return normalizeBaseUrl(process.env.OLLAMA_HOST || DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_BASE_URL);
 }
 
+/**
+ * Where ollama.service keeps its blobs — the directory a pull writes into, and
+ * so the filesystem a pull has to be measured against.
+ *
+ * NOT `data/`. Ollama runs as its own account with its own home
+ * (`/usr/share/ollama` on the vendor's package, which
+ * `scripts/x64-migration/ensure-ollama-home.sh` is careful about), and on this
+ * box that need not be the mount `data/` sits on. Measuring the wrong one
+ * would refuse a pull that fits, or let the other filesystem fill.
+ *
+ * `OLLAMA_MODELS` first, because that is the one knob the service honours if an
+ * operator moved the store. The path need not exist: `checkInstallDisk` walks
+ * to the nearest existing ancestor, which is on the same filesystem the blobs
+ * will land on.
+ */
+export function getOllamaModelsDir(): string {
+  const configured = process.env.OLLAMA_MODELS?.trim();
+  return configured || "/usr/share/ollama/.ollama/models";
+}
+
 export function getLocalAiProxyBaseUrl(provider: LocalAiProvider): string {
   return PROVIDERS[provider].proxyBaseUrl();
 }
