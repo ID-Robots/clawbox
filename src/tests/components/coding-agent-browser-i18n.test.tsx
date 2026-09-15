@@ -77,8 +77,9 @@ describe("the coding agent's browser copy renders translated", () => {
     expect(copy["codingAgent.wizardBrowserTitle"]).toBe("Läufe dürfen den Browser dieser Box nutzen");
     expect(copy["codingAgent.wizardBrowserSkip"]).toBe("Überspringen — unsichtbar browsen");
     // The step count is part of the wizard's promise: the browser step made it
-    // four, and nine locale files still said three.
-    expect(copy["codingAgent.wizardIntro"]).toContain("vier Schritte");
+    // four and nine locale files still said three; the Improvement Program
+    // step made it five.
+    expect(copy["codingAgent.wizardIntro"]).toContain("fünf Schritte");
     // One register throughout the card — the block is Sie, and the two media
     // hints beside this switch had drifted to du.
     expect(copy["codingAgent.realBrowserHint"]).toContain("Sie");
@@ -88,7 +89,7 @@ describe("the coding agent's browser copy renders translated", () => {
   it("shows Japanese, not the English underneath it", async () => {
     const copy = await copyIn("ja");
     expect(copy["codingAgent.realBrowserLabel"]).toBe("このボックスのブラウザーで確認する");
-    expect(copy["codingAgent.wizardIntro"]).toContain("4 ステップ");
+    expect(copy["codingAgent.wizardIntro"]).toContain("5 ステップ");
     for (const key of KEYS) {
       expect(copy[key], `${key} fell through to English`).not.toBe(translations.en[key]);
     }

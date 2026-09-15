@@ -1009,7 +1009,7 @@ export const nl: Record<string, string> = {
   "codingAgent.message.errorSettled": "Die run is klaar, dus er valt niets meer te vertellen.",
 
   "codingAgent.wizardTitle": "Codeagent instellen",
-  "codingAgent.wizardIntro": "Met de codeagent geeft je assistent een hele taak door aan Claude Code op deze box: hij leest en schrijft bestanden in één map, voert daar opdrachten uit en rapporteert terug. Instellen kost vier stappen.",
+  "codingAgent.wizardIntro": "Met de codeagent geeft je assistent een hele taak door aan Claude Code op deze box: hij leest en schrijft bestanden in één map, voert daar opdrachten uit en rapporteert terug. Instellen kost vijf stappen.",
   "codingAgent.wizardEnable": "Inschakelen",
   "codingAgent.wizardStepOf": "Stap {n} van {total}",
   "codingAgent.wizardNext": "Volgende",
@@ -1022,6 +1022,8 @@ export const nl: Record<string, string> = {
   "codingAgent.wizardGithubHint": "Een run pusht zijn werk met dit account naar GitHub. Je kunt dit overslaan en later verbinden in Instellingen — een run werkt ook zonder, hij heeft dan alleen nergens om naartoe te pushen.",
   "codingAgent.wizardGithubConnect": "Aanmelden met GitHub",
   "codingAgent.wizardGithubConnected": "GitHub verbonden",
+  "codingAgent.wizardImprovementTitle": "Help ClawBox te verbeteren",
+  "codingAgent.wizardImprovementHint": "Als er iets misgaat in ClawBox' eigen software — een codeersessie die mislukt, een updatestap die niet doorloopt, een pagina met een fout — kan deze box een kort technisch rapport naar de ontwikkelaars sturen als openbare issue op GitHub, met het account dat je zojuist hebt verbonden. Kies wat hij moet doen; je kunt dit altijd wijzigen in de instellingen van de codeagent.",
   "codingAgent.wizardProjectTitle": "Projectmap en inspanning",
   "codingAgent.wizardProjectHint": "De map waarin een run werkt wanneer de assistent geen project noemt. Blader om er een te kiezen, of typ een absoluut pad.",
   "codingAgent.wizardBrowse": "Bladeren",

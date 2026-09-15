@@ -1009,7 +1009,7 @@ export const fr: Record<string, string> = {
   "codingAgent.message.errorSettled": "Cette exécution est terminée : il n'y a plus rien à lui dire.",
 
   "codingAgent.wizardTitle": "Configurer l'agent de code",
-  "codingAgent.wizardIntro": "L'agent de code permet à votre assistant de confier une tâche entière à Claude Code sur cette box : il lit et écrit des fichiers dans un dossier, y exécute des commandes et rend compte. La configuration tient en quatre étapes.",
+  "codingAgent.wizardIntro": "L'agent de code permet à votre assistant de confier une tâche entière à Claude Code sur cette box : il lit et écrit des fichiers dans un dossier, y exécute des commandes et rend compte. La configuration tient en cinq étapes.",
   "codingAgent.wizardEnable": "Activer",
   "codingAgent.wizardStepOf": "Étape {n} sur {total}",
   "codingAgent.wizardNext": "Suivant",
@@ -1022,6 +1022,8 @@ export const fr: Record<string, string> = {
   "codingAgent.wizardGithubHint": "Une exécution pousse son travail vers GitHub avec ce compte. Vous pouvez ignorer cette étape et vous connecter plus tard dans les Réglages — une exécution fonctionne sans, elle n'a simplement nulle part où pousser.",
   "codingAgent.wizardGithubConnect": "Se connecter avec GitHub",
   "codingAgent.wizardGithubConnected": "GitHub connecté",
+  "codingAgent.wizardImprovementTitle": "Aidez à améliorer ClawBox",
+  "codingAgent.wizardImprovementHint": "Quand quelque chose ne va pas dans le logiciel ClawBox lui-même — une exécution de code qui échoue, une étape de mise à jour qui n'aboutit pas, une page en erreur — cette box peut envoyer aux développeurs un court rapport technique sous forme de ticket public sur GitHub, avec le compte que vous venez de connecter. Choisissez ce qu'elle doit faire ; vous pourrez le changer à tout moment dans les réglages de l'agent de code.",
   "codingAgent.wizardProjectTitle": "Dossier du projet et réflexion",
   "codingAgent.wizardProjectHint": "Le dossier dans lequel une exécution travaille quand l'assistant ne nomme aucun projet. Parcourez pour en choisir un, ou saisissez un chemin absolu.",
   "codingAgent.wizardBrowse": "Parcourir",

@@ -1004,7 +1004,7 @@ export const es: Record<string, string> = {
   "codingAgent.message.errorSettled": "Esa ejecución ha terminado, así que ya no hay nada que decirle.",
 
   "codingAgent.wizardTitle": "Configurar el agente de código",
-  "codingAgent.wizardIntro": "El agente de código permite que tu asistente delegue una tarea completa a Claude Code en esta caja: lee y escribe archivos en una carpeta, ejecuta comandos allí e informa del resultado. Configurarlo lleva cuatro pasos.",
+  "codingAgent.wizardIntro": "El agente de código permite que tu asistente delegue una tarea completa a Claude Code en esta caja: lee y escribe archivos en una carpeta, ejecuta comandos allí e informa del resultado. Configurarlo lleva cinco pasos.",
   "codingAgent.wizardEnable": "Activar",
   "codingAgent.wizardStepOf": "Paso {n} de {total}",
   "codingAgent.wizardNext": "Siguiente",
@@ -1017,6 +1017,8 @@ export const es: Record<string, string> = {
   "codingAgent.wizardGithubHint": "Una ejecución sube su trabajo a GitHub con esta cuenta. Puedes omitirlo y conectarlo más tarde en Ajustes: una ejecución funciona igual sin ello, solo que no tiene dónde subir.",
   "codingAgent.wizardGithubConnect": "Iniciar sesión con GitHub",
   "codingAgent.wizardGithubConnected": "GitHub conectado",
+  "codingAgent.wizardImprovementTitle": "Ayuda a mejorar ClawBox",
+  "codingAgent.wizardImprovementHint": "Cuando algo falla en el propio software de ClawBox — una ejecución de código que falla, un paso de actualización que no termina, una página con un error — esta caja puede enviar un breve informe técnico a los desarrolladores como incidencia pública en GitHub, con la cuenta que acabas de conectar. Elige qué debe hacer; puedes cambiarlo en cualquier momento en los ajustes del agente de código.",
   "codingAgent.wizardProjectTitle": "Carpeta del proyecto y esfuerzo",
   "codingAgent.wizardProjectHint": "La carpeta en la que trabaja una ejecución cuando el asistente no nombra ningún proyecto. Explora para elegir una o escribe una ruta absoluta.",
   "codingAgent.wizardBrowse": "Explorar",

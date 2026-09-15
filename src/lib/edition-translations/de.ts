@@ -1008,7 +1008,7 @@ export const de: Record<string, string> = {
   "codingAgent.message.errorSettled": "Dieser Lauf ist beendet, es gibt ihm nichts mehr zu sagen.",
 
   "codingAgent.wizardTitle": "Coding-Agent einrichten",
-  "codingAgent.wizardIntro": "Mit dem Coding-Agenten übergibt Ihr Assistent eine ganze Aufgabe an Claude Code auf dieser Box: Er liest und schreibt Dateien in einem Ordner, führt dort Befehle aus und meldet sich zurück. Die Einrichtung dauert vier Schritte.",
+  "codingAgent.wizardIntro": "Mit dem Coding-Agenten übergibt Ihr Assistent eine ganze Aufgabe an Claude Code auf dieser Box: Er liest und schreibt Dateien in einem Ordner, führt dort Befehle aus und meldet sich zurück. Die Einrichtung dauert fünf Schritte.",
   "codingAgent.wizardEnable": "Aktivieren",
   "codingAgent.wizardStepOf": "Schritt {n} von {total}",
   "codingAgent.wizardNext": "Weiter",
@@ -1021,6 +1021,8 @@ export const de: Record<string, string> = {
   "codingAgent.wizardGithubHint": "Ein Lauf überträgt seine Arbeit mit diesem Konto zu GitHub. Sie können das überspringen und später in den Einstellungen verbinden — ein Lauf funktioniert auch ohne, er hat dann nur kein Ziel zum Übertragen.",
   "codingAgent.wizardGithubConnect": "Mit GitHub anmelden",
   "codingAgent.wizardGithubConnected": "GitHub verbunden",
+  "codingAgent.wizardImprovementTitle": "Helfen Sie, ClawBox zu verbessern",
+  "codingAgent.wizardImprovementHint": "Wenn in der ClawBox-Software selbst etwas schiefgeht — ein fehlgeschlagener Coding-Lauf, ein Update-Schritt, der nicht durchläuft, eine Seite mit einem Fehler — kann diese Box über das gerade verbundene Konto einen kurzen technischen Bericht als öffentliches Issue auf GitHub an die Entwickler senden. Wählen Sie, was sie tun soll; Sie können das jederzeit in den Einstellungen des Coding-Agenten ändern.",
   "codingAgent.wizardProjectTitle": "Projektordner und Aufwand",
   "codingAgent.wizardProjectHint": "Der Ordner, in dem ein Lauf arbeitet, wenn der Assistent kein Projekt nennt. Wählen Sie einen über Durchsuchen, oder geben Sie einen absoluten Pfad ein.",
   "codingAgent.wizardBrowse": "Durchsuchen",

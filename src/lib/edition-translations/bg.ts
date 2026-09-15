@@ -995,7 +995,7 @@ export const bg: Record<string, string> = {
   "codingAgent.message.errorSettled": "Това изпълнение приключи, така че няма какво повече да му се каже.",
 
   "codingAgent.wizardTitle": "Настройка на кодиращия агент",
-  "codingAgent.wizardIntro": "Кодиращият агент позволява на асистента ви да предаде цяла задача на Claude Code на тази кутия: чете и записва файлове в една папка, изпълнява команди там и се отчита. Настройката е в четири стъпки.",
+  "codingAgent.wizardIntro": "Кодиращият агент позволява на асистента ви да предаде цяла задача на Claude Code на тази кутия: чете и записва файлове в една папка, изпълнява команди там и се отчита. Настройката е в пет стъпки.",
   "codingAgent.wizardEnable": "Активиране",
   "codingAgent.wizardStepOf": "Стъпка {n} от {total}",
   "codingAgent.wizardNext": "Напред",
@@ -1008,6 +1008,8 @@ export const bg: Record<string, string> = {
   "codingAgent.wizardGithubHint": "Изпълнението качва работата си в GitHub с този акаунт. Можете да пропуснете и да се свържете по-късно от Настройки — изпълнението работи и без това, просто няма къде да качва.",
   "codingAgent.wizardGithubConnect": "Вход с GitHub",
   "codingAgent.wizardGithubConnected": "GitHub е свързан",
+  "codingAgent.wizardImprovementTitle": "Помогнете за подобряването на ClawBox",
+  "codingAgent.wizardImprovementHint": "Когато нещо се обърка в самия софтуер на ClawBox — неуспешно изпълнение на код, стъпка от обновяването, която не завършва, страница с грешка — тази кутия може да изпрати кратък технически доклад до разработчиците като публичен проблем в GitHub, с акаунта, който току-що свързахте. Изберете какво да прави; можете да го промените по всяко време в настройките на кодиращия агент.",
   "codingAgent.wizardProjectTitle": "Папка на проекта и усилие",
   "codingAgent.wizardProjectHint": "Папката, в която работи изпълнението, когато асистентът не посочи проект. Разгледайте, за да изберете, или въведете абсолютен път.",
   "codingAgent.wizardBrowse": "Преглед",
