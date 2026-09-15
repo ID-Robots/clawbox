@@ -288,7 +288,7 @@ export default function BrowserSettingsPanel({
               value={urlValue}
               onChange={(e) => setUrlDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") void save({ startUrl: urlValue }, "startUrl"); }}
-              placeholder="https://www.google.com"
+              placeholder="about:blank"
               data-testid="browser-settings-start-url"
               // text-base on a phone: an input under 16px makes iOS Safari zoom
               // the page on focus, which scrolls the rest of the page away.

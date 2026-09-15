@@ -74,7 +74,7 @@ export async function POST(request: Request) {
       const normalized = normalizeStartUrl(body.startUrl);
       if (!normalized) {
         return NextResponse.json(
-          { error: "The start page has to be a web address beginning with http:// or https://.", code: "bad_start_url" },
+          { error: "The start page has to be about:blank or a web address beginning with http:// or https://.", code: "bad_start_url" },
           { status: 400 },
         );
       }
