@@ -273,6 +273,9 @@ describe("the improvement step", () => {
       .toBe(translations.en["improvement.githubMissing"]);
     fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-off"));
     expect(screen.queryByTestId("coding-agent-wizard-improvement-github")).toBeNull();
+  });
+});
+
 describe("what the wizard never offers", () => {
   it("never mentions Vercel, on any step", async () => {
     // The Vercel integration is a BETA flag, off by default, offered in ONE
