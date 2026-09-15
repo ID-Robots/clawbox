@@ -128,7 +128,11 @@ const DEEP_SPACE_WALLPAPER: BuiltinWallpaper = {
 };
 
 const NEUTRAL_ONLY: readonly BuiltinWallpaper[] = [DEEP_SPACE_WALLPAPER];
-const OPENCLAW_WALLPAPERS: readonly BuiltinWallpaper[] = [LOBSTER_ORBITAL_WALLPAPER, CLAWBOX_WALLPAPER, DEEP_SPACE_WALLPAPER];
+// The Hermes picture is offered on an OpenClaw box as well (owner's ruling
+// 2026-09-15: "it needs to be available for both hermes and openclaw"), which
+// narrows the 2026-09-06 rule to the other direction — a Hermes box still
+// shows no ClawBox art, and the DEFAULT on each edition is still its own brand.
+const OPENCLAW_WALLPAPERS: readonly BuiltinWallpaper[] = [LOBSTER_ORBITAL_WALLPAPER, CLAWBOX_WALLPAPER, HERMES_WALLPAPER, DEEP_SPACE_WALLPAPER];
 const HERMES_WALLPAPERS: readonly BuiltinWallpaper[] = [HERMES_WALLPAPER, DEEP_SPACE_WALLPAPER];
 
 /**

@@ -25,10 +25,11 @@ import {
 const ids = (harness: string | null) => builtinWallpapers(harness).map((wp) => wp.id);
 
 describe("which built-ins an edition offers", () => {
-  it("gives an OpenClaw box its own brand and the neutral one", () => {
+  it("gives an OpenClaw box its own brand, the Hermes picture and the neutral one", () => {
     // Lobster Orbital first — the default since 2026-09-15 — with the older
-    // ClawBox picture kept selectable behind it.
-    expect(ids("openclaw")).toEqual(["lobster-orbital", "clawbox", "deep-space"]);
+    // ClawBox picture kept selectable behind it, and the Hermes picture too
+    // (owner's ruling 2026-09-15: available on both editions).
+    expect(ids("openclaw")).toEqual(["lobster-orbital", "clawbox", "hermes", "deep-space"]);
   });
 
   it("gives a Hermes box its own brand and the neutral one", () => {
@@ -41,12 +42,13 @@ describe("which built-ins an edition offers", () => {
     expect(ids(null)).toEqual(["deep-space"]);
   });
 
-  it("does not carry the other edition's image file at all", () => {
+  it("carries the Hermes picture on OpenClaw, and no ClawBox art on Hermes", () => {
     // The tile is an <img src>, so an entry that is merely unselectable would
-    // still fetch the picture. This is about what the PAGE requests — both
-    // files ship on both editions and stay fetchable by URL, which the ruling
-    // does not ask about.
-    expect(builtinWallpapers("openclaw").map((wp) => wp.image)).not.toContain("/hermes-wallpaper.jpeg");
+    // still fetch the picture. This is about what the PAGE requests — every
+    // file ships on both editions and stays fetchable by URL. Since
+    // 2026-09-15 the Hermes picture is offered on an OpenClaw box as well; the
+    // other direction is unchanged.
+    expect(builtinWallpapers("openclaw").map((wp) => wp.image)).toContain("/hermes-wallpaper.jpeg");
     expect(builtinWallpapers("hermes").map((wp) => wp.image)).not.toContain("/clawbox-wallpaper.jpeg");
     expect(builtinWallpapers("hermes").map((wp) => wp.image)).not.toContain("/lobster-orbital-wallpaper.jpeg");
     expect(builtinWallpapers(null).every((wp) => wp.image === "")).toBe(true);
@@ -106,10 +108,12 @@ describe("what a saved wp_id actually paints", () => {
     expect(renderedWallpaperId("deep-space", "hermes", 0)).toBe("deep-space");
   });
 
-  it("heals the OTHER edition's brand to this one", () => {
-    // A box re-imaged onto the other edition, or a choice made before the
-    // ruling. For the PAINT only — the caller writes nothing back.
-    expect(renderedWallpaperId("hermes", "openclaw", 0)).toBe("lobster-orbital");
+  it("keeps a Hermes pick on an OpenClaw box, and heals ClawBox art on a Hermes one", () => {
+    // Since 2026-09-15 the Hermes picture is offered on an OpenClaw box too, so
+    // a stored "hermes" there is a choice and paints as saved. The other
+    // direction still heals — a box re-imaged onto Hermes, or a choice made
+    // before the ruling — for the PAINT only; the caller writes nothing back.
+    expect(renderedWallpaperId("hermes", "openclaw", 0)).toBe("hermes");
     expect(renderedWallpaperId("clawbox", "hermes", 0)).toBe("hermes");
     expect(renderedWallpaperId("lobster-orbital", "hermes", 0)).toBe("hermes");
   });

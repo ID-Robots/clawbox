@@ -124,7 +124,7 @@ describe("/app/settings — Appearance", () => {
     // Upload tile. It is now handed the wallpapers THIS EDITION ships — its own
     // brand and the neutral one — rather than both products' branding
     // (owner ruling 2026-09-06).
-    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("lobster-orbital,clawbox,deep-space");
+    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("lobster-orbital,clawbox,hermes,deep-space");
   });
 
   it("shows the wallpaper's own opacity while the box holds none, and never writes it", async () => {
@@ -397,11 +397,11 @@ describe("/app/settings — Appearance", () => {
     expect(screen.getByTestId("ui-wallpapers").textContent).toBe("deep-space");
   });
 
-  it("heals a stored other-edition brand for the card, and leaves the box's value alone", async () => {
-    // A `wp_id` naming the art this edition no longer ships — a box re-imaged
-    // onto the other edition, or a choice made before the ruling. The card
-    // shows this edition's own brand; the stored value is not rewritten, for
-    // the same reason an unanswerable `custom-<n>` is not (#728).
+  it("paints a stored Hermes pick on an OpenClaw box as saved, and leaves the box's value alone", async () => {
+    // Since 2026-09-15 the Hermes picture is offered on an OpenClaw box too, so
+    // a `wp_id` of "hermes" is a choice the card honours — and, like every
+    // other read, it rewrites nothing (#728). The healing of art an edition does
+    // not ship is pinned on the resolver itself in builtin-wallpapers.test.ts.
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -416,7 +416,7 @@ describe("/app/settings — Appearance", () => {
     );
 
     render(<StandaloneAppPage />);
-    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("lobster-orbital"));
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("hermes"));
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });

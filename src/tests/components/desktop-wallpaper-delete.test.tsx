@@ -452,17 +452,17 @@ describe("the wallpaper's own opacity", () => {
  * screen.
  */
 describe("the built-in wallpapers this edition offers", () => {
-  it("offers Lobster Orbital, ClawBox and Deep Space on an OpenClaw box, and never the Hermes art", async () => {
+  it("offers Lobster Orbital, ClawBox and Deep Space on an OpenClaw box, the Hermes picture among them", async () => {
     // The older ClawBox picture stays selectable — a box that chose it keeps
     // it — behind the default.
     savedWallpaperId = "clawbox";
     await mountDesktop("clawbox-wallpaper");
     await openAppearanceSettings();
 
-    // Not merely unselectable — not fetched. The tile is an <img src>, so a
-    // tile for the other edition would still pull the other product's picture.
-    expect(brandWallpaperAssets().some((url) => url.includes("hermes-wallpaper"))).toBe(false);
-    expect(builtinWallpaperTiles()).toEqual(["lobster-orbital", "clawbox", "deep-space"]);
+    // The Hermes picture is offered here too since 2026-09-15 (owner's ruling:
+    // available on both editions), so its tile — an <img src> — is fetched.
+    expect(brandWallpaperAssets().some((url) => url.includes("hermes-wallpaper"))).toBe(true);
+    expect(builtinWallpaperTiles()).toEqual(["lobster-orbital", "clawbox", "hermes", "deep-space"]);
   });
 
   it("offers Hermes and Deep Space on a Hermes box, and never the ClawBox art", async () => {
