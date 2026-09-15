@@ -11,6 +11,7 @@ import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
 // The toggle lives in its own module now — the secrets card draws one too.
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
+import ImprovementProgramCard from "./ImprovementProgramCard";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
@@ -21,8 +22,9 @@ import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } 
  * Claude Code runs (src/lib/coding-agent.ts), in one place.
  *
  * The switch, the default project folder, how hard a run thinks, the two
- * ceilings a run stops at, the automatic review pass, and the GitHub account
- * its work is backed up to.
+ * ceilings a run stops at, the automatic review pass, the GitHub account
+ * its work is backed up to — and, right under it, the ClawBox Improvement
+ * Program, whose reports go out on that same GitHub credential.
  * These used to sit at the top of the Coding Agent desktop app, above the
  * run history; the owner wanted the app to be about the runs and the
  * settings to live with the other settings. The app keeps the readiness
@@ -1205,6 +1207,14 @@ export default function CodingAgentSettingsPanel({
           {errorIn("github")}
         </div>
       )}
+
+      {/* The ClawBox Improvement Program, directly under GitHub because that is
+          the credential its reports ride on (`gh issue create`). Not behind
+          `github?.installed`: the choice is the owner's whether or not gh is
+          on the box yet, and the card itself says when GitHub is missing. It
+          lived in Settings → System until the move here; the wizard's
+          improvement step asks the same question once, on first run. */}
+      <ImprovementProgramCard />
     </div>
   );
 }

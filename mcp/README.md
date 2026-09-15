@@ -807,8 +807,9 @@ harness that is not usable, a failed update step, a route that threw — kept in
 `data/incidents.json` and, only if the owner opted in, filed on
 `ID-Robots/clawbox` as an issue labelled `improvement-program` / `auto-report`.
 
-The owner's switch (Settings → System) has three values and is the whole
-design:
+The owner's switch (Coding Agent → Settings, under the GitHub card; the
+first-run wizard asks it once as its second step) has three values and is the
+whole design:
 
 | | what the box does | what these tools do |
 |---|---|---|
