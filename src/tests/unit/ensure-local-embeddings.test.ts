@@ -180,6 +180,8 @@ type RunOpts = {
   extra?: Record<string, unknown>;
   /** Environment an ancestor (the updater, a login shell) may have exported. */
   extraEnv?: Record<string, string>;
+  /** Arguments for the script — `--no-download` is the one every automatic caller passes. */
+  args?: string[];
   /** The stub CLI answers 0 but writes a different file — what a misdirected CLI did on the box. */
   writeElsewhere?: boolean;
 };
@@ -235,7 +237,7 @@ function run(opts: RunOpts = {}) {
     mkdirSync(path.dirname(statePath), { recursive: true });
     writeFileSync(statePath, opts.state);
   }
-  const res = spawnSync("bash", [SCRIPT], {
+  const res = spawnSync("bash", [SCRIPT, ...(opts.args ?? [])], {
     encoding: "utf-8",
     env: {
       ...process.env,
@@ -356,6 +358,37 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(downloads(r.calls)).toEqual([]);
     expect(configSets(r.calls)).toHaveLength(1);
     expect(reindexes(r.calls)).toHaveLength(1);
+  });
+
+  it("with --no-download, wires a GGUF that is on disk exactly as before", () => {
+    // The flag install.sh and gateway-pre-start.sh pass: nothing after the
+    // model check changes for a box that has the file.
+    const r = run({ args: ["--no-download"] });
+    expect(r.status).toBe(0);
+    expect(downloads(r.calls)).toEqual([]);
+    expect(configSets(r.calls)).toEqual(ops(LEGACY));
+    expect(reindexes(r.calls)).toHaveLength(1);
+  });
+
+  it("with --no-download, fetches nothing and touches nothing when the GGUF is absent", () => {
+    // One line and exit 0: no hf, no config write, no reindex, and no backoff
+    // recorded either — nothing was attempted, so a later run by hand starts
+    // clean. The 639 MB is the owner's click in Settings → Local AI.
+    const r = run({ present: false, args: ["--no-download"] });
+    expect(r.status).toBe(0);
+    expect(downloads(r.calls)).toEqual([]);
+    expect(configSets(r.calls)).toEqual([]);
+    expect(reindexes(r.calls)).toEqual([]);
+    expect(r.state).toBe("");
+    expect(r.stdout).toMatch(/may not fetch it/);
+    expect(r.stdout).toMatch(/Settings → Local AI/);
+    expect(r.memorySearch).toEqual({});
+  });
+
+  it("refuses an option it does not know rather than taking it for a download run", () => {
+    const r = run({ present: false, args: ["--fetch"] });
+    expect(r.status).toBe(2);
+    expect(downloads(r.calls)).toEqual([]);
   });
 
   it("treats provider \"auto\" as unset", () => {
