@@ -30,6 +30,12 @@ provisioned before the web server first starts. It no-ops on an OpenClaw device,
 where `gateway-pre-start.sh` owns the registration; the premium `dual` SKU runs
 both.
 
+Both writers honour the owner's switch: with `clawbox_mcp_enabled: false` in
+`data/config.json` (Settings → Harness → Device tools, written by
+`/setup-api/harness/mcp`, which also unregisters and restarts each harness at
+once) each REMOVES its entry instead of writing it, so a reboot cannot put the
+tools back. Absent means on.
+
 Two properties of the Hermes entry are load-bearing:
 
 - **`command` is `bun`, with the script in `args`.** Hermes refuses an entry

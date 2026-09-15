@@ -403,15 +403,53 @@ if not isinstance(cfg, dict):
           file=sys.stderr)
     sys.exit(1)
 
-servers = cfg.get("mcp_servers")
-if not isinstance(servers, dict):
-    servers = {}
-    cfg["mcp_servers"] = servers
+
+def mcp_switched_off():
+    """The owner's switch for the MCP server (Settings -> Harness, 2026-09-15).
+
+    `clawbox_mcp_enabled` in the device store, read exactly the way the re-arm
+    below reads its own key from the same file and the way
+    src/lib/clawbox-mcp-switch.ts reads it: only the boolean `false` is off. An
+    absent key, another type and a store that cannot be read all mean ON — the
+    tools are the box's default capability, and a failed read must fail towards
+    the box the owner has always had, never towards one that lost its tools.
+    """
+    store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not store_path:
+        return False
+    try:
+        with open(store_path, encoding="utf-8") as fh:
+            store = json.load(fh)
+    except Exception:
+        return False
+    return isinstance(store, dict) and store.get("clawbox_mcp_enabled") is False
+
 
 changed = False
-if servers.get("clawbox") != desired:
-    servers["clawbox"] = desired
-    changed = True
+servers = cfg.get("mcp_servers")
+# What this run did to the entry, for the closing line: "registered" is the
+# only word the script used to have, and it would be a lie over a removal.
+mcp_action = "unchanged"
+if mcp_switched_off():
+    # HONOURED HERE, or the next web-server boot — which runs this script —
+    # would quietly put back the entry /setup-api/harness/mcp just removed.
+    # Everything below this point (the distractor skills, the clarify window,
+    # the path guard) still lands: none of it is the MCP server's.
+    if isinstance(servers, dict) and "clawbox" in servers:
+        del servers["clawbox"]
+        changed = True
+        mcp_action = "removed"
+        print("[register-mcp] the ClawBox MCP server is switched off in Settings; removed mcp_servers.clawbox")
+    else:
+        print("[register-mcp] the ClawBox MCP server is switched off in Settings; leaving it unregistered")
+else:
+    if not isinstance(servers, dict):
+        servers = {}
+        cfg["mcp_servers"] = servers
+    if servers.get("clawbox") != desired:
+        servers["clawbox"] = desired
+        changed = True
+        mcp_action = "registered"
 
 # ── Retire the bundled email-skill distractors. ─────────────────────────────
 # Hermes seeds a bundled skills library into ~/.hermes/skills, and its `email`
@@ -954,7 +992,12 @@ except Exception:
     except OSError:
         pass
     raise
-print("[register-mcp] registered the ClawBox MCP server with Hermes")
+if mcp_action == "registered":
+    print("[register-mcp] registered the ClawBox MCP server with Hermes")
+elif mcp_action == "removed":
+    print("[register-mcp] removed the ClawBox MCP server from the Hermes config")
+else:
+    print("[register-mcp] wrote the Hermes config (the MCP registration is unchanged)")
 PY
 
 # ── 4. Retire the harness's own browser toolset. ────────────────────────────

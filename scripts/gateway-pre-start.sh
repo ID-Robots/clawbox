@@ -5768,13 +5768,69 @@ if ! python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
-token = os.environ.get("CLAWBOX_MCP_TOKEN_VAL", "")
-if not token:
-    sys.exit(0)
+
+
+def write_atomically(cfg):
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp_path, cfg_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def mcp_switched_off():
+    """The owner's switch for the MCP server (Settings -> Harness, 2026-09-15).
+
+    `clawbox_mcp_enabled` in the device store (data/config.json), read the way
+    the other device-store readers in this script read it: never sourced, and
+    the SAME rule as src/lib/clawbox-mcp-switch.ts — only the boolean `false`
+    is off. An absent key, a value of another type and a store that cannot be
+    read (`except Exception`, as wide as the sibling readers: this block is
+    guarded, but a corrupt byte in the store must still cost the box its
+    switch and not its tools) all read as ON, because the tools are the box's
+    default capability and every failure of this read must fail towards the
+    box the owner has always had.
+    """
+    store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not store_path:
+        return False
+    try:
+        with open(store_path, encoding="utf-8") as fh:
+            store = json.load(fh)
+    except Exception:
+        return False
+    return isinstance(store, dict) and store.get("clawbox_mcp_enabled") is False
+
+
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
 except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+
+# THE SWITCH IS HONOURED BEFORE THE TOKEN IS LOOKED AT: an owner's off holds
+# whether or not this boot has a bearer, and it is what stops the next gateway
+# start from quietly putting the tools back after /setup-api/harness/mcp
+# removed them. One line either way, so the journal says why the entry is gone.
+if mcp_switched_off():
+    mcp_cfg = cfg.get("mcp")
+    servers = mcp_cfg.get("servers") if isinstance(mcp_cfg, dict) else None
+    if isinstance(servers, dict) and "clawbox" in servers:
+        del servers["clawbox"]
+        write_atomically(cfg)
+        print("  The ClawBox MCP server is switched off in Settings; removed its registration")
+    else:
+        print("  The ClawBox MCP server is switched off in Settings; leaving it unregistered")
+    sys.exit(0)
+
+token = os.environ.get("CLAWBOX_MCP_TOKEN_VAL", "")
+if not token:
     sys.exit(0)
 
 desired = {
@@ -5790,17 +5846,7 @@ if mcp_servers.get("clawbox") == desired:
     print("  MCP server registration already current, skipping write")
     sys.exit(0)
 mcp_servers["clawbox"] = desired
-tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
-try:
-    with os.fdopen(tmp_fd, "w") as f:
-        json.dump(cfg, f, indent=2)
-    os.replace(tmp_path, cfg_path)
-except Exception:
-    try:
-        os.unlink(tmp_path)
-    except Exception:
-        pass
-    raise
+write_atomically(cfg)
 print("  Updated MCP server registration with bearer token")
 PY
 then
