@@ -1,10 +1,12 @@
 export const dynamic = "force-dynamic";
 
+import fs from "fs/promises";
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
-import { getEmbedProvisioningStatus } from "@/lib/embed-server";
+import { getEmbedLaunchSpec, getEmbedProvisioningStatus } from "@/lib/embed-server";
+import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 
 /**
  * POST /setup-api/embed/install → fetch the memory-search model, streamed.
@@ -58,13 +60,21 @@ export async function POST(req: Request) {
   if (inFlight) {
     return NextResponse.json({ error: "The memory model is already being fetched.", code: "busy" }, { status: 409 });
   }
+  // Settings -> Local AI's "Download again" on a row that already reads
+  // installed: the GGUF is on the box but the index says the embedder is not
+  // answering, and re-running the step is the one repair that does not need a
+  // terminal. A bodyless POST — every caller that predates this — is unchanged.
+  const force = await req.json().then(
+    (body: unknown) => (body as { force?: unknown })?.force === true,
+    () => false,
+  );
   inFlight = true;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
         const provisioning = await getEmbedProvisioningStatus().catch(() => null);
-        if (provisioning?.installed) {
+        if (provisioning?.installed && !force) {
           emit(controller, { success: true, status: "The memory-search model is already on this box." });
           return;
         }
@@ -91,4 +101,48 @@ export async function POST(req: Request) {
   return new Response(stream, {
     headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * DELETE /setup-api/embed/install → take the memory-search model back off.
+ *
+ * The undo of the POST, and it lives on the same route for that reason. What
+ * it removes is the GGUF this box downloaded — not the unit, not the llama.cpp
+ * binary, not the index: those are install.sh's, and a "remove" that quietly
+ * uninstalled the runtime would leave the Memory Shard wizard with nothing to
+ * put back.
+ *
+ * The unit is stopped FIRST. llama-server holds the weights open, and unlinking
+ * a file out from under a running server frees no disk at all until it exits —
+ * which is the one thing this button promises.
+ */
+export async function DELETE(req: Request) {
+  if (!(await hasOwnerSession(req))) {
+    return NextResponse.json({ error: "Removing the memory model needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
+  }
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "Removing the memory model only works from this ClawBox's own pages.", kind: "cross_origin" }, { status: 403 });
+  }
+  if (inFlight) {
+    return NextResponse.json({ error: "The memory model is being fetched right now.", code: "busy" }, { status: 409 });
+  }
+
+  const spec = getEmbedLaunchSpec();
+  let freedBytes: number | null = null;
+  try {
+    freedBytes = (await fs.stat(spec.modelPath)).size;
+  } catch {
+    return NextResponse.json({ error: "The memory model is not on this box.", code: "not_found" }, { status: 404 });
+  }
+  await stopLocalAiProvider("embed").catch(() => {});
+  try {
+    await fs.unlink(spec.modelPath);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not remove the memory model.", code: "remove_failed" },
+      { status: 500 },
+    );
+  }
+  const provisioning = await getEmbedProvisioningStatus().catch(() => null);
+  return NextResponse.json({ ok: true, freedBytes, installed: !!provisioning?.installed });
 }

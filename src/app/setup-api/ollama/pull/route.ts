@@ -2,7 +2,8 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { ensureLocalAiReady, getOllamaBaseUrl } from "@/lib/local-ai-runtime";
-import { requireSession } from "@/lib/route-auth";
+import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const OLLAMA_BASE = getOllamaBaseUrl();
 
@@ -11,8 +12,27 @@ export async function POST(request: Request) {
   // caller on the setup AP could fill the disk one multi-GB pull at a time.
   // Local Models is a desktop/AIModelsStep surface and both are authenticated
   // by the time they run, so it fails closed. TASK-443.
-  const unauthorized = await requireSession(request);
-  if (unauthorized) return unauthorized;
+  //
+  // OWNER ONLY since Settings -> Local AI became the place models are
+  // installed from. `requireSession` here admitted the MCP BEARER as well as
+  // the owner's cookie — middleware hands it to every /setup-api route — so
+  // the agent could pull models onto the owner's disk with no click behind it.
+  // The owner's decision of 2026-09-14 is that a local model arrives when
+  // somebody asks for it, which means this is the person's verb, exactly like
+  // the voice and memory-model installs beside it. Same origin too: a
+  // multi-gigabyte download started by another site's page is the same spend.
+  if (!(await hasOwnerSession(request))) {
+    return NextResponse.json(
+      { error: "Downloading a model needs a signed-in browser session.", code: "owner_only" },
+      { status: 403 },
+    );
+  }
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "Downloading a model only works from this ClawBox's own pages.", code: "cross_origin" },
+      { status: 403 },
+    );
+  }
 
   let body: { model?: string };
   try {

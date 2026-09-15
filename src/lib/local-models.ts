@@ -867,6 +867,33 @@ export async function startUserEngine(unit: string): Promise<ToggleResult> {
   }
 }
 
+/**
+ * Pick up a user unit file this process has just rewritten, and bounce the
+ * engine onto it — but only if it was already up.
+ *
+ * `try-restart`, never `restart`: the Whisper size picker rewrites the unit's
+ * `WHISPER_MODEL` and an engine the owner had switched OFF must not come back
+ * on because the model behind it changed. `scripts/install-voice.sh` uses the
+ * same verb after it deploys the scripts, for the same reason.
+ *
+ * Both halves are best-effort and reported as ONE answer: a daemon-reload that
+ * failed leaves the old unit in systemd's memory, which is exactly the state
+ * the caller has to tell the owner about ("it will use the new model after a
+ * restart") rather than a failure of the change itself, which has landed on
+ * disk either way.
+ */
+export async function reloadAndRestartUserEngine(unit: string): Promise<ToggleResult> {
+  if (!USER_UNITS.has(unit)) return { ok: false, error: "Unknown service." };
+  const env = userSystemctlEnv();
+  try {
+    await execFileAsync("/usr/bin/systemctl", ["--user", "daemon-reload"], { timeout: 15_000, env });
+    await execFileAsync("/usr/bin/systemctl", ["--user", "try-restart", unit], { timeout: 30_000, env });
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Could not restart the service." };
+  }
+}
+
 /** Every engine the inventory can name, so a route can tell "unknown" from "has no switch". */
 export const ENGINE_IDS: ReadonlySet<string> = new Set(["llamacpp", "kokoro", "whisper", "embeddings"]);
 
