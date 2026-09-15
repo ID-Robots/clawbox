@@ -98,6 +98,15 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "set_timezone",
   "vnc_install",
   "vnc_refresh",
+  // The Local AI tab's two engine installs (2026-09-15): Kokoro through
+  // /setup-api/tts/install, faster-whisper through /setup-api/whisper
+  // `{action:"install-engine"}`. Both routes refuse the MCP bearer, and both
+  // steps are off UI_ROOT_STEPS for the reason openclaw_tts is — a root
+  // install is the person's decision. install.sh force-installs neither any
+  // more (owner's ruling: nothing but the llama.cpp runtime and Gemma 4), so
+  // these are the ONLY way an engine reaches a box.
+  "voice_kokoro_install",
+  "voice_whisper_install",
 ];
 
 export function isWebRootStep(step: string): boolean {
@@ -122,11 +131,12 @@ export const UI_ROOT_STEPS: readonly string[] = [
   "openclaw_setup",
   "openclaw_patch",
   "openclaw_config",
-  // NOT openclaw_tts. The on-device voice install (Settings → Local AI →
-  // Kokoro → Install) is on WEB_ROOT_STEPS because the web server starts it,
-  // but only through /setup-api/tts/install, which refuses the MCP bearer:
-  // a root install is the person's decision. Listing it here would offer it
-  // to install/run-step as well, which the agent's bearer can reach.
+  // NOT openclaw_tts, voice_kokoro_install or voice_whisper_install. The
+  // on-device engine installs (Settings → Local AI → Install) are on
+  // WEB_ROOT_STEPS because the web server starts them, but only through
+  // /setup-api/tts/install and /setup-api/whisper, which refuse the MCP
+  // bearer: a root install is the person's decision. Listing them here would
+  // offer them to install/run-step as well, which the agent's bearer can reach.
   "clawkeep_install",
 ];
 

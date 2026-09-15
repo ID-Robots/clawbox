@@ -5536,15 +5536,37 @@ fi
 # unset/"auto"/the old ollama one/already ours, so a deliberate remote setup
 # stays), and forces the reindex the provider change requires.
 #
-# Launched DETACHED on purpose: this is a blocking ExecStartPre, the model is a
-# ~640MB download, and the script waits for the web server's proxy, which may
-# still be starting beside this gateway. The script takes its own lock, so
-# overlapping restarts do not stack up downloads.
+# Launched DETACHED on purpose: this is a blocking ExecStartPre, and the script
+# waits for the web server's proxy, which may still be starting beside this
+# gateway. The script takes its own lock, so overlapping restarts do not stack
+# up. `--no-download`, since 2026-09-15: the 639 MB GGUF is the owner's click
+# in Settings → Local AI, and a gateway start wires memory search to a model
+# that is already on the box or leaves it alone — it fetched the model on its
+# own before, mid-update at 15:10:41 on the day this was measured.
+#
+# And NOT AT ALL while an in-app update owns the box. The updater marks that
+# on DISK — `update_in_progress` (src/lib/update-lock.ts) for the run, and
+# `update_needs_continuation` (src/lib/updater.ts) across the reboot it
+# performs — precisely so a process that is not the updater's can read it, and
+# this one is not: the gateway is restarted several times inside an update,
+# and a helper detached from each of those starts raced the update's own
+# `openclaw config set` for the config file. A grep, not a JSON parse: the
+# store is `"key": value` from JSON.stringify, and a python start on every
+# gateway boot for one boolean is not worth it. A store that cannot be read
+# answers "no update" — the helper is harmless on a box with no update.
+update_owns_box() {
+  local store="${CLAWBOX_DEVICE_STORE:-$CLAWBOX_ROOT/data/config.json}"
+  [ -r "$store" ] || return 1
+  grep -Eq '"update_in_progress"[[:space:]]*:[[:space:]]*true' "$store" && return 0
+  grep -Eq '"update_needs_continuation"[[:space:]]*:[[:space:]]*"[^"]+"' "$store"
+}
 LOCAL_EMBEDDINGS="$SCRIPT_DIR/ensure-local-embeddings.sh"
 LOCAL_EMBEDDINGS_LOG="$CLAWBOX_ROOT/data/local-embeddings.log"
-if [ -x "$LOCAL_EMBEDDINGS" ]; then
+if update_owns_box; then
+  echo "  Local embeddings check skipped: an update owns this box (the next gateway start after it runs the check)"
+elif [ -x "$LOCAL_EMBEDDINGS" ]; then
   mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
-  setsid nohup "$LOCAL_EMBEDDINGS" >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
+  setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
   echo "  Local embeddings check running in the background (see $LOCAL_EMBEDDINGS_LOG)"
 else
   echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"

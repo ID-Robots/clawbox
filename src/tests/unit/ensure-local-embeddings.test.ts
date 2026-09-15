@@ -708,6 +708,41 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
     expect(src).toContain("ensure-local-embeddings.sh");
   });
 
+  it("launches it with --no-download: a gateway start wires a model that is there and fetches none", () => {
+    expect(src).toMatch(/^\s*setsid nohup "\$LOCAL_EMBEDDINGS" --no-download /m);
+  });
+
+  it("launches nothing at all while an in-app update owns the box", () => {
+    // The helper fired mid-update, from one of the gateway restarts an update
+    // performs (15:10:41 on 2026-09-15), racing the update's own config writes.
+    const fn = src.match(/^update_owns_box\(\) \{[\s\S]*?^\}$/m)?.[0];
+    expect(fn, "update_owns_box is not defined in the pre-start").toBeTruthy();
+    // Consulted BEFORE the launch, on the same `if` chain.
+    const gate = src.indexOf("if update_owns_box; then");
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(src.indexOf('setsid nohup "$LOCAL_EMBEDDINGS"'));
+    expect(src.slice(gate, src.indexOf('setsid nohup "$LOCAL_EMBEDDINGS"'))).toMatch(/elif \[ -x "\$LOCAL_EMBEDDINGS" \]; then/);
+
+    // And the predicate itself, run against the device store's own shapes.
+    const store = path.join(dir, "config.json");
+    const ask = (json: string | null) => {
+      if (json === null) rmSync(store, { force: true });
+      else writeFileSync(store, json);
+      return spawnSync("bash", ["-c", `${fn}\nCLAWBOX_DEVICE_STORE="$1" CLAWBOX_ROOT=/nonexistent update_owns_box`, "_", store], { encoding: "utf-8" }).status;
+    };
+    // The lock the updater sets for the run (src/lib/update-lock.ts), as
+    // JSON.stringify writes it — pretty or compact.
+    expect(ask('{\n  "setup_complete": true,\n  "update_in_progress": true\n}')).toBe(0);
+    expect(ask('{"update_in_progress":true}')).toBe(0);
+    // The continuation marker across the reboot (src/lib/updater.ts).
+    expect(ask('{\n  "update_needs_continuation": "abc123"\n}')).toBe(0);
+    expect(ask('{"update_needs_continuation": "no-previous-build"}')).toBe(0);
+    // Cleared, absent, or no store at all: no update.
+    expect(ask('{\n  "update_in_progress": false,\n  "setup_complete": true\n}')).toBe(1);
+    expect(ask('{"setup_complete": true}')).toBe(1);
+    expect(ask(null)).toBe(1);
+  });
+
   it("never blocks a gateway start on a model download", () => {
     expect(src).not.toMatch(/ollama pull/);
     expect(src).not.toMatch(/hf download/);
@@ -839,6 +874,8 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     cliExit?: number;
     config?: unknown;
     withoutPython?: boolean;
+    /** Whether the GGUF is on disk (default yes). */
+    model?: boolean;
   }): Report {
     if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
     const home = path.join(dir, "device", "home", "clawbox");
@@ -860,9 +897,16 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     );
     writeFileSync(
       path.join(project, "scripts", "ensure-local-embeddings.sh"),
-      `#!/usr/bin/env bash\nprintf 'ran\\n' >> ${JSON.stringify(stepLog)}\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf 'ran %s\\n' "$*" >> ${JSON.stringify(stepLog)}\nexit 0\n`,
     );
     chmodSync(path.join(project, "scripts", "ensure-local-embeddings.sh"), 0o755);
+    // The GGUF, which is what decides whether the block asks anything at all:
+    // the download is the owner's click, and a box without the file is told so
+    // in one line.
+    if (opts.model !== false) {
+      mkdirSync(path.join(project, "data", "embed", "models"), { recursive: true });
+      writeFileSync(path.join(project, "data", "embed", "models", "Qwen3-Embedding-0.6B-Q8_0.gguf"), "gguf");
+    }
     const openclaw = path.join(stubBin, "openclaw");
     writeFileSync(
       openclaw,
@@ -896,6 +940,12 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
       "is_test_mode() { return 1; }",
       `has_openclaw_harness() { return ${opts.edition === "hermes" ? 1 : 0}; }`,
       `step_embed_model() { printf 'model-step\\n' >> ${JSON.stringify(stepLog)}; }`,
+      'get_env_setting_or_default() { printf "%s" "$3"; }',
+      (() => {
+        const m = /^embed_model_path\(\) \{[\s\S]*?^\}$/m.exec(INSTALL_SH);
+        if (!m) throw new Error("embed_model_path not found in install.sh");
+        return m[0];
+      })(),
       "ensure_local_embeddings() {",
       BLOCK,
       "}",
@@ -940,11 +990,21 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     expect(BLOCK).toContain("memory status");
   });
 
-  it("caches the model first, then runs the helper, then asks the core", () => {
+  it("asks nothing about an embedder nobody installed: one line, no helper, no core, answer 0", () => {
+    const run = report({ cli: status(PROVIDER), model: false });
+    expect(run.rc).toBe(0);
+    expect(run.steps).toEqual([]);
+    expect(run.cliCalls).toBe("");
+    expect(run.out).toMatch(/not installed on this box/);
+    expect(run.out).toMatch(/Settings → Local AI/);
+    expect(run.out).not.toContain(READY);
+  });
+
+  it("runs the helper with --no-download — never the model step — then asks the core", () => {
     const run = report({ cli: status(PROVIDER) });
     // A healthy on-device embedder has nothing to report.
     expect(run.rc).toBe(0);
-    expect(run.steps).toEqual(["model-step", "ran"]);
+    expect(run.steps).toEqual(["ran --no-download"]);
     expect(run.cliCalls).toContain("memory status --agent main --deep --json");
     // …and it asks the CLI plainly. The probe used to be wrapped in `timeout -k
     // 5 60`; it no longer is (owner's rule, 2026-09-14: nothing in the installer
