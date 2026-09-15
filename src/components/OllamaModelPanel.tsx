@@ -4,11 +4,9 @@ import type { OllamaModel, OllamaSearchResult } from "@/hooks/useOllamaModels";
 import type { KeyboardEvent, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { OLLAMA_MAX_MODEL_PARAM_B } from "@/lib/resource-limits";
-
-const PRESET_MODELS = [
-  { id: "llama3.2:3b", label: "Llama 3.2 3B" },
-  { id: "qwen2.5:3b-instruct-q4_K_M", label: "Qwen2.5 3B" },
-];
+// Shared with Settings → Local AI's own Ollama card: two pickers offering two
+// different "recommended" pairs is exactly the drift a constant prevents.
+import { OLLAMA_PRESET_MODELS as PRESET_MODELS } from "@/lib/local-install";
 
 interface OllamaModelPanelProps {
   ollamaRunning: boolean;

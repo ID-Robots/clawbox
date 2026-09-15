@@ -5,7 +5,13 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
+import { readInstallStream } from "@/lib/install-stream";
 import CloudDefaultsCard from "@/components/CloudDefaultsCard";
+import { FOCUS_RING as PANEL_FOCUS_RING } from "@/components/local-ai/ui";
+import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
+import GgufLibraryCard from "@/components/local-ai/GgufLibraryCard";
+import OllamaModelsCard from "@/components/local-ai/OllamaModelsCard";
+import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
 
 /**
  * Settings → Local AI: everything that runs on the box itself, grouped by
@@ -54,7 +60,9 @@ const CONTROLS = ["none", "user-unit", "system-unit"];
 
 // The keyboard ring every focusable control here shows — the same outline
 // the wizard's buttons use, so a keyboard user sees one ring across the app.
-const FOCUS_RING = "focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--coral-ring)]";
+// Defined beside the install cards' own styles so the panel and the cards it
+// mounts cannot show two different rings.
+const FOCUS_RING = PANEL_FOCUS_RING;
 
 /** Every field the render reads, checked before the payload is trusted. */
 function isEntry(value: unknown): value is LocalModelEntry {
@@ -114,53 +122,6 @@ function rowText(t: Translate, prefix: string, code: string | undefined, params:
   const key = `${prefix}.${code}`;
   const text = t(key, params);
   return text === key ? english : text;
-}
-
-/**
- * Read the llama.cpp install route's answer. It is not JSON: it answers 200
- * and streams NDJSON — `status` lines while it builds, downloads and starts
- * the model, then ONE closing line, `success` or `error`. A stream that ends
- * with neither is a failure too (the server went away mid-install); a line
- * that is not JSON is a torn write and is skipped, as the wizard skips them.
- */
-async function readInstallStream(
-  res: Response,
-  onStatus: (line: string) => void,
-): Promise<{ ok: boolean; error?: string }> {
-  const reader = res.body?.getReader();
-  if (!reader) return { ok: false };
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const consume = (line: string): { ok: boolean; error?: string } | null => {
-    if (!line) return null;
-    let payload: { status?: unknown; error?: unknown; success?: unknown };
-    try {
-      payload = JSON.parse(line);
-    } catch {
-      return null;
-    }
-    if (typeof payload.status === "string") onStatus(payload.status);
-    if (typeof payload.error === "string") return { ok: false, error: payload.error };
-    if (payload.success === true) return { ok: true };
-    return null;
-  };
-  for (;;) {
-    const { done, value } = await reader.read();
-    buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-    let newline = buffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      newline = buffer.indexOf("\n");
-      const outcome = consume(line);
-      if (outcome) return outcome;
-    }
-    if (done) break;
-  }
-  // The closing line may arrive without its newline; it still decides the
-  // outcome — dropping it turned a finished multi-minute install into an
-  // error.
-  return consume(buffer.trim()) ?? { ok: false };
 }
 
 /** The on-device roles by kind, each read from the surface that decides it. */
@@ -360,7 +321,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         return;
       }
       if (action.streams) {
-        const outcome = await readInstallStream(res, (line) => setProgress((p) => ({ ...p, [entry.id]: line })));
+        const outcome = await readInstallStream(res, (line) => {
+          if (line.status) setProgress((p) => ({ ...p, [entry.id]: line.status as string }));
+        });
         if (!outcome.ok) setError(outcome.error ?? t("localModels.error.changeFailed"));
         // A successful install/activation changes the device pairing. Tell
         // already-mounted chat and provider pickers only after the terminal
@@ -415,6 +378,14 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       setLocalOnly(!next);
     }
   }, [t]);
+
+  // A card finished an install or a removal: the inventory above it is stale
+  // the moment that happens, and so are the roles read from the tts/stt/provider
+  // surfaces (a new local chat model is a provider change).
+  const afterInstall = useCallback(() => {
+    void refresh();
+    void refreshRoles();
+  }, [refresh, refreshRoles]);
 
   /**
    * What a row can do, decided from the same facts the row shows. Only actions
@@ -485,6 +456,26 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     if (!entry.installed) return null;
     if (entry.kind === "llm" && entry.managedBy !== "localAi") return null;
     return roles[entry.kind] ?? null;
+  };
+
+  /**
+   * The install cards, by the group each belongs under.
+   *
+   * Built here rather than inside the map so the panel's own refresh is what
+   * every card reports a change to: an install writes something the inventory
+   * row above it describes (a Whisper size, the embedder's GGUF, an Ollama
+   * model), and a card that updated only itself would leave the row beside it
+   * claiming the old state until the five-second poll came round.
+   */
+  const installCards: Partial<Record<Kind, React.ReactNode>> = {
+    llm: (
+      <>
+        <OllamaModelsCard onChanged={afterInstall} />
+        <GgufLibraryCard />
+      </>
+    ),
+    stt: <WhisperSizesCard onChanged={afterInstall} />,
+    embedding: <EmbeddingModelCard onChanged={afterInstall} />,
   };
 
   if (!snapshot) {
@@ -573,13 +564,19 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
 
       {GROUPS.map((group) => {
         const entries = snapshot.models.filter((m) => m.kind === group.kind);
-        if (entries.length === 0) return null;
+        // The install cards belong under the group whose engines they add to,
+        // and they stand on their own: a group whose inventory row could not be
+        // read still has to offer its installs, which is the state an owner is
+        // most likely to be on this page for.
+        const extras = installCards[group.kind];
+        if (entries.length === 0 && !extras) return null;
         return (
           <section key={group.kind} data-testid={`local-ai-group-${group.kind}`}>
             <h3 className="flex items-center gap-2 text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2 px-1">
               <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">{group.icon}</span>
               {t(group.titleKey)}
             </h3>
+            {entries.length > 0 && (
             <ul className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] divide-y divide-white/[0.06]">
               {entries.map((entry) => {
                 const role = roleFor(entry);
@@ -709,6 +706,8 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                 );
               })}
             </ul>
+            )}
+            {extras && <div className="mt-3 space-y-3">{extras}</div>}
           </section>
         );
       })}
