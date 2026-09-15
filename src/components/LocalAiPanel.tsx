@@ -495,7 +495,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
             menu.push(makePrimary);
           }
         }
-        uninstall = removal("/setup-api/llamacpp/models?engine=1");
+        // Not while Gemma is the model the box answers with: the route refuses
+        // that (409 `in_use`), and the menu's "Use as fallback" is the step
+        // that comes first. A button that can only be refused is a dead end.
+        if (roles.llm !== "primary") uninstall = removal("/setup-api/llamacpp/models?engine=1");
         break;
       }
       case "tts": {
@@ -506,10 +509,13 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
             menu.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/tts", { action: "select", choice: "local" }) });
           }
           uninstall = removal("/setup-api/tts/install");
-        } else if (edition !== "hermes") {
+        } else {
           // The voice on the box is installed by install.sh's own step, started
           // as root and followed line by line — the same stream shape the Gemma
-          // install answers with. OpenClaw only: the step is the gateway's.
+          // install answers with. Every edition: `step_openclaw_tts --kokoro`
+          // installs the engine and registers it with whichever harness the box
+          // runs (Hermes' `clawbox-local` provider included), and since the
+          // update installs nothing this button is the only way in.
           install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/tts/install", {}) };
         }
         break;

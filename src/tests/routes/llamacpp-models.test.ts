@@ -17,6 +17,14 @@ const owner = { value: true };
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
 vi.mock("@/lib/route-auth", () => ({ requireSession: async () => null }));
 
+/** openclaw.json as the Gemma uninstall reads it: who the box answers with. */
+const oc = { absent: false, config: {} as Record<string, unknown> };
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
+  openclawIsAbsent: () => oc.absent,
+  readConfig: async () => oc.config,
+}));
+
 const disk = { free: 100 * 1024 * 1024 * 1024 as number | null };
 vi.mock("@/lib/project-import", () => ({ freeBytes: async () => disk.free }));
 
@@ -39,7 +47,8 @@ vi.mock("@/app/setup-api/local-ai/route", () => ({ POST: (req: Request) => disab
 
 /** The `hf download` child. */
 const child = { code: 0, stderr: "", writes: null as string | null, bytes: 32 };
-vi.mock("child_process", () => ({
+vi.mock("child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("child_process")>()),
   spawn: () => {
     const handlers: Record<string, ((...a: unknown[]) => void)[]> = {};
     const errHandlers: ((chunk: string) => void)[] = [];
@@ -92,6 +101,8 @@ beforeEach(() => {
   disk.free = 100 * 1024 * 1024 * 1024;
   spec.wired = null;
   stopped.mockClear();
+  oc.absent = false;
+  oc.config = {};
   disabled.mockClear().mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }));
   child.code = 0;
   child.stderr = "";
@@ -366,6 +377,32 @@ describe("DELETE /setup-api/llamacpp/models?engine=1", () => {
     expect(fs.existsSync(path.join(modelDir, GEMMA))).toBe(false);
     // The off switch stops the runtime itself; a second stop is not asked for.
     expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("refuses while Gemma is the PRIMARY model — local-only mode included — and touches nothing", async () => {
+    // The off switch clears only the fallback list: a primary left on
+    // llamacpp/… would send the next turn to a runtime that downloads the file
+    // again.
+    fs.writeFileSync(path.join(modelDir, GEMMA), "x".repeat(64));
+    spec.wired = "gemma4-e2b-it-q4_0";
+    oc.config = { agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0", fallbacks: [] } } } };
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("in_use");
+    expect(disabled).not.toHaveBeenCalled();
+    expect(stopped).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(modelDir, GEMMA))).toBe(true);
+  });
+
+  it("proceeds on the Hermes edition, which has no openclaw.json primary to refuse over", async () => {
+    fs.writeFileSync(path.join(modelDir, GEMMA), "x");
+    oc.absent = true;
+    oc.config = { agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } } };
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    expect(res.status).toBe(200);
   });
 
   it("only stops the runtime when the model is wired to nothing", async () => {

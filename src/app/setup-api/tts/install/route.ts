@@ -4,7 +4,6 @@ import { NextResponse } from "next/server";
 import { POST as selectVoice } from "@/app/setup-api/tts/route";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { uninstallKokoro } from "@/lib/kokoro-uninstall";
-import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
@@ -23,7 +22,7 @@ import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
  * registration an install and an update run, which since 2026-09-15 install
  * nothing themselves (the owner's ruling — no model or engine but the
  * llama.cpp runtime and Gemma 4 is forced), so this click is the ONLY way
- * Kokoro reaches a box.
+ * Kokoro reaches a box — on every SKU, the Hermes one included.
  *
  * Answers the llama.cpp install route's shape, which the tab already reads:
  * `{status}` lines while it runs, then ONE closing `{success: true}` or
@@ -49,9 +48,12 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
 let inFlight = false;
 
 export async function POST(req: Request) {
-  if (openclawIsAbsent()) {
-    return NextResponse.json({ error: "Voice output is not part of this edition.", code: "edition" }, { status: 409 });
-  }
+  // EVERY EDITION. The step is `step_openclaw_tts --kokoro`, which installs
+  // the engine and then registers it with whichever harness the box runs — on
+  // Hermes the `clawbox-local` provider, before its Hermes arm returns. It used
+  // to refuse the Hermes SKU (409 `edition`) from the days the whole tts family
+  // was OpenClaw-CLI work; that was harmless only while every update installed
+  // Kokoro everywhere, and since 2026-09-15 this click is the one way in.
   // OWNER ONLY. Installing software as root is the person's decision; the
   // agent holds the MCP bearer the middleware also admits here.
   if (!(await hasOwnerSession(req))) {
@@ -99,10 +101,10 @@ export async function POST(req: Request) {
  * The undo of the POST, on the same route for that reason (the embed route's
  * precedent). What it removes is `src/lib/kokoro-uninstall.ts`'s list — the
  * weights, the stamp, the unit — and the row on Settings → Local AI reads
- * "not installed" the moment the stamp is gone. Not gated on the edition the
- * way the POST is: install-voice.sh writes the Kokoro unit on every SKU and
- * both harnesses speak through the same script, so there is a voice to remove
- * on either.
+ * "not installed" the moment the stamp is gone. Like the POST, not gated on
+ * the edition: install-voice.sh writes the Kokoro unit on every SKU and both
+ * harnesses speak through the same script, so there is a voice to remove on
+ * either — and, symmetrically, a voice to install.
  *
  * A pick of "this box" that is left standing would read back a voice that
  * cannot speak, so it is settled on Auto the way the tts route settles a pick

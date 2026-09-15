@@ -83,6 +83,10 @@ function stubDevice(
     improvementFails?: boolean;
     /** The mode the box already holds; `off` is its stored default. */
     improvementMode?: "off" | "ask" | "auto";
+    /** Whether the box holds an ANSWER; defaults to true for ask/auto, false otherwise. */
+    answered?: boolean;
+    /** Holds the Improvement Program GET until it settles — a read that lands late. */
+    holdImprovementRead?: Promise<void>;
     /**
      * The ClawBox AI account this box is on. The wizard's first step is behind
      * the paid-plan gate (owner's decision, 2026-09-14), so the default here is
@@ -94,6 +98,7 @@ function stubDevice(
   calls = [];
   let installed = opts.chromiumInstalled ?? true;
   let improvementMode: string = opts.improvementMode ?? "off";
+  let improvementAnswered = opts.answered ?? (opts.improvementMode === "ask" || opts.improvementMode === "auto");
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -115,9 +120,12 @@ function stubDevice(
           return json({ error: "Changing the Improvement Program needs a signed-in browser session.", code: "owner_only" }, 403);
         }
         improvementMode = body.mode;
+        improvementAnswered = true;
+      } else if (opts.holdImprovementRead) {
+        await opts.holdImprovementRead;
       }
       return json({
-        mode: improvementMode, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
+        mode: improvementMode, answered: improvementAnswered, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
         maxIssuesPerDay: 5, remainingToday: 5,
         github: { installed: true, connected: false, login: null }, incidents: [],
       });
@@ -264,6 +272,29 @@ describe("the improvement step", () => {
     await waitFor(() =>
       expect(screen.getByTestId("coding-agent-wizard-improvement-ask")).toHaveAttribute("aria-checked", "true"),
     );
+  });
+
+  it("keeps an explicit earlier Off rather than proposing Automatic over a decline", async () => {
+    stubDevice({ improvementMode: "off", answered: true });
+    await reachImprovementStep();
+    await waitFor(() =>
+      expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "true"),
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
+    await waitFor(() => expect(improvementWrites()).toEqual([{ mode: "off" }]));
+  });
+
+  it("lets the owner's pick win over a read that lands after it", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    stubDevice({ improvementMode: "ask", holdImprovementRead: hold });
+    await reachImprovementStep();
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-off"));
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
+    await waitFor(() => expect(improvementWrites()).toEqual([{ mode: "off" }]));
   });
 
   it("says GitHub is missing beside an answer that would send, and not beside Off", async () => {

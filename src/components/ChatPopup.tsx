@@ -1270,11 +1270,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       newAppGateRef.current = false
       if (status && (status.setupComplete === false || status.enabled === false)) {
         dispatchOpenApp('coding')
+        // On a phone the chat is full screen ABOVE the one window the phone
+        // draws, so the Coding Agent would open out of sight and the press
+        // would look dead. Get out of its way; on a desktop the chat stays
+        // beside the plain window.
+        if (mobile) onClose()
         return
       }
       setShowNewApp(true)
     })
-  }, [showNewApp, closeNewApp, readCodingAgentStatus])
+  }, [showNewApp, closeNewApp, readCodingAgentStatus, mobile, onClose])
 
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will

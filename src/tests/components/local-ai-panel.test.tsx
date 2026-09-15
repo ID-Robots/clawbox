@@ -605,6 +605,20 @@ describe("LocalAiPanel", () => {
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/install", body: {} }));
   });
 
+  it("offers the Kokoro install on the Hermes edition too, beside the Uninstall it already had", async () => {
+    // `step_openclaw_tts --kokoro` registers Hermes' clawbox-local provider,
+    // and the update installs nothing any more: a row with Uninstall and no
+    // Install would strand a Hermes box without its voice.
+    const absent = MODELS.map((m) => (m.id === "kokoro" ? { ...m, installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed." } : m));
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    stubFetch({ models: absent, post: (url) => (url === "/setup-api/tts/install" ? json({ success: true, status: "The voice on this box is installed." }) : undefined) });
+    render(<I18nProvider><LocalAiPanel active edition="hermes" /></I18nProvider>);
+    await screen.findByTestId("local-model-kokoro");
+    expect(screen.queryByTestId("local-model-action-kokoro-uninstall")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-install"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/install", body: {} }));
+  });
+
   it("says, in amber, when a voice pick settled on the default instead", async () => {
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     stubFetch({ post: (url) => (url === "/setup-api/tts" ? json({ choice: "auto", fallback: { requested: "local", reason: "not_wired" } }) : undefined) });
@@ -687,8 +701,17 @@ describe("LocalAiPanel", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("cancels an uninstall without touching the box, and warns on Gemma that the next update puts it back", async () => {
+  it("offers no Uninstall on Gemma while it is the model the box answers with — the menu's Use as fallback comes first", async () => {
     stubFetch({ llmDefault: true });
+    renderPanel();
+    await screen.findByTestId("local-model-llamacpp");
+    expect(screen.queryByTestId("local-model-action-llamacpp-uninstall")).not.toBeInTheDocument();
+    expect(screen.getByTestId("local-model-action-llamacpp-disable")).toBeInTheDocument();
+  });
+
+  it("cancels an uninstall without touching the box, and warns on Gemma that the next update puts it back", async () => {
+    // Gemma as the fallback: while it is the primary the Uninstall is not offered.
+    stubFetch({ llmDefault: false });
     renderPanel();
     await screen.findByTestId("local-model-llamacpp");
     fireEvent.click(screen.getByTestId("local-model-action-llamacpp-uninstall"));

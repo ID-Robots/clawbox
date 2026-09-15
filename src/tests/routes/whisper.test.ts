@@ -36,6 +36,25 @@ const restarted = vi.fn(async () => ({ ok: true as boolean }));
 const removed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined, code: undefined as string | undefined }));
 const uninstalled = vi.fn(async () => ({ ok: true as boolean, freedBytes: 228 * 1024 * 1024 as number | null, error: undefined as string | undefined, code: undefined as string | undefined }));
 
+/** What the engine uninstall releases once the engine is gone. */
+const sync = vi.fn(async (..._a: unknown[]) => false);
+const primary = { value: "cloud" as string };
+const setPrimary = vi.fn(async (..._a: unknown[]) => {});
+const cleared = vi.fn(async (..._a: unknown[]) => {});
+const gatewayRestart = vi.fn(async () => {});
+vi.mock("@/lib/stt-channel", () => ({ syncChannelAudio: (...a: unknown[]) => sync(...a) }));
+vi.mock("@/lib/stt-preference", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/stt-preference")>()),
+  getSttPrimary: async () => primary.value,
+  setSttPrimary: (...a: unknown[]) => setPrimary(...a),
+}));
+vi.mock("@/lib/clawai-cloud-choice", () => ({ clearOwnerChoice: (...a: unknown[]) => cleared(...a) }));
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
+  openclawIsAbsent: () => false,
+  restartGateway: () => gatewayRestart(),
+}));
+
 vi.mock("@/lib/whisper-models", () => ({
   readWhisperState: async () => structuredClone(state),
   setActiveWhisperSize: (...a: unknown[]) => pointed(...(a as [])),
@@ -54,7 +73,8 @@ vi.mock("@/lib/whisper-models", () => ({
  * be able to exit 0 and leave nothing behind.
  */
 const child = { code: 0, stdout: ["Fetching the small model..."], stderr: "", leavesWeights: true };
-vi.mock("child_process", () => ({
+vi.mock("child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("child_process")>()),
   spawn: () => {
     const handlers: Record<string, ((...a: unknown[]) => void)[]> = {};
     const outHandlers: ((chunk: string) => void)[] = [];
@@ -112,6 +132,11 @@ beforeEach(() => {
   restarted.mockClear().mockResolvedValue({ ok: true });
   removed.mockClear().mockResolvedValue({ ok: true, error: undefined, code: undefined });
   uninstalled.mockClear().mockResolvedValue({ ok: true, freedBytes: 228 * 1024 * 1024, error: undefined, code: undefined });
+  sync.mockReset().mockResolvedValue(false);
+  primary.value = "cloud";
+  setPrimary.mockReset().mockResolvedValue(undefined);
+  cleared.mockReset().mockResolvedValue(undefined);
+  gatewayRestart.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -374,5 +399,69 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     expect((await res.json()).code).toBe("busy");
     expect(uninstalled).not.toHaveBeenCalled();
     await readStream(fetching);
+  });
+
+  it("refuses while the ENGINE is being installed — its own pre-download writes into the same cache", async () => {
+    state.installed = false;
+    let finish: () => void = () => {};
+    followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
+    const { POST, DELETE } = await load();
+    const installing = await POST(post({ action: "install-engine" }));
+    const res = await DELETE(del());
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("busy");
+    expect(uninstalled).not.toHaveBeenCalled();
+    finish();
+    await readStream(installing);
+  });
+
+  it("takes its row out of the channel audio list, settles transcription on the cloud and says a local pick fell back", async () => {
+    primary.value = "local";
+    sync.mockResolvedValue(true);
+    state.installed = false;
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(sync).toHaveBeenCalledWith(["cloud", "local"], false);
+    expect(setPrimary).toHaveBeenCalledWith("cloud");
+    expect(cleared).toHaveBeenCalledWith("stt");
+    expect(gatewayRestart).toHaveBeenCalledTimes(1);
+    expect(body.fallback).toEqual({ requested: "local", reason: "not_installed" });
+    expect(body.warning).toBeUndefined();
+  });
+
+  it("restarts nothing when the list named no local row, and claims no fallback over a cloud pick", async () => {
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(gatewayRestart).not.toHaveBeenCalled();
+    expect(body.fallback).toBeUndefined();
+  });
+
+  it("keeps a landed uninstall a success when the gateway restart fails, and says so", async () => {
+    sync.mockResolvedValue(true);
+    gatewayRestart.mockRejectedValue(new Error("nothing listening"));
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(typeof body.warning).toBe("string");
+  });
+
+  it("touches no transcription setting when the device refused the removal", async () => {
+    uninstalled.mockResolvedValue({ ok: false, freedBytes: null, error: "Could not remove the service file.", code: "remove_failed" });
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+
+    expect(res.status).toBe(500);
+    expect(sync).not.toHaveBeenCalled();
+    expect(setPrimary).not.toHaveBeenCalled();
   });
 });

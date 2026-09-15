@@ -798,13 +798,24 @@ install_kokoro_tts() {
 kokoro_report_present() {
   local stamp
   stamp="$(cat "$KOKORO_STAMP" 2>/dev/null || true)"
-  if [ -z "$stamp" ] || ! clawbox_python "import kokoro, torch" >/dev/null 2>&1; then
+  if [ -z "$stamp" ]; then
     echo "  Kokoro is not installed on this box (install it from Settings → Local AI)"
     kokoro_report "absent"
     return 0
   fi
+  # STAMPED but the stack no longer imports — a later pip resolve (numpy 2.x is
+  # the known breaker of the Jetson torch wheel) broke it. That is the
+  # installed-and-broken class, never `absent`: Settings → Local AI reads
+  # "installed" off the stamp and the unit, so `absent` here would show a voice
+  # that cannot speak with no Install offered and nothing recorded.
+  if ! clawbox_python "import kokoro, torch" >/dev/null 2>&1; then
+    echo "  ERROR: Kokoro is installed but its Python stack no longer imports" >&2
+    printf "  Fix:   Uninstall, then Install on the Kokoro row in Settings → Local AI, or: sudo bash %q/install.sh --step voice_kokoro_install\n" "${PROJECT_DIR:-/home/clawbox/clawbox}" >&2
+    kokoro_report "failed:import"
+    return 12
+  fi
   if [ "$stamp" != "$KOKORO_STAMP_VERSION" ]; then
-    echo "  Kokoro was installed by an older release (stamp $stamp, current $KOKORO_STAMP_VERSION) — Install in Settings → Local AI picks up its fixes"
+    echo "  Kokoro was installed by an older release (stamp $stamp, current $KOKORO_STAMP_VERSION) — Uninstall, then Install in Settings → Local AI picks up its fixes (or: sudo bash install.sh --step voice_kokoro_install)"
   fi
   if ! kokoro_check_phonemiser; then
     echo "  ERROR: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech" >&2
@@ -999,7 +1010,7 @@ whisper_mark_installed() {
   local dir
   dir=$(dirname "$WHISPER_STAMP")
   if ! (mkdir -p "$dir" && printf '%s\n' "$WHISPER_STAMP_VERSION" > "$WHISPER_STAMP"); then
-    echo "  Warning: could not write $WHISPER_STAMP - the next update will reinstall faster-whisper" >&2
+    echo "  Warning: could not write $WHISPER_STAMP - the next Install from Settings → Local AI (install-voice.sh --whisper) will redo faster-whisper" >&2
     return 0
   fi
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$dir" 2>/dev/null || true

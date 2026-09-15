@@ -186,23 +186,31 @@ export default function CodingAgentSetupWizard({
   const [improvementMode, setImprovementMode] = useState<ImprovementMode>("auto");
   const [maxIssuesPerDay, setMaxIssuesPerDay] = useState(5);
   const improvementRefs = useRef<Partial<Record<ImprovementMode, HTMLButtonElement | null>>>({});
+  /** The owner has picked on the step: a read that lands later must not undo it. */
+  const improvementTouched = useRef(false);
 
   const loadImprovement = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/improvement-program", { cache: "no-store" });
       if (!res.ok) return;
-      const out = (await res.json()) as { mode?: unknown; maxIssuesPerDay?: unknown };
+      const out = (await res.json()) as { mode?: unknown; answered?: unknown; maxIssuesPerDay?: unknown };
       // The daily cap the box actually enforces is the number the Automatic
       // hint names; a read that fails keeps the card's own fallback.
       if (typeof out.maxIssuesPerDay === "number" && Number.isFinite(out.maxIssuesPerDay)) {
         setMaxIssuesPerDay(out.maxIssuesPerDay);
       }
-      // A box that already ANSWERED — `ask` or `auto` — keeps its answer on
-      // screen: this wizard runs again after Start over, and preselecting
-      // Automatic over an owner's explicit "ask me" would quietly widen it on
-      // Continue. `off` is the stored default and so indistinguishable from
-      // "never asked"; it is the one value the preselection wins over.
-      if (out.mode === "ask" || out.mode === "auto") setImprovementMode(out.mode);
+      // The owner's own pick on this step wins over a read that lands late:
+      // the GET waits on `gh auth status`, which is seconds on a slow link.
+      if (improvementTouched.current) return;
+      // Otherwise a box that already ANSWERED keeps its answer on screen —
+      // Off included. This wizard runs again after Start over, and proposing
+      // Automatic over an explicit "ask me", or over an explicit decline,
+      // would quietly widen it on Continue. Automatic is proposed only over
+      // "never asked". A server that predates `answered` sends none, and
+      // there `off` cannot be told from never asked.
+      const known = out.mode === "off" || out.mode === "ask" || out.mode === "auto";
+      if (out.answered === true && known) setImprovementMode(out.mode as ImprovementMode);
+      else if (out.mode === "ask" || out.mode === "auto") setImprovementMode(out.mode);
     } catch {
       // Best effort: the step still asks, and Continue still writes.
     }
@@ -241,6 +249,7 @@ export default function CodingAgentSetupWizard({
     const n = IMPROVEMENT_MODES.length;
     const next = IMPROVEMENT_MODES[(IMPROVEMENT_MODES.indexOf(current) + delta + n) % n];
     improvementRefs.current[next]?.focus();
+    improvementTouched.current = true;
     setImprovementMode(next);
   };
 
@@ -677,7 +686,7 @@ export default function CodingAgentSetupWizard({
                 disabled={busy === "improvement"}
                 data-testid={`coding-agent-wizard-improvement-${m}`}
                 onKeyDown={(e) => moveImprovementWithArrows(e, m)}
-                onClick={() => setImprovementMode(m)}
+                onClick={() => { improvementTouched.current = true; setImprovementMode(m); }}
                 className={`w-full text-left rounded-xl border p-3 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
                   improvementMode === m
                     ? "border-[var(--coral-bright)] bg-[var(--coral-bright)]/10"

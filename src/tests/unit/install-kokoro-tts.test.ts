@@ -682,6 +682,19 @@ describe.skipIf(!hasBash)("install-voice.sh --scripts-only, the mode every insta
     expect(existsSync(path.join(res.home, ".config/systemd/user/kokoro-server.service"))).toBe(true);
   });
 
+  it("publishes failed:import and exits 12 on a stamped box whose Python stack no longer imports — never absent", () => {
+    // A later pip resolve (numpy 2.x is the known breaker of the Jetson torch
+    // wheel) leaves the stamp and the unit behind: Settings → Local AI reads
+    // that as installed, so `absent` here would hide a voice that cannot speak
+    // behind a row with no Install on it.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" }, true, "--scripts-only");
+    expect(res.status, res.stderr).toBe(12);
+    expect(res.ttsStatus).toMatch(/^KOKORO=failed:import$/m);
+    expect(res.ttsStatus).not.toMatch(/^KOKORO=absent$/m);
+    expect(res.su.filter((c) => c.includes("pip3 install")), "an update reinstalled the engine").toEqual([]);
+    expect(`${res.stdout}\n${res.stderr}`).toMatch(/voice_kokoro_install/);
+  });
+
   it("never publishes skipped: a board with no CUDA and no Kokoro is absent, not a mute-box failure", () => {
     // A skip is a board declining an install it was asked for; --scripts-only
     // asks for none, so an aarch64 box without nvcc is simply a box without

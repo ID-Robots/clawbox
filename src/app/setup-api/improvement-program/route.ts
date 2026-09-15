@@ -3,6 +3,7 @@ import { githubStatus } from "@/lib/coding-github";
 import { MAX_ISSUES_PER_DAY, REPORT_REPO } from "@/lib/incident-report";
 import {
   getImprovementMode,
+  readStoredImprovementMode,
   isImprovementMode,
   listIncidents,
   MAX_INCIDENTS,
@@ -64,13 +65,17 @@ const LIST_LIMIT = 25;
 export async function GET() {
   // No owner gate: the MCP bearer middleware already admitted is the intended
   // reader. An anonymous caller never gets here — middleware refuses it.
-  const mode = await getImprovementMode();
+  const [mode, stored] = await Promise.all([getImprovementMode(), readStoredImprovementMode()]);
   const incidents = listIncidents();
   // Never allowed to fail the read: a box with no `gh` still has a queue worth
   // showing, and the card's "Connect GitHub" line is drawn from this.
   const github = await githubStatus().catch(() => null);
   return NextResponse.json({
     mode,
+    // Whether the owner ever gave an answer. `mode` collapses "never asked"
+    // into "off" (every sending reader must fail that way); the wizard needs
+    // the difference to keep an explicit decline.
+    answered: stored !== null,
     // The reporter's own constant, never a second literal: the card renders
     // this as the destination, and a copy would drift from where reports go.
     repo: REPORT_REPO,

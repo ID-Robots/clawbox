@@ -84,6 +84,22 @@ export async function getImprovementMode(): Promise<ImprovementMode> {
   }
 }
 
+/**
+ * The owner's STORED answer, or null when there is none (absent, invalid or
+ * unreadable). Never for a reader that decides whether to SEND — those go
+ * through `getImprovementMode`, which fails toward "off". This one exists so
+ * the Coding Agent's wizard can tell "never asked" from an explicit Off, and
+ * keep a decline across Start over instead of proposing Automatic over it.
+ */
+export async function readStoredImprovementMode(): Promise<ImprovementMode | null> {
+  try {
+    const value = await configGet(IMPROVEMENT_MODE_KEY);
+    return isImprovementMode(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function setImprovementMode(mode: ImprovementMode): Promise<void> {
   await configSet(IMPROVEMENT_MODE_KEY, mode);
 }

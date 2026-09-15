@@ -4,17 +4,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * The spoken-replies switch (src/lib/voice-reply.ts): OFF by default — only a
  * stored `true` speaks (the owner's ruling, 2026-09-15) — and the boot repair
  * that seeds the gateway's `tts.auto` for a box that predates the switch —
- * written only when the key is absent, into whichever home holds the
- * providers, so a hand-set "always" or "tagged" is never overwritten.
+ * written when the key is absent, into whichever home holds the providers,
+ * and once over the previous build's own `inbound` seed beside no stored
+ * answer; a hand-set "always" or "tagged" is never overwritten.
  */
 
 const getMock = vi.fn();
 const setMock = vi.fn();
+const knownMock = vi.fn();
 const readConfigMock = vi.fn();
 const writeConfigMock = vi.fn();
 
 vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => getMock(...a),
+  getKnown: (...a: unknown[]) => knownMock(...a),
   set: (...a: unknown[]) => setMock(...a),
 }));
 let absent = false;
@@ -33,6 +36,7 @@ beforeEach(() => {
   absent = false;
   getMock.mockReset().mockResolvedValue(undefined);
   setMock.mockReset().mockResolvedValue(undefined);
+  knownMock.mockReset().mockResolvedValue({ value: undefined, known: false });
   readConfigMock.mockReset();
   writeConfigMock.mockReset().mockResolvedValue(undefined);
 });
@@ -100,6 +104,46 @@ describe("ensureVoiceAutoReplyMode", () => {
 
   it("never overwrites a mode that is already there", async () => {
     readConfigMock.mockResolvedValue({ tts: { providers: {}, auto: "always" } });
+    const { ensureVoiceAutoReplyMode } = await lib();
+    expect(await ensureVoiceAutoReplyMode()).toBe(false);
+    expect(writeConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("flips the previous build's own seed — inbound beside no stored answer — to off, once, and records it", async () => {
+    // The build before 2026-09-15 defaulted the switch ON and its first boot
+    // wrote `inbound`; left alone, channel voice notes would go on being
+    // answered aloud under a switch that now reads Off.
+    readConfigMock.mockResolvedValue({ tts: { providers: { openai: {} }, auto: "inbound" } });
+    const { ensureVoiceAutoReplyMode } = await lib();
+    expect(await ensureVoiceAutoReplyMode()).toBe(true);
+    expect(writeConfigMock.mock.calls[0][0].tts).toEqual({ providers: { openai: {} }, auto: "off" });
+    // Recorded, so the next boot sees a known key and never judges it again.
+    expect(setMock).toHaveBeenCalledWith("voice_auto_reply", false);
+  });
+
+  it("flips the seed in the legacy home too", async () => {
+    readConfigMock.mockResolvedValue({ messages: { tts: { providers: { x: {} }, auto: "inbound" } } });
+    const { ensureVoiceAutoReplyMode } = await lib();
+    expect(await ensureVoiceAutoReplyMode()).toBe(true);
+    const written = writeConfigMock.mock.calls[0][0];
+    expect(written.messages.tts.auto).toBe("off");
+    expect(written.tts).toBeUndefined();
+  });
+
+  it("leaves inbound alone when the owner's answer is stored — either way", async () => {
+    readConfigMock.mockResolvedValue({ tts: { providers: {}, auto: "inbound" } });
+    for (const value of [true, false]) {
+      knownMock.mockResolvedValue({ value, known: true });
+      const { ensureVoiceAutoReplyMode } = await lib();
+      expect(await ensureVoiceAutoReplyMode()).toBe(false);
+    }
+    expect(writeConfigMock).not.toHaveBeenCalled();
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing when the store cannot say whether the owner answered", async () => {
+    readConfigMock.mockResolvedValue({ tts: { providers: {}, auto: "inbound" } });
+    knownMock.mockRejectedValue(new Error("EACCES"));
     const { ensureVoiceAutoReplyMode } = await lib();
     expect(await ensureVoiceAutoReplyMode()).toBe(false);
     expect(writeConfigMock).not.toHaveBeenCalled();

@@ -129,7 +129,11 @@ beforeEach(() => {
   h.writeConfig.mockResolvedValue(undefined);
   h.restartGateway.mockResolvedValue(undefined);
   h.hermesRead.mockResolvedValue({ state: "present" });
-  h.patchHermesConfig.mockResolvedValue({ mode: "merge", backupPath: null });
+  // A landed unset reads back as absent — the route asks the file after it.
+  h.patchHermesConfig.mockImplementation(async () => {
+    h.hermesRead.mockResolvedValue({ state: "absent" });
+    return { mode: "merge", backupPath: null };
+  });
   h.reload.mockResolvedValue(true);
   h.reloadRefused.mockResolvedValue(undefined);
   h.gatewayStatus.mockResolvedValue({ value: { installed: true, running: true, scope: "system" }, answered: true });
@@ -266,6 +270,28 @@ describe("POST /setup-api/harness/mcp — OpenClaw", () => {
     expect(h.restartGateway).not.toHaveBeenCalled();
   });
 
+  it("on over a pre-start that left the entry out: 502 openclaw_not_registered, the switch saved, restarted true", async () => {
+    // The pre-start skips the entry with only a journal WARN (a short token, a
+    // full disk); a restart that succeeded proves nothing about that.
+    fs.writeFileSync(storePath(), JSON.stringify({ clawbox_mcp_enabled: false }));
+    h.openclawConfig = { gateway: { port: 18789 } };
+    const res = await post({ enabled: true });
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("openclaw_not_registered");
+    expect(body.enabled).toBe(true);
+    expect(body.applied.openclaw).toEqual({ restarted: true });
+    expect(readStore().clawbox_mcp_enabled).toBe(true);
+  });
+
+  it("on over an openclaw.json it cannot read back is not called a failure — could not look is not 'not registered'", async () => {
+    fs.writeFileSync(storePath(), JSON.stringify({ clawbox_mcp_enabled: false }));
+    h.readConfigStrict.mockRejectedValue(new Error("EACCES"));
+    const res = await post({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(h.restartGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("a gateway that did not come back is a 502 gateway_restart_failed over a saved switch", async () => {
     h.restartGateway.mockRejectedValue(new Error("nothing listening"));
     const res = await post({ enabled: false });
@@ -320,6 +346,33 @@ describe("POST /setup-api/harness/mcp — Hermes", () => {
     expect(res.status).toBe(200);
     expect(h.reloadRefused).toHaveBeenCalledTimes(1);
     expect((await res.json()).applied.hermes.reloaded).toBe(false);
+  });
+
+  it("off that a straddling boot-script save put back: removed once more, and a 502 hermes_still_registered when it stays", async () => {
+    // The Node YAML writer cannot take register-mcp.sh's flock; the file is
+    // asked back rather than trusted.
+    h.patchHermesConfig.mockResolvedValue({ mode: "merge", backupPath: null });
+    h.hermesRead.mockResolvedValue({ state: "present" });
+    const res = await post({ enabled: false });
+    expect(h.patchHermesConfig).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("hermes_still_registered");
+    expect(body.enabled).toBe(false);
+    expect(readStore().clawbox_mcp_enabled).toBe(false);
+  });
+
+  it("off that a straddling save put back once: the second removal lands and the answer is a plain success", async () => {
+    let calls = 0;
+    h.patchHermesConfig.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) h.hermesRead.mockResolvedValue({ state: "absent" });
+      return { mode: "merge", backupPath: null };
+    });
+    h.hermesRead.mockResolvedValue({ state: "present" });
+    const res = await post({ enabled: false });
+    expect(h.patchHermesConfig).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
   });
 
   it("a config.yaml that could not be written is a 502 hermes_unregister_failed over a saved switch", async () => {

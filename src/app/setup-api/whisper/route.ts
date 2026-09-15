@@ -3,13 +3,17 @@ export const dynamic = "force-dynamic";
 import { spawn } from "child_process";
 import path from "path";
 import { NextResponse } from "next/server";
+import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { checkInstallDisk, dirBytes, diskRefusal } from "@/lib/install-disk";
+import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
 import { safeWhisperSize, whisperSize } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
+import { syncChannelAudio } from "@/lib/stt-channel";
+import { getSttPrimary, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
 import {
   readWhisperState,
   removeWhisperSize,
@@ -266,18 +270,30 @@ export async function DELETE(req: Request) {
 
   const params = new URL(req.url).searchParams;
   if (params.get("scope") === "engine") {
-    // The whole engine, not one size. Refused while a size is being fetched:
+    // The whole engine, not one size. Refused while a size is being fetched —
     // the fetcher would go on writing into a cache this is deleting, and the
-    // stream would then point the unit at weights that are gone.
-    if (inFlight) {
-      return NextResponse.json({ error: "A speech model is being fetched right now.", code: "busy" }, { status: 409 });
+    // stream would then point the unit at weights that are gone — and while
+    // the ENGINE is being installed, whose own pre-download is the second
+    // writer into that cache.
+    if (inFlight || engineInFlight) {
+      return NextResponse.json({ error: "Speech on this box is being installed, or a model is being fetched, right now.", code: "busy" }, { status: 409 });
     }
+    // Read BEFORE the removal, the Kokoro DELETE's pattern: afterwards the
+    // stored preference is the only trace that the box's engine was chosen.
+    const pickedLocal = await getSttPrimary().then((p) => p === "local", () => false);
     const removed = await uninstallWhisperEngine();
     if (!removed.ok) {
       return NextResponse.json({ error: removed.error, code: removed.code ?? "remove_failed" }, { status: 500 });
     }
+    const warning = await releaseLocalTranscription();
     const state = await readWhisperState();
-    return NextResponse.json({ ok: true, freedBytes: removed.freedBytes, ...state });
+    return NextResponse.json({
+      ok: true,
+      freedBytes: removed.freedBytes,
+      ...state,
+      ...(pickedLocal ? { fallback: { requested: "local", reason: "not_installed" } } : {}),
+      ...(warning ? { warning } : {}),
+    });
   }
 
   const size = safeWhisperSize(params.get("size"));
@@ -341,4 +357,38 @@ function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok:
       finish({ ok: false, error: lines.at(-1) || `The speech model download failed (exit ${code}).` });
     });
   });
+}
+
+/**
+ * After the engine is gone, take it out of what still NAMES it: the CLI row in
+ * OpenClaw's shared audio list — which channel voice notes exec, and which on a
+ * box with no unit polls a dead socket for a minute and then downloads the
+ * weights this removal just freed — and `stt_primary` with its owner pin. The
+ * stt route's own order: the gateway's config first, the preference second.
+ *
+ * Never turns a landed uninstall into a failure: what it could not do comes
+ * back as a `warning` sentence, the stt route's wording, and the panel says it
+ * in amber beside a row that correctly reads "not installed".
+ */
+async function releaseLocalTranscription(): Promise<string | null> {
+  let wrote = false;
+  try {
+    if (!openclawIsAbsent()) wrote = await syncChannelAudio(sttEngineOrder("cloud"), false);
+    await setSttPrimary("cloud");
+    await clearOwnerChoice("stt");
+  } catch (err) {
+    console.warn("[setup-api/whisper] could not release the removed engine from the transcription settings:", err);
+    return "Removed, but the transcription settings could not be updated — channel voice notes still name the box's own engine until the engine is changed in Settings → Local AI.";
+  }
+  if (!wrote) return null;
+  try {
+    // Media-understanding config is read at gateway start.
+    await restartGateway();
+    return null;
+  } catch (err) {
+    console.warn("[setup-api/whisper] gateway restart failed after the audio write:", err);
+    return err instanceof GatewayNotReadyError
+      ? "Removed. The gateway has not finished restarting — channel voice notes switch over once it is serving again."
+      : "Removed, but the gateway restart failed — channel voice notes switch over at the next restart.";
+  }
 }

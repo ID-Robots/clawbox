@@ -5,6 +5,7 @@ import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 import { POST as disableLocalAi } from "@/app/setup-api/local-ai/route";
+import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
 import { getLlamaCppLaunchSpec, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
@@ -350,6 +351,10 @@ export async function DELETE(req: Request) {
  * uninstall is the state nothing can retry from. An unwired model only needs
  * its runtime stopped, since llama-server holds the file open.
  *
+ * Refused 409 `in_use` while Gemma is the PRIMARY model (local-only mode
+ * included): uninstalling the model a box answers with is a change of default
+ * first, and the panel offers that gesture.
+ *
  * The next system update puts Gemma back — it is the one model install.sh
  * caches on every box — and the panel's dialog says so.
  */
@@ -364,6 +369,21 @@ async function uninstallEngine(): Promise<NextResponse> {
     freedBytes = (await fs.stat(target)).size;
   } catch {
     return NextResponse.json({ error: "The local model is not on this box.", code: "not_found" }, { status: 404 });
+  }
+  // Refused while Gemma is the model the box ANSWERS with — its primary, which
+  // is also what local-only mode sets. The Disable below only clears the
+  // fallback list, so the next turn would still route to llamacpp/… and the
+  // runtime would download again the file this is about to delete. The owner
+  // moves the default first ("Use as fallback", or local-only off).
+  if (!openclawIsAbsent()) {
+    const config = await readConfig().catch(() => null);
+    const primary = config?.agents?.defaults?.model?.primary?.trim() ?? "";
+    if (primary.startsWith("llamacpp/")) {
+      return NextResponse.json(
+        { error: "Gemma is the model this box answers with. Choose \u201cUse as fallback\u201d (or turn local-only mode off) first, then uninstall it.", code: "in_use" },
+        { status: 409 },
+      );
+    }
   }
   const wired = await resolveConfiguredLlamaCppAlias().catch(() => null);
   if (wired !== null) {

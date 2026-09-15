@@ -83,6 +83,29 @@ describe("the chat's Create App button and the Coding Agent's setup", () => {
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("on a phone, closes the full-screen chat so the window it opened is not hidden under it", async () => {
+    // The phone draws one window at a lower layer than the full-screen chat:
+    // left open, the chat would cover the Coding Agent and the press would
+    // look dead.
+    answerCodingStatus(() => ok({ enabled: true, setupComplete: false, maxTaskChars: 4000 }));
+    const opened = watchOpens();
+    const onClose = vi.fn();
+    render(<ChatPopup isOpen mobile onClose={onClose} />);
+    fireEvent.click(await screen.findByTestId("chat-new-app-toggle"));
+    await waitFor(() => expect(opened).toEqual([{ appId: "coding" }]));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("on a desktop, stays open beside the plain window", async () => {
+    answerCodingStatus(() => ok({ enabled: true, setupComplete: false, maxTaskChars: 4000 }));
+    const opened = watchOpens();
+    const onClose = vi.fn();
+    render(<ChatPopup isOpen onClose={onClose} />);
+    fireEvent.click(await screen.findByTestId("chat-new-app-toggle"));
+    await waitFor(() => expect(opened).toEqual([{ appId: "coding" }]));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("opens the Coding Agent app while the feature's switch is off, even with setup done", async () => {
     answerCodingStatus(() => ok({ enabled: false, setupComplete: true }));
     const opened = watchOpens();

@@ -14,8 +14,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 
 /**
- * Both legacy ClawBox AI model ids now serve Flash 4.1 and start with reasoning
- * off. A level the user picked themselves still wins over that default.
+ * Both legacy ClawBox AI model ids now serve Flash 4.1 and start at Medium
+ * reasoning (the owner's ruling of 2026-09-15). A level the user picked
+ * themselves — Off included — still wins over that default.
  *
  * Mounts the real ChatPopup against a fake gateway socket and asserts the
  * first `sessions.patch{thinkingLevel}` frame — the wire value is what the

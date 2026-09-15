@@ -23,7 +23,6 @@ const writeStateMock = vi.fn();
 const clearChoiceMock = vi.fn();
 const voiceState = { choice: "auto" as string };
 
-vi.mock("@/lib/openclaw-config", () => ({ openclawIsAbsent: () => false }));
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: (...a: unknown[]) => ownerMock(...a) }));
 vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followMock(...a) }));
 vi.mock("@/lib/kokoro-uninstall", () => ({ uninstallKokoro: () => uninstallMock() }));
@@ -84,6 +83,21 @@ describe("POST /setup-api/tts/install", () => {
     const out = await lines(res);
     expect(out.map((l) => l.status)).toContain("Kokoro GPU TTS installed");
     expect(out[out.length - 1]).toMatchObject({ success: true });
+  });
+
+  it("installs on the Hermes SKU too — the step's Hermes arm registers clawbox-local", async () => {
+    // The 409 `edition` this route used to answer on Hermes was harmless only
+    // while every update installed Kokoro everywhere; with the update
+    // installing nothing, a Hermes box would have had Uninstall and no way back.
+    vi.stubEnv("CLAWBOX_EDITION", "hermes");
+    followMock.mockResolvedValue({ ok: true });
+    const { POST } = await route();
+    const res = await POST(post());
+    expect(res.status).toBe(200);
+    const out = await lines(res);
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+    expect(followMock).toHaveBeenCalledTimes(1);
+    expect(followMock.mock.calls[0][0]).toBe("voice_kokoro_install");
   });
 
   it("never asks for openclaw_tts — that step refreshes what is present and installs nothing", async () => {

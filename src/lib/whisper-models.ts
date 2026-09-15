@@ -30,9 +30,11 @@ export const WHISPER_UNIT_PATH = path.join(SYSTEMD_USER_DIR, WHISPER_UNIT);
 
 /**
  * The stamp `whisper_mark_installed` in install-voice.sh writes after a
- * complete faster-whisper install, and reads as the idempotence gate on every
- * update — see the KOKORO_STAMP note beside it. Removing it is what makes the
- * next update (or the Install button) put the engine back.
+ * complete faster-whisper install, and reads as the idempotence gate of
+ * `install_whisper_stt` (`--whisper`, the Local AI tab's Install) — see the
+ * KOKORO_STAMP note beside it. An update's `--scripts-only` run only refreshes
+ * the unit when the stamp and the import are both there; removing the stamp is
+ * what makes the Install button put the engine back.
  */
 export const WHISPER_STAMP = path.join(HOME, ".cache/clawbox/whisper-installed");
 
@@ -224,7 +226,9 @@ export interface WhisperUninstallResult {
  * still in place to retry from; a failure after it leaves the row saying "not
  * installed" over some stray weights, which is only disk. The engine's Python
  * packages stay: they are install.sh's (a root install into the account's
- * site-packages) and the stamp is what tells the next update to redo them.
+ * site-packages), and the stamp is what `install-voice.sh --whisper` — the
+ * Local AI tab's Install, install.sh's `voice_whisper_install` step — reads to
+ * redo them; an update runs `--scripts-only` and redoes nothing.
  */
 export async function uninstallWhisperEngine(): Promise<WhisperUninstallResult> {
   let freed = 0;

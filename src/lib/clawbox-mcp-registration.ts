@@ -54,7 +54,9 @@ export interface McpSwitchFailure {
     | "openclaw_unregister_failed"
     | "gateway_restart_failed"
     | "hermes_unregister_failed"
-    | "hermes_register_failed";
+    | "hermes_register_failed"
+    | "hermes_still_registered"
+    | "openclaw_not_registered";
   message: string;
 }
 
@@ -106,9 +108,10 @@ export async function readClawboxMcpRegistration(): Promise<McpRegistrationState
 
 async function readOpenclawRegistered(): Promise<boolean | null> {
   try {
-    // STRICT: an EACCES or a half-written file is "could not look", never "not
-    // registered" — the panel would otherwise draw a box that has lost its
-    // tools over one that merely could not be read.
+    // STRICT: an EACCES or a half-written file is "could not look" (null), never
+    // "not registered" — the GET answers that tri-state, and the post-restart
+    // verdict in applyOpenclaw would otherwise report a registration the
+    // pre-start skipped over a file this process merely could not read.
     return openclawEntryPresent(await readConfigStrict());
   } catch (err) {
     console.error("[clawbox-mcp] openclaw.json could not be read:", err instanceof Error ? err.message : err);
@@ -176,12 +179,19 @@ async function applyOpenclaw(
   // a running gateway spawns the MCP server from the config it started with.
   try {
     await restartGateway();
-    return { restarted: true };
   } catch (err) {
     console.error("[clawbox-mcp] gateway restart failed:", err instanceof Error ? err.message : err);
     fail("gateway_restart_failed", "The switch is saved, but the assistant's gateway did not come back after the restart. Check the ClawBox service log.");
     return { restarted: false };
   }
+  // ON is the pre-start's to write, and the pre-start skips it with only a
+  // journal WARN (an unreadable or short token, a full disk). The restart
+  // succeeding proves nothing about that, so the file is asked. `null` — could
+  // not look — is never read as "not registered".
+  if (enabled && (await readOpenclawRegistered()) === false) {
+    fail("openclaw_not_registered", "The switch is saved and the gateway restarted, but its pre-start did not register the tools. Check the ClawBox gateway log (journalctl -u clawbox-gateway) for the MCP token or openclaw.json warning.");
+  }
+  return { restarted: true };
 }
 
 async function applyHermes(
@@ -215,6 +225,16 @@ async function applyHermes(
   } else {
     try {
       await patchHermesConfig({ unset: [HERMES_SERVER_KEY] });
+      // The Node YAML writer cannot take register-mcp.sh's flock, so a boot
+      // run of that script straddling this write can save its own copy — with
+      // the entry — over ours. Asked back once, removed once more (by then any
+      // straddling block has saved); still there is a failure the panel shows.
+      if ((await readHermesRegistered()) === true) {
+        await patchHermesConfig({ unset: [HERMES_SERVER_KEY] });
+        if ((await readHermesRegistered()) === true) {
+          fail("hermes_still_registered", "The switch is saved, but Hermes' config still lists the ClawBox MCP server; the next web-server start removes it. Try again in a minute.");
+        }
+      }
     } catch (err) {
       console.error("[clawbox-mcp] config.yaml could not be written:", err instanceof Error ? err.message : err);
       fail(

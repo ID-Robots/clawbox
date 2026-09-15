@@ -730,7 +730,7 @@ shell tool, not less and not more:
   stored default project folder is used — the same fallback the run route
   documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
-  150 turns by default (10–2000), an optional token ceiling the device itself
+  400 turns by default (10–2000), an optional token ceiling the device itself
   enforces, an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it;
