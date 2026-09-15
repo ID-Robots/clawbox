@@ -136,11 +136,13 @@ function readConfig(): OpenclawConfig {
  * The stderr lines about the EMAIL: plugin, dropping the other plugins'.
  *
  * `block()` extracts the shared installer and EVERY plugin it installs, so the
- * path guard's and the web-taint gate's own lines ride along in every run here.
- * They are other suites' subjects; an assertion about "did this block stay
- * quiet" has to be about this block.
+ * path guard's own lines ride along in every run here. (The retired
+ * web-taint gate's field cleanup sits in the same slice and prints nothing on
+ * a box that never had it, which every box here is.) They are other suites'
+ * subjects; an assertion about "did this block stay quiet" has to be about
+ * this block.
  */
-const OTHER_HOOK_PLUGIN_IDS = ["clawbox-path-guard", "clawbox-web-taint"];
+const OTHER_HOOK_PLUGIN_IDS = ["clawbox-path-guard"];
 
 function emailHookLines(stderr: string): string {
   return stderr

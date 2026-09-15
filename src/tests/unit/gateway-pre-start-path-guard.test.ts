@@ -55,10 +55,10 @@ function block(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const from = "# ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ";
   // The section that follows the path guard's, not the last one in the file:
-  // every plugin installed inside the slice writes its own warnings into the
-  // stderr this suite asserts is empty, and each of them is another suite's
-  // subject. See src/tests/unit/gateway-pre-start-web-taint.test.ts.
-  const to = "# ── The web-taint approval gate ";
+  // every block inside the slice writes its own lines into the stderr this
+  // suite asserts is empty, and each of them is another suite's subject. See
+  // src/tests/unit/gateway-pre-start-web-taint-cleanup.test.ts.
+  const to = "# ── Field cleanup: the retired clawbox-web-taint plugin ";
   const start = src.indexOf(from);
   const end = src.indexOf(to, start);
   if (start < 0 || end < 0) throw new Error("the path-guard install block is not in gateway-pre-start.sh");
