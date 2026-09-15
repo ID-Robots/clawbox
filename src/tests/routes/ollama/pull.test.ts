@@ -6,6 +6,15 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
 }));
 
+// Pulling a model is the OWNER's verb: `requireSession` here also admitted the
+// MCP bearer, which middleware hands to every /setup-api route.
+const owner = { value: true };
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+
+// The disk check the route makes on the first `total` the pull reports.
+const free = { bytes: 100 * 1024 * 1024 * 1024 };
+vi.mock("@/lib/project-import", () => ({ freeBytes: async () => free.bytes }));
+
 describe("POST /setup-api/ollama/pull", () => {
   let ollamaPullPost: (req: Request) => Promise<Response>;
   let session: SessionFixture;
@@ -20,6 +29,8 @@ describe("POST /setup-api/ollama/pull", () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    owner.value = true;
+    free.bytes = 100 * 1024 * 1024 * 1024;
     session = installSessionFixture();
     vi.stubGlobal("fetch", vi.fn());
     const mod = await import("@/app/setup-api/ollama/pull/route");
@@ -280,4 +291,106 @@ describe("POST /setup-api/ollama/pull", () => {
       expect(done).toBe(true);
     }
   });
+
+  it("refuses a caller that is not the owner", async () => {
+    owner.value = false;
+    const res = await ollamaPullPost(jsonRequest({ model: "llama2" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.code).toBe("owner_only");
+  });
+
+  it("refuses a request from another site's page", async () => {
+    const req = new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: session.cookie, Origin: "http://evil.example" },
+      body: JSON.stringify({ model: "llama2" }),
+    });
+    const res = await ollamaPullPost(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.code).toBe("cross_origin");
+  });
+
+  it("stops a pull that would not fit, on the first total it sees", async () => {
+    // 4 GB left, a 40 GB model: the refusal arrives instead of the progress
+    // line, and the download is dropped rather than left to fill the disk.
+    free.bytes = 4 * 1024 * 1024 * 1024;
+    const chunks = [
+      JSON.stringify({ status: "pulling manifest" }) + "\n",
+      JSON.stringify({ status: "pulling", completed: 0, total: 40 * 1024 * 1024 * 1024 }) + "\n",
+    ];
+    let index = 0;
+    const cancel = vi.fn(() => Promise.resolve());
+    const mockReader = {
+      cancel,
+      read: vi.fn().mockImplementation(() => {
+        if (index < chunks.length) {
+          return Promise.resolve({ done: false, value: new TextEncoder().encode(chunks[index++]) });
+        }
+        return Promise.resolve({ done: true });
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => mockReader } }));
+
+    const res = await ollamaPullPost(jsonRequest({ model: "huge" }));
+    expect(res.status).toBe(200);
+
+    const content = await readAll(res);
+    const lines = content.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[0]).toMatchObject({ status: "pulling manifest" });
+    expect(lines[1]).toMatchObject({ code: "disk_full" });
+    expect(lines[1].requiredBytes).toBe(40 * 1024 * 1024 * 1024);
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("lets a pull that fits through untouched", async () => {
+    const chunks = [
+      JSON.stringify({ status: "pulling", completed: 1, total: 1024 }) + "\n",
+      JSON.stringify({ status: "success" }) + "\n",
+    ];
+    let index = 0;
+    const mockReader = {
+      cancel: vi.fn(() => Promise.resolve()),
+      read: vi.fn().mockImplementation(() => {
+        if (index < chunks.length) {
+          return Promise.resolve({ done: false, value: new TextEncoder().encode(chunks[index++]) });
+        }
+        return Promise.resolve({ done: true });
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => mockReader } }));
+
+    const content = await readAll(await ollamaPullPost(jsonRequest({ model: "small" })));
+    expect(content).toContain("success");
+    expect(content).not.toContain("disk_full");
+  });
+
+  it("forwards a terminal line that arrives without its newline", async () => {
+    const mockReader = {
+      cancel: vi.fn(() => Promise.resolve()),
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(JSON.stringify({ status: "success" })) })
+        .mockResolvedValue({ done: true }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => mockReader } }));
+
+    const content = await readAll(await ollamaPullPost(jsonRequest({ model: "small" })));
+    expect(content).toContain("success");
+  });
 });
+
+async function readAll(res: Response): Promise<string> {
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder();
+  let content = "";
+  if (!reader) return content;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    content += decoder.decode(value, { stream: true });
+  }
+  return content + decoder.decode();
+}

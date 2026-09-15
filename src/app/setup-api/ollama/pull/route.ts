@@ -179,8 +179,10 @@ export async function POST(request: Request) {
           try { send({ error: msg }); } catch { /* client gone */ }
         } finally {
           // The pull is dropped with the reader: whatever this refused, Ollama
-          // must not go on downloading it with nothing watching.
-          reader.cancel().catch(() => {});
+          // must not go on downloading it with nothing watching. Optional the
+          // way the `cancel` hook below already is — a body that is not a real
+          // ReadableStream still has to leave the controller closed.
+          reader.cancel?.()?.catch?.(() => {});
           try {
             controller.close();
           } catch {
