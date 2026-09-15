@@ -186,6 +186,12 @@ d("gateway-pre-start.sh — the retired web-taint gate's field cleanup", () => {
     for (const call of src.match(/install_clawbox_hook_plugin\s+"[^"]*"[^\n]*/g) ?? []) {
       expect(call.toLowerCase()).not.toContain("taint");
     }
+    // And nothing BEFORE the cleanup names the retired plugin in any form — an
+    // unquoted argument, a variable assigned the id — so no installer spelling
+    // can slip past the call-shaped check above.
+    const cleanupAt = src.indexOf("# ── Field cleanup: the retired clawbox-web-taint plugin");
+    expect(cleanupAt).toBeGreaterThan(0);
+    expect(src.slice(0, cleanupAt).toLowerCase()).not.toContain("web-taint");
   });
 
   it("leaves exactly the path guard behind when the whole installer slice runs", () => {

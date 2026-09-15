@@ -118,8 +118,11 @@ export async function ensureVoiceAutoReplyMode(): Promise<boolean> {
     // key and leaves the file alone. A stored answer either way, and any hand
     // edit (`always`, `tagged`), is never touched.
     if (present !== "inbound") return false;
-    const known = await getKnown(VOICE_AUTO_REPLY_KEY).catch(() => ({ value: undefined, known: true }));
-    if (known.known) return false;
+    // `known` says whether the STORE could be read, not whether the key is in
+    // it. An unreadable store cannot tell ClawBox's seed from the owner's
+    // choice, so nothing is written; a readable one decides by the key itself.
+    const stored = await getKnown(VOICE_AUTO_REPLY_KEY).catch(() => ({ value: undefined, known: false }));
+    if (!stored.known || stored.value !== undefined) return false;
     writeMode(config, home, block, "off");
     await writeConfig(config);
     await set(VOICE_AUTO_REPLY_KEY, false);

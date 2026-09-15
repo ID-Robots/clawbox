@@ -293,6 +293,25 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     expect(out[out.length - 1]).toEqual({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
   });
 
+  it("refuses an engine install that would not fit before anything starts, and a later one with room proceeds", async () => {
+    disk.free = 1024 * 1024 * 1024;
+    const { POST } = await load();
+    const res = await POST(post({ action: "install-engine" }));
+    const body = await res.json();
+    expect(res.status).toBe(507);
+    expect(body.code).toBe("disk_full");
+    expect(body.requiredBytes).toBe(3 * 1024 * 1024 * 1024);
+    expect(followMock).not.toHaveBeenCalled();
+
+    // The refusal left no install marked as running.
+    disk.free = 100 * 1024 * 1024 * 1024;
+    followMock.mockResolvedValue({ ok: true });
+    const next = await POST(post({ action: "install-engine" }));
+    expect(next.status).toBe(200);
+    await readStream(next);
+    expect(followMock).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses when the engine is already installed — the sizes are the picker's job", async () => {
     state.installed = true;
     const { POST } = await load();

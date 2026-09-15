@@ -102,14 +102,18 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   // fallback. The Voice tab below flips that, and this row is read again.
   await expect(kokoroRow.getByTestId("local-model-role-kokoro")).toHaveText("Fallback");
 
-  // NEGATIVE: Whisper is not on this box. It must read as absent, carry no
-  // role, and offer no control of any kind — no switch, no menu.
+  // Whisper is not on this box. It must read as absent and carry no role, and
+  // since 2026-09-15 — when the update stopped installing engines and Local AI
+  // became the one place they are installed from — its ONE control is Install:
+  // no switch, no menu, nothing that acts on an engine that is not there.
   await expect(localAi.getByTestId("local-ai-group-stt").getByRole("heading", { name: "Speech to text" })).toBeVisible();
   const whisperRow = localAi.getByTestId("local-model-whisper");
   await expect(whisperRow.getByText("Not installed", { exact: true })).toBeVisible();
   await expect(whisperRow.getByText("Not installed. Speech is transcribed in the cloud.")).toBeVisible();
   await expect(whisperRow.getByRole("switch")).toHaveCount(0);
-  await expect(whisperRow.getByRole("button")).toHaveCount(0);
+  await expect(whisperRow.getByRole("button")).toHaveCount(1);
+  await expect(whisperRow.getByTestId("local-model-action-whisper-install")).toBeVisible();
+  await expect(whisperRow.getByTestId("local-model-menu-whisper")).toHaveCount(0);
   await expect(whisperRow.getByTestId("local-model-role-whisper")).toHaveCount(0);
 
   // ── Channels: a hub row per channel; Telegram is configured inside it.

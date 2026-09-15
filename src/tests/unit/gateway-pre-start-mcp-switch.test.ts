@@ -148,24 +148,25 @@ describe.skipIf(!canRun)("gateway-pre-start.sh — the MCP switch", () => {
     }
   });
 
-  it("registers when the store is missing or unreadable — a failed read never costs the box its tools", () => {
+  it("registers when the store is missing, and leaves the registration as it is when the store cannot be read", () => {
     writeFileSync(configPath, "{}");
-    // No store at all.
+    // No store at all: the box's default, on.
     let r = run();
     expect(r.status, r.out).toBe(0);
     expect(servers()?.clawbox).toBeTruthy();
-    // A torn store.
-    writeFileSync(configPath, "{}");
-    writeFileSync(storePath, "{\"clawbox_mcp_enabled\": fal");
-    r = run();
-    expect(r.status, r.out).toBe(0);
-    expect(servers()?.clawbox).toBeTruthy();
-    // A store that is not an object.
-    writeFileSync(configPath, "{}");
-    writeFileSync(storePath, "[false]");
-    r = run();
-    expect(r.status, r.out).toBe(0);
-    expect(servers()?.clawbox).toBeTruthy();
+    for (const torn of ["{\"clawbox_mcp_enabled\": fal", "[false]"]) {
+      // Unregistered stays unregistered: a corrupt store cannot undo an owner's off...
+      writeFileSync(configPath, "{}");
+      writeFileSync(storePath, torn);
+      r = run();
+      expect(r.status, r.out).toBe(0);
+      expect(servers()?.clawbox, torn).toBeFalsy();
+      // ...and registered stays registered: nor can it strip a working box.
+      writeFileSync(configPath, JSON.stringify(REGISTERED));
+      r = run();
+      expect(r.status, r.out).toBe(0);
+      expect(servers()?.clawbox, torn).toBeTruthy();
+    }
   });
 
   it("honours the off switch even on a boot with no bearer", () => {

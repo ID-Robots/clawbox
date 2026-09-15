@@ -42,8 +42,10 @@ export default function MemoryShardEmbedderCard() {
   const load = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" });
-      const body = res.ok ? await res.json() : null;
-      if (live.current) setStatus(parseEmbedderChoiceStatus(body));
+      const parsed = parseEmbedderChoiceStatus(res.ok ? await res.json() : null);
+      // A read that failed keeps the last answer the box gave rather than
+      // blanking the card or inventing one.
+      if (live.current && parsed) setStatus(parsed);
     } catch {
       // A box that cannot say keeps the card out of the way rather than
       // drawing a choice it cannot back.

@@ -15,10 +15,11 @@ import { getKnown } from "@/lib/config-store";
  *
  * ABSENT MEANS ON. This is the box's default capability, not a consent: a box
  * that has never been asked has its tools, and only an explicit `false` takes
- * them away. An unreadable store reads as on for the same reason — every
- * failure of this read must fail towards the box the owner has always had, and
- * the route that flips the switch refuses a write it cannot land rather than
- * guessing.
+ * them away. A store that EXISTS and cannot be read is a third answer to the
+ * two boot scripts: they leave the registration exactly as the last readable
+ * run left it, so a corrupt write can neither undo an owner's off nor strip a
+ * working box. This reader is for the Settings panel's drawing only; the route
+ * that flips the switch refuses a write it cannot land rather than guessing.
  */
 export const CLAWBOX_MCP_ENABLED_KEY = "clawbox_mcp_enabled";
 

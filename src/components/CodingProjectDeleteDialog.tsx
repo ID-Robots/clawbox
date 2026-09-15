@@ -267,7 +267,7 @@ export default function CodingProjectDeleteDialog({
                 {t("codingAgent.delete.purged", { names: done.prunedEarly.join(", ") })}
               </p>
             )}
-            {(done.vercelLinkRemoved || done.secretsRemoved.length > 0 || done.runsKept > 0 || done.metadataKeptFor) && (
+            {((vercelEnabled && done.vercelLinkRemoved) || done.secretsRemoved.length > 0 || done.runsKept > 0 || done.metadataKeptFor) && (
               <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-muted)]">
                 {vercelEnabled && done.vercelLinkRemoved && <li>{t("codingAgent.delete.vercelRemoved")}</li>}
                 {done.secretsRemoved.length > 0 && (

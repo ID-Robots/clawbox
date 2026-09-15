@@ -404,25 +404,35 @@ if not isinstance(cfg, dict):
     sys.exit(1)
 
 
-def mcp_switched_off():
+def mcp_switch_state():
     """The owner's switch for the MCP server (Settings -> Harness, 2026-09-15).
 
     `clawbox_mcp_enabled` in the device store, read exactly the way the re-arm
     below reads its own key from the same file and the way
-    src/lib/clawbox-mcp-switch.ts reads it: only the boolean `false` is off. An
-    absent key, another type and a store that cannot be read all mean ON — the
-    tools are the box's default capability, and a failed read must fail towards
-    the box the owner has always had, never towards one that lost its tools.
+    src/lib/clawbox-mcp-switch.ts reads it: only the boolean `false` is off,
+    and an absent key or an absent store is on.
+
+    Three answers, not two. A store that EXISTS and cannot be read — torn,
+    undecodable, not an object — is "unknown": this run cannot tell whether
+    the owner switched the tools off, so the registration is left exactly as
+    the last run that could read the store left it, neither put back nor
+    taken away. Reading it as on would undo an owner's off on the boot after a
+    corrupt write; reading it as off would strip the tools from every box
+    whose store hiccuped.
     """
     store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
     if not store_path:
-        return False
+        return "on"
     try:
         with open(store_path, encoding="utf-8") as fh:
             store = json.load(fh)
+    except FileNotFoundError:
+        return "on"
     except Exception:
-        return False
-    return isinstance(store, dict) and store.get("clawbox_mcp_enabled") is False
+        return "unknown"
+    if not isinstance(store, dict):
+        return "unknown"
+    return "off" if store.get("clawbox_mcp_enabled") is False else "on"
 
 
 changed = False
@@ -430,7 +440,12 @@ servers = cfg.get("mcp_servers")
 # What this run did to the entry, for the closing line: "registered" is the
 # only word the script used to have, and it would be a lie over a removal.
 mcp_action = "unchanged"
-if mcp_switched_off():
+mcp_switch = mcp_switch_state()
+if mcp_switch == "unknown":
+    # Neither put back nor taken away: the store exists and cannot be read, so
+    # this run cannot tell an owner's off from a box that never switched.
+    print("[register-mcp] WARN: the device store could not be read; the ClawBox MCP registration is left exactly as it is")
+elif mcp_switch == "off":
     # HONOURED HERE, or the next web-server boot — which runs this script —
     # would quietly put back the entry /setup-api/harness/mcp just removed.
     # Everything below this point (the distractor skills, the clarify window,

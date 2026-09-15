@@ -36,7 +36,9 @@ beforeEach(() => {
   absent = false;
   getMock.mockReset().mockResolvedValue(undefined);
   setMock.mockReset().mockResolvedValue(undefined);
-  knownMock.mockReset().mockResolvedValue({ value: undefined, known: false });
+  // The real shape: `known` is whether the store was READ; an absent key in a
+  // readable store is `{ value: undefined, known: true }`.
+  knownMock.mockReset().mockResolvedValue({ value: undefined, known: true });
   readConfigMock.mockReset();
   writeConfigMock.mockReset().mockResolvedValue(undefined);
 });
@@ -143,10 +145,13 @@ describe("ensureVoiceAutoReplyMode", () => {
 
   it("writes nothing when the store cannot say whether the owner answered", async () => {
     readConfigMock.mockResolvedValue({ tts: { providers: {}, auto: "inbound" } });
-    knownMock.mockRejectedValue(new Error("EACCES"));
-    const { ensureVoiceAutoReplyMode } = await lib();
-    expect(await ensureVoiceAutoReplyMode()).toBe(false);
+    for (const unreadable of [() => knownMock.mockResolvedValue({ value: undefined, known: false }), () => knownMock.mockRejectedValue(new Error("EACCES"))]) {
+      unreadable();
+      const { ensureVoiceAutoReplyMode } = await lib();
+      expect(await ensureVoiceAutoReplyMode()).toBe(false);
+    }
     expect(writeConfigMock).not.toHaveBeenCalled();
+    expect(setMock).not.toHaveBeenCalled();
   });
 
   it("creates the v2 block on a box with no speech config at all", async () => {

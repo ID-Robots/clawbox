@@ -41,7 +41,17 @@ export const dynamic = "force-dynamic";
  * middleware already requires a session or the device bearer.
  */
 export async function GET() {
-  return NextResponse.json(await readEmbedderChoice(), { headers: { "Cache-Control": "no-store" } });
+  try {
+    return NextResponse.json(await readEmbedderChoice(), { headers: { "Cache-Control": "no-store" } });
+  } catch (err) {
+    // Never "local" over a read that failed: a card that believed it would
+    // skip the very request that moves a cloud index back onto the box.
+    console.error("[memory-shard] where the index is embedded could not be read:", err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: "Where the memory index is embedded could not be read from this box's config.", kind: "unreadable" },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
 }
 
 async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
@@ -54,7 +64,7 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
     import("@/lib/clawai-cloud-defaults"),
   ]);
   const [choice, provisioning, facts] = await Promise.all([
-    cloudSupported ? readEmbeddingChoice().catch(() => null) : Promise.resolve(null),
+    cloudSupported ? readEmbeddingChoice() : Promise.resolve(null),
     getEmbedProvisioningStatus().catch(() => null),
     // The resolver's own facts, so "the cloud model is on offer here" means the
     // same thing it means to the default that promotes a box onto it: linked,

@@ -5836,28 +5836,36 @@ def write_atomically(cfg):
         raise
 
 
-def mcp_switched_off():
+def mcp_switch_state():
     """The owner's switch for the MCP server (Settings -> Harness, 2026-09-15).
 
     `clawbox_mcp_enabled` in the device store (data/config.json), read the way
     the other device-store readers in this script read it: never sourced, and
     the SAME rule as src/lib/clawbox-mcp-switch.ts — only the boolean `false`
-    is off. An absent key, a value of another type and a store that cannot be
-    read (`except Exception`, as wide as the sibling readers: this block is
-    guarded, but a corrupt byte in the store must still cost the box its
-    switch and not its tools) all read as ON, because the tools are the box's
-    default capability and every failure of this read must fail towards the
-    box the owner has always had.
+    is off, and an absent key or an absent store is on, because the tools are
+    the box's default capability.
+
+    Three answers, not two. A store that EXISTS and cannot be read — torn,
+    undecodable, not an object — is "unknown": this run cannot tell whether
+    the owner switched the tools off, so the registration is left exactly as
+    the last run that could read the store left it, neither put back nor
+    taken away. Reading it as on would undo an owner's off on the boot after a
+    corrupt write; reading it as off would strip the tools from every box
+    whose store hiccuped.
     """
     store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
     if not store_path:
-        return False
+        return "on"
     try:
         with open(store_path, encoding="utf-8") as fh:
             store = json.load(fh)
+    except FileNotFoundError:
+        return "on"
     except Exception:
-        return False
-    return isinstance(store, dict) and store.get("clawbox_mcp_enabled") is False
+        return "unknown"
+    if not isinstance(store, dict):
+        return "unknown"
+    return "off" if store.get("clawbox_mcp_enabled") is False else "on"
 
 
 try:
@@ -5870,7 +5878,11 @@ except (OSError, json.JSONDecodeError):
 # whether or not this boot has a bearer, and it is what stops the next gateway
 # start from quietly putting the tools back after /setup-api/harness/mcp
 # removed them. One line either way, so the journal says why the entry is gone.
-if mcp_switched_off():
+switch = mcp_switch_state()
+if switch == "unknown":
+    print("  WARN: the device store could not be read; the ClawBox MCP registration is left exactly as it is")
+    sys.exit(0)
+if switch == "off":
     mcp_cfg = cfg.get("mcp")
     servers = mcp_cfg.get("servers") if isinstance(mcp_cfg, dict) else None
     if isinstance(servers, dict) and "clawbox" in servers:

@@ -63,7 +63,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Installing the voice only works from this ClawBox's own pages.", kind: "cross_origin" }, { status: 403 });
   }
   if (inFlight) {
-    return NextResponse.json({ error: "The voice is already being installed.", code: "busy" }, { status: 409 });
+    return NextResponse.json({ error: "The voice is being installed or removed right now.", code: "busy" }, { status: 409 });
   }
   inFlight = true;
 
@@ -126,20 +126,41 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "The voice is being installed right now.", code: "busy" }, { status: 409 });
   }
 
-  // Read BEFORE the removal: afterwards the status route reports the engine
-  // as unconfigured and the stored pick is the only trace that it was chosen.
-  const pickedLocal = await readVoiceState().then((s) => s.choice === "local", () => false);
-  const removed = await uninstallKokoro();
-  if (!removed.ok) {
-    return NextResponse.json({ error: removed.error ?? "Could not remove the voice.", code: removed.code ?? "remove_failed" }, { status: 500 });
+  // The POST's own flag, held for the whole removal: an install started now
+  // would write the stamp, the cache and the unit this is deleting.
+  inFlight = true;
+  try {
+    // Read BEFORE the removal: afterwards the status route reports the engine
+    // as unconfigured and the stored pick is the only trace that it was chosen.
+    const pickedLocal = await readVoiceState().then((s) => s.choice === "local", () => false);
+    const removed = await uninstallKokoro();
+    if (!removed.ok) {
+      return NextResponse.json({ error: removed.error ?? "Could not remove the voice.", code: removed.code ?? "remove_failed" }, { status: 500 });
+    }
+    if (!pickedLocal) {
+      return NextResponse.json({ ok: true, freedBytes: removed.freedBytes, installed: false });
+    }
+    try {
+      const fallback = await releaseLocalVoicePick();
+      return NextResponse.json({ ok: true, freedBytes: removed.freedBytes, installed: false, fallback });
+    } catch (err) {
+      // The voice IS gone; what did not land is moving the pick off it. Said as
+      // exactly that, never as a clean success over a pick that still names an
+      // engine this box no longer has.
+      console.error("[tts/install] the voice was removed but its pick could not be moved to Auto:", err instanceof Error ? err.message : err);
+      return NextResponse.json(
+        {
+          error: "The voice was removed, but the voice choice could not be moved off it. Choose a voice in Settings → Voice.",
+          code: "fallback_failed",
+          freedBytes: removed.freedBytes,
+          installed: false,
+        },
+        { status: 500 },
+      );
+    }
+  } finally {
+    inFlight = false;
   }
-  const fallback = pickedLocal ? await releaseLocalVoicePick() : null;
-  return NextResponse.json({
-    ok: true,
-    freedBytes: removed.freedBytes,
-    installed: false,
-    ...(fallback ? { fallback } : {}),
-  });
 }
 
 /**
@@ -158,8 +179,10 @@ async function releaseLocalVoicePick(): Promise<{ requested: "local"; reason: "n
     body: JSON.stringify({ action: "select", choice: "auto" }),
   })).then((res) => res.ok, () => false);
   if (!settled) {
-    await writeVoiceState({ ...(await readVoiceState()), choice: "auto" }).catch(() => {});
-    await clearOwnerChoice("tts").catch(() => {});
+    // Not swallowed: a pick left on "local" or a stale owner pin is what the
+    // caller must be told about.
+    await writeVoiceState({ ...(await readVoiceState()), choice: "auto" });
+    await clearOwnerChoice("tts");
   }
   return { requested: "local", reason: "not_installed" };
 }

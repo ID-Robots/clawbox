@@ -180,6 +180,40 @@ describe("DELETE /setup-api/tts/install", () => {
     expect(selectMock).not.toHaveBeenCalled();
   });
 
+  it("says the removal landed but the choice did not move, when the Auto write fails", async () => {
+    voiceState.choice = "local";
+    selectMock.mockResolvedValue(new Response(JSON.stringify({ error: "no voice", code: "no_voice" }), { status: 409 }));
+    writeStateMock.mockRejectedValue(new Error("EACCES"));
+    const { DELETE } = await route();
+    const res = await DELETE(del());
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ code: "fallback_failed", installed: false });
+  });
+
+  it("says the same when releasing the owner's pin fails", async () => {
+    voiceState.choice = "local";
+    selectMock.mockResolvedValue(new Response(JSON.stringify({ error: "no voice", code: "no_voice" }), { status: 409 }));
+    clearChoiceMock.mockRejectedValue(new Error("EACCES"));
+    const { DELETE } = await route();
+    const res = await DELETE(del());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("fallback_failed");
+  });
+
+  it("refuses an install while the voice is being removed", async () => {
+    let finish!: () => void;
+    uninstallMock.mockImplementation(() => new Promise((resolve) => { finish = () => resolve({ ok: true, freedBytes: 1 }); }));
+    const { POST, DELETE } = await route();
+    const removing = DELETE(del());
+    await vi.waitFor(() => expect(uninstallMock).toHaveBeenCalled());
+    const res = await POST(post());
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("busy");
+    expect(followMock).not.toHaveBeenCalled();
+    finish();
+    expect((await removing).status).toBe(200);
+  });
+
   it("refuses while the voice is being installed", async () => {
     let finish!: () => void;
     followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));

@@ -16,12 +16,12 @@ vi.mock("child_process", () => ({ execFile: execFileMock }));
 let home: string;
 const calls: string[][] = [];
 
-function answer(fail: (args: string[]) => boolean = () => false) {
+function answer(fail: (args: string[]) => boolean = () => false, stderr = "Failed to connect to bus") {
   type Cb = (err: Error | null, out?: { stdout: string; stderr: string }) => void;
   execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Cb) => {
     calls.push(args);
     if (fail(args)) {
-      cb(Object.assign(new Error("Command failed"), { stdout: "", stderr: "Failed to connect to bus" }));
+      cb(Object.assign(new Error("Command failed"), { stdout: "", stderr }));
       return;
     }
     cb(null, { stdout: "", stderr: "" });
@@ -67,10 +67,22 @@ describe("removeUserUnit", () => {
     expect(fs.existsSync(file)).toBe(false);
   });
 
-  it("still removes the file when systemd would not answer the disable, and when there was no file", async () => {
-    // A unit that is already gone answers "no such unit" to the disable; that
-    // is not a reason to leave the rest of the uninstall undone.
+  it("refuses, and keeps the file, when systemd could not be asked to stop the unit", async () => {
+    // No bus, a permission, a timeout: the service may still be running, and a
+    // deleted unit file would leave a process no unit can name.
     answer((args) => args.includes("disable"));
+    const file = unitFile("whisper-server.service");
+    const { removeUserUnit, WHISPER_UNIT } = await load();
+
+    expect(await removeUserUnit(WHISPER_UNIT)).toEqual({ ok: false, error: "Could not stop the service." });
+    expect(fs.existsSync(file)).toBe(true);
+    expect(calls.some((args) => args.includes("daemon-reload"))).toBe(false);
+  });
+
+  it("still removes the file when systemd says the unit is already gone, and when there was no file", async () => {
+    // A unit that is already gone answers "does not exist" to the disable;
+    // that is not a reason to leave the rest of the uninstall undone.
+    answer((args) => args.includes("disable"), "Failed to disable unit: Unit file kokoro-server.service does not exist.");
     const file = unitFile("kokoro-server.service");
     const { removeUserUnit, KOKORO_UNIT } = await load();
 

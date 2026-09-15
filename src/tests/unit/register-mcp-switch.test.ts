@@ -21,7 +21,8 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * back. Pinned: `clawbox_mcp_enabled: false` in data/config.json removes an
  * existing entry, writes none into a config that has none, and leaves the
  * rest of §3 (the distractor skills, the clarify window) landing as before;
- * the key absent, true, or the store unreadable registers as it always did.
+ * the key absent or true registers as it always did, and a store that exists
+ * but cannot be read leaves the registration exactly as it is.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -158,14 +159,35 @@ d("register-mcp.sh — the MCP switch", () => {
     expect(r.stdout).toMatch(/registered the ClawBox MCP server with Hermes/);
   });
 
-  it("registers when the switch is explicitly on, and when the store is missing or torn", () => {
-    for (const store of [JSON.stringify({ clawbox_mcp_enabled: true }), null, "{\"clawbox_mcp_enabled\": fal", "[false]", JSON.stringify({ clawbox_mcp_enabled: "false" })]) {
+  it("registers when the switch is explicitly on, when the store is missing, and for any value but the boolean false", () => {
+    for (const store of [JSON.stringify({ clawbox_mcp_enabled: true }), null, JSON.stringify({ clawbox_mcp_enabled: "false" })]) {
       fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
       fs.rmSync(storePath, { force: true });
       if (store !== null) fs.writeFileSync(storePath, store);
       const r = run();
       expect(r.status, r.stdout + r.stderr).toBe(0);
       expect(servers()?.clawbox, `store ${JSON.stringify(store)}`).toBeTruthy();
+    }
+  });
+
+  it("leaves the registration exactly as it is when the store exists and cannot be read", () => {
+    for (const torn of ["{\"clawbox_mcp_enabled\": fal", "[false]"]) {
+      // Unregistered stays unregistered: a corrupt store cannot undo an owner's off...
+      fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+      fs.writeFileSync(storePath, torn);
+      let r = run();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(servers()?.clawbox, `torn ${torn}`).toBeFalsy();
+      expect(r.stdout).toMatch(/left exactly as it is/);
+
+      // ...and registered stays registered: nor can it strip a working box.
+      fs.rmSync(storePath, { force: true });
+      r = run();
+      expect(servers()?.clawbox).toBeTruthy();
+      fs.writeFileSync(storePath, torn);
+      r = run();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(servers()?.clawbox, `torn ${torn}`).toBeTruthy();
     }
   });
 

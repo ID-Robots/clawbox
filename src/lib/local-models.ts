@@ -910,8 +910,15 @@ export async function reloadAndRestartUserEngine(unit: string): Promise<ToggleRe
 export async function removeUserUnit(unit: string): Promise<ToggleResult> {
   if (!USER_UNITS.has(unit)) return { ok: false, error: "Unknown service." };
   const env = userSystemctlEnv();
-  await execFileAsync("/usr/bin/systemctl", ["--user", "disable", "--now", unit], { timeout: 30_000, env })
-    .catch(() => {});
+  const disableFailure = await execFileAsync("/usr/bin/systemctl", ["--user", "disable", "--now", unit], { timeout: 30_000, env })
+    .then(() => null, (err: unknown) => err as { stderr?: unknown; message?: string });
+  // A unit systemd no longer knows is not a reason to leave the rest undone.
+  // Anything else — no bus, a permission, a timeout — may have left the
+  // service RUNNING, and deleting its file then would strand a process no unit
+  // can name: refuse, keep the file, and let the owner retry.
+  if (disableFailure && !unitAlreadyAbsent(disableFailure)) {
+    return { ok: false, error: "Could not stop the service." };
+  }
   try {
     await fs.unlink(path.join(SYSTEMD_USER_DIR, unit));
   } catch (err) {
@@ -923,6 +930,12 @@ export async function removeUserUnit(unit: string): Promise<ToggleResult> {
   await execFileAsync("/usr/bin/systemctl", ["--user", "daemon-reload"], { timeout: 15_000, env })
     .catch(() => {});
   return { ok: true };
+}
+
+/** systemctl's own words for a unit that is not there to disable. */
+function unitAlreadyAbsent(err: { stderr?: unknown; message?: string }): boolean {
+  const text = `${typeof err.stderr === "string" ? err.stderr : ""} ${err.message ?? ""}`;
+  return /does not exist|not found|no such file|not loaded/i.test(text);
 }
 
 /** Every engine the inventory can name, so a route can tell "unknown" from "has no switch". */

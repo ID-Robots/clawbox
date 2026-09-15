@@ -120,12 +120,19 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   // leaves the model on this box, which is what every box did before.
   const [embedder, setEmbedder] = useState<EmbedderChoiceStatus | null>(null);
   const [pickedSource, setPickedSource] = useState<EmbeddingSource | null>(null);
+  // Whether that read has ANSWERED, apart from what it answered: `embedder` is
+  // null both while it is in flight and after it failed, and a press in the
+  // first case would take the local path and download 640 MB on a box the
+  // cloud model was about to be offered on. A failed read still settles, so
+  // the local flow stays reachable.
+  const [embedderSettled, setEmbedderSettled] = useState(false);
   useEffect(() => {
     let live = true;
     void fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => { if (live) setEmbedder(parseEmbedderChoiceStatus(body)); })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { if (live) setEmbedderSettled(true); });
     return () => { live = false; };
   }, []);
   const source: EmbeddingSource = pickedSource ?? (embedder?.cloudAvailable ? "cloud" : "local");
@@ -499,7 +506,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             <button
               type="button"
               onClick={() => void provision()}
-              disabled={busy === "provision"}
+              disabled={busy === "provision" || !embedderSettled}
               data-testid="memory-shard-index-now"
               className={BTN_PRIMARY}
             >

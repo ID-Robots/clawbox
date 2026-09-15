@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   owner: true,
   absent: false,
   baseUrl: "http://127.0.0.1/setup-api/local-ai/embed/v1" as string | null,
+  choiceThrows: false,
   routeReady: true,
   factsThrow: false,
   token: "claw_test_token" as string | null,
@@ -34,7 +35,10 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
 vi.mock("@/lib/memory-shard", () => ({
   switchToLocalEmbeddings: () => h.switchLocal(),
   switchToCloudEmbeddings: (...a: unknown[]) => h.switchCloud(...a),
-  readEmbeddingChoice: async () => ({ provider: "openai-compatible", model: "m", baseUrl: h.baseUrl }),
+  readEmbeddingChoice: async () => {
+    if (h.choiceThrows) throw new Error("EACCES: permission denied, open 'openclaw.json'");
+    return { provider: "openai-compatible", model: "m", baseUrl: h.baseUrl };
+  },
 }));
 vi.mock("@/lib/clawai-cloud-choice", () => ({ noteOwnerChoice: (...a: unknown[]) => h.note(...a) }));
 vi.mock("@/lib/clawkeep-memory", () => ({ invalidateMemoryStatusCache: () => h.invalidate() }));
@@ -62,6 +66,7 @@ beforeEach(() => {
   h.owner = true;
   h.absent = false;
   h.baseUrl = "http://127.0.0.1/setup-api/local-ai/embed/v1";
+  h.choiceThrows = false;
   h.routeReady = true;
   h.factsThrow = false;
   h.token = "claw_test_token";
@@ -91,6 +96,15 @@ describe("GET", () => {
     const body = await (await (await route()).GET()).json();
     expect(body).toEqual({ source: "local", cloudSupported: false, cloudAvailable: false, localInstalled: false });
     expect(h.facts).not.toHaveBeenCalled();
+  });
+
+  it("answers 503, never 'local', when the config cannot be read", async () => {
+    h.choiceThrows = true;
+    const res = await (await route()).GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.kind).toBe("unreadable");
+    expect(body.source).toBeUndefined();
   });
 
   it("reads a cloud the resolver could not vouch for as not on offer, never as an error", async () => {

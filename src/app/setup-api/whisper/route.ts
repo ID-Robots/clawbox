@@ -74,6 +74,14 @@ let engineInFlight = false;
  * keeps, and the CTranslate2 build alone is five minutes on an Orin.
  */
 const ENGINE_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+/**
+ * What the WHOLE engine install may need on the cache's filesystem, not one
+ * size's weights: the faster-whisper and CTranslate2 wheels, the CTranslate2
+ * CUDA source and build tree while it compiles, and the `base` weights. A
+ * deliberately generous ceiling — refusing up front costs a click, while
+ * running out part-way costs minutes of build and a half-installed engine.
+ */
+const WHISPER_ENGINE_INSTALL_BYTES = 3 * 1024 * 1024 * 1024;
 
 export async function GET(request: Request) {
   const unauthorized = await requireSession(request);
@@ -234,6 +242,10 @@ async function installEngine(): Promise<Response> {
   if (engineInFlight) {
     return NextResponse.json({ error: "Speech on this box is already being installed.", code: "busy" }, { status: 409 });
   }
+  // Before anything starts: a build that fails on a full disk minutes in is
+  // the outcome this refuses in one request.
+  const disk = await checkInstallDisk(whisperCacheDir("base"), WHISPER_ENGINE_INSTALL_BYTES);
+  if (!disk.ok) return diskRefusal(disk);
   engineInFlight = true;
 
   const stream = new ReadableStream<Uint8Array>({

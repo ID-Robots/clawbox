@@ -1146,8 +1146,9 @@ case "${1:-}" in
   --kokoro)       VOICE_MODE="kokoro" ;;
   --whisper)      VOICE_MODE="whisper" ;;
   --tts-only)     VOICE_MODE="tts-only" ;;
-  --*)
-    # Any other option is refused rather than silently taken as "run the full
+  *)
+    # Any other argument — an option or a bare word like `whisper` — is refused
+    # rather than silently taken as "run the full
     # pipeline install": that path builds CTranslate2 from source, and the
     # fallback-only flag an earlier release accepted here used to land on it.
     # There is no such mode any more, and a caller that still asks for one

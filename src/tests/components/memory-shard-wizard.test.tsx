@@ -34,7 +34,7 @@ let posts: { url: string; body: unknown; signal?: AbortSignal | null }[] = [];
  */
 type Plan = "flash" | "pro" | "free" | "none";
 
-function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean; plan?: Plan; provider?: unknown } = {}) {
+function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean; plan?: Plan; provider?: unknown; holdProvider?: Promise<void> } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -59,6 +59,7 @@ function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: 
     // and the wizard keeps the model on this box, which every walk below
     // that predates the choice relies on.
     if (url === "/setup-api/clawkeep/memory/provider" && !init?.method) {
+      if (opts.holdProvider) await opts.holdProvider;
       return opts.provider === undefined ? json({ error: "not here" }, 404) : json(opts.provider);
     }
     if (url.startsWith("/setup-api/embed/status")) {
@@ -117,7 +118,10 @@ async function runProvision(done: () => void) {
   await leaveIntro();
   fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
   fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
-  fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+  // Held until the read of where the model may run has answered.
+  const indexNow = screen.getByTestId("memory-shard-index-now");
+  await waitFor(() => expect(indexNow).not.toBeDisabled());
+  fireEvent.click(indexNow);
   return rendered;
 }
 
@@ -227,6 +231,20 @@ describe("MemoryShardWizard", () => {
     expect(await screen.findByTestId("memory-shard-source-cloud")).toBeDisabled();
     expect(screen.getByTestId("memory-shard-source-local")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("memory-shard-source-cloud-unavailable")).toBeInTheDocument();
+  });
+
+  it("holds Index now until the read of where the model may run has answered", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    stub({ provider: { source: "local", cloudSupported: true, cloudAvailable: true, localInstalled: false }, holdProvider: hold });
+    render(<MemoryShardWizard onDone={() => {}} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    expect(screen.getByTestId("memory-shard-index-now")).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByTestId("memory-shard-index-now")).not.toBeDisabled());
+    expect(screen.getByTestId("memory-shard-source-cloud")).toHaveAttribute("aria-checked", "true");
   });
 
   it("draws no choice on the edition that indexes on the box itself", async () => {
