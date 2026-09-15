@@ -335,7 +335,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "browser.errorAgentHoldsCdp": "The assistant's background browser is still holding the debugging port. Try again in a moment.",
     "browser.errorUnreachable": "The box did not answer. Check that it is still reachable, then try again.",
     "browser.errorOwnerOnly": "Only a signed-in browser on this ClawBox can change these settings.",
-    "browser.errorStartUrl": "The start page has to begin with http:// or https://.",
+    "browser.errorStartUrl": "The start page has to be about:blank or begin with http:// or https://.",
     "browser.setup.artCaption": "One window, yours and the assistant's",
     "browser.setup.introTitle": "A real browser, on the box",
     "browser.setup.introBody": "Chromium runs on this device's own screen, and this window shows that screen. {harness} drives the same browser you are looking at — same tabs, same logins.",

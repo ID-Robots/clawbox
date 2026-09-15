@@ -23,8 +23,10 @@ export const BROWSER_AUTO_OPEN_CONFIG_KEY = "browser_auto_open";
 export const BROWSER_START_URL_CONFIG_KEY = "browser_start_url";
 
 /** What Chromium opens with when the owner has not chosen anything — the same
- *  address scripts/launch-browser.sh falls back to, so the two agree. */
-export const DEFAULT_START_URL = "https://www.google.com";
+ *  address scripts/launch-browser.sh falls back to, so the two agree. A blank
+ *  page (owner's decision, 2026-09-15): the box's browser is driven by the
+ *  agent and the owner, and neither needs a search engine loaded first. */
+export const DEFAULT_START_URL = "about:blank";
 
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
 const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
@@ -77,16 +79,19 @@ export async function setBrowserAutoOpen(enabled: boolean): Promise<boolean> {
 /**
  * The owner's start page as a URL that is safe to hand to a shell.
  *
- * http(s) only — Chromium would happily open `file:///etc/shadow` on the
- * screen the agent can screenshot — and the serialized form is what gets
- * stored, so a stored value can never be a half-typed address. The single
- * quote is percent-encoded because the value is written into a
- * single-quoted shell assignment, which nothing else can escape.
+ * `about:blank` or http(s), nothing else — Chromium would happily open
+ * `file:///etc/shadow` on the screen the agent can screenshot — and the
+ * serialized form is what gets stored, so a stored value can never be a
+ * half-typed address. `about:blank` is the one non-web page allowed: it loads
+ * nothing, and it is the default. The single quote is percent-encoded because
+ * the value is written into a single-quoted shell assignment, which nothing
+ * else can escape.
  */
 export function normalizeStartUrl(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   if (trimmed === "") return null;
+  if (trimmed.toLowerCase() === "about:blank") return "about:blank";
   let parsed: URL;
   try {
     parsed = new URL(trimmed);

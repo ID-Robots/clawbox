@@ -71,6 +71,11 @@ describe("browser setup state", () => {
   it("accepts only http(s) start pages", () => {
     expect(normalizeStartUrl("https://example.com/x")).toBe("https://example.com/x");
     expect(normalizeStartUrl("http://example.com/")).toBe("http://example.com/");
+    // The one non-web page: the default, accepted in any case and with padding.
+    expect(normalizeStartUrl("about:blank")).toBe("about:blank");
+    expect(normalizeStartUrl("  About:Blank ")).toBe("about:blank");
+    expect(normalizeStartUrl("about:config")).toBeNull();
+    expect(DEFAULT_START_URL).toBe("about:blank");
     expect(normalizeStartUrl("file:///etc/shadow")).toBeNull();
     expect(normalizeStartUrl("javascript:alert(1)")).toBeNull();
     expect(normalizeStartUrl("not a url")).toBeNull();

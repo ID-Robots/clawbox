@@ -186,7 +186,7 @@ describe("/setup-api/browser/manage", () => {
 
       expect(body).toHaveProperty("setupComplete");
       expect(body.autoOpen).toBe(true);
-      expect(body.startUrl).toBe("https://www.google.com");
+      expect(body.startUrl).toBe("about:blank");
     });
 
     /**
@@ -410,7 +410,7 @@ describe("/setup-api/browser/manage", () => {
       expect(fs.writeFile).toHaveBeenCalledTimes(1);
       const [file, body] = vi.mocked(fs.writeFile).mock.calls[0] as unknown as [string, string];
       expect(String(file)).toMatch(/\.cache\/clawbox\/browser\.env$/);
-      expect(String(body)).toContain("CLAWBOX_BROWSER_START_URL='https://www.google.com'");
+      expect(String(body)).toContain("CLAWBOX_BROWSER_START_URL='about:blank'");
       // Before the unit is started, not after: systemd is what reads it.
       const startCall = mockExec.mock.calls.findIndex((call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes("clawbox-browser.service"));
       expect(startCall).toBeGreaterThanOrEqual(0);
