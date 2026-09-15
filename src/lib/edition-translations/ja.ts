@@ -1010,7 +1010,7 @@ export const ja: Record<string, string> = {
   "codingAgent.message.errorSettled": "この実行は終了しているため、もう伝えられることはありません。",
 
   "codingAgent.wizardTitle": "コーディングエージェントの設定",
-  "codingAgent.wizardIntro": "コーディングエージェントを使うと、アシスタントがタスク全体をこのボックス上の Claude Code に任せられます。指定した 1 つのフォルダー内でファイルを読み書きし、コマンドを実行して、結果を報告します。設定は 4 ステップです。",
+  "codingAgent.wizardIntro": "コーディングエージェントを使うと、アシスタントがタスク全体をこのボックス上の Claude Code に任せられます。指定した 1 つのフォルダー内でファイルを読み書きし、コマンドを実行して、結果を報告します。設定は 5 ステップです。",
   "codingAgent.wizardEnable": "有効にする",
   "codingAgent.wizardStepOf": "ステップ {n} / {total}",
   "codingAgent.wizardNext": "次へ",
@@ -1023,6 +1023,8 @@ export const ja: Record<string, string> = {
   "codingAgent.wizardGithubHint": "実行はこのアカウントで作業内容を GitHub にプッシュします。スキップして後から設定で接続することもできます。接続しなくても実行は動作しますが、プッシュ先がありません。",
   "codingAgent.wizardGithubConnect": "GitHub でサインイン",
   "codingAgent.wizardGithubConnected": "GitHub に接続済み",
+  "codingAgent.wizardImprovementTitle": "ClawBox の改善に協力する",
+  "codingAgent.wizardImprovementHint": "ClawBox 自体のソフトウェアで問題が起きたとき — コーディング実行の失敗、完了しない更新ステップ、エラーになるページ — このボックスは、いま接続したアカウントを使って、短い技術レポートを GitHub の公開 Issue として開発者に送信できます。どうするかを選んでください。コーディングエージェントの設定でいつでも変更できます。",
   "codingAgent.wizardProjectTitle": "プロジェクトフォルダーと思考の深さ",
   "codingAgent.wizardProjectHint": "アシスタントがプロジェクトを指定しないときに実行が作業するフォルダーです。参照して選ぶか、絶対パスを入力してください。",
   "codingAgent.wizardBrowse": "参照",

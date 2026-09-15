@@ -1020,7 +1020,7 @@ export const it: Record<string, string> = {
   "codingAgent.message.errorSettled": "Questa esecuzione è terminata, non c'è più nulla da dirle.",
 
   "codingAgent.wizardTitle": "Configura l'agente di codice",
-  "codingAgent.wizardIntro": "L'agente di codice consente al tuo assistente di affidare un'intera attività a Claude Code su questa box: legge e scrive file in una cartella, vi esegue comandi e riferisce. La configurazione richiede quattro passaggi.",
+  "codingAgent.wizardIntro": "L'agente di codice consente al tuo assistente di affidare un'intera attività a Claude Code su questa box: legge e scrive file in una cartella, vi esegue comandi e riferisce. La configurazione richiede cinque passaggi.",
   "codingAgent.wizardEnable": "Attiva",
   "codingAgent.wizardStepOf": "Passaggio {n} di {total}",
   "codingAgent.wizardNext": "Avanti",
@@ -1033,6 +1033,8 @@ export const it: Record<string, string> = {
   "codingAgent.wizardGithubHint": "Un'esecuzione carica il proprio lavoro su GitHub con questo account. Puoi saltare questo passaggio e collegarlo più tardi in Impostazioni: un'esecuzione funziona anche senza, semplicemente non ha dove caricare.",
   "codingAgent.wizardGithubConnect": "Accedi con GitHub",
   "codingAgent.wizardGithubConnected": "GitHub collegato",
+  "codingAgent.wizardImprovementTitle": "Aiuta a migliorare ClawBox",
+  "codingAgent.wizardImprovementHint": "Quando qualcosa non va nel software ClawBox stesso — un'esecuzione di codice fallita, un passaggio di aggiornamento che non si conclude, una pagina in errore — questo box può inviare agli sviluppatori una breve segnalazione tecnica come issue pubblica su GitHub, con l'account che hai appena collegato. Scegli cosa deve fare; puoi cambiarlo in qualsiasi momento nelle impostazioni dell'agente di codice.",
   "codingAgent.wizardProjectTitle": "Cartella del progetto e sforzo",
   "codingAgent.wizardProjectHint": "La cartella in cui lavora un'esecuzione quando l'assistente non indica alcun progetto. Sfoglia per sceglierne una, oppure digita un percorso assoluto.",
   "codingAgent.wizardBrowse": "Sfoglia",

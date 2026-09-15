@@ -93,6 +93,16 @@ let gitReads: string[];
 let vercelReads: string[];
 
 /** The device, as far as this component can tell. */
+/**
+ * Past the GitHub step and through the Improvement Program step, onto the
+ * project folder. The programme's Next is a write, so the folder is awaited.
+ */
+async function passImprovementStep() {
+  fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+  fireEvent.click(await screen.findByTestId("coding-agent-wizard-improvement-next"));
+  await screen.findByTestId("coding-agent-wizard-folder");
+}
+
 function stubFetch(
   // `setupComplete` defaults to true: every test below is about a box whose
   // owner has been through the wizard, which is also what the route answers
@@ -113,6 +123,7 @@ function stubFetch(
   } = {},
 ) {
   let runs = runsArg;
+  let improvementMode = "off";
   posts = [];
   gitReads = [];
   vercelReads = [];
@@ -318,6 +329,20 @@ function stubFetch(
       // The route answers the whole status, re-read after the change.
       return json(payload());
     }
+    // The Improvement Program: the wizard's second step reads it on mount and
+    // writes the owner's answer on Next; the settings page embeds its card.
+    if (url === "/setup-api/improvement-program") {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { mode: string };
+        posts.push({ url, body });
+        improvementMode = body.mode;
+      }
+      return json({
+        mode: improvementMode, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
+        maxIssuesPerDay: 5, remainingToday: 5,
+        github: { installed: false, connected: false, login: null }, incidents: [],
+      });
+    }
     if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
       // The started run is in the listing from the next poll on, as the
@@ -388,15 +413,21 @@ describe("CodingAgentApp", () => {
       // GitHub is what a run pushes with, not what it needs to start, so the
       // step can be passed without an account.
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-      expect(screen.getByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
+      // The Improvement Program comes next — right after GitHub, on whose
+      // credential its reports go out — with Automatic proposed; Next writes
+      // the answer and lands on the folder.
+      expect(screen.getByTestId("coding-agent-wizard-improvement-auto")).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
+      expect(await screen.findByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
       expect(screen.getByTestId("coding-agent-wizard-browse")).toBeInTheDocument();
+      expect(posts.find((p) => p.url === "/setup-api/improvement-program")?.body).toEqual({ mode: "auto" });
     });
 
     it("proposes Ultracode and says what it costs", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
       // The owner is told before they choose, not by a bill afterwards.
@@ -408,7 +439,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
@@ -436,7 +467,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-skip"));
@@ -455,7 +486,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));

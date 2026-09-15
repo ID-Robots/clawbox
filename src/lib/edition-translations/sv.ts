@@ -1005,7 +1005,7 @@ export const sv: Record<string, string> = {
   "codingAgent.message.errorSettled": "Den körningen är klar, så det finns inget mer att säga till den.",
 
   "codingAgent.wizardTitle": "Ställ in kodagenten",
-  "codingAgent.wizardIntro": "Med kodagenten lämnar din assistent över en hel uppgift till Claude Code på den här boxen: den läser och skriver filer i en mapp, kör kommandon där och rapporterar tillbaka. Det tar fyra steg att ställa in.",
+  "codingAgent.wizardIntro": "Med kodagenten lämnar din assistent över en hel uppgift till Claude Code på den här boxen: den läser och skriver filer i en mapp, kör kommandon där och rapporterar tillbaka. Det tar fem steg att ställa in.",
   "codingAgent.wizardEnable": "Aktivera",
   "codingAgent.wizardStepOf": "Steg {n} av {total}",
   "codingAgent.wizardNext": "Nästa",
@@ -1018,6 +1018,8 @@ export const sv: Record<string, string> = {
   "codingAgent.wizardGithubHint": "En körning pushar sitt arbete till GitHub med det här kontot. Du kan hoppa över det och ansluta senare i Inställningar — en körning fungerar ändå, den har bara ingenstans att pusha.",
   "codingAgent.wizardGithubConnect": "Logga in med GitHub",
   "codingAgent.wizardGithubConnected": "GitHub anslutet",
+  "codingAgent.wizardImprovementTitle": "Hjälp till att förbättra ClawBox",
+  "codingAgent.wizardImprovementHint": "När något går fel i ClawBox egen programvara — en kodkörning som misslyckas, ett uppdateringssteg som inte går igenom, en sida som ger fel — kan den här boxen skicka en kort teknisk rapport till utvecklarna som ett publikt ärende på GitHub, med kontot du just anslöt. Välj vad den ska göra; du kan ändra det när som helst i kodagentens inställningar.",
   "codingAgent.wizardProjectTitle": "Projektmapp och möda",
   "codingAgent.wizardProjectHint": "Mappen som en körning arbetar i när assistenten inte namnger något projekt. Bläddra för att välja en, eller skriv en absolut sökväg.",
   "codingAgent.wizardBrowse": "Bläddra",

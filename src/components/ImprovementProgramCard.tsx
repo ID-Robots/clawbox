@@ -5,7 +5,10 @@ import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 
 /**
- * Settings → System → ClawBox Improvement Program.
+ * Coding Agent → Settings → ClawBox Improvement Program, drawn directly under
+ * the GitHub card because reports go out on that credential. (It sat in
+ * Settings → System before the move.) The first-run wizard's improvement step
+ * asks the same question once, in this card's own words.
  *
  * THE CARD IS THE CONSENT. Everything on it above the three buttons exists so
  * that an owner who reads it knows exactly what a report contains before they
@@ -24,7 +27,10 @@ import StatusMessage from "./StatusMessage";
  * refusal is not an offer.
  */
 
-type Mode = "off" | "ask" | "auto";
+/** The three modes, in the order every surface lists them. Exported for the
+ *  first-run wizard's improvement step, which asks this card's question once. */
+export type ImprovementMode = "off" | "ask" | "auto";
+type Mode = ImprovementMode;
 
 interface IncidentRow {
   id: string;
@@ -47,7 +53,8 @@ interface ProgramState {
   incidents: IncidentRow[];
 }
 
-const MODES: Mode[] = ["off", "ask", "auto"];
+export const IMPROVEMENT_MODES: ImprovementMode[] = ["off", "ask", "auto"];
+const MODES = IMPROVEMENT_MODES;
 
 const FALLBACK: ProgramState = {
   mode: "off",
@@ -128,11 +135,12 @@ function toRow(value: unknown): IncidentRow | null {
   };
 }
 
-const MODE_KEYS: Record<Mode, { label: string; hint: string }> = {
+export const IMPROVEMENT_MODE_KEYS: Record<ImprovementMode, { label: string; hint: string }> = {
   off: { label: "improvement.modeOff", hint: "improvement.modeOffHint" },
   ask: { label: "improvement.modeAsk", hint: "improvement.modeAskHint" },
   auto: { label: "improvement.modeAuto", hint: "improvement.modeAutoHint" },
 };
+const MODE_KEYS = IMPROVEMENT_MODE_KEYS;
 
 /** How many of the recent errors the card lists. The whole log is a support
  *  question, not a settings one. */

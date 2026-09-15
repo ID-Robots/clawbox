@@ -1019,7 +1019,7 @@ export const zh: Record<string, string> = {
   "codingAgent.message.errorSettled": "该运行已结束，没有什么可再告诉它的了。",
 
   "codingAgent.wizardTitle": "设置编程助手",
-  "codingAgent.wizardIntro": "编程助手让助理把整项任务交给这台设备上的 Claude Code：它在一个文件夹内读写文件、执行命令，并汇报结果。设置只需四步。",
+  "codingAgent.wizardIntro": "编程助手让助理把整项任务交给这台设备上的 Claude Code：它在一个文件夹内读写文件、执行命令，并汇报结果。设置只需五步。",
   "codingAgent.wizardEnable": "启用",
   "codingAgent.wizardStepOf": "第 {n} 步，共 {total} 步",
   "codingAgent.wizardNext": "下一步",
@@ -1032,6 +1032,8 @@ export const zh: Record<string, string> = {
   "codingAgent.wizardGithubHint": "运行会用此账户把工作推送到 GitHub。你可以跳过，稍后在设置中连接——不连接也能运行，只是没有推送目标。",
   "codingAgent.wizardGithubConnect": "使用 GitHub 登录",
   "codingAgent.wizardGithubConnected": "已连接 GitHub",
+  "codingAgent.wizardImprovementTitle": "帮助改进 ClawBox",
+  "codingAgent.wizardImprovementHint": "当 ClawBox 自身的软件出现问题时——编程运行失败、更新步骤无法完成、页面报错——本设备可以用你刚连接的账户，将一份简短的技术报告作为公开议题发送给 GitHub 上的开发者。选择它应该怎么做；你随时可以在编程助手的设置中更改。",
   "codingAgent.wizardProjectTitle": "项目文件夹与思考强度",
   "codingAgent.wizardProjectHint": "当助理未指定项目时，运行所使用的文件夹。可浏览选择，或输入绝对路径。",
   "codingAgent.wizardBrowse": "浏览",

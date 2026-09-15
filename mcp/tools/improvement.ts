@@ -1,8 +1,8 @@
 // The ClawBox Improvement Program: what broke on this box, and — on the
 // owner's say-so — reporting it to the ClawBox developers as a GitHub issue.
 //
-// WHY THE AGENT IS IN THIS AT ALL. The owner's mode has three values (Settings
-// → System → ClawBox Improvement Program). `auto` needs nobody: the box files
+// WHY THE AGENT IS IN THIS AT ALL. The owner's mode has three values (Coding
+// Agent → Settings → ClawBox Improvement Program). `auto` needs nobody: the box files
 // on capture. `off` sends nothing. `ask` is the middle one and it is the
 // reason these two tools exist — nothing is sent by itself, and the agent is
 // what turns a queued incident into a question a person can answer: "ClawBox
@@ -65,7 +65,7 @@ function modeLine(p: ProgramPayload): string {
   const connected = p.github?.connected === true;
   if (p.mode === "off") {
     return "The ClawBox Improvement Program is OFF: these are kept on the device and nothing is sent."
-      + " Do not offer to report them — the owner turns the programme on in Settings first.";
+      + " Do not offer to report them — the owner turns the programme on in the Coding Agent settings first.";
   }
   if (!connected) {
     return "The ClawBox Improvement Program is on, but GitHub is not connected on this box, so reports cannot be sent."
@@ -86,7 +86,7 @@ const REPORT_RULES: ErrorRule[] = [
     match: /"code":\s*"off"/,
     code: "CONFLICT",
     message: "The ClawBox Improvement Program is switched off on this box, so nothing is sent.",
-    next: "Do not retry. Tell the user it is off and that they can turn it on in Settings on the ClawBox desktop.",
+    next: "Do not retry. Tell the user it is off and that they can turn it on in the Coding Agent settings on the ClawBox desktop.",
   },
   {
     status: 409,

@@ -248,7 +248,7 @@ export async function reportIncident(id: string, deps: ReportDeps = {}): Promise
     return {
       ok: false,
       code: "off",
-      detail: "The ClawBox Improvement Program is switched off on this box, so nothing is sent. The owner can turn it on in Settings.",
+      detail: "The ClawBox Improvement Program is switched off on this box, so nothing is sent. The owner can turn it on in the Coding Agent settings.",
     };
   }
 

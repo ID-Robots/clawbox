@@ -603,7 +603,7 @@ export const codingAgentEn: Record<string, string> = {
   // it works in. Settings keeps every one of these controls — this is an
   // onboarding path, not the only way in.
   "codingAgent.wizardTitle": "Set up the coding agent",
-  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes four steps.",
+  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes five steps.",
   "codingAgent.wizardEnable": "Enable",
   "codingAgent.wizardStepOf": "Step {n} of {total}",
   "codingAgent.wizardNext": "Next",
@@ -617,6 +617,13 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.wizardGithubHint": "A run pushes its work to GitHub with this account. You can skip this and connect later in Settings — a run still works without it, it just has nowhere to push.",
   "codingAgent.wizardGithubConnect": "Sign in with GitHub",
   "codingAgent.wizardGithubConnected": "GitHub connected",
+
+  // ── Step 2: the ClawBox Improvement Program ─────────────────────────────
+  // Asked right after GitHub because that is the credential a report goes
+  // out on. The lists of what is sent and what never is are the card's own
+  // keys (improvement.*); only the step's framing lives here.
+  "codingAgent.wizardImprovementTitle": "Help improve ClawBox",
+  "codingAgent.wizardImprovementHint": "When something in ClawBox's own software goes wrong — a coding run that fails, an update step that will not finish, a page that errors — this box can send a short technical report to the developers as a public issue on GitHub, using the account you just connected. Choose what it should do; you can change this any time in the Coding Agent's settings.",
 
   "codingAgent.wizardProjectTitle": "Project folder and effort",
   "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to pick one, or type an absolute path.",
