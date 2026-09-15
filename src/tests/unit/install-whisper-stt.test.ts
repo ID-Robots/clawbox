@@ -7,8 +7,8 @@ import path from "node:path";
 /**
  * faster-whisper was unreachable code on every shipped box.
  *
- * `install.sh:3179` is the only caller of install-voice.sh and always passes
- * `--tts-only`, whose arm exits above the STT steps — so "Whisper: Not
+ * `install.sh:3179` was the only caller of install-voice.sh and always passed
+ * `--tts-only`, whose arm exited above the STT steps — so "Whisper: Not
  * installed" was the permanent state of the fleet, with no route to fixing it
  * short of SSH.
  *
@@ -17,6 +17,12 @@ import path from "node:path";
  * told which one the board has; pinned to sm_87 it took 255 s of `make -j4`
  * plus a 34 s clone on this Orin Nano (measured 2026-09-04, CTranslate2 4.8.2,
  * linking libcudnn.so.9 / libcublas.so.12, `cuobjdump` reporting sm_87 only).
+ *
+ * Then it swung the other way: `--tts-only` installed it on EVERY in-app update
+ * of every box, 6.5 minutes of a from-source build nobody asked for
+ * (2026-09-15). The route is a click now — `--whisper`, behind install.sh's
+ * `voice_whisper_install` and the Local AI tab — and the update runs
+ * `--scripts-only`, which only refreshes the unit of an engine already there.
  */
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
@@ -41,7 +47,8 @@ function shellCode(fn: string): string {
 }
 
 /**
- * The body of the --tts-only arm.
+ * The body of the mode dispatch — the one arm that runs every mode but the
+ * full pipeline (`--tts-only`, `--kokoro`, `--whisper`, `--scripts-only`).
  *
  * Anchored, and loudly: `slice(VOICE_SH.indexOf(...))` on a missed anchor is
  * `slice(-1)` — the last CHARACTER of the file, not an empty string — so the
@@ -49,13 +56,26 @@ function shellCode(fn: string): string {
  * code at all.
  */
 function ttsOnlyArm(): string {
-  const at = VOICE_SH.indexOf('if [ "${1:-}" = "--tts-only" ]; then');
-  if (at < 0) throw new Error("the --tts-only arm was not found in install-voice.sh");
+  const at = VOICE_SH.indexOf('if [ "$VOICE_MODE" != "full" ]; then');
+  if (at < 0) throw new Error("the mode dispatch was not found in install-voice.sh");
   return VOICE_SH.slice(at);
 }
 
-describe("the STT half is reachable from the path every box runs", () => {
-  it("--tts-only installs it, after Kokoro", () => {
+describe("the STT half is reachable on a click, and never on an update", () => {
+  it("--whisper and --tts-only install it; --scripts-only and --kokoro only refresh a unit that is there", () => {
+    const arm = shellCode(ttsOnlyArm());
+    // The arm that installs is named by the two modes that may, and it is the
+    // only arm that reaches install_whisper_stt.
+    expect(arm).toMatch(/^\s*whisper\|tts-only\)\s*\n\s*install_whisper_stt \|\| STT_RC=\$\?/m);
+    expect(arm.split("install_whisper_stt").length - 1, "install_whisper_stt is reached from more than one arm").toBe(1);
+    // Every other mode reaches the refresh, which fetches nothing.
+    expect(arm).toMatch(/^\s*\*\) whisper_refresh_present ;;\s*$/m);
+    const refresh = shellCode(extractShellFunction("whisper_refresh_present"));
+    expect(refresh).not.toMatch(/pip_as_clawbox|build_ctranslate2_cuda|whisper_predownload_model|install_whisper_stt/);
+    expect(refresh).toMatch(/whisper_stack_present \|\| return 0/);
+  });
+
+  it("in --tts-only it still comes after Kokoro", () => {
     const arm = ttsOnlyArm();
     const kokoro = arm.indexOf("install_kokoro_tts");
     const stt = arm.indexOf("install_whisper_stt");
@@ -71,12 +91,39 @@ describe("the STT half is reachable from the path every box runs", () => {
   });
 
   it("does not touch the arm's exit contract, which is Kokoro's", () => {
-    // install.sh grades step_openclaw_tts by these codes; STT must not move them.
+    // install.sh grades step_openclaw_tts by these codes; STT must not move
+    // them. --whisper has a contract of its own (graded by $STT_RC inside its
+    // own `if`), and every exit line below still names a literal code or
+    // Kokoro's.
     const arm = ttsOnlyArm();
     const end = arm.indexOf(`${NL}fi`);
     for (const line of arm.slice(0, end).split(NL).filter((l) => l.trim().startsWith("exit "))) {
       expect(line, `exit must not carry the STT code: ${line}`).not.toContain("STT_RC");
     }
+  });
+
+  it("--whisper is graded by faster-whisper, in the codes install.sh already reads", () => {
+    const arm = ttsOnlyArm();
+    const whisper = arm.slice(arm.indexOf('if [ "$VOICE_MODE" = "whisper" ]; then'));
+    const block = whisper.slice(0, whisper.indexOf(`${NL}  fi`));
+    expect(block).toMatch(/case "\$STT_RC" in/);
+    expect(block).toMatch(/13\)[\s\S]*?exit 13/);
+    expect(block).toMatch(/\*\)[\s\S]*?exit 12/);
+    expect(block).toMatch(/DEPLOY_RC" -ne 0[\s\S]*?exit 1/);
+  });
+
+  it("pre-fetches the weights without building a model in a compute type the CUDA build lacks", () => {
+    // WhisperModel("base", device="cpu", compute_type="int8") was the
+    // pre-download, and the CUDA-built CTranslate2 has no CPU int8 backend on
+    // the board: "Requested int8 compute type, but the target device or
+    // backend do not support efficient int8 computation" — a successful
+    // download reported as a failed one (2026-09-15).
+    const fetch = shellCode(extractShellFunction("whisper_predownload_model"));
+    expect(fetch).not.toContain("int8");
+    expect(fetch).toContain('download_model("base")');
+    // The fallback for a faster-whisper too old to carry the helper loads the
+    // model in the one type every build supports.
+    expect(fetch).toMatch(/WhisperModel\("base", device="cpu", compute_type="float32"\)/);
   });
 
   it("no longer claims the hour it never measured", () => {

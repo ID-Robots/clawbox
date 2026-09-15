@@ -233,25 +233,76 @@ function runStep(edition: string, opts: StepOpts = {}) {
   };
 }
 
-describe.skipIf(!hasBash)("the Hermes SKU installs the same on-device engine as OpenClaw", () => {
-  it("runs the voice install on a Hermes box instead of returning early", () => {
+describe.skipIf(!hasBash)("the Hermes SKU refreshes the same on-device voice as OpenClaw", () => {
+  // `--scripts-only`, on every SKU: the scripts, the units of the engines that
+  // are present, and the verdict off the disk. Never `--tts-only` — that mode
+  // installed Kokoro AND faster-whisper on every update, and since 2026-09-15
+  // an engine reaches a box only through the Local AI tab's Install.
+  it("runs the voice refresh on a Hermes box instead of returning early", () => {
     // The whole defect in one assertion: the step used to answer
     // "[hermes edition] skipping on-device TTS" and return 0, so no Hermes box
     // ever had scripts/install-voice.sh run on it.
     const res = runStep("hermes");
-    expect(res.voiceArgs, `install-voice.sh never ran on a Hermes box:\n${res.out}`).toContain("--tts-only");
+    expect(res.voiceArgs, `install-voice.sh never ran on a Hermes box:\n${res.out}`).toEqual(["--scripts-only"]);
     expect(res.out).not.toMatch(/skipping on-device TTS/);
   });
 
   it("runs it on the dual SKU too", () => {
     const res = runStep("dual");
-    expect(res.voiceArgs, `install-voice.sh never ran on a dual box:\n${res.out}`).toContain("--tts-only");
+    expect(res.voiceArgs, `install-voice.sh never ran on a dual box:\n${res.out}`).toEqual(["--scripts-only"]);
   });
 
   it("still runs it on the openclaw SKU, unchanged", () => {
     const res = runStep("openclaw");
-    expect(res.voiceArgs).toContain("--tts-only");
+    expect(res.voiceArgs).toEqual(["--scripts-only"]);
     expect(res.hermesCalls, `an openclaw box was written to through the Hermes CLI:\n${res.out}`).toEqual([]);
+  });
+});
+
+describe.skipIf(!hasBash)("a Kokoro nobody installed is a plain state, on every harness", () => {
+  // The verdict `absent`: the box never installed the engine and this run was
+  // not asked to. Exit 0, nothing recorded, one line saying where the install
+  // is — and the Hermes selection still made, because an unset `tts.provider`
+  // is Microsoft's cloud and not silence.
+  const ABSENT = { voiceExit: 0, ttsStatus: "KOKORO=absent\n" };
+
+  it("still selects the on-device provider on Hermes, and says where the engine comes from", () => {
+    const res = runStep("hermes", ABSENT);
+    expect(res.stepRc, res.out).toBe("0");
+    expect(res.provisionFailures, `an engineless box was recorded as a failure:\n${res.out}`).toEqual([]);
+    const calls = res.hermesCalls.join("\n");
+    expect(calls).toContain(`config set tts.providers.${HERMES_PROVIDER}.type command`);
+    expect(calls, `an engineless box was left to resolve Hermes' Edge default:\n${res.out}`)
+      .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    expect(res.out).toMatch(/install it from Settings → Local AI/);
+    expect(res.out).toMatch(/would hand the box to Hermes' factory Edge cloud/);
+    // Not the alarm the two failure verdicts raise.
+    expect(res.out).not.toMatch(/NO working on-device TTS engine/);
+    expect(res.out).not.toMatch(/did NOT install/);
+    expect(res.out).not.toMatch(/^\s*ERROR/m);
+  });
+
+  it("defines no tts-local-cli provider on OpenClaw behind an engine that is not there", () => {
+    const res = runStep("openclaw", ABSENT);
+    expect(res.stepRc, res.out).toBe("0");
+    expect(res.provisionFailures).toEqual([]);
+    expect(res.out).toMatch(/On-device voice is not installed — install it from Settings → Local AI/);
+    expect(res.openclawCalls.some((c) => c.includes("tts-local-cli")), `a provider was written for no engine:\n${res.out}`).toBe(false);
+    expect(res.openclawCalls.some((c) => c.startsWith("config set messages.tts.provider "))).toBe(false);
+  });
+
+  it("on the dual SKU registers Hermes and leaves OpenClaw's local provider undefined", () => {
+    const res = runStep("dual", ABSENT);
+    expect(res.stepRc, res.out).toBe("0");
+    expect(res.hermesCalls.join("\n")).toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    expect(res.openclawCalls.some((c) => c.includes("tts-local-cli"))).toBe(false);
+  });
+
+  it("keeps a preserved OpenClaw selection and still writes no local definition", () => {
+    const res = runStep("openclaw", { ...ABSENT, openclawProvider: "openai" });
+    expect(res.stepRc, res.out).toBe("0");
+    expect(res.out).toMatch(/preserving/);
+    expect(res.openclawCalls.some((c) => c.includes("tts-local-cli"))).toBe(false);
   });
 });
 

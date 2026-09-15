@@ -14,13 +14,16 @@ import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
  * POST /setup-api/tts/install → install the box's own voice (Kokoro), streamed.
  *
  * The Local AI tab's "Install" on a Kokoro row that reads "Not installed".
- * The work is install.sh's own step_openclaw_tts — the CUDA Kokoro stack, its
- * on-demand server unit, the workspace scripts and the `tts-local-cli`
- * provider entry — started as root through the one launcher the web server is
- * granted (src/lib/root-step-runner.ts; `openclaw_tts` is on its list), and
- * followed through systemd so the row shows what the installer is doing. The
- * same step an in-app update runs, so a box installed from here is the same
- * box an update produces.
+ * The work is install.sh's `voice_kokoro_install` step — the CUDA Kokoro
+ * stack, its on-demand server unit, the workspace scripts and the
+ * `tts-local-cli` provider entry — started as root through the one launcher
+ * the web server is granted (src/lib/root-step-runner.ts; the step is on
+ * WEB_ROOT_STEPS), and followed through systemd so the row shows what the
+ * installer is doing. It is step_openclaw_tts in its INSTALL mode: the same
+ * registration an install and an update run, which since 2026-09-15 install
+ * nothing themselves (the owner's ruling — no model or engine but the
+ * llama.cpp runtime and Gemma 4 is forced), so this click is the ONLY way
+ * Kokoro reaches a box.
  *
  * Answers the llama.cpp install route's shape, which the tab already reads:
  * `{status}` lines while it runs, then ONE closing `{success: true}` or
@@ -66,7 +69,7 @@ export async function POST(req: Request) {
     async start(controller) {
       try {
         emit(controller, { status: "Installing the voice on this box (Kokoro)…" });
-        const result = await followRootStep("openclaw_tts", {
+        const result = await followRootStep("voice_kokoro_install", {
           timeoutMs: INSTALL_TIMEOUT_MS,
           label: "the voice install",
           onStatus: (line) => emit(controller, { status: line }),

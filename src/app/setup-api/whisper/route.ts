@@ -8,6 +8,7 @@ import { checkInstallDisk, dirBytes, diskRefusal } from "@/lib/install-disk";
 import { safeWhisperSize, whisperSize } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
+import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   readWhisperState,
@@ -22,11 +23,18 @@ import {
 /**
  * /setup-api/whisper — which speech-to-text size this box transcribes with.
  *
- * Every box ships with `base`. The owner's decision of 2026-09-14 is that the
- * other sizes are one click away, so this is the click: GET the picker's facts,
- * POST a size to fetch it and switch to it, DELETE one to get the disk back —
- * or, with `?scope=engine`, take speech-to-text off the box altogether (every
- * size, the stamp, the unit), which is Settings → Local AI's Uninstall.
+ * Every box used to ship with `base`; since 2026-09-15 no box ships with the
+ * engine at all (owner's ruling: install.sh forces nothing but the llama.cpp
+ * runtime and Gemma 4), so this route is also where the ENGINE arrives:
+ * `POST { action: "install-engine" }` streams install.sh's
+ * `voice_whisper_install` root step — faster-whisper, the CTranslate2 CUDA
+ * build and the `base` weights — in the shape `/setup-api/tts/install`
+ * answers with (`{status}` lines, then ONE closing `{success: true}` or
+ * `{error}`), 409 `already_installed` when the unit is there, 409 `busy`
+ * while one runs. Everything else is the picker: GET its facts, POST a size
+ * to fetch it and switch to it, DELETE one to get the disk back — or, with
+ * `?scope=engine`, take speech-to-text off the box altogether (every size,
+ * the stamp, the unit), which is Settings → Local AI's Uninstall.
  *
  * OWNER ONLY for both writes, and same-origin with it. A size change spends
  * hundreds of megabytes and swaps the engine the microphone speaks to; the
@@ -54,6 +62,14 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
 
 /** One fetch at a time: two would write the same Hub cache entry. */
 let inFlight = false;
+/** One engine install at a time: two would fight over pip and the CTranslate2 build tree. */
+let engineInFlight = false;
+/**
+ * Not below config/clawbox-root-update@.service's TimeoutStartSec (2 h), so
+ * systemd, not this stream, owns the kill — the rule the tts/install route
+ * keeps, and the CTranslate2 build alone is five minutes on an Orin.
+ */
+const ENGINE_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 export async function GET(request: Request) {
   const unauthorized = await requireSession(request);
@@ -92,12 +108,14 @@ export async function POST(req: Request) {
   const refused = await guard(req, "Changing the speech model");
   if (refused) return refused;
 
-  let body: { size?: unknown };
+  let body: { size?: unknown; action?: unknown };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON", code: "invalid" }, { status: 400 });
   }
+  if (body.action === "install-engine") return installEngine();
+
   // The CATALOGUE's own string, not the caller's: `whisperCacheDir` builds a
   // path from it, and the repo's rule is that what reaches `path.join` is
   // rebuilt rather than tested and passed through (`safeAppId`).
@@ -182,6 +200,56 @@ export async function POST(req: Request) {
       } finally {
         if (timer) clearInterval(timer);
         inFlight = false;
+        try { controller.close(); } catch { /* already closed */ }
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * The engine itself, for a box that has none. Owner-only and same-origin like
+ * every write here (the guard ran before this was reached), and refused while
+ * the engine is already installed: the SIZES are the picker's job, and
+ * re-running the engine install over a working one is what the Terminal is
+ * for. The root unit runs on if the client leaves; the in-flight flag is
+ * released only at its real end, so a second click cannot start a second
+ * build under the first.
+ */
+async function installEngine(): Promise<Response> {
+  const state = await readWhisperState();
+  if (state.installed) {
+    return NextResponse.json(
+      { error: "Speech on this box is already installed.", code: "already_installed" },
+      { status: 409 },
+    );
+  }
+  if (engineInFlight) {
+    return NextResponse.json({ error: "Speech on this box is already being installed.", code: "busy" }, { status: 409 });
+  }
+  engineInFlight = true;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        emit(controller, { status: "Installing speech on this box (faster-whisper)…" });
+        const result = await followRootStep("voice_whisper_install", {
+          timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
+          label: "the speech install",
+          onStatus: (line) => emit(controller, { status: line }),
+        });
+        if (!result.ok) {
+          emit(controller, { error: result.error || "The speech install did not finish." });
+        } else {
+          emit(controller, { success: true, status: "Speech on this box is installed." });
+        }
+      } catch (err) {
+        emit(controller, { error: err instanceof Error ? err.message : "The speech install failed." });
+      } finally {
+        engineInFlight = false;
         try { controller.close(); } catch { /* already closed */ }
       }
     },

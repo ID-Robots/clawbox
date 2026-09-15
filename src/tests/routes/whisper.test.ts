@@ -13,6 +13,10 @@ const owner = { value: true };
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
 vi.mock("@/lib/route-auth", () => ({ requireSession: async () => null }));
 
+/** The root-step follower behind `{action:"install-engine"}`; its real module reaches systemd. */
+const followMock = vi.fn();
+vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followMock(...a) }));
+
 const disk = { free: 100 * 1024 * 1024 * 1024 as number | null };
 vi.mock("@/lib/project-import", () => ({ freeBytes: async () => disk.free }));
 
@@ -218,6 +222,57 @@ describe("POST /setup-api/whisper", () => {
 
     expect(lines.at(-1)).toMatchObject({ success: true, restarted: false });
     expect(String(lines.at(-1)?.status)).toContain("after the next restart");
+  });
+});
+
+describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
+  beforeEach(() => {
+    followMock.mockReset();
+    state.installed = false;
+  });
+
+  it("refuses the MCP bearer, like every write here", async () => {
+    const { POST } = await load();
+    owner.value = false;
+    const res = await POST(post({ action: "install-engine" }));
+    expect(res.status).toBe(403);
+    expect(followMock).not.toHaveBeenCalled();
+  });
+
+  it("runs the voice_whisper_install root step and streams its lines, then a closing success", async () => {
+    // The engine is the owner's click since 2026-09-15: no install or update
+    // puts faster-whisper on a box, so this step is the only path to it.
+    followMock.mockImplementation(async (step: string, opts: { onStatus: (line: string) => void }) => {
+      opts.onStatus("=== On-device speech-to-text (faster-whisper) ===");
+      opts.onStatus("  faster-whisper ready");
+      return { ok: true };
+    });
+    const { POST } = await load();
+    const res = await POST(post({ action: "install-engine" }));
+    expect(res.status).toBe(200);
+    expect(followMock.mock.calls[0][0]).toBe("voice_whisper_install");
+    const out = await readStream(res);
+    expect(out.map((l) => l.status)).toContain("  faster-whisper ready");
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+    // Nothing of the size picker ran: no fetch, no unit write, no restart.
+    expect(pointed).not.toHaveBeenCalled();
+    expect(restarted).not.toHaveBeenCalled();
+  });
+
+  it("closes with the step's error when it failed", async () => {
+    followMock.mockResolvedValue({ ok: false, error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
+    const { POST } = await load();
+    const out = await readStream(await POST(post({ action: "install-engine" })));
+    expect(out[out.length - 1]).toEqual({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
+  });
+
+  it("refuses when the engine is already installed — the sizes are the picker's job", async () => {
+    state.installed = true;
+    const { POST } = await load();
+    const res = await POST(post({ action: "install-engine" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("already_installed");
+    expect(followMock).not.toHaveBeenCalled();
   });
 });
 

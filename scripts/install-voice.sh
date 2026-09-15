@@ -14,26 +14,51 @@
 # below -- outside the idempotence gate, because a box that already has the
 # stack is exactly the box a broken wheel would be found on.
 #
-# Usage:
-#   install-voice.sh              full STT+TTS install (CTranslate2 source
-#                                 build, Whisper model, Kokoro; ~1 h on an Orin)
-#   install-voice.sh --tts-only   the workspace TTS scripts and the Kokoro GPU
-#                                 stack only (what install.sh runs on every
-#                                 install and every in-app update)
+# NOTHING HERE IS INSTALLED BY AN UPDATE ANY MORE. The in-app update ran
+# --tts-only, and --tts-only had quietly grown from "the Kokoro stack" into
+# Kokoro + faster-whisper + a from-source CTranslate2 build: 15 minutes of a
+# 35-minute update spent on engines nobody asked for (measured 2026-09-15).
+# The owner's ruling is that install.sh force-installs no model or engine but
+# the llama.cpp runtime and Gemma 4, so install.sh runs --scripts-only and an
+# engine arrives only through the Local AI tab's Install (--kokoro, --whisper).
 #
-# Exit status, in BOTH modes. The published Kokoro VERDICT decides it, never a
-# return code on its own:
-#   0   Kokoro verdict `ready`.
-#   13  Kokoro verdict `skipped:<reason>`: the board declines the only engine,
-#       so NO on-device engine can speak. The engine and the concrete reason it
-#       is absent are printed. install.sh records this as a provision failure
-#       (non-fatal) — every shipped ClawBox is a Jetson with a Kokoro build, so
-#       a skip on real hardware means something is wrong.
+# Usage:
+#   install-voice.sh                 full STT+TTS install (CTranslate2 source
+#                                    build, Whisper model, Kokoro), run by hand
+#   install-voice.sh --scripts-only  deploy the voice scripts and the units of
+#                                    the engines that are PRESENT, restart the
+#                                    resident servers, publish the Kokoro
+#                                    verdict from what is on disk. Installs
+#                                    nothing. What install.sh runs on every
+#                                    install and every in-app update.
+#   install-voice.sh --kokoro        the Kokoro GPU stack (torch, the packages,
+#                                    the model), then the scripts — the Local AI
+#                                    tab's Install, through the
+#                                    voice_kokoro_install root step
+#   install-voice.sh --whisper       faster-whisper, the CTranslate2 CUDA build
+#                                    and the Whisper weights, then the scripts —
+#                                    the voice_whisper_install root step
+#   install-voice.sh --tts-only      --kokoro and --whisper in one run: the mode
+#                                    install.sh used to run on every update,
+#                                    kept for callers that still ask for it
+#
+# Exit status of --scripts-only, --kokoro and --tts-only. The published Kokoro
+# VERDICT decides it, never a return code on its own:
+#   0   Kokoro verdict `ready` — or `absent`, which only --scripts-only
+#       publishes, for a box that never installed the engine: not a failure,
+#       the owner installs it from Settings → Local AI when they want it.
+#   13  Kokoro verdict `skipped:<reason>`: the board declines the engine it was
+#       ASKED to install (no CUDA, no Jetson build for its architecture), so no
+#       on-device engine can speak. The engine and the concrete reason are
+#       printed; install.sh records it as a provision failure (non-fatal).
 #   12  Kokoro verdict `failed:<reason>`, or no verdict at all, an unparseable
 #       verdict, a truncated reason, or a status outside the vocabulary.
 #   1   the voice scripts did not deploy (Kokoro's own verdict stands).
 #   2   unknown option.
-# The verdict vocabulary is closed: `ready`, `skipped:<reason>`,
+# --whisper is graded by faster-whisper the same way: 0 ready, 13 this board
+# cannot have it (no CUDA), 12 attempted and did not arrive, 1 the scripts did
+# not deploy. It leaves the Kokoro verdict exactly as it found it.
+# The verdict vocabulary is closed: `ready`, `absent`, `skipped:<reason>`,
 # `failed:<reason>` — anything else is 12. The verdict is published to
 # $TTS_STATUS_FILE for readers that are not tailing stdout.
 set -euo pipefail
@@ -49,8 +74,8 @@ PIP="pip3"
 
 # ── Shared Kokoro (GPU TTS) constants ───────────────────────────────────────
 # Named once because two paths through this file install Kokoro — the full
-# voice-pipeline run at the bottom and the --tts-only run install.sh uses — and
-# a second copy of any of these is a drift waiting to happen.
+# voice-pipeline run at the bottom and the --kokoro run the Local AI tab uses —
+# and a second copy of any of these is a drift waiting to happen.
 
 # JP v61 wheel works on JetPack 6.1+ (including 6.2.x).
 JETSON_TORCH_URL="https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
@@ -163,9 +188,9 @@ kokoro_expected_cusparselt_dir() {
 # downloads an artifact by hand any more; pip is the only fetch left.
 
 # Deploy the TTS entrypoint + engine scripts into the workspace the gateway
-# runs from. Split out of the big install so --tts-only can call it too: the
-# updater re-runs that path on every update, and a box whose clawbox-tts.sh is
-# stale is a box whose speech path is stale.
+# runs from. Split out of the big install so every mode can call it: the
+# updater re-runs --scripts-only on every update, and a box whose
+# clawbox-tts.sh is stale is a box whose speech path is stale.
 # Returns non-zero if ANY required piece did not land. A device that keeps a
 # stale or half-copied speech install while the updater reports success is the
 # same class of bug as a silent TTS failure, one layer further out.
@@ -228,8 +253,8 @@ restart_voice_servers() {
 # path actually installed it: install.sh called this script with a
 # fallback-only flag and then printed "Kokoro GPU". Every shipped box spoke
 # through the CPU fallback. The pieces below are functions, not inline steps,
-# because both the full pipeline install and --tts-only run them and neither
-# may drift.
+# because both the full pipeline install and --kokoro run them and neither may
+# drift.
 
 # CUDA detection: nvcc on PATH, else the standard Jetson location (exported so
 # later steps find it). Returns 0 only when CUDA is genuinely usable — the
@@ -417,7 +442,7 @@ print('Kokoro model ready on', next(pipeline.model.parameters()).device)
 #
 # It builds the G2P and nothing else, so it runs on EVERY run -- including the
 # box that skips the whole GPU install because it is already stamped, which is
-# precisely the box a broken wheel would be found on, and which --tts-only
+# precisely the box a broken wheel would be found on, and which --scripts-only
 # reaches on every in-app update of every box on the fleet.
 kokoro_check_phonemiser() {
   local out rc=0
@@ -456,9 +481,9 @@ print('Phonemiser OK (out-of-vocabulary words phonemise)')
 }
 
 # Does the box already have a COMPLETE Kokoro stack? This is the idempotence
-# gate: --tts-only runs on EVERY in-app update of a shipped device, and
-# re-fetching the torch wheel each time would make every update a ~300 MB
-# download for nothing.
+# gate: --kokoro is what the Local AI tab's Install runs, on a box that may
+# well have the stack already, and re-fetching the torch wheel each time would
+# make a click on a working box a ~300 MB download for nothing.
 #
 # Both halves are load-bearing. The stamp says "a previous run of this script
 # finished every step"; the import says "and it is still true" (a pip
@@ -485,7 +510,7 @@ kokoro_mark_installed() {
 }
 
 # The kokoro-server.service heredoc lives here, once, so the full path and
-# --tts-only cannot ship two different units.
+# the mode dispatch below cannot ship two different units.
 write_kokoro_unit() {
   local ld
   # "expected": this file is written once and read for the life of the box, and
@@ -524,10 +549,15 @@ activate_user_units() {
 # Publish the Kokoro verdict — on stdout, as before, AND to $TTS_STATUS_FILE so
 # it outlives the run.
 #
-# The three states are a contract, and two of them used to be indistinguishable
+# The four states are a contract, and two of them used to be indistinguishable
 # to every reader downstream:
 #
-#   ready       requested, installed, usable.
+#   ready       installed, usable.
+#   absent      never installed on this box, and nothing asked for it: what
+#               --scripts-only publishes on a box whose owner has not pressed
+#               Install in Settings → Local AI. NOT a failure and NOT a skip —
+#               a skip is a board declining an install it was asked for. Every
+#               reader grades it as a plain state of the box.
 #   skipped:*   NOT applicable to this board (no CUDA, no Jetson build for this
 #               architecture). This engine is absent by the board's own
 #               design — and it is the ONLY engine, so such a box has no
@@ -594,7 +624,7 @@ kokoro_report() {
 # Every place that reports "this box has no on-device voice" has to say WHY
 # the engine is not there, or the operator is left to go and read
 # $TTS_STATUS_FILE to learn what the run already knew. Kept in one function so
-# the reporting sites below (--tts-only, the full pipeline's summary and its
+# the reporting sites below (the mode dispatch, the full pipeline's summary and its
 # final guard) cannot drift into three vocabularies.
 #
 # `ready` is the only verdict that means "this engine can speak". `skipped:?*`
@@ -604,7 +634,8 @@ kokoro_report() {
 # they are told apart so the operator knows what to do about it: a skip is a
 # board that declines the only engine (exit 13 below), a failure is an install
 # a human has to repair (exit 12). On this one-engine box the reason is both
-# the operator's sentence and the grade.
+# the operator's sentence and the grade. `absent` is the fourth word and the
+# one that is NOT a failure: nothing was asked for, so nothing is missing.
 #
 # `skipped:?*` / `failed:?*`, never `skipped:*`: a bare `skipped:` carries no
 # reason, and a truncated write is exactly how one appears. A claim with its
@@ -617,6 +648,7 @@ kokoro_report() {
 tts_verdict_explain() {
   case "${1:-}" in
     ready)      printf 'ready' ;;
+    absent)     printf 'not installed - the owner installs it from Settings -> Local AI' ;;
     skipped:?*) printf 'SKIPPED (%s) - this board does not run it' "${1#skipped:}" ;;
     failed:?*)  printf 'FAILED (%s) - it was asked for and did not install' "${1#failed:}" ;;
     "")         printf 'no verdict published - the install left no record of it' ;;
@@ -705,13 +737,14 @@ install_kokoro_tts() {
   # kokoro, torch` works, which a broken espeakng-loader does not disturb --
   # misaki degrades rather than raising -- so an already-stamped box would take
   # the skip arm and reach `ready` with a phonemiser that drops every
-  # out-of-vocabulary word. --tts-only runs on every in-app update, so that is
-  # every box on the fleet, including the one this fix is being shipped to.
+  # out-of-vocabulary word. kokoro_report_present runs the same check on every
+  # in-app update, so that is every box on the fleet, including the one this
+  # fix is being shipped to.
   if ! kokoro_check_phonemiser; then
     echo "  ERROR: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech" >&2
-    # Re-running the step lands on the idempotence gate and re-runs this same
-    # check, so the caller's "Re-run: --step openclaw_tts" is not a remedy here.
-    # The wheel that carries the espeak library and its data is.
+    # Re-running the install lands on the idempotence gate and re-runs this
+    # same check, so pressing Install again is not a remedy here. The wheel
+    # that carries the espeak library and its data is.
     # The same shape install_python_package installs with: a login shell for
     # the configured user and --user. `sudo -u clawbox pip3 install` without
     # --user is a system install run by an unprivileged account, so the printed
@@ -729,6 +762,58 @@ install_kokoro_tts() {
   # Refreshed on every run, present or not: the unit points at a script
   # deploy_voice_scripts just re-copied, and a stale unit is how a working box
   # stops working after an update.
+  if ! write_kokoro_unit; then
+    echo "  ERROR: could not write $SYSTEMD_USER/kokoro-server.service" >&2
+    kokoro_report "failed:unit"
+    return 12
+  fi
+  activate_user_units
+  kokoro_report "ready"
+}
+
+# What --scripts-only publishes: the verdict for the Kokoro that IS on the box,
+# with nothing installed. This runs on every install and every in-app update,
+# so it is the cheap path by construction — one import probe and the phonemiser
+# check, never pip and never a download.
+#
+#   absent           no stamp, or a stamp whose `import kokoro, torch` no
+#                    longer works: the box has no on-device voice and nothing
+#                    here asked for one. NOT a failure, and never `skipped:*`:
+#                    a skip is a board declining an install it was asked for.
+#                    The owner installs it from Settings → Local AI.
+#   ready            installed, imports, phonemises — and its unit refreshed,
+#                    because the server it points at was just re-copied.
+#   failed:<reason>  installed and broken (the phonemiser, the unit): an engine
+#                    that is there and cannot speak is still a defect a human
+#                    has to fix, and --scripts-only says so with 12.
+#
+# The stamp's PRESENCE, not its version, is what "installed" means here: a box
+# stamped by a release this file has since bumped past still has an engine,
+# and redoing the install for it is the Local AI tab's Install, not an update's
+# business. Said out loud so the operator knows why the fix is not on the box.
+#
+# `local-models.ts` reads `installed` off the stamp AND the unit, so the unit
+# is written only behind a present engine — a unit with nothing behind it would
+# advertise a voice the box does not have.
+kokoro_report_present() {
+  local stamp
+  stamp="$(cat "$KOKORO_STAMP" 2>/dev/null || true)"
+  if [ -z "$stamp" ] || ! clawbox_python "import kokoro, torch" >/dev/null 2>&1; then
+    echo "  Kokoro is not installed on this box (install it from Settings → Local AI)"
+    kokoro_report "absent"
+    return 0
+  fi
+  if [ "$stamp" != "$KOKORO_STAMP_VERSION" ]; then
+    echo "  Kokoro was installed by an older release (stamp $stamp, current $KOKORO_STAMP_VERSION) — Install in Settings → Local AI picks up its fixes"
+  fi
+  if ! kokoro_check_phonemiser; then
+    echo "  ERROR: Kokoro cannot phonemise out-of-vocabulary words — names and brands would be dropped from speech" >&2
+    # The same remedy install_kokoro_tts prints, in the same shape, for the
+    # same reason (see there): the espeak wheel, not a re-run.
+    printf "  Fix:   su - %q -c '%s install --user --force-reinstall espeakng-loader misaki'\n" "$CLAWBOX_USER" "$PIP" >&2
+    kokoro_report "failed:phonemiser"
+    return 12
+  fi
   if ! write_kokoro_unit; then
     echo "  ERROR: could not write $SYSTEMD_USER/kokoro-server.service" >&2
     kokoro_report "failed:unit"
@@ -871,8 +956,38 @@ whisper_predownload_model() {
     echo "  Whisper weights already cached"
     return 0
   fi
-  clawbox_python 'from faster_whisper import WhisperModel
-WhisperModel("base", device="cpu", compute_type="int8")' >/dev/null 2>&1
+  # `download_model` fetches and nothing more — the same call
+  # scripts/fetch-whisper-model.py makes for the other sizes. Building a
+  # WhisperModel to get the same download used to ask for `int8` on the CPU,
+  # and the CUDA-built CTranslate2 this file installs has no CPU int8 backend
+  # on this board ("Requested int8 compute type, but the target device or
+  # backend do not support efficient int8 computation", observed 2026-09-15),
+  # so every successful download was reported as a failed pre-fetch. An older
+  # faster-whisper without the helper still loads the model, in the one
+  # compute type every build supports.
+  clawbox_python 'try:
+    from faster_whisper.utils import download_model
+except ImportError:
+    from faster_whisper import WhisperModel
+    WhisperModel("base", device="cpu", compute_type="float32")
+else:
+    download_model("base")' >/dev/null 2>&1
+}
+
+# The unit for a faster-whisper that is already here, refreshed after
+# deploy_voice_scripts re-copied the server it points at. Nothing is fetched,
+# and a box without the engine gets no unit: src/lib/local-models.ts reads
+# `installed` off the unit's presence, and a unit with no engine behind it
+# would advertise one. Best-effort — the engine is the Local AI tab's to
+# install, not this run's.
+whisper_refresh_present() {
+  whisper_stack_present || return 0
+  if write_whisper_unit; then
+    activate_user_units
+  else
+    echo "  Warning: could not refresh whisper-server.service" >&2
+  fi
+  return 0
 }
 
 whisper_stack_present() {
@@ -891,7 +1006,7 @@ whisper_mark_installed() {
 }
 
 # The whisper-server.service heredoc lives here, once, so the full path and
-# --tts-only cannot ship two different units.
+# the mode dispatch cannot ship two different units.
 #
 # It points at the WORKSPACE copy of whisper-server.py, which deploy_voice_scripts
 # writes on every run — $SCRIPTS_DST exists only on the full-pipeline path.
@@ -949,7 +1064,7 @@ install_whisper_stt() {
     return 0
   fi
   # detect_cuda, not $HAS_CUDA: that variable is assigned further down this
-  # file, BELOW the --tts-only arm that exits before reaching it, so reading it
+  # file, BELOW the mode dispatch that exits before reaching it, so reading it
   # here is an unbound variable and `set -u` would abort the whole install.
   # install_kokoro_tts calls the function for the same reason.
   if ! detect_cuda; then
@@ -999,26 +1114,43 @@ install_whisper_stt() {
   echo "  faster-whisper ready"
 }
 
-# --tts-only installs exactly what on-device TTS needs: the workspace scripts
-# OpenClaw execs, and the CUDA Kokoro stack with its on-demand server unit.
-# There is no second engine to install — Kokoro is the box's only voice, and a
-# Kokoro that is missing is reported (verdict file, exit status) rather than
-# papered over by a CPU fallback.
+# ── Mode dispatch ───────────────────────────────────────────────────────────
+# Which engines this run may INSTALL is decided once, here, and never inferred
+# from what happens to be on the box. --scripts-only is what install.sh runs on
+# every install and every in-app update: the workspace scripts OpenClaw execs,
+# the units of the engines that are present, and the Kokoro verdict read off
+# the disk — nothing fetched, nothing built. --kokoro and --whisper are the
+# Local AI tab's two Install buttons (voice_kokoro_install and
+# voice_whisper_install in install.sh). --tts-only is both installs in one
+# run, the mode the update used to invoke, kept so a caller that still asks
+# for it keeps getting what it asked for.
 #
-# It DOES now install the STT half — faster-whisper, the CTranslate2 CUDA build
-# and the Whisper weights — which this file used to exclude on the grounds that
-# it was "roughly an hour on an Orin". That number was never measured. Pinned to
-# the one architecture the board actually has (cuda_arch_pin), the same build
-# took 255 s of `make -j4` plus a 34 s clone on an Orin Nano — measured
-# 2026-09-04. Unpinned, nvcc emits code for every architecture it knows, which
-# is where the hour went. Stamp-gated, so a box that has it pays one import
-# check per update and nothing else.
-#
-# The scripts go first so a Kokoro failure can never take the entrypoint with
-# it: clawbox-tts.sh is what turns "Kokoro is down" into an exit-1 report the
-# gateway can act on, instead of a missing command.
-if [ "${1:-}" = "--tts-only" ]; then
-  echo "=== On-device TTS (Kokoro GPU) ==="
+# The scripts go first in every mode so an engine failure can never take the
+# entrypoint with it: clawbox-tts.sh is what turns "Kokoro is down" into an
+# exit-1 report the gateway can act on, instead of a missing command.
+VOICE_MODE="full"
+case "${1:-}" in
+  "")             VOICE_MODE="full" ;;
+  --scripts-only) VOICE_MODE="scripts-only" ;;
+  --kokoro)       VOICE_MODE="kokoro" ;;
+  --whisper)      VOICE_MODE="whisper" ;;
+  --tts-only)     VOICE_MODE="tts-only" ;;
+  --*)
+    # Any other option is refused rather than silently taken as "run the full
+    # pipeline install": that path builds CTranslate2 from source, and the
+    # fallback-only flag an earlier release accepted here used to land on it.
+    # There is no such mode any more, and a caller that still asks for one
+    # should hear that instead of getting an hour of builds.
+    echo "install-voice.sh: unknown option '$1' (modes: --scripts-only, --kokoro, --whisper, --tts-only; no flag runs the full STT+TTS install)" >&2
+    exit 2 ;;
+esac
+
+if [ "$VOICE_MODE" != "full" ]; then
+  case "$VOICE_MODE" in
+    scripts-only) echo "=== Voice scripts (engines are installed from Settings → Local AI) ===" ;;
+    whisper)      echo "=== On-device speech-to-text (faster-whisper) ===" ;;
+    *)            echo "=== On-device TTS (Kokoro GPU) ===" ;;
+  esac
 
   DEPLOY_RC=0
   deploy_voice_scripts || DEPLOY_RC=$?
@@ -1028,34 +1160,73 @@ if [ "${1:-}" = "--tts-only" ]; then
     restart_voice_servers
   fi
 
+  # Kokoro: INSTALLED in the two install modes, only LOOKED AT by
+  # --scripts-only. --whisper leaves the Kokoro verdict exactly as it found it
+  # — it is about the other engine, and rewriting a verdict it did not examine
+  # would be a claim about something it never looked at.
   KOKORO_RC=0
-  install_kokoro_tts || KOKORO_RC=$?
-
-  # AFTER Kokoro, so a failed pip or a lost network can never cost the box its
-  # voice, and BEFORE the case below, which exits: STT is independent of TTS,
-  # and a box whose Kokoro is missing should still get its ears. Its status is
-  # reported and deliberately does NOT feed the exit code — the contract
-  # documented above is Kokoro's, and install.sh grades this step by it.
-  STT_RC=0
-  install_whisper_stt || STT_RC=$?
-  case "$STT_RC" in
-    0)  echo "  On-device speech-to-text: ready" ;;
-    13) echo "  On-device speech-to-text: not applicable to this board" ;;
-    *)  echo "  On-device speech-to-text: NOT installed (speech is transcribed in the cloud)" >&2 ;;
+  case "$VOICE_MODE" in
+    kokoro|tts-only) install_kokoro_tts || KOKORO_RC=$? ;;
+    scripts-only)    kokoro_report_present || KOKORO_RC=$? ;;
   esac
+
+  # faster-whisper: installed in its two modes. In the others its unit is
+  # refreshed when the engine is there (deploy_voice_scripts just re-copied the
+  # server it points at) and nothing is fetched. Its status feeds the exit code
+  # ONLY in --whisper: everywhere else the contract is Kokoro's, and install.sh
+  # grades the step by it. In --tts-only it still comes AFTER Kokoro, so a
+  # failed pip or a lost network can never cost the box its voice.
+  STT_RC=0
+  case "$VOICE_MODE" in
+    whisper|tts-only)
+      install_whisper_stt || STT_RC=$?
+      case "$STT_RC" in
+        0)  echo "  On-device speech-to-text: ready" ;;
+        13) echo "  On-device speech-to-text: not applicable to this board" ;;
+        *)  echo "  On-device speech-to-text: NOT installed (speech is transcribed in the cloud)" >&2 ;;
+      esac
+      ;;
+    *) whisper_refresh_present ;;
+  esac
+
+  # --whisper is graded by ITS engine: the same three codes install.sh reads
+  # for Kokoro (13 the board declines it, 12 it was asked for and did not
+  # arrive, 1 the scripts did not deploy behind a ready engine), because
+  # step_voice_whisper_install grades them the same way.
+  if [ "$VOICE_MODE" = "whisper" ]; then
+    case "$STT_RC" in
+      0) ;;
+      13)
+        echo "=== faster-whisper does not apply to this board (no CUDA) — speech is transcribed in the cloud ===" >&2
+        exit 13
+        ;;
+      *)
+        echo "=== faster-whisper was requested and did NOT install — speech stays transcribed in the cloud ===" >&2
+        exit 12
+        ;;
+    esac
+    if [ "$DEPLOY_RC" -ne 0 ]; then
+      echo "=== Voice scripts INCOMPLETE — the workspace copy of the voice scripts did not deploy (faster-whisper: ready) ===" >&2
+      exit 1
+    fi
+    echo "=== On-device speech-to-text ready (faster-whisper) ==="
+    exit 0
+  fi
 
   # The exit status is the contract with install.sh's step_openclaw_tts (the
   # table in the header of this file):
   #
-  #   0    Kokoro is ready.
-  #   13   Kokoro does not apply to this board (no CUDA, no Jetson build). It
-  #        is the only engine, so this box has NO on-device voice: a mute box,
-  #        reported with the engine and its reason, recorded by install.sh.
-  #   12   Kokoro was REQUESTED and did not install — or published no verdict
-  #        this dispatch can read. Same silence for the listener, but this one
-  #        is a defect a human has to fix.
-  #   1    the voice scripts did not deploy behind a READY Kokoro; Kokoro's own
-  #        verdict stands in $TTS_STATUS_FILE.
+  #   0    Kokoro is ready — or absent, on a --scripts-only run over a box that
+  #        never installed it. Absent is a state of the box, not a failure.
+  #   13   Kokoro does not apply to this board (no CUDA, no Jetson build). Only
+  #        an install mode can say it: it is the only engine, so this box has
+  #        NO on-device voice — a mute box, reported with the engine and its
+  #        reason, recorded by install.sh.
+  #   12   Kokoro was REQUESTED and did not install — or is there and cannot
+  #        speak (the phonemiser, the unit) — or published no verdict this
+  #        dispatch can read. A defect a human has to fix.
+  #   1    the voice scripts did not deploy behind a READY (or absent) Kokoro;
+  #        Kokoro's own verdict stands in $TTS_STATUS_FILE.
   #
   # The two-engine release exited 10/11 for a skipped Kokoro because the CPU
   # engine behind it still spoke. There is no engine behind it now, so a
@@ -1070,14 +1241,17 @@ if [ "${1:-}" = "--tts-only" ]; then
   # before `exit "$KOKORO_RC"` and laundered a mute box into a warning.
   #
   # Whether the engine ARRIVED is read from the published VERDICT, not from the
-  # return code. install_kokoro_tts sets both in the same breath, so today they
-  # cannot disagree — but a future early return that forgets kokoro_report, or
-  # a verdict outside the vocabulary, must land on the failure arm and not on
-  # `exit "$KOKORO_RC"`. Nothing to read is not evidence of an engine. Nor is
-  # `skipped:?*` bundled with `ready`: that alternation is exactly what let a
-  # declined engine fall through as one that exists.
+  # return code. install_kokoro_tts and kokoro_report_present set both in the
+  # same breath, so today they cannot disagree — but a future early return
+  # that forgets kokoro_report, or a verdict outside the vocabulary, must land
+  # on the failure arm and not on `exit "$KOKORO_RC"`. Nothing to read is not
+  # evidence of an engine. Nor is `skipped:?*` bundled with `ready`: that
+  # alternation is exactly what let a declined engine fall through as one that
+  # exists. `absent` sits beside `ready` on an arm of its own because it IS a
+  # clean run, and the only verdict an install mode can never publish.
   case "$TTS_KOKORO_VERDICT" in
     ready) ;;
+    absent) ;;
     skipped:?*)
       tts_mute_box_report
       exit 13
@@ -1091,22 +1265,15 @@ if [ "${1:-}" = "--tts-only" ]; then
     echo "=== Voice scripts INCOMPLETE — the workspace copy of the TTS scripts did not deploy (Kokoro: ${TTS_KOKORO_VERDICT:-unreported}) ===" >&2
     exit 1
   fi
-  # Only a `ready` verdict reaches this line, and install_kokoro_tts returns 0
-  # in the same breath as publishing it.
-  echo "=== On-device TTS ready (Kokoro GPU) ==="
+  # Only `ready` and `absent` reach this line, and both are published in the
+  # same breath as a 0 return.
+  if [ "$TTS_KOKORO_VERDICT" = "absent" ]; then
+    echo "=== On-device voice not installed — install it from Settings → Local AI ==="
+  else
+    echo "=== On-device TTS ready (Kokoro GPU) ==="
+  fi
   exit "$KOKORO_RC"
 fi
-
-# Any other option is refused rather than silently taken as "run the full
-# pipeline install": that path builds CTranslate2 from source and takes about
-# an hour, and the fallback-only flag an earlier release accepted here used to
-# land on it. There is no such mode any more, and a caller that still asks for
-# one should hear that instead of getting an hour of builds.
-case "${1:-}" in
-  --*)
-    echo "install-voice.sh: unknown option '$1' (the only mode flag is --tts-only; no flag runs the full STT+TTS install)" >&2
-    exit 2 ;;
-esac
 
 echo "=== Voice Pipeline Installer (GPU-Accelerated) ==="
 
@@ -1121,7 +1288,7 @@ fi
 # ── Step 1: Install CUDA PyTorch (if available) ─────────────────────────────
 
 # Tracked across the Kokoro steps so this path can write the same completion
-# stamp --tts-only reads, and write it only when every one of them worked. A
+# stamp --kokoro reads, and write it only when every one of them worked. A
 # box installed the long way must not then redo the whole GPU stack on its
 # first in-app update — nor be stamped as complete when it is not.
 KOKORO_FULL_OK=$HAS_CUDA
@@ -1189,24 +1356,10 @@ if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -typ
   echo "  Clearing corrupted Whisper model cache..."
   rm -rf "$WHISPER_CACHE"
 fi
-DEVICE="cpu"
-COMPUTE="auto"
-if $HAS_CUDA; then
-  DEVICE="cuda"
-  COMPUTE="float16"
-fi
-# Through the shared helper: this was the third copy of the same pinned
-# python3.10 path, and STT needs that loader path for exactly the reason TTS
-# does — the CUDA libraries live under user-site.
-if whisper_model_cached; then
-  echo "  Whisper weights already cached"
-else
-  clawbox_python "
-from faster_whisper import WhisperModel
-model = WhisperModel('base', device='$DEVICE', compute_type='$COMPUTE')
-print('Whisper base model ready on $DEVICE')
-" 2>&1 | tail -3
-fi
+# Through the shared helper: this was a third copy of the same download, on the
+# same pinned python3.10 path, and the one helper carries the compute-type fix
+# (see whisper_predownload_model) that this copy would otherwise miss.
+whisper_predownload_model || echo "  Warning: could not pre-fetch the Whisper weights (the first transcription fetches them)"
 
 echo "[6/7] Pre-downloading Kokoro model..."
 if kokoro_predownload_model; then
