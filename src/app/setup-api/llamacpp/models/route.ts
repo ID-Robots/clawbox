@@ -120,7 +120,16 @@ export async function GET(request: Request) {
   const file = params.get("file");
 
   // The "how big is it" probe the panel makes before it offers Download.
+  //
+  // OWNER ONLY, unlike the listing beside it: this one reaches OUT, to a
+  // repository path the caller named. The listing reports what is already on
+  // the box and is fine for anything middleware admits; a request this box
+  // makes to the internet on someone else's word is the person's, and the MCP
+  // bearer is the party the install gates exist for.
   if (repo !== null || file !== null) {
+    if (!(await hasOwnerSession(request))) {
+      return NextResponse.json({ error: "Checking a model's size needs a signed-in browser session.", code: "owner_only" }, { status: 403 });
+    }
     if (!isHfRepo(repo) || !isHfGgufFile(file)) {
       return NextResponse.json({ error: "That is not a Hugging Face repository and GGUF file.", code: "invalid" }, { status: 400 });
     }

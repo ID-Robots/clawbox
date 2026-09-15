@@ -148,6 +148,20 @@ describe("GET /setup-api/llamacpp/models", () => {
     expect(asked).toBe("https://huggingface.co/api/models/owner/name/tree/main?recursive=1");
   });
 
+  it("keeps the outbound size probe to the owner, while the listing stays open to the session", async () => {
+    owner.value = false;
+    const { GET } = await load();
+
+    const probe = await GET(new Request("http://localhost/setup-api/llamacpp/models?repo=owner/name&file=other.gguf"));
+    expect(probe.status).toBe(403);
+    expect((await probe.json()).code).toBe("owner_only");
+    // Nothing left this box.
+    expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+
+    const listing = await GET(new Request("http://localhost/setup-api/llamacpp/models"));
+    expect(listing.status).toBe(200);
+  });
+
   it("refuses a reference that is not owner/name plus a .gguf", async () => {
     const { GET } = await load();
     for (const query of ["repo=owner&file=other.gguf", "repo=owner/name&file=README.md", "repo=owner/../x&file=a.gguf"]) {
