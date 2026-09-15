@@ -224,9 +224,13 @@ function runTtsOnly(
   };
 }
 
-/** The `--tts-only` dispatch block of install-voice.sh, as source. */
+/**
+ * The mode dispatch block of install-voice.sh, as source: the one block that
+ * runs `--tts-only`, `--kokoro`, `--whisper` and `--scripts-only` — every mode
+ * but the full pipeline — and grades the Kokoro verdict for all of them.
+ */
 function ttsOnlyDispatch(): string {
-  const start = INSTALL_VOICE_SH.indexOf('"${1:-}" = "--tts-only"');
+  const start = INSTALL_VOICE_SH.indexOf('if [ "$VOICE_MODE" != "full" ]; then');
   const end = INSTALL_VOICE_SH.indexOf("Voice Pipeline Installer");
   if (start < 0 || end < start) throw new Error("the --tts-only dispatch moved");
   return INSTALL_VOICE_SH.slice(start, end);

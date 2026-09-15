@@ -43,11 +43,11 @@ export interface ApprovalPromptProps {
   /**
    * How many approvals are waiting on the chat right now, this one included.
    * Above one, a card that offers allow-once also offers "Allow all (N)" —
-   * the owner's ask of 2026-09-07, when a turn that had read the web raised a
-   * card per shell command and each wanted its own press. It answers every
-   * waiting card with allow-once, one resolve each: a batch of the consent
-   * the card already offers, never a standing allow, so a gate that refuses
-   * `allow-always` (the web-taint gate) is not widened by it.
+   * the owner's ask of 2026-09-07, when a turn raised a card per shell
+   * command and each wanted its own press. It answers every waiting card
+   * with allow-once, one resolve each: a batch of the consent the card
+   * already offers, never a standing allow, so a request that refuses
+   * `allow-always` is not widened by it.
    */
   pendingCount?: number;
   /** Answer every waiting approval with allow-once. */

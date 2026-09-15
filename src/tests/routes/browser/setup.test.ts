@@ -87,7 +87,7 @@ describe("/setup-api/browser/setup", () => {
   it("puts the default back when the start page is cleared", async () => {
     store.set("browser_start_url", "https://example.com/start");
     const res = await post({ startUrl: "" });
-    expect((await res.json()).startUrl).toBe("https://www.google.com");
+    expect((await res.json()).startUrl).toBe("about:blank");
     expect(store.has("browser_start_url")).toBe(false);
   });
 

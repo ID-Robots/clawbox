@@ -88,6 +88,9 @@ const BRAND_ONLY = new Set([
   "Ultracode",
   // A loanword that is genuinely identical in several languages.
   "tokens",
+  // The Coding Agent's Vercel switch wears this badge; the word is the same
+  // in German, Spanish, Italian and Swedish (French and Dutch accent it).
+  "Beta",
   // A filesystem path shown as a placeholder. Translating it would invent a
   // folder that does not exist on the box.
   "/home/clawbox/Projects",

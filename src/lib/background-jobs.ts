@@ -4,18 +4,25 @@ import { readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConf
 
 // The three things the box does on its OWN initiative, and the switches for them.
 //
-// WHY THIS EXISTS (TASK-609, owner ruling 2026-09-03). OpenClaw 2 arrives with
-// heartbeat DMs, memory dreaming and self-learning all ON: measured on a box,
-// `state/openclaw.sqlite` `cron_jobs` held `heartbeat-main`,
-// `skill-collection-review-main` and "Memory Dreaming Promotion" all enabled,
-// the journal logged "[heartbeat] started" twice in an evening, and the alerts
-// go to `commands.ownerAllowFrom` — one Telegram user. None of it was asked
-// for, all of it spends the owner's subscription or his ClawBox AI credits, and
-// ClawBox wrote none of the keys. The opt-outs are seeded once per box by the
-// boot script that owns each harness's config — `scripts/gateway-pre-start.sh`
-// on OpenClaw, `scripts/register-mcp.sh` on Hermes, where the same shared
-// config lock is already held — and this module is how the owner changes his
-// mind afterwards.
+// WHY THIS EXISTS. OpenClaw 2 arrives with heartbeat DMs, memory dreaming and
+// self-learning all ON: measured on a box, `state/openclaw.sqlite` `cron_jobs`
+// held `heartbeat-main`, `skill-collection-review-main` and "Memory Dreaming
+// Promotion" all enabled, the journal logged "[heartbeat] started" twice in an
+// evening, and the alerts go to `commands.ownerAllowFrom` — one Telegram user.
+// All of it spends the owner's subscription or his ClawBox AI credits, and
+// ClawBox wrote none of the keys — so TASK-609 (owner ruling 2026-09-03) seeded
+// OPT-OUTS once per box, and this panel was how the owner switched them back.
+//
+// THE DEFAULT IS ON (owner ruling 2026-09-15, reversing that): "Working on its
+// own" is what the box does unless the owner says otherwise. The boot script
+// that owns each harness's config — `scripts/gateway-pre-start.sh` on
+// OpenClaw, `scripts/register-mcp.sh` on Hermes, where the same shared config
+// lock is already held — brings a box the previous build seeded off back to
+// the harness defaults ONCE (generation 2 of `data/background-optouts.json`,
+// which only flips a key still AT the old opt-out literal), and from then on
+// the keys are the owner's for ever. This module is the switches themselves,
+// in both directions; nothing at boot seeds a value into a key any more, and
+// nothing ever writes `0m` but the owner's own OFF here.
 //
 // HARNESS FIRST — every one of these is the harness's own documented key, read
 // and written through the harness's own writer. Nothing here invents a store.
@@ -179,11 +186,13 @@ export class BackgroundJobError extends Error {
 }
 
 /**
- * Switching a job ON means REMOVING ClawBox's opt-out, not pinning a value of
- * our own: `config unset` puts the key back where the core's own default
- * decides it, which for the heartbeat is 30 m — or an hour on Anthropic OAuth,
- * a distinction ClawBox has no business freezing. The two boolean/enum rows
- * have no such default to defer to, so they are written explicitly.
+ * Switching a job ON means REMOVING the key, not pinning a value of our own:
+ * `config unset` puts it back where the core's own default decides it, which
+ * for the heartbeat is 30 m — or an hour on Anthropic OAuth, a distinction
+ * ClawBox has no business freezing. The two boolean/enum rows have no such
+ * default to defer to, so they are written explicitly. The boot-time flip in
+ * `gateway-pre-start.sh` removes the key the same way, so the panel's ON and
+ * the migration cannot leave the cadence in two different shapes.
  *
  * The unset is only attempted where the key is actually present: the CLI exits
  * 1 with "Config path not found" otherwise, and that is not a failure.

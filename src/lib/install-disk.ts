@@ -60,6 +60,52 @@ export async function checkInstallDisk(dir: string, requiredBytes: number): Prom
   return diskVerdict(requiredBytes, free, DISK_FREE_RESERVE_BYTES);
 }
 
+/** One part of an install that writes to more than one place: where, and how much. */
+export interface InstallPart {
+  dir: string;
+  bytes: number;
+}
+
+/**
+ * Parts on the same filesystem add up; parts on different ones do not. Pure,
+ * so the grouping is testable without two real mounts. A part whose device
+ * could not be read is kept on its own rather than guessed into a group.
+ */
+export function sumPartsByDevice(
+  parts: readonly { dir: string; bytes: number; device: string | null }[],
+): InstallPart[] {
+  const groups = new Map<string, InstallPart>();
+  parts.forEach((part, index) => {
+    const key = part.device ?? `unknown:${index}`;
+    const group = groups.get(key);
+    if (group) group.bytes += part.bytes;
+    else groups.set(key, { dir: part.dir, bytes: part.bytes });
+  });
+  return [...groups.values()];
+}
+
+/**
+ * {@link checkInstallDisk} for an install that writes to several directories
+ * which may or may not share a filesystem — a package tree, a build tree under
+ * /tmp and a model cache. Every filesystem the install touches is measured
+ * against the sum of the parts that land on it, and the FIRST one short is the
+ * verdict; when all fit, the first group's verdict is answered.
+ */
+export async function checkInstallDisks(parts: readonly InstallPart[]): Promise<DiskVerdict> {
+  const located = await Promise.all(parts.map(async (part) => {
+    const measurable = await existingAncestor(part.dir);
+    const device = measurable === null ? null : await fs.stat(measurable).then((st) => String(st.dev), () => null);
+    return { dir: measurable ?? part.dir, bytes: part.bytes, device };
+  }));
+  let first: DiskVerdict | null = null;
+  for (const group of sumPartsByDevice(located)) {
+    const verdict = await checkInstallDisk(group.dir, group.bytes);
+    if (!verdict.ok) return verdict;
+    first ??= verdict;
+  }
+  return first ?? (await checkInstallDisk(parts[0]?.dir ?? "/", 0));
+}
+
 /**
  * The refusal, in the shape every caller of this module answers with: a stable
  * `code` the locales word, and the three figures so the panel can say "needs

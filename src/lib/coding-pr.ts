@@ -5,7 +5,7 @@
  * WHY THIS LIVES ON THE SERVER, not in the run's brief.
  *
  * The obvious design is to tell the agent to do it. That fails three ways on
- * this box, all measured: a run polling CI spends one of its 150 turns per
+ * this box, all measured: a run polling CI spends one of its 400 turns per
  * poll; it holds one of the box's few run slots (coding_agent_max_parallel_runs)
  * for as long as CI
  * takes; and the idle killer ends a run that sits quiet in a long `gh` wait.

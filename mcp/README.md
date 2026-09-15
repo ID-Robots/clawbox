@@ -30,6 +30,12 @@ provisioned before the web server first starts. It no-ops on an OpenClaw device,
 where `gateway-pre-start.sh` owns the registration; the premium `dual` SKU runs
 both.
 
+Both writers honour the owner's switch: with `clawbox_mcp_enabled: false` in
+`data/config.json` (Settings → Harness → Device tools, written by
+`/setup-api/harness/mcp`, which also unregisters and restarts each harness at
+once) each REMOVES its entry instead of writing it, so a reboot cannot put the
+tools back. Absent means on.
+
 Two properties of the Hermes entry are load-bearing:
 
 - **`command` is `bun`, with the script in `args`.** Hermes refuses an entry
@@ -724,7 +730,7 @@ shell tool, not less and not more:
   stored default project folder is used — the same fallback the run route
   documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
-  150 turns by default (10–2000), an optional token ceiling the device itself
+  400 turns by default (10–2000), an optional token ceiling the device itself
   enforces, an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it;
@@ -807,8 +813,9 @@ harness that is not usable, a failed update step, a route that threw — kept in
 `data/incidents.json` and, only if the owner opted in, filed on
 `ID-Robots/clawbox` as an issue labelled `improvement-program` / `auto-report`.
 
-The owner's switch (Settings → System) has three values and is the whole
-design:
+The owner's switch (Coding Agent → Settings, under the GitHub card; the
+first-run wizard asks it once as its second step) has three values and is the
+whole design:
 
 | | what the box does | what these tools do |
 |---|---|---|

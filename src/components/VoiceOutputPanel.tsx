@@ -286,7 +286,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   /**
    * Repair the channel voice, from the page that says it is broken.
    *
-   * The work is install.sh's own `openclaw_tts` step — the same one the Local
+   * The work is install.sh's own `voice_kokoro_install` step — the same one the Local
    * AI tab's Kokoro install runs, which now asks apt for ffmpeg — started as
    * root through /setup-api/tts/install. The route STREAMS NDJSON: `status`
    * lines while it works, then one closing `success` or `error`. The lines are
@@ -325,7 +325,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       // box answered afterwards — the same rule `post` follows below.
       if (ok && refreshed) {
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: refreshed.autoReply !== false, engines: refreshed.engines },
+          detail: { autoReply: refreshed.autoReply === true, engines: refreshed.engines },
         }));
       }
     } catch {
@@ -393,7 +393,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         // retire this box's voice, and a chat docked beside this page kept
         // showing the old answer until it was closed and reopened.
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: data.autoReply !== false, engines: data.engines },
+          detail: { autoReply: data.autoReply === true, engines: data.engines },
         }));
       }
       if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
@@ -656,15 +656,15 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           id="voice-auto-reply"
           type="button"
           role="switch"
-          aria-checked={status.autoReply !== false}
+          aria-checked={status.autoReply === true}
           disabled={disabled}
-          onClick={() => void post({ action: "autoReply", enabled: status.autoReply === false })}
+          onClick={() => void post({ action: "autoReply", enabled: status.autoReply !== true })}
           data-testid="voice-auto-reply"
           className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
-            status.autoReply !== false ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            status.autoReply === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
           }`}
         >
-          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply !== false ? "translate-x-6" : "translate-x-1"}`} />
+          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply === true ? "translate-x-6" : "translate-x-1"}`} />
         </button>
       </div>
 
@@ -675,7 +675,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           The button repairs it from here, because a shipped box whose Kokoro
           is already installed has no other route to the fix: the Local AI
           tab's Install only appears on a Kokoro that is missing. */}
-      {noVoiceNotes && status.autoReply !== false && (
+      {noVoiceNotes && status.autoReply === true && (
         <div
           role="status"
           data-testid="voice-channel-voice-notes"

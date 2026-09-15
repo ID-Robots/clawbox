@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import HelpTip from "./HelpTip";
+import MemoryShardEmbedderCard from "./MemoryShardEmbedderCard";
 import MemoryShardFolders from "./MemoryShardFolders";
 import StatusMessage from "./StatusMessage";
 import { PaidPlanNotice } from "./PaidFeatureGate";
@@ -206,6 +207,10 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
 
         {error && <StatusMessage type="error" message={error} />}
       </div>
+
+      {/* Where the index is embedded — the ClawBox AI cloud or the model on
+          this box — beside the switch that governs whether it is built. */}
+      <MemoryShardEmbedderCard />
 
       {/* Which of the owner's own documents the box reads is the other half
           of the consent the switch above gives, so it sits beside it — before

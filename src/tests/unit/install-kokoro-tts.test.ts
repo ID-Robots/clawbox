@@ -260,7 +260,14 @@ function runTtsOnly(
  *                          engine's REASON off this file, never off the exit
  *                          code, so a test about the wording has to write one.
  */
-function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: string | null = null, extraEnv: Record<string, string> = {}) {
+function runStep(
+  voiceExit: number,
+  currentProvider = "",
+  ttsStatusContents: string | null = null,
+  extraEnv: Record<string, string> = {},
+  /** The mode argument the step is called with — none is the install/update refresh. */
+  mode = "",
+) {
   const projectDir = path.join(root, "project");
   const callsLog = path.join(root, "openclaw.log");
   const voiceArgs = path.join(root, "voice-args.log");
@@ -324,7 +331,7 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
     // The real knob, not a stub: the test is about what the step does with it.
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
-    "step_openclaw_tts",
+    `step_openclaw_tts ${mode}`,
   ].join("\n");
 
   // TTS_STATUS_FILE travels as an environment variable rather than as an
@@ -357,13 +364,53 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises", () => {
-  it("calls the Kokoro-capable mode, not --piper-only", () => {
-    // The whole defect in one assertion: --piper-only cannot install Kokoro,
-    // so a step that calls it can never make its own summary line true.
+  it("asks install-voice.sh for the scripts and the units — never for an engine — on an install or update", () => {
+    // Since 2026-09-15 the update installs nothing: --scripts-only deploys the
+    // scripts, refreshes the units of the engines that are present and reads
+    // the verdict off the disk. The install modes are the Local AI tab's.
     const res = runStep(0);
     expect(res.status).toBe(0);
-    expect(res.voiceArgs).toContain("--tts-only");
+    expect(res.voiceArgs).toEqual(["--scripts-only"]);
+    expect(res.voiceArgs).not.toContain("--tts-only");
     expect(res.voiceArgs).not.toContain("--piper-only");
+  });
+
+  it("is the Kokoro install when asked for it — the mode step_voice_kokoro_install passes", () => {
+    const res = runStep(0, "", "KOKORO=ready\n", {}, "--kokoro");
+    expect(res.status).toBe(0);
+    expect(res.voiceArgs).toEqual(["--kokoro"]);
+    expect(res.stdout).toContain("On-device TTS configured (Kokoro GPU)");
+    const step = extractShellFn(INSTALL_SH, "step_voice_kokoro_install");
+    expect(step).toMatch(/step_openclaw_tts --kokoro/);
+  });
+
+  it("records a failed Kokoro INSTALL under the step that retries it", () => {
+    // From the Local AI tab, "Re-run: --step openclaw_tts" would refresh the
+    // scripts and report the same absence; the repair is the install itself.
+    const res = runStep(12, "", "KOKORO=failed:model\n", {}, "--kokoro");
+    expect(res.status).toBe(12);
+    expect(res.provisionFailures).toEqual(["voice_kokoro_install"]);
+    expect(res.stderr).toMatch(/--step voice_kokoro_install/);
+  });
+
+  it("treats a Kokoro nobody installed as a plain state: one line, exit 0, nothing recorded", () => {
+    const res = runStep(0, "", "KOKORO=absent\n");
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.provisionFailures, `an engineless box was recorded as a failure:\n${res.stderr}`).toEqual([]);
+    expect(res.stdout).toContain("On-device voice is not installed — install it from Settings → Local AI");
+    // No engine, no provider: tts-local-cli is neither defined nor selected,
+    // and the Voice tab writes it the moment Kokoro is installed.
+    expect(res.openclaw.some((c) => c.includes("tts-local-cli"))).toBe(false);
+    expect(res.openclaw.some((c) => c.startsWith("config set messages.tts.provider "))).toBe(false);
+    expect(res.stdout).not.toContain("configured (Kokoro GPU)");
+    expect(res.stderr).not.toMatch(/NO working on-device TTS engine|did NOT install/);
+  });
+
+  it("still records a deploy that did not land, whatever the engine's state", () => {
+    const res = runStep(1, "", "KOKORO=absent\n");
+    expect(res.status).toBe(14);
+    expect(res.provisionFailures).toEqual(["openclaw_tts"]);
+    expect(res.stderr).toMatch(/voice scripts did not deploy/);
   });
 
   it("claims Kokoro only when install-voice.sh reports it ready", () => {
@@ -608,6 +655,99 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
   });
 });
 
+describe.skipIf(!hasBash)("install-voice.sh --scripts-only, the mode every install and update runs", () => {
+  it("publishes absent, installs nothing and exits 0 on a box that never installed Kokoro", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" }, false, "--scripts-only");
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.ttsStatus).toMatch(/^KOKORO=absent$/m);
+    expect(res.su.filter((c) => c.includes("pip3 install")), "an update installed an engine").toEqual([]);
+    expect(res.curl).toEqual([]);
+    expect(res.stdout).toContain("install it from Settings → Local AI");
+    // The scripts still landed — the entrypoint is what turns "no Kokoro" into
+    // a report the gateway can act on.
+    expect(existsSync(path.join(res.home, ".openclaw/workspace/scripts/openclaw/clawbox-tts.sh"))).toBe(true);
+    // And no unit for an engine that is not there: local-models.ts reads
+    // `installed` off the unit's presence.
+    expect(existsSync(path.join(res.home, ".config/systemd/user/kokoro-server.service"))).toBe(false);
+    expect(existsSync(path.join(res.home, ".config/systemd/user/whisper-server.service"))).toBe(false);
+  });
+
+  it("publishes ready, refreshes the unit and runs the phonemiser check on a box that has Kokoro — and still installs nothing", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "0" }, true, "--scripts-only");
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+    expect(res.su.filter((c) => c.includes("pip3 install"))).toEqual([]);
+    expect(res.su.filter((c) => c.includes("pipeline.model.parameters")), "the model pre-download ran").toEqual([]);
+    expect(res.su.filter((c) => c.includes("zorblattic")), "the phonemiser check was skipped").toHaveLength(1);
+    expect(existsSync(path.join(res.home, ".config/systemd/user/kokoro-server.service"))).toBe(true);
+  });
+
+  it("publishes failed:import and exits 12 on a stamped box whose Python stack no longer imports — never absent", () => {
+    // A later pip resolve (numpy 2.x is the known breaker of the Jetson torch
+    // wheel) leaves the stamp and the unit behind: Settings → Local AI reads
+    // that as installed, so `absent` here would hide a voice that cannot speak
+    // behind a row with no Install on it.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" }, true, "--scripts-only");
+    expect(res.status, res.stderr).toBe(12);
+    expect(res.ttsStatus).toMatch(/^KOKORO=failed:import$/m);
+    expect(res.ttsStatus).not.toMatch(/^KOKORO=absent$/m);
+    expect(res.su.filter((c) => c.includes("pip3 install")), "an update reinstalled the engine").toEqual([]);
+    expect(`${res.stdout}\n${res.stderr}`).toMatch(/voice_kokoro_install/);
+  });
+
+  it("never publishes skipped: a board with no CUDA and no Kokoro is absent, not a mute-box failure", () => {
+    // A skip is a board declining an install it was asked for; --scripts-only
+    // asks for none, so an aarch64 box without nvcc is simply a box without
+    // the engine, graded 0.
+    const res = runTtsOnly({ KOKORO_IMPORT_EXIT: "1" }, false, "--scripts-only");
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.ttsStatus).toMatch(/^KOKORO=absent$/m);
+    expect(res.stderr).not.toMatch(/NO WORKING TTS ENGINE/);
+  });
+
+  it("reads the stamp's presence, not its version: an older release's Kokoro is still an engine", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "0" }, "1", "--scripts-only");
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+    expect(res.stdout).toMatch(/installed by an older release/);
+    expect(res.su.filter((c) => c.includes("pip3 install")), "an update redid the install").toEqual([]);
+  });
+});
+
+describe.skipIf(!hasBash)("install-voice.sh --whisper, the speech-to-text install", () => {
+  it("installs faster-whisper and never touches Kokoro or its verdict", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" }, false, "--whisper");
+    expect(res.status, res.stderr).toBe(0);
+    const pip = res.su.filter((c) => c.includes("pip3 install"));
+    expect(pip.some((c) => c.includes("faster-whisper"))).toBe(true);
+    // No Kokoro wheel, no Kokoro probe, no Kokoro warm-up — the resident
+    // server's `try-restart` (and this fixture's own temp path) are the only
+    // places the name may appear.
+    expect(pip.some((c) => c.includes(shellConst("JETSON_TORCH_URL")) || c.includes("kokoro soundfile"))).toBe(false);
+    expect(res.su.some((c) => c.includes("import kokoro, torch") || c.includes("from kokoro import KPipeline"))).toBe(false);
+    expect(res.ttsStatus, "the STT install rewrote the Kokoro verdict").toBe("");
+    expect(existsSync(path.join(res.home, ".config/systemd/user/whisper-server.service"))).toBe(true);
+  });
+
+  it("exits 13 on a board with no CUDA", () => {
+    const res = runTtsOnly({ KOKORO_IMPORT_EXIT: "1" }, false, "--whisper");
+    expect(res.status, res.stderr).toBe(13);
+    expect(res.su.filter((c) => c.includes("pip3 install"))).toEqual([]);
+  });
+});
+
+describe.skipIf(!hasBash)("install-voice.sh --kokoro on a fresh CUDA box", () => {
+  it("installs the Jetson torch wheel, kokoro and the model, and no speech-to-text", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" }, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const pip = res.su.filter((c) => c.includes("pip3 install"));
+    expect(pip.some((c) => c.includes(shellConst("JETSON_TORCH_URL")))).toBe(true);
+    expect(pip.some((c) => c.includes("kokoro"))).toBe(true);
+    expect(res.su.join("\n"), "the Kokoro install pulled in the STT half").not.toContain("faster-whisper");
+    expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+  });
+});
+
 describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () => {
   it("installs the Jetson torch wheel, kokoro, and the model, then reports ready", () => {
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
@@ -748,14 +888,14 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     expect(res.stdout).not.toMatch(/piper/i);
   });
 
-  it("runs the STT half too, which it used to exclude over an hour it never measured", () => {
-    // This path runs from step_post_update on EVERY in-app update, and the STT
-    // half was excluded because it was "roughly an hour on an Orin". That
-    // number was never measured, and it was the cost of compiling CTranslate2
-    // for every CUDA architecture nvcc knows. Pinned to the one the board has,
-    // the same build took 255 s of `make -j4` plus a 34 s clone on an Orin Nano
-    // (measured 2026-09-04). So faster-whisper ships now, and no shipped box is
-    // left reporting "Whisper: Not installed" with no route to fixing it.
+  it("runs the STT half too — the one mode that installs both engines in one go", () => {
+    // The STT half was excluded from this mode because it was "roughly an hour
+    // on an Orin". That number was never measured, and it was the cost of
+    // compiling CTranslate2 for every CUDA architecture nvcc knows. Pinned to
+    // the one the board has, the same build took 255 s of `make -j4` plus a
+    // 34 s clone on an Orin Nano (measured 2026-09-04). The update no longer
+    // runs this mode at all (2026-09-15) — it is kept for a caller that asks
+    // for both engines by name.
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
     const all = res.su.join("\n");
     expect(all, "the STT wheels were not installed").toContain("faster-whisper");
@@ -1206,6 +1346,16 @@ describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box 
     expect(res.out).toMatch(/--step openclaw_tts/);
     // Not the failed:* sentence either: nothing was requested on this board.
     expect(res.out).not.toMatch(/requested and did NOT install/);
+  });
+
+  it("passes a box that never installed the engine — absent is a plain state, not a failed probe", () => {
+    // Every fresh box, now that Kokoro is the owner's click: a check that
+    // failed all of them would teach everyone to ignore it.
+    const res = runValidator("KOKORO=absent\n");
+    expect(res.status, res.out).toBe(0);
+    expect(res.out).toMatch(/not installed on this box/);
+    expect(res.out).toMatch(/not a failed probe/);
+    expect(res.out).not.toMatch(/checks failed/);
   });
 
   it("passes a box that has the engine", () => {

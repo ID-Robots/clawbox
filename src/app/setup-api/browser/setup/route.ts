@@ -64,8 +64,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Expected autoOpen to be true or false.", code: "bad_body" }, { status: 400 });
   }
   // `null` is how the owner clears the start page back to the default; a
-  // string that is not an http(s) address is a refusal, because Chromium
-  // would happily open a `file://` one on the screen the agent screenshots.
+  // string that is neither about:blank nor an http(s) address is a refusal,
+  // because Chromium would happily open a `file://` one on the screen the
+  // agent screenshots.
   let startUrl: string | null | undefined;
   if (body.startUrl !== undefined) {
     if (body.startUrl === null || (typeof body.startUrl === "string" && body.startUrl.trim() === "")) {
@@ -74,7 +75,7 @@ export async function POST(request: Request) {
       const normalized = normalizeStartUrl(body.startUrl);
       if (!normalized) {
         return NextResponse.json(
-          { error: "The start page has to be a web address beginning with http:// or https://.", code: "bad_start_url" },
+          { error: "The start page has to be about:blank or a web address beginning with http:// or https://.", code: "bad_start_url" },
           { status: 400 },
         );
       }

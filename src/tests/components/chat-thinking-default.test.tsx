@@ -14,8 +14,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 
 /**
- * Both legacy ClawBox AI model ids now serve Flash 4.1 and start with reasoning
- * off. A level the user picked themselves still wins over that default.
+ * Both legacy ClawBox AI model ids now serve Flash 4.1 and start at Medium
+ * reasoning (the owner's ruling of 2026-09-15). A level the user picked
+ * themselves — Off included — still wins over that default.
  *
  * Mounts the real ChatPopup against a fake gateway socket and asserts the
  * first `sessions.patch{thinkingLevel}` frame — the wire value is what the
@@ -166,12 +167,16 @@ describe("chat reasoning default for ClawBox AI Flash 4.1", () => {
     resetHarnessCache();
   });
 
-  it("starts the legacy V4 Pro alias at off", async () => {
-    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("off");
+  it("starts the legacy V4 Pro alias at medium", async () => {
+    // The owner's ruling of 2026-09-15: a fresh ClawBox AI box thinks at
+    // Medium. The chat opens at SAFE_THINKING_LEVEL (off) and syncs to the
+    // provider's default once the provider settles — this is the first level
+    // it actually pushes.
+    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("medium");
   });
 
-  it("keeps Flash fast — off — on the same provider", async () => {
-    await expect(firstPushedThinkingLevel(FLASH_MODEL)).resolves.toBe("off");
+  it("starts Flash at medium on the same provider", async () => {
+    await expect(firstPushedThinkingLevel(FLASH_MODEL)).resolves.toBe("medium");
   });
 
   it.each([PRO_MODEL, FLASH_MODEL])("keeps the user's selected effort on %s", async (model) => {
@@ -181,8 +186,15 @@ describe("chat reasoning default for ClawBox AI Flash 4.1", () => {
 
   it("never pushes a level the provider's ladder does not offer, even if one was persisted", async () => {
     // A stale `xhigh` from an older picker is not on the uniform ladder; the
-    // persisted read ignores it and the off default applies.
+    // persisted read ignores it and the medium default applies.
     window.localStorage.setItem(`${PERSIST_KEY_PREFIX}:clawai`, "xhigh");
-    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("off");
+    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("medium");
+  });
+
+  it("keeps an explicit off when the owner chose it", async () => {
+    // Medium is the default, not a floor: a persisted `off` is the owner's own
+    // pick and still wins.
+    window.localStorage.setItem(`${PERSIST_KEY_PREFIX}:clawai`, "off");
+    await expect(firstPushedThinkingLevel(FLASH_MODEL)).resolves.toBe("off");
   });
 });

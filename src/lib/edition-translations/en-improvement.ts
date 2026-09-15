@@ -1,5 +1,7 @@
 /**
- * The ClawBox Improvement Program card (Settings → System).
+ * The ClawBox Improvement Program card (Coding Agent → Settings, under the
+ * GitHub card), and the two lists the first-run wizard's improvement step
+ * borrows from it.
  *
  * The copy carries the whole consent, so it is written to be read rather than
  * skimmed: what goes out, what never does, and the fact that the redaction

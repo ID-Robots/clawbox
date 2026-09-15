@@ -75,6 +75,9 @@ function open(props: Partial<Parameters<typeof CodingProjectDeleteDialog>[0]> = 
       name="My Shop"
       onClose={props.onClose ?? (() => {})}
       onDeleted={props.onDeleted ?? (() => {})}
+      // Absent means OFF, as on every Vercel surface; the cases that read the
+      // link lines say so explicitly.
+      vercelEnabled={props.vercelEnabled}
     />,
   );
 }
@@ -95,7 +98,7 @@ describe("the dialog while it is reading the folder", () => {
 describe("a project that may go", () => {
   it("states its size and what goes with it, and asks for the name", async () => {
     stubFetch({ ...CLEAN, vercelLinked: true, secretNames: ["VERCEL_TOKEN"], runCount: 3 });
-    open();
+    open({ vercelEnabled: true });
 
     const facts = await screen.findByTestId("coding-agent-delete-facts");
     expect(facts.textContent).toContain(t("codingAgent.delete.whatIsThere", { size: "4.0 KB", files: 12 }));
@@ -127,7 +130,7 @@ describe("a project that may go", () => {
   it("sends the folder twice and reports where it went", async () => {
     const onDeleted = vi.fn();
     stubFetch(CLEAN);
-    open({ onDeleted });
+    open({ onDeleted, vercelEnabled: true });
     await screen.findByTestId("coding-agent-delete-facts");
     fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
     fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
@@ -246,13 +249,37 @@ describe("a project that may go", () => {
       ok: true,
       body: { ...OUTCOME, vercelLinkRemoved: false, secretsRemoved: [], metadataKeptFor: "/home/clawbox/clawbox/data/code-projects/shop" },
     });
-    open();
+    open({ vercelEnabled: true });
     await screen.findByTestId("coding-agent-delete-facts");
     fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
     fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
     // "No secrets went" would otherwise read as "there were none".
     expect((await screen.findByTestId("coding-agent-delete-metadata-kept")).textContent)
       .toBe(t("codingAgent.delete.metadataKept"));
+  });
+
+  it("names Vercel nowhere while the integration is OFF, whatever the route claims", async () => {
+    // The integration is a BETA flag, off by default (and off when the host
+    // says nothing). The route answers `vercelLinked: false` for such a box
+    // itself; this pins the dialog's own silence against a server that does
+    // not — the link line in the preview, the "taken down" line afterwards,
+    // and the metadata-kept sentence, which then speaks of the secrets alone.
+    stubFetch({ ...CLEAN, vercelLinked: true, secretNames: ["VERCEL_TOKEN"] }, {
+      ok: true,
+      body: { ...OUTCOME, vercelLinkRemoved: true, secretsRemoved: [], metadataKeptFor: "/home/clawbox/clawbox/data/code-projects/shop" },
+    });
+    open();
+    const facts = await screen.findByTestId("coding-agent-delete-facts");
+    expect(facts.textContent).not.toContain(t("codingAgent.delete.willRemoveVercel"));
+    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
+    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
+    fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
+    const done = await screen.findByTestId("coding-agent-delete-done");
+    expect(done.textContent).not.toContain(t("codingAgent.delete.vercelRemoved"));
+    expect(screen.getByTestId("coding-agent-delete-metadata-kept").textContent)
+      .toBe(t("codingAgent.delete.metadataKeptSecrets"));
+    expect(t("codingAgent.delete.metadataKeptSecrets")).not.toMatch(/vercel/i);
+    expect(screen.getByRole("dialog").textContent).not.toMatch(/vercel link/i);
   });
 
   it("reports afterwards what the count bound actually took", async () => {

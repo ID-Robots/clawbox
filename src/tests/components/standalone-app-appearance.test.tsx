@@ -124,7 +124,36 @@ describe("/app/settings — Appearance", () => {
     // Upload tile. It is now handed the wallpapers THIS EDITION ships — its own
     // brand and the neutral one — rather than both products' branding
     // (owner ruling 2026-09-06).
-    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("clawbox,deep-space");
+    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("lobster-orbital,clawbox,hermes,deep-space");
+  });
+
+  it("shows the wallpaper's own opacity while the box holds none, and never writes it", async () => {
+    // Lobster Orbital is a 50% picture: the slider shows 50 on a box that never
+    // moved it, and that default is painted, not persisted — a change to the
+    // fit goes out WITHOUT a `wp_opacity` beside it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ wp_id: "lobster-orbital", wp_fit: "fill" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("lobster-orbital"));
+    expect(screen.getByTestId("ui-opacity").textContent).toBe("50");
+
+    fireEvent.click(screen.getByTestId("pick-center"));
+    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_fit: "center" }), SAVED_SOON);
+    expect(posts.some((body) => "wp_opacity" in body)).toBe(false);
+
+    // The owner's own move is what writes it.
+    fireEvent.click(screen.getByTestId("pick-opacity"));
+    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_fit: "center", wp_opacity: 80 }), SAVED_SOON);
   });
 
   it("saves a wallpaper, a fit and an opacity to the preferences the desktop reads", async () => {
@@ -214,7 +243,7 @@ describe("/app/settings — Appearance", () => {
 
     fireEvent.click(screen.getByTestId("pick-custom-0"));
     fireEvent.click(screen.getByTestId("delete-custom-0"));
-    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("lobster-orbital");
   });
 
   it("shows the fallback for a selection this browser's uploads cannot answer, and leaves the box's own alone", async () => {
@@ -236,10 +265,10 @@ describe("/app/settings — Appearance", () => {
     );
 
     render(<StandaloneAppPage />);
-    // `wp_fit` proves the box's answer LANDED — "clawbox" is also this page's
+    // `wp_fit` proves the box's answer LANDED — the brand is also this page's
     // initial state, so asserting it alone would pass before the fetch.
     await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
-    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("lobster-orbital");
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });
@@ -275,7 +304,7 @@ describe("/app/settings — Appearance", () => {
     expect(screen.getByTestId("ui-custom").textContent).toBe("1");
     // Rendered locally, persisted nowhere: the card shows the fallback and the
     // box keeps the selection it holds. Well past the 500 ms debounce.
-    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("lobster-orbital");
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });
@@ -368,11 +397,11 @@ describe("/app/settings — Appearance", () => {
     expect(screen.getByTestId("ui-wallpapers").textContent).toBe("deep-space");
   });
 
-  it("heals a stored other-edition brand for the card, and leaves the box's value alone", async () => {
-    // A `wp_id` naming the art this edition no longer ships — a box re-imaged
-    // onto the other edition, or a choice made before the ruling. The card
-    // shows this edition's own brand; the stored value is not rewritten, for
-    // the same reason an unanswerable `custom-<n>` is not (#728).
+  it("paints a stored Hermes pick on an OpenClaw box as saved, and leaves the box's value alone", async () => {
+    // Since 2026-09-15 the Hermes picture is offered on an OpenClaw box too, so
+    // a `wp_id` of "hermes" is a choice the card honours — and, like every
+    // other read, it rewrites nothing (#728). The healing of art an edition does
+    // not ship is pinned on the resolver itself in builtin-wallpapers.test.ts.
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -387,7 +416,7 @@ describe("/app/settings — Appearance", () => {
     );
 
     render(<StandaloneAppPage />);
-    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox"));
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("hermes"));
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });

@@ -476,6 +476,10 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.vercelEnabledLabel": "Vercel integration",
   "codingAgent.vercelEnabledHint": "Let this box deploy your projects to Vercel. With it on, a project's page gets a card for attaching a Vercel project and buttons to deploy a preview or production, and the assistant can deploy for you. Off, none of that is on the box at all. Off unless you turn it on — or unless you had already attached a Vercel project, which turns it on for you.",
   "codingAgent.vercelEnabledFailed": "Could not change the Vercel setting.",
+  // The BETA badge beside the switch and the line under it: experimental,
+  // off by default, never part of setup.
+  "codingAgent.vercelBetaBadge": "Beta",
+  "codingAgent.vercelBetaHint": "Experimental and off by default. Turn it on only if you want this box to deploy your projects to Vercel; it is never part of setup, and you can switch it off again here at any time.",
 
   // A run that finished on its own keeps whatever it started — the way an app
   // that serves itself on a port is meant to work — so the page says so and
@@ -603,7 +607,7 @@ export const codingAgentEn: Record<string, string> = {
   // it works in. Settings keeps every one of these controls — this is an
   // onboarding path, not the only way in.
   "codingAgent.wizardTitle": "Set up the coding agent",
-  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes four steps.",
+  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes five steps.",
   "codingAgent.wizardEnable": "Enable",
   "codingAgent.wizardStepOf": "Step {n} of {total}",
   "codingAgent.wizardNext": "Next",
@@ -617,6 +621,13 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.wizardGithubHint": "A run pushes its work to GitHub with this account. You can skip this and connect later in Settings — a run still works without it, it just has nowhere to push.",
   "codingAgent.wizardGithubConnect": "Sign in with GitHub",
   "codingAgent.wizardGithubConnected": "GitHub connected",
+
+  // ── Step 2: the ClawBox Improvement Program ─────────────────────────────
+  // Asked right after GitHub because that is the credential a report goes
+  // out on. The lists of what is sent and what never is are the card's own
+  // keys (improvement.*); only the step's framing lives here.
+  "codingAgent.wizardImprovementTitle": "Help improve ClawBox",
+  "codingAgent.wizardImprovementHint": "When something in ClawBox's own software goes wrong — a coding run that fails, an update step that will not finish, a page that errors — this box can send a short technical report to the developers as a public issue on GitHub, using the account you just connected. Choose what it should do; you can change this any time in the Coding Agent's settings.",
 
   "codingAgent.wizardProjectTitle": "Project folder and effort",
   "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to pick one, or type an absolute path.",
@@ -827,6 +838,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.delete.unsavedIgnored": "{n} ignored files and folders, which git does not track and a push never takes:",
   "codingAgent.delete.purgeOldestLabel": "I accept that this deletes those for good, before their time was up.",
   "codingAgent.delete.metadataKept": "Its stored secrets and Vercel link were left alone: another project of the same name is still using them.",
+  // The same line while the Vercel integration is OFF: the secrets alone,
+  // since nothing on that box may name the link.
+  "codingAgent.delete.metadataKeptSecrets": "Its stored secrets were left alone: another project of the same name is still using them.",
   "codingAgent.delete.refusal.trashFull": "This ClawBox is already keeping the most removed projects it can, and all of them can still be recovered. Empty the deleted projects first, or agree to lose the oldest.",
   "codingAgent.delete.forceLabel": "I have read this and want the folder removed anyway.",
   "codingAgent.delete.typeName": "Type {folder} to confirm.",

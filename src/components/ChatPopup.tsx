@@ -1038,10 +1038,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           plan: t("codingAgent.chatPlan"),
         },
       }}
-      // View: the run's own page in the Coding Agent app, with the whole
-      // desktop for it — the live terminal is embedded there while it runs.
+      // View: the run's own page in the Coding Agent app — the live terminal
+      // is embedded there while it runs. In a NORMAL window: the button asked
+      // for a maximize once, which threw a window the owner had sized and
+      // placed to full screen on every press; a window already up keeps its
+      // size and place now, and the chat is in the corner for a reason.
       openLabel={t("codingAgent.liveView")}
-      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true })}
+      onOpen={() => dispatchOpenCodingRun(run.id)}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
@@ -1212,25 +1215,71 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // project page hands over its project and the team switch.
   const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
   const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
-  const toggleNewApp = useCallback(() => {
+  // The ONE read of the Coding Agent's status this surface makes: the card's
+  // task ceiling comes off it, and so does the + button's gate below, so the
+  // two cannot disagree about what the box says. Answers the payload, or null
+  // for a route that could not be read — it never throws, because a caller
+  // falls back to opening the card rather than leaving the button dead.
+  const readCodingAgentStatus = useCallback(async (): Promise<Record<string, unknown> | null> => {
+    try {
+      const res = await fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
+      if (!res.ok) return null
+      const data: unknown = await res.json()
+      if (!data || typeof data !== 'object') return null
+      const n = (data as { maxTaskChars?: unknown }).maxTaskChars
+      if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
+      return data as Record<string, unknown>
+    } catch {
+      return null // the card keeps the default ceiling
+    }
+  }, [])
+  // Open the card as asked, no questions. This is the Coding Agent's OWN
+  // hand-off (its home's Create button, a project page's Plan), and that app
+  // already sits behind its wizard — gating it here would be a second gate
+  // on the same door, and a slower one.
+  const openNewApp = useCallback(() => {
     // The fetch sits BESIDE the setter, not inside the updater: React may run
     // an updater more than once per call, and one click must cost one request.
-    if (!showNewApp && newAppMaxChars === null) {
-      void fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
-        .then(res => res.ok ? res.json() as Promise<{ maxTaskChars?: unknown }> : null)
-        .then(data => {
-          const n = data?.maxTaskChars
-          if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
-        })
-        .catch(() => { /* the card keeps the default ceiling */ })
-    }
-    // Closing forgets what the last opener asked for (a project, the team
-    // switch): the next "+" must open a fresh card, not the previous
-    // project's team form.
-    if (showNewApp) setNewAppOptions({})
-    setShowNewApp(open => !open)
-  }, [showNewApp, newAppMaxChars])
+    if (newAppMaxChars === null) void readCodingAgentStatus()
+    setShowNewApp(true)
+  }, [newAppMaxChars, readCodingAgentStatus])
+  // Closing forgets what the last opener asked for (a project, the team
+  // switch): the next "+" must open a fresh card, not the previous
+  // project's team form.
   const closeNewApp = useCallback(() => { setShowNewApp(false); setNewAppOptions({}) }, [])
+  // Whether the + button is still deciding where to land: a second press
+  // while the status is in flight must cost no second request, and must not
+  // toggle the card back shut the moment the first press opens it.
+  const newAppGateRef = useRef(false)
+  // The + button. Opening first asks whether the Coding Agent's setup is
+  // finished: the card composes a message that asks the assistant to
+  // DELEGATE the build, and until the owner has been through that app's
+  // wizard (or while its switch is off) the delegation is refused — so the
+  // press used to open a form whose only outcome was a refusal. It lands on
+  // the Coding Agent app instead, in a plain window, where the wizard (or the
+  // switch) is the first thing on screen. Asked on EVERY press rather than
+  // once, because the answer changes in the other window: a wizard finished
+  // there must count on the next press, without a reload. A status the box
+  // cannot read opens the card — never a dead button — and so does one that
+  // predates the field, since only an explicit `false` is a refusal.
+  const toggleNewApp = useCallback(() => {
+    if (showNewApp) { closeNewApp(); return }
+    if (newAppGateRef.current) return
+    newAppGateRef.current = true
+    void readCodingAgentStatus().then(status => {
+      newAppGateRef.current = false
+      if (status && (status.setupComplete === false || status.enabled === false)) {
+        dispatchOpenApp('coding')
+        // On a phone the chat is full screen ABOVE the one window the phone
+        // draws, so the Coding Agent would open out of sight and the press
+        // would look dead. Get out of its way; on a desktop the chat stays
+        // beside the plain window.
+        if (mobile) onClose()
+        return
+      }
+      setShowNewApp(true)
+    })
+  }, [showNewApp, closeNewApp, readCodingAgentStatus, mobile, onClose])
 
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will
@@ -1242,11 +1291,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         project: typeof detail?.project === 'string' ? detail.project : undefined,
         team: detail?.team === true,
       })
-      if (!showNewApp) toggleNewApp()
+      openNewApp()
     }
     window.addEventListener(NEW_APP_EVENT, onNewApp)
     return () => window.removeEventListener(NEW_APP_EVENT, onNewApp)
-  }, [showNewApp, toggleNewApp])
+  }, [openNewApp])
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -3470,8 +3519,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // typed one gets the player and nothing more. Where a clip is already on the
   // reply — Hermes, whose chat route attaches it inside the turn — nothing is
   // asked for at all.
-  const [voiceAutoReply, setVoiceAutoReply] = useState(true)
-  const voiceAutoReplyRef = useRef(true)
+  // OFF until the box says otherwise: spoken replies are off by default
+  // (src/lib/voice-reply.ts), and a reply that lands before `/setup-api/tts`
+  // has answered — or after it refused — must not be synthesised on a guess.
+  const [voiceAutoReply, setVoiceAutoReply] = useState(false)
+  const voiceAutoReplyRef = useRef(false)
   useEffect(() => { voiceAutoReplyRef.current = voiceAutoReply }, [voiceAutoReply])
   // Whether the box has a voice to speak WITH, as it last said. `null` while
   // nothing is known — see speechEngineAvailable. A ref rather than state:
@@ -3529,10 +3581,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (!active) return
         // Only a body that actually STATES the switch moves it. A refusal or a
         // server error answers an error object, and `data?.autoReply !== false`
-        // reads that as ON — so the composer would show spoken replies on for a
-        // box that was never asked, and `speakReply` would go on to synthesise
-        // for a state nothing confirmed. "Keep the last reading" has to mean
-        // the last real one.
+        // read that as ON — so `speakReply` went on to synthesise for a state
+        // nothing confirmed. "Keep the last reading" has to mean the last real
+        // one, and before there is one the switch is off, as on the box.
         if (typeof data?.autoReply === 'boolean') setVoiceAutoReply(data.autoReply)
         // Only a body that LISTS engines moves this, exactly as the event path
         // below does. A refusal or an error object has no `engines` key, and

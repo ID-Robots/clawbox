@@ -128,15 +128,29 @@ beforeEach(() => {
   preferenceMock.mockReset().mockResolvedValue(undefined);
   choiceSourceMock.mockReset().mockResolvedValue(undefined);
   wireMock.mockReset().mockResolvedValue({ ok: true, provider: {} });
-  autoReplyMock.mockReset().mockResolvedValue(true);
+  autoReplyMock.mockReset().mockResolvedValue(false);
   setAutoReplyMock.mockReset().mockResolvedValue(undefined);
   ownerMock.mockReset().mockResolvedValue(true);
 });
 
 describe("spoken replies", () => {
-  it("reports the switch with the status, on by default", async () => {
+  it("reports the switch with the status", async () => {
     const { GET } = await route();
+    expect((await (await GET()).json()).autoReply).toBe(false);
+    autoReplyMock.mockResolvedValue(true);
     expect((await (await GET()).json()).autoReply).toBe(true);
+  });
+
+  it("answers autoReply:false for a fresh box, through the real reader", async () => {
+    // Not the mock's word for it: the module's own reader over a config store
+    // that holds no `voice_auto_reply` at all (the owner's ruling of
+    // 2026-09-15 — spoken replies are off until the owner turns them on).
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    autoReplyMock.mockImplementation(real.getVoiceAutoReply);
+    preferenceMock.mockResolvedValue(undefined);
+    const { GET } = await route();
+    expect((await (await GET()).json()).autoReply).toBe(false);
+    expect(preferenceMock).toHaveBeenCalledWith(real.VOICE_AUTO_REPLY_KEY);
   });
 
   it("writes the gateway's inbound mode and the store when switched on, off when off", async () => {

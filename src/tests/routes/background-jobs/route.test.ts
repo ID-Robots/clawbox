@@ -13,15 +13,17 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
 }));
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn() }));
 
-// TASK-609. OpenClaw 2 arrives with heartbeat DMs, memory dreaming and
-// self-learning all on, spending the owner's subscription and messaging him
-// without being asked. These are the switches, and the properties that matter
-// are the ones a panel can get wrong in a way nobody notices:
+// OpenClaw 2 arrives with heartbeat DMs, memory dreaming and self-learning all
+// on, spending the owner's subscription and messaging him without being asked
+// — and since the owner's ruling of 2026-09-15 that IS the default (TASK-609's
+// opt-outs are taken back once at boot). These are the switches, and the
+// properties that matter are the ones a panel can get wrong in a way nobody
+// notices:
 //
 //   * an ABSENT key means the core's own default, and all three defaults are
-//     ON — reading absence as "off" would show an unseeded box as already quiet;
-//   * switching one ON removes ClawBox's opt-out rather than pinning a value of
-//     our own, so the core keeps deciding the cadence;
+//     ON — reading absence as "off" would show a fresh box as already quiet;
+//   * switching one ON removes the key rather than pinning a value of our
+//     own, so the core keeps deciding the cadence;
 //   * the write is read BACK before the switch reports success;
 //   * Hermes has no heartbeat at all, and says so rather than drawing a switch.
 

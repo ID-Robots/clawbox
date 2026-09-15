@@ -16,9 +16,13 @@
 # passive-cooling trip, in a fanless-by-default appliance that sits in a
 # living room.
 #
-# So: BALANCED is the default (a real nvpmodel cap, DVFS left alone, idle
-# states on), and PERFORMANCE — the old pinned behaviour, verbatim — is an
-# opt-in setting the owner turns on when they want it.
+# So there are two profiles: BALANCED (a real nvpmodel cap, DVFS left alone,
+# idle states on) and PERFORMANCE (the old pinned behaviour, verbatim).
+# Balanced was the default from TASK-455 until 2026-09-15, when the owner ruled
+# that performance is what a ClawBox runs by default and balanced is the
+# opt-out: DEFAULT_MODE below is what an absent or invalid state file resolves
+# to, so the update's `--apply` turns the pinned profile on for a box that
+# never chose, while a persisted `balanced` is honoured through every update.
 #
 #   --check         print current state as JSON; change nothing (dry run)
 #   --balanced      persist + apply the balanced profile
@@ -34,7 +38,7 @@ set -euo pipefail
 STATE_DIR="${CLAWBOX_STATE_DIR:-/etc/clawbox}"
 STATE_FILE="$STATE_DIR/power-mode"
 NVPMODEL_CONF="${CLAWBOX_NVPMODEL_CONF:-/etc/nvpmodel.conf}"
-DEFAULT_MODE="balanced"
+DEFAULT_MODE="performance"
 
 usage() {
   echo "Usage: $(basename "$0") --check | --balanced | --performance | --apply | --restore" >&2
@@ -48,7 +52,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Root-owned, next to /etc/clawbox/edition.env and for the same reason: the web
 # server runs as `clawbox` and its whole config tree is clawbox-writable, so the
 # thing root acts on at boot must not be. The only values ever written are the
-# two literals below.
+# two literals below, and a persisted literal always wins over DEFAULT_MODE —
+# that is what keeps an owner's `balanced` through the update that made
+# performance the default.
 read_mode() {
   local raw=""
   [ -f "$STATE_FILE" ] && raw="$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null || true)"
@@ -169,6 +175,16 @@ EMC_RATE_LOCK="/sys/kernel/debug/bpmp/debug/clk/emc/mrq_rate_locked"
 store_clock_state() {
   have jetson_clocks || return 0
   [ -e "$CLOCK_SNAPSHOT" ] && return 0
+  # Nor when the clocks are ALREADY pinned and no snapshot says by whom. Since
+  # performance became the default, an update's `--apply` reaches this on a
+  # box the pre-TASK-455 unit pinned at boot, and a snapshot taken there would
+  # be a pinned one — the next --balanced would "restore" the pinning. Leave
+  # it unstored and let restore_clock_state fall back to clearing the EMC
+  # lock, the way it does for every box pinned before there was a snapshot.
+  if clocks_pinned; then
+    echo "clock state not stored: clocks already pinned (--balanced clears the EMC lock instead)"
+    return 0
+  fi
   mkdir -p "$(dirname "$CLOCK_SNAPSHOT")" 2>/dev/null || return 0
   if jetson_clocks --store "$CLOCK_SNAPSHOT" >/dev/null 2>&1; then
     echo "clock state stored to $CLOCK_SNAPSHOT"

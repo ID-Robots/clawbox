@@ -34,7 +34,7 @@ let posts: { url: string; body: unknown; signal?: AbortSignal | null }[] = [];
  */
 type Plan = "flash" | "pro" | "free" | "none";
 
-function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean; plan?: Plan } = {}) {
+function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: boolean; pullFails?: boolean; pullTruncated?: boolean; plan?: Plan; provider?: unknown; holdProvider?: Promise<void> } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -54,6 +54,13 @@ function stub(opts: { modelPresent?: boolean; indexStatus?: number; pullHangs?: 
     }
     if (url.startsWith("/setup-api/coding-agent/browse")) {
       return json({ root: "/home/clawbox", path: "/home/clawbox", parent: null, entries: [{ name: "Documents", path: "/home/clawbox/Documents" }] });
+    }
+    // Where the model may run. Unset, the route is absent — an older server —
+    // and the wizard keeps the model on this box, which every walk below
+    // that predates the choice relies on.
+    if (url === "/setup-api/clawkeep/memory/provider" && !init?.method) {
+      if (opts.holdProvider) await opts.holdProvider;
+      return opts.provider === undefined ? json({ error: "not here" }, 404) : json(opts.provider);
     }
     if (url.startsWith("/setup-api/embed/status")) {
       return json({ supported: true, installed: !!opts.modelPresent, model: "qwen3-embedding-0.6b", engine: "llama.cpp" });
@@ -111,7 +118,10 @@ async function runProvision(done: () => void) {
   await leaveIntro();
   fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
   fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
-  fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+  // Held until the read of where the model may run has answered.
+  const indexNow = screen.getByTestId("memory-shard-index-now");
+  await waitFor(() => expect(indexNow).not.toBeDisabled());
+  fireEvent.click(indexNow);
   return rendered;
 }
 
@@ -174,6 +184,78 @@ describe("MemoryShardWizard", () => {
     // until it is rebuilt; the route's own incremental→full upgrade fires only
     // on an EMPTY index, not a stale one.
     expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/index")?.body).toEqual({ mode: "full" });
+  });
+
+  it("uses the ClawBox AI cloud model when the plan covers it, and downloads nothing", async () => {
+    stub({ provider: { source: "local", cloudSupported: true, cloudAvailable: true, localInstalled: false } });
+    const done = vi.fn();
+    render(<MemoryShardWizard onDone={done} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    await waitFor(() => expect(screen.getByTestId("memory-shard-source-cloud")).toHaveAttribute("aria-checked", "true"));
+    expect(screen.getByTestId("memory-shard-provision-body")).toHaveTextContent("clawkeep.memory.setup.provisionBodyCloud");
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeUndefined();
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "cloud" });
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/index")?.body).toEqual({ mode: "full" });
+    expect(clawkeepTranslations.en["clawkeep.memory.setup.provisionBodyCloud"]).toBeTruthy();
+  });
+
+  it("lets the owner keep the model on this box instead of the cloud one", async () => {
+    stub({ provider: { source: "local", cloudSupported: true, cloudAvailable: true, localInstalled: false } });
+    const done = vi.fn();
+    render(<MemoryShardWizard onDone={done} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    await waitFor(() => expect(screen.getByTestId("memory-shard-source-cloud")).toHaveAttribute("aria-checked", "true"));
+    fireEvent.click(screen.getByTestId("memory-shard-source-local"));
+    expect(screen.getByTestId("memory-shard-source-local")).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeDefined();
+    // The body-less call is the model on this box, as it always was.
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")?.body).toBeNull();
+  });
+
+  it("offers the model on this box alone when the cloud one is not available, and says so", async () => {
+    stub({ provider: { source: "local", cloudSupported: true, cloudAvailable: false, localInstalled: false } });
+    render(<MemoryShardWizard onDone={() => {}} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    expect(await screen.findByTestId("memory-shard-source-cloud")).toBeDisabled();
+    expect(screen.getByTestId("memory-shard-source-local")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("memory-shard-source-cloud-unavailable")).toBeInTheDocument();
+  });
+
+  it("holds Index now until the read of where the model may run has answered", async () => {
+    let release: () => void = () => {};
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    stub({ provider: { source: "local", cloudSupported: true, cloudAvailable: true, localInstalled: false }, holdProvider: hold });
+    render(<MemoryShardWizard onDone={() => {}} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    expect(screen.getByTestId("memory-shard-index-now")).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByTestId("memory-shard-index-now")).not.toBeDisabled());
+    expect(screen.getByTestId("memory-shard-source-cloud")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("draws no choice on the edition that indexes on the box itself", async () => {
+    stub({ provider: { source: "local", cloudSupported: false, cloudAvailable: false, localInstalled: false } });
+    render(<MemoryShardWizard onDone={() => {}} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    await screen.findByTestId("memory-shard-index-now");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByTestId("memory-shard-source")).toBeNull();
   });
 
   it("skips the download when the model is already on the box", async () => {

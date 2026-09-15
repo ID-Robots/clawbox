@@ -19,14 +19,16 @@ interface BackgroundJobsStatus {
   jobs: { id: BackgroundJobId; enabled: boolean; supported: boolean; key: string | null }[];
 }
 
-// The three things the box does on its own initiative (TASK-609).
+// The three things the box does on its own initiative — ON by default (owner
+// ruling 2026-09-15; TASK-609's opt-outs of 2026-09-03 are taken back once at
+// boot by `gateway-pre-start.sh` / `register-mcp.sh`).
 //
 // OpenClaw 2 arrives with all three on: unprompted check-ins DM'd to the owner,
 // memory consolidation on the default model, and self-learning's weekly
 // collection review — measured on a box as three enabled cron rows and two
-// "[heartbeat] started" lines in one evening. `gateway-pre-start.sh` seeds the
-// opt-outs once; this is where the owner changes his mind, and the only place
-// on the device that says the jobs exist at all.
+// "[heartbeat] started" lines in one evening. This is where the owner switches
+// any of them off, or back on, and the only place on the device that says the
+// jobs exist at all.
 //
 // EVERY ROW IS A HARNESS KEY, and the panel says which one. The switches write
 // `agents.defaults.heartbeat.every`, `plugins.entries.memory-core.config.

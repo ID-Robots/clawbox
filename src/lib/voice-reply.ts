@@ -1,8 +1,10 @@
 /**
  * Replying with voice to a voice message.
  *
- * One switch, Settings → Voice → "Reply with voice to voice messages", on by
- * default, reaching two surfaces that must agree:
+ * One switch, Settings → Voice → "Spoken replies", OFF by default — a box
+ * that has never been asked speaks nothing, on a channel or in the chat, until
+ * the owner turns it on (the owner's ruling, 2026-09-15; it was on by default
+ * until then) — reaching two surfaces that must agree:
  *
  *  - a CHANNEL voice note (Telegram and friends) is answered by the gateway:
  *    OpenClaw's `tts.auto: "inbound"` sends audio only after an inbound voice
@@ -24,7 +26,7 @@
  *
  * SERVER ONLY.
  */
-import { get, set } from "@/lib/config-store";
+import { get, getKnown, set } from "@/lib/config-store";
 // TYPE ONLY at module scope. The values this module needs from openclaw-config
 // are used by the boot repair alone, and that module reaches the openclaw CLI —
 // it pulls `child_process` into the import graph of everything that reads the
@@ -37,10 +39,14 @@ export const VOICE_AUTO_REPLY_KEY = "voice_auto_reply";
 
 export type TtsAutoMode = "inbound" | "off";
 
-/** On unless the owner switched it off: a voice message gets a voice back. */
+/**
+ * Off unless the owner switched it on: only a stored `true` speaks. Anything
+ * else — absent, `false`, a value that is not a boolean — is off, because a
+ * reply spoken by a box nobody asked to speak is the worse mistake.
+ */
 export async function getVoiceAutoReply(): Promise<boolean> {
   const stored = await get(VOICE_AUTO_REPLY_KEY);
-  return stored !== false;
+  return stored === true;
 }
 
 export async function setVoiceAutoReply(enabled: boolean): Promise<void> {
@@ -75,10 +81,13 @@ function ttsBlockOf(config: OpenClawConfig, home: "tts" | "messages.tts"): Recor
 
 /**
  * Boot-time repair: a box that predates the switch has no `tts.auto` at all,
- * and the switch's default — on — means nothing to the gateway until the
- * mode is in the file. Written only when the key is ABSENT: a value that is
- * there is either this switch's own last write or the owner's hand edit
- * ("always", "tagged"), and neither is overwritten at boot. Answers whether
+ * and the switch's position — off unless the owner set it — means nothing to
+ * the gateway until the mode is in the file (a fresh box is seeded "off", and
+ * only the owner's own `true` seeds "inbound"). Written when the key is
+ * ABSENT, and once more over the previous build's own seed — `inbound` beside
+ * no stored answer, flipped to `off` and recorded (see the body). Any other
+ * value is this switch's own last write or the owner's hand edit ("always",
+ * "tagged"), and is never overwritten at boot. Answers whether
  * it wrote, so the caller knows whether a gateway restart is owed.
  *
  * Read with the WRITER's reader: `readConfig` answers `{}` to every failure
@@ -96,15 +105,46 @@ export async function ensureVoiceAutoReplyMode(): Promise<boolean> {
   if (Object.keys(config).length === 0) return false;
   const home = ttsHomeOf(config);
   const block = ttsBlockOf(config, home);
-  if (block && typeof block.auto === "string" && block.auto) return false;
+  const present = block && typeof block.auto === "string" && block.auto ? (block.auto as string) : null;
+  if (present !== null) {
+    // ONE migration over a value that is there: the previous build's default
+    // was ON, and its first boot seeded `inbound` on every box whose owner
+    // never touched the switch. Since 2026-09-15 the switch is OFF unless the
+    // owner said otherwise, so that seed — `inbound` with NO stored answer —
+    // is ClawBox's own stale write, not a choice, and left in place the
+    // gateway would go on answering channel voice notes aloud under a switch
+    // that reads Off. It is flipped to `off` and the answer recorded as
+    // `false`, which is what makes this run once: the next boot sees a known
+    // key and leaves the file alone. A stored answer either way, and any hand
+    // edit (`always`, `tagged`), is never touched.
+    if (present !== "inbound") return false;
+    // `known` says whether the STORE could be read, not whether the key is in
+    // it. An unreadable store cannot tell ClawBox's seed from the owner's
+    // choice, so nothing is written; a readable one decides by the key itself.
+    const stored = await getKnown(VOICE_AUTO_REPLY_KEY).catch(() => ({ value: undefined, known: false }));
+    if (!stored.known || stored.value !== undefined) return false;
+    writeMode(config, home, block, "off");
+    await writeConfig(config);
+    await set(VOICE_AUTO_REPLY_KEY, false);
+    return true;
+  }
   const mode = ttsAutoModeFor(await getVoiceAutoReply());
+  writeMode(config, home, block, mode);
+  await writeConfig(config);
+  return true;
+}
+
+function writeMode(
+  config: OpenClawConfig,
+  home: "tts" | "messages.tts",
+  block: Record<string, unknown> | undefined,
+  mode: string,
+): void {
   if (home === "tts") {
-    config.tts = { ...(block ?? {}), auto: mode };
+    config.tts = { ...(block ?? {}), auto: mode } as OpenClawConfig["tts"];
   } else {
     const messages = ((config as { messages?: Record<string, unknown> }).messages ?? {}) as Record<string, unknown>;
     messages.tts = { ...(block ?? {}), auto: mode };
     (config as { messages?: Record<string, unknown> }).messages = messages;
   }
-  await writeConfig(config);
-  return true;
 }

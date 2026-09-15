@@ -10,11 +10,14 @@ import path from "node:path";
  * reached through the web server's local-AI proxy. Three things install.sh has
  * to get right for that, on an UPDATE as well as on a fresh install:
  *
- *  - the GGUF is cached as root BEFORE anything points OpenClaw at the
- *    embedder (`step_embed_model`), because a first request that had to
- *    download 640 MB would not fit OpenClaw's own timeouts;
- *  - `ensure_local_embeddings` runs the helper and asks the CORE what it
- *    resolved, and cannot fail the update whatever it finds;
+ *  - the GGUF is cached as root ONLY on the owner's click (`step_embed_model`,
+ *    behind /setup-api/embed/install) — never by a flash and never by an
+ *    update, since 2026-09-15 (the owner's ruling: install.sh forces nothing
+ *    but the llama.cpp runtime and Gemma 4);
+ *  - `ensure_local_embeddings` wires a GGUF that is already on disk (the
+ *    helper, `--no-download`), asks the CORE what it resolved, and cannot fail
+ *    the update whatever it finds — and on a box without the GGUF says so in
+ *    one line and asks nothing;
  *  - the old embedder inside ollama is stopped afterwards, and the build frees
  *    the new unit's memory the way it frees ollama's.
  */
@@ -118,10 +121,11 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
     expect(INSTALL_SH.slice(dispatchStart, dispatchEnd)).toMatch(/\bembed_model\b/);
   });
 
-  it("on a fresh install, caches the model early and points memory search at it only once the web server is up", () => {
+  it("on a fresh install, downloads no embedder and points memory search at one only once the web server is up", () => {
     const main = INSTALL_SH.slice(INSTALL_SH.lastIndexOf('log "Installing llama.cpp runtime..."'));
-    expect(main.indexOf("step_embed_model")).toBeGreaterThan(main.indexOf("step_llamacpp_install"));
-    expect(main.indexOf("ensure_local_embeddings")).toBeGreaterThan(main.indexOf("step_start_services"));
+    const code = main.split(NL).filter((l) => !/^\s*#/.test(l)).join(NL);
+    expect(code, "a flash still caches the embedder").not.toMatch(/\bstep_embed_model\b/);
+    expect(code.indexOf("ensure_local_embeddings")).toBeGreaterThan(code.indexOf("step_start_services"));
   });
 });
 
@@ -351,16 +355,17 @@ describe("step_embed_model — driven against stubs", () => {
     expect(r.cached).toBe(true);
   });
 
-  it("is not what a Hermes FLASH spends 639 MB on — the main flow defers it", () => {
-    // The gate moved to the call site rather than away: a box whose owner never
-    // opens Memory Shard must not pay for the model at install time. Read from
-    // the shipped installer, because that is where the decision now lives.
+  it("is not what ANY flash spends 639 MB on — the main flow defers it on every edition", () => {
+    // It used to be gated on the harness (a Hermes flash deferred, an OpenClaw
+    // flash downloaded). Neither downloads now: the owner's click is the one
+    // path. Read from the shipped installer, because that is where the
+    // decision lives.
     const source = fs.readFileSync(INSTALL_SH_PATH, "utf8");
-    const at = source.indexOf('log "Caching the memory-search model..."');
+    const at = source.indexOf('log "Memory-search model');
     expect(at, "the step must still be announced on every edition").toBeGreaterThan(-1);
-    const block = source.slice(at, at + 900);
-    expect(block).toMatch(/if has_openclaw_harness; then\n\s*step_embed_model/);
-    expect(block).toMatch(/else\n\s*echo "  Deferred:/);
+    const block = source.slice(at, source.indexOf('log "', at + 1));
+    expect(block).toMatch(/^\s*echo "  Deferred:/m);
+    expect(block.split(NL).filter((l) => !/^\s*#/.test(l)).join(NL)).not.toMatch(/step_embed_model|has_openclaw_harness/);
   });
 
   for (const [name, opts, said] of [
@@ -385,15 +390,23 @@ describe("ensure_local_embeddings never fails the update", () => {
   });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-  /** @param hermes edition without a core; @param helper whether the script is there */
-  function run({ hermes = false, helper = true, testMode = false, modelStepFails = false } = {}) {
+  /**
+   * @param hermes edition without a core; @param helper whether the script is
+   * there; @param model whether the GGUF is on disk — the fact that decides
+   * whether anything below is asked at all.
+   */
+  function run({ hermes = false, helper = true, testMode = false, model = true } = {}) {
     const project = path.join(tmp, "project");
     fs.mkdirSync(path.join(project, "scripts"), { recursive: true });
     fs.mkdirSync(path.join(tmp, "home", ".openclaw"), { recursive: true });
+    if (model) {
+      fs.mkdirSync(path.join(project, "data", "embed", "models"), { recursive: true });
+      fs.writeFileSync(path.join(project, "data", "embed", "models", "Qwen3-Embedding-0.6B-Q8_0.gguf"), "gguf");
+    }
     if (helper) {
       fs.writeFileSync(
         path.join(project, "scripts", "ensure-local-embeddings.sh"),
-        `#!/bin/sh${NL}echo HELPER_RAN${NL}`,
+        `#!/bin/sh${NL}echo "HELPER_RAN $*"${NL}`,
         { mode: 0o755 },
       );
     }
@@ -406,11 +419,15 @@ describe("ensure_local_embeddings never fails the update", () => {
       "OPENCLAW_BIN=/bin/false",
       `is_test_mode() { ${testMode ? "return 0" : "return 1"}; }`,
       `has_openclaw_harness() { ${hermes ? "return 1" : "return 0"}; }`,
-      `step_embed_model() { echo MODEL_STEP_RAN; ${modelStepFails ? "return 1" : "return 0"}; }`,
+      // A model step that, if it ran, would be the download the update must
+      // not make.
+      "step_embed_model() { echo MODEL_STEP_RAN; return 0; }",
+      'get_env_setting_or_default() { printf "%s" "$3"; }',
       'as_clawbox() { "$@"; }',
       // as_clawbox_login runs a command string as the clawbox user; here, us.
       'as_clawbox_login() { eval "$*"; }',
-      `sed -n '/^ensure_local_embeddings() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
+      `sed -n '/^embed_model_path() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
+      `sed -n '/^ensure_local_embeddings() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `. "${tmp}/fn.sh"`,
       // Called the way `optional_step` calls it — `if "$@"` — so a non-zero
       // return is REPORTED rather than aborting this fixture's own shell under
@@ -432,13 +449,12 @@ describe("ensure_local_embeddings never fails the update", () => {
     return { out, code };
   }
 
-  it("caches the model, then runs the helper, on a healthy OpenClaw box", () => {
+  it("runs the helper with --no-download, and never the model step, on a box that has the GGUF", () => {
     const r = run();
-    expect(r.out).toContain("MODEL_STEP_RAN");
-    expect(r.out).toContain("HELPER_RAN");
-    expect(r.out.indexOf("MODEL_STEP_RAN")).toBeLessThan(r.out.indexOf("HELPER_RAN"));
+    expect(r.out, "an update downloaded the embedder").not.toContain("MODEL_STEP_RAN");
+    expect(r.out).toContain("HELPER_RAN --no-download");
     // The fixture's core is `/bin/false`, so nothing answers the status probe —
-    // the state the case below names — and the function now SAYS so instead of
+    // the state the case below names — and the function SAYS so instead of
     // answering 0 over a verdict it could not read. It still cannot fail the
     // update: `step_post_update` runs it through `optional_step`, which records
     // the name and returns 0 itself.
@@ -446,11 +462,17 @@ describe("ensure_local_embeddings never fails the update", () => {
     expect(r.out).toMatch(/could not read an embedder/i);
   });
 
-  it("still runs the helper when the model cache fails — the unit fetches on first use", () => {
-    const r = run({ modelStepFails: true });
-    expect(r.out).toContain("HELPER_RAN");
-    // Same fixture, same unanswered core (see above).
-    expect(r.out).toContain("RC=1");
+  it("says the embedder is not installed, and asks nothing else, on a box without the GGUF", () => {
+    // Not a finding: nothing is wrong with a box whose owner has not pressed
+    // Install. The helper is not run and the core is not asked about an
+    // embedder nobody installed.
+    const r = run({ model: false });
+    expect(r.out).toContain("RC=0");
+    expect(r.out).toMatch(/not installed on this box/);
+    expect(r.out).toMatch(/Settings → Local AI/);
+    expect(r.out).not.toContain("HELPER_RAN");
+    expect(r.out).not.toContain("MODEL_STEP_RAN");
+    expect(r.out).not.toMatch(/could not read an embedder/i);
   });
 
   it("puts no clock on the helper — it bounds itself", () => {
@@ -467,7 +489,7 @@ describe("ensure_local_embeddings never fails the update", () => {
     // true` here, which is what keeps its outcome out of this step's verdict.
     const body = shellCode(extractShellFunction("ensure_local_embeddings"));
     expect(body).not.toMatch(/\btimeout\b/);
-    expect(body).toMatch(/as_clawbox_login "\$helper" <\/dev\/null \|\| true/);
+    expect(body).toMatch(/as_clawbox_login "\$helper" --no-download <\/dev\/null \|\| true/);
     // `</dev/null` on both the helper and the status probe: no clock closes off
     // the one way a non-interactive CLI hangs without doing any work — a prompt
     // on the stdin it inherits from the root step, which it would wait on for

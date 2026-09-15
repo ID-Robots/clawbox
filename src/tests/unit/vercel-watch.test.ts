@@ -163,7 +163,10 @@ describe("the deployment watch", () => {
   async function boot(config: Record<string, unknown> = {}): Promise<void> {
     fs.writeFileSync(
       path.join(root, "data", "config.json"),
-      JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: true, ...config }),
+      // The box-wide Vercel integration is a BETA flag, off by default; every
+      // case here is about a box whose owner switched it on, except the one
+      // that pins the other reading.
+      JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: true, coding_vercel_enabled: true, ...config }),
     );
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
@@ -234,6 +237,24 @@ describe("the deployment watch", () => {
 
     expect(vercel.listDeployments).not.toHaveBeenCalled();
     expect(lib.getRun(RUN_ID)?.vercel?.detail).toMatch(/link for this project was removed/i);
+  });
+
+  it("ASKS VERCEL NOTHING while the integration is switched OFF, and settles a pending watch as abandoned", async () => {
+    // The flag is re-read on every tick, beside the link and the token: an
+    // owner who switches the integration off while a build is being watched
+    // is obeyed at the next poll rather than outlived — and the link that is
+    // still on disk does not make the box keep asking about it.
+    await boot({ coding_vercel_enabled: false });
+    writeRecord();
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.vercel?.phase).toBe("abandoned"); });
+
+    expect(vercel.listDeployments).not.toHaveBeenCalled();
+    expect(vercel.readDeployment).not.toHaveBeenCalled();
+    expect(link.resolveVercelAuth).not.toHaveBeenCalled();
+    expect(lib.getRun(RUN_ID)?.vercel?.detail).toBe(lib.DEPLOY_WATCH_DISABLED_DETAIL);
+    expect(lib.DEPLOY_WATCH_DISABLED_DETAIL).toMatch(/switched off/i);
   });
 
   it("stops watching when the token is gone — that is not a failed build", async () => {
@@ -383,7 +404,9 @@ describe("a failed build going back to the harness", () => {
 
     fs.writeFileSync(
       path.join(root, "data", "config.json"),
-      JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: true }),
+      // The beta flag ON, as in the first describe: a hand-off only ever
+      // follows a build the box was allowed to watch.
+      JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: true, coding_vercel_enabled: true }),
     );
     vi.resetModules();
     lib = await import("@/lib/coding-agent");

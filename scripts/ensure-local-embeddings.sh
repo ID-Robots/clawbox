@@ -17,7 +17,10 @@
 # traffic never reached. This script is the single implementation of "have the
 # model, point memory.search at the proxy, reindex": install.sh calls it
 # directly (after the web server is up), gateway-pre-start.sh launches it
-# detached on every gateway start.
+# detached on every gateway start — BOTH with --no-download, since 2026-09-15:
+# the 639 MB GGUF is the owner's click in Settings → Local AI (install.sh's
+# `--step embed_model`), and neither an update nor a gateway start may spend it
+# on a box whose owner never asked. Run by hand with no flag, it still fetches.
 #
 # OpenClaw 2 (2026.8+) moved the choice from agents.defaults.memorySearch.* to
 # memory.search.* and its CLI refuses the retired path outright ("moved to
@@ -27,6 +30,17 @@
 # Everything here is best-effort. A failure must leave the box on lexical FTS,
 # never half-configured, and never block the gateway.
 set -euo pipefail
+
+# --no-download: WIRE an embedder that is already on disk, never fetch one.
+# Everything after the model check is unchanged — the proxy probe, the one
+# merged config write, the reindex — so a box that HAS the GGUF is pointed at
+# it exactly as before; a box without it hears one line and is left as it is.
+NO_DOWNLOAD=0
+case "${1:-}" in
+  "") ;;
+  --no-download) NO_DOWNLOAD=1 ;;
+  *) echo "usage: $0 [--no-download]" >&2; exit 2 ;;
+esac
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-/home/clawbox/.npm-global/bin/openclaw}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/home/clawbox/.openclaw/openclaw.json}"
@@ -245,6 +259,12 @@ state_set_reindex_pending() {
 # --- is the model there? -----------------------------------------------------
 MODEL_PATH="$EMBED_MODEL_DIR/$EMBED_HF_FILE"
 if [ ! -f "$MODEL_PATH" ]; then
+  # Before the backoff is even read: nothing is attempted, so nothing is
+  # recorded, and a later run by hand starts with a clean slate.
+  if [ "$NO_DOWNLOAD" = "1" ]; then
+    log "$EMBED_HF_FILE is not on this box and this run may not fetch it — install it from Settings → Local AI (Memory search); memory search stays as it is"
+    exit 0
+  fi
   NOW="$(date +%s)"
   LAST="$(state_get last_attempt)"
   FAILURES="$(state_get failures)"

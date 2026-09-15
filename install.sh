@@ -3795,14 +3795,19 @@ step_openclaw_setup() {
     step_openclaw_patch
     step_openclaw_config
   fi
-  # Only 12 ("Kokoro was requested and did not install"), 13 ("this box has NO
-  # working on-device TTS engine") and 14 ("the voice scripts did not deploy;
-  # Kokoro's own verdict stands") are tolerated here, and only because the step
-  # has already recorded each of them with record_provision_failure, so the
-  # summary, the exit status, the provisioning marker and step_validate_services'
-  # TTS probe all carry them. A box that could not install its speech engine
-  # must still finish provisioning and come up reachable — that is how it gets
-  # fixed.
+  # step_openclaw_tts installs NOTHING here: it deploys the voice scripts,
+  # refreshes the units of the engines that are present, and on a box whose
+  # owner has not pressed Install in Settings → Local AI it publishes `absent`
+  # and returns 0 — a plain state, not a warning. What it CAN still return:
+  # 12 (an installed Kokoro that cannot speak — the phonemiser, the unit), 14
+  # ("the voice scripts did not deploy; Kokoro's own verdict stands"), and 13
+  # ("this board declines the only engine"), which only the install mode
+  # step_voice_kokoro_install runs can publish but is kept in this table
+  # because the two share one function. Each is tolerated only because the
+  # step has already recorded it with record_provision_failure, so the summary,
+  # the exit status, the provisioning marker and step_validate_services' TTS
+  # probe all carry it. A box whose voice refresh failed must still finish
+  # provisioning and come up reachable — that is how it gets fixed.
   #
   # They are three DIFFERENT facts and they are kept apart on purpose. Folding
   # 14 into 13 would print "this box has NO working on-device TTS engine" over a
@@ -4399,12 +4404,23 @@ step_llamacpp_model() {
   ensure_llamacpp_model_cached
 }
 
+# Where the memory-search GGUF lives on this box, for the readers that only
+# need to know whether it is THERE (ensure_local_embeddings). The pin is read
+# the way ensure_embed_model_cached reads it, with the same default, so the two
+# cannot look for two files — src/tests/unit/install-opt-in-engines.test.ts
+# pins the literals together.
+embed_model_path() {
+  local HF_FILE
+  HF_FILE=$(get_env_setting_or_default "$PROJECT_DIR/.env" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf")
+  printf '%s/data/embed/models/%s' "$PROJECT_DIR" "$HF_FILE"
+}
+
 # Cache the memory-search embedder's GGUF (data/embed/models) so the unit never
 # has to download it inside a proxied request: OpenClaw gives a document batch
 # 120 s and a query 60 s, and a 640 MB fetch on a slow link fits neither.
-# Fast no-op when the file is there, which is what makes it safe on every
-# update. The same download the unit's start script would do on its own —
-# scripts/start-embed-server.sh — done here as root, ahead of time.
+# Fast no-op when the file is there. Reached ONLY through `--step embed_model`
+# — the Local AI tab's Install (/setup-api/embed/install) — since 2026-09-15:
+# neither the main install flow nor an update downloads this model any more.
 ensure_embed_model_cached() {
   local ENV_FILE="$PROJECT_DIR/.env"
   local MODEL_DIR="$PROJECT_DIR/data/embed/models"
@@ -6085,6 +6101,28 @@ tts_ensure_ffmpeg() {
 }
 
 step_openclaw_tts() {
+  # WHAT install-voice.sh is asked for. `--scripts-only` (the default, and what
+  # step_openclaw_setup and step_post_update run) deploys the voice scripts and
+  # the units of the engines that are PRESENT, and publishes the Kokoro
+  # verdict from what is on disk — it installs nothing. `--kokoro` is the
+  # INSTALL: step_voice_kokoro_install (the Local AI tab's Install button,
+  # through /setup-api/tts/install) calls this same function with it, so the
+  # verdict reading, the tolerance codes and the registration with every
+  # harness below are written once and cannot drift between "installed on a
+  # click" and "refreshed on an update".
+  #
+  # The update used to run `--tts-only`, which had grown from "the Kokoro
+  # stack" into Kokoro + faster-whisper + a from-source CTranslate2 build: 15
+  # minutes of a 35-minute update on engines nobody asked for (measured
+  # 2026-09-15). The owner's ruling is that install.sh force-installs no model
+  # or engine but the llama.cpp runtime and Gemma 4; everything else is the
+  # owner's click in Settings → Local AI.
+  local VOICE_MODE="${1:---scripts-only}"
+  # The step an operator re-runs for the same outcome: the install for an
+  # install that failed, this step for a refresh that did.
+  local TTS_RERUN="openclaw_tts"
+  [ "$VOICE_MODE" = "--kokoro" ] && TTS_RERUN="voice_kokoro_install"
+
   # Registered with the harness: the tree copy, which outlives every restage.
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
   # Run by root: the copy root holds. See tts_write_local_provider_definition.
@@ -6095,22 +6133,16 @@ step_openclaw_tts() {
   # Hermes arm below too, which returns before the OpenClaw registration.
   tts_ensure_ffmpeg
 
-  # --tts-only installs the CUDA Kokoro stack and deploys the voice scripts,
-  # and deliberately not the STT half of that script (faster-whisper + the
-  # CTranslate2 source build, about an hour on an Orin) because this step also
-  # runs from step_post_update on every in-app update. The flag it replaced
-  # installed only the CPU fallback of the time and nothing else, so every box
-  # we shipped ran on that fallback while this step printed "Kokoro GPU" — on
-  # freshly flashed hardware neither `import kokoro` nor `import torch`
-  # resolved and no kokoro-server unit existed (TASK-420). That fallback is
-  # gone now; Kokoro is the only on-device engine.
-  #
-  # Its exit code is the contract: it never fails the install over the GPU
-  # path, it reports whether Kokoro is actually there so the summary below can
-  # tell the truth instead of asserting it.
+  # Its exit code is the contract (the table in install-voice.sh's header): it
+  # never fails the install over the GPU path, it reports whether Kokoro is
+  # actually there so the summary below can tell the truth instead of
+  # asserting it. The flag this mode dispatch replaced installed only the CPU
+  # fallback of the time and nothing else, so every box we shipped ran on that
+  # fallback while this step printed "Kokoro GPU" (TASK-420). That fallback is
+  # gone; Kokoro is the only on-device engine, and now an opt-in one.
   local VOICE_RC=0
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
-    bash "$SRC_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
+    bash "$SRC_DIR/scripts/install-voice.sh" "$VOICE_MODE" || VOICE_RC=$?
 
   # WHETHER this box has its engine is a fact the run just PUBLISHED; $VOICE_RC
   # only says how far it got. Reading the first off the second is the defect
@@ -6135,19 +6167,25 @@ step_openclaw_tts() {
     KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
   fi
 
-  local KOKORO_READY=false KOKORO_REASON=""
+  # KOKORO_ABSENT: the run published `absent` — a box that never installed the
+  # engine and was not asked to. A plain state of the box, graded 0, and the
+  # one verdict an install mode can never publish.
+  local KOKORO_READY=false KOKORO_REASON="" KOKORO_ABSENT=false
   # The status this STEP returns, separate from whether TTS could be configured.
   # A Kokoro that was asked for and did not arrive is a failure of this step
-  # (12), and so is a board that declines the only engine there is (13): either
-  # way the box has no on-device voice until it is fixed. This installer cannot
-  # know whether the cloud voice exists — that needs the ClawBox AI link, which
-  # happens after install — so neither is graded clean; both are recorded.
+  # (12), and so is a board that declines the engine it was asked to install
+  # (13): either way the box has no on-device voice until it is fixed. This
+  # installer cannot know whether the cloud voice exists — that needs the
+  # ClawBox AI link, which happens after install — so neither is graded clean;
+  # both are recorded. Neither can come out of a `--scripts-only` run over a
+  # box that simply has no engine: that is `absent`, exit 0, and the summary
+  # says where the engine is installed from.
   local TTS_RC=0
   case "$VOICE_RC" in
     0)  KOKORO_READY=true ;;
     13)
         # An older install-voice.sh used 10 and 11 for the same fact; the
-        # current one emits only 13.
+        # current one emits only 13, and only from an INSTALL mode.
         #
         # ——— This board declines the only on-device engine ————————————
         # Kokoro published `skipped:<reason>` — no CUDA toolkit, no Jetson
@@ -6183,7 +6221,7 @@ step_openclaw_tts() {
         echo "  # The cloud voice speaks for this box once it is linked to" >&2
         echo "  # ClawBox AI on a plan that includes cloud speech; until then" >&2
         echo "  # spoken requests go unanswered." >&2
-        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
         echo "  ############################################################" >&2
         # The e2e-install container has no GPU by construction (it says so
         # with CLAWBOX_TEST_NO_GPU=1 — see e2e-install/README.md, which lists
@@ -6196,7 +6234,7 @@ step_openclaw_tts() {
         if harness_has_no_gpu; then
           echo "  CLAWBOX_TEST_NO_GPU=1, not recording the missing engine as a provisioning failure (no GPU in the harness)"
         else
-          record_provision_failure openclaw_tts
+          record_provision_failure "$TTS_RERUN"
         fi
         ;;
     12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
@@ -6221,9 +6259,9 @@ step_openclaw_tts() {
         echo "  # Kokoro GPU TTS was REQUESTED and did NOT install." >&2
         echo "  # This box has no on-device voice; spoken replies fall back" >&2
         echo "  # to the gateway's cloud voice until it is fixed." >&2
-        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
         echo "  ############################################################" >&2
-        record_provision_failure openclaw_tts
+        record_provision_failure "$TTS_RERUN"
         ;;
     1)  KOKORO_REASON="the voice scripts did not deploy"
         # Kokoro's own verdict stands (install-voice.sh returns 12, not 1, when
@@ -6244,8 +6282,8 @@ step_openclaw_tts() {
         # moment later.
         echo "  Warning: the voice install did not complete — the voice scripts did not deploy to the workspace" >&2
         echo "  Whether this box has its engine is recorded in $TTS_STATUS_FILE" >&2
-        echo "  Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
-        record_provision_failure openclaw_tts
+        echo "  Re-run:  sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+        record_provision_failure "$TTS_RERUN"
         ;;
     *)  KOKORO_REASON="install-voice.sh exited $VOICE_RC"
         # An exit code nobody wrote a branch for is not evidence of health. The
@@ -6256,7 +6294,7 @@ step_openclaw_tts() {
         # either; it is recorded, and the verdict file is what says which.
         TTS_RC=14
         echo "  Warning: install-voice.sh exited $VOICE_RC, which is not in its contract — treating the TTS install as failed" >&2
-        record_provision_failure openclaw_tts
+        record_provision_failure "$TTS_RERUN"
         ;;
   esac
   # The GPU engine, named from the verdict where there is one. KOKORO_READY (an
@@ -6264,6 +6302,15 @@ step_openclaw_tts() {
   local KOKORO_HAVE="$KOKORO_READY"
   case "$KOKORO_VERDICT" in
     ready) KOKORO_HAVE=true ;;
+    absent)
+           # Not installed, not asked for. The exit code (0) already said
+           # "clean"; the verdict says WHAT is on the box, and the reason is
+           # worded for the two arms below that name it — the Hermes note,
+           # and a deploy failure (VOICE_RC=1) that keeps its own reason.
+           KOKORO_HAVE=false
+           KOKORO_ABSENT=true
+           [ -n "$KOKORO_REASON" ] || KOKORO_REASON="it is not installed; Settings → Local AI installs it"
+           ;;
     ?*)    KOKORO_HAVE=false
            # Reached by every non-zero exit that published a verdict, and by a
            # clean exit only if the verdict contradicts it, which the contract
@@ -6273,7 +6320,12 @@ step_openclaw_tts() {
            [ -n "$KOKORO_REASON" ] || KOKORO_REASON="the voice install published KOKORO=$KOKORO_VERDICT"
            ;;
   esac
-  if [ "$KOKORO_HAVE" != true ]; then
+  if [ "$KOKORO_ABSENT" = true ] && [ "$VOICE_RC" -eq 0 ]; then
+    # ONE line, informational, and the step's whole verdict on an engineless
+    # box: no banner, no record_provision_failure, no 12/13. Nothing is wrong
+    # with a box whose owner has not pressed Install.
+    echo "  On-device voice is not installed — install it from Settings → Local AI"
+  elif [ "$KOKORO_HAVE" != true ]; then
     # No engine claim here: on VOICE_RC=1 with no verdict on file Kokoro's
     # state is unknown, so naming an engine would be a guess. The summary at
     # the end of the step says what is actually known.
@@ -6444,7 +6496,7 @@ step_openclaw_tts() {
           # be read is equally on Edge, and equally fixed by re-running this
           # step. Only the engine clause below is conditional.
           echo "           If that selection is in fact unset, Hermes falls back to its factory Edge cloud rather than staying silent. Re-run once the CLI answers:" >&2
-          echo "           sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+          echo "           sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
           if [ "$KOKORO_HAVE" != true ]; then
             echo "           This box also has no on-device engine ($KOKORO_REASON)." >&2
           fi
@@ -6494,7 +6546,13 @@ step_openclaw_tts() {
               # around. VOICE_RC=1 with `KOKORO=ready` on file is a working
               # engine (the OpenClaw arm below says so too), and VOICE_RC=0 with
               # any other verdict is not one.
-              if [ "$KOKORO_HAVE" != true ]; then
+              if [ "$KOKORO_ABSENT" = true ]; then
+                # The opt-in case, said without the alarm the two below carry:
+                # nothing failed. The selection is kept for the same reason
+                # they keep it — an unset key is Microsoft's cloud, not
+                # silence — and the install is one click away.
+                echo "  Note: this box has no on-device engine yet (install it from Settings → Local AI); until then, or until ClawBox AI is linked on a plan that includes cloud speech, its Hermes voice stays SILENT. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud."
+              elif [ "$KOKORO_HAVE" != true ]; then
                 # Qualified by SKU. `applyClawaiToHermes` — the only writer of
                 # the Hermes cloud voice — runs where `getActiveHarness()`
                 # answers "hermes". On a hermes box that is always; on a dual
@@ -6533,8 +6591,8 @@ step_openclaw_tts() {
       # and neither treats as fatal.
       echo "  ERROR: the on-device voice was NOT registered with Hermes — $HERMES_TTS_FAIL" >&2
       echo "         Hermes will not speak on this box until it is. Re-run:" >&2
-      echo "         sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
-      record_provision_failure openclaw_tts
+      echo "         sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+      record_provision_failure "$TTS_RERUN"
       [ "$TTS_RC" -eq 0 ] && TTS_RC=14
     fi
   fi
@@ -6586,8 +6644,11 @@ step_openclaw_tts() {
     # got a tts-local-cli entry at all — and with Kokoro installed, the Local
     # AI tab's "Make primary" answered "not available on this box". Define the
     # provider (never select it); the tts route repairs the same entry on
-    # demand, and this keeps an update from leaving it missing.
-    if [ -x "$TTS_SCRIPT" ]; then
+    # demand, and this keeps an update from leaving it missing. Only behind an
+    # engine the box HAS, or has at least been asked for: a definition on an
+    # `absent` box is a provider that fails every utterance, and the Voice
+    # tab's "This box" pick writes it the moment Kokoro is installed.
+    if [ "$KOKORO_ABSENT" != true ] && [ -x "$TTS_SCRIPT" ]; then
       tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" "$TTS_SCRIPT_SRC" \
         || echo "  Warning: could not define the on-device voice provider; Settings → Voice can repair it" >&2
     fi
@@ -6602,6 +6663,28 @@ step_openclaw_tts() {
   if ! tts_config_readable; then
     echo "  Warning: openclaw.json exists and could not be read — leaving $TTS_HOME.provider alone rather than overwriting a choice we cannot see" >&2
     echo "           Diagnose with: openclaw config get $TTS_HOME.provider" >&2
+    return "$TTS_RC"
+  fi
+
+  # No engine on this box and nothing asked for one: the on-device provider is
+  # neither defined nor selected — `tts-local-cli` is registered only behind a
+  # Kokoro that is present (or was at least asked for, which the 12/13 arms
+  # above record and then still configure, so the box comes up fixable). The
+  # CLOUD voice, when the box has one, is still chosen for an unset selection:
+  # gateway-pre-start.sh writes that entry and never selects it, and this step
+  # is the one place the default voice is decided (owner's ruling, 2026-09-09).
+  # Seed-if-unset governs here as below — this branch is only reached when
+  # `tts.provider` was unset.
+  if [ "$KOKORO_ABSENT" = true ]; then
+    local CLOUD_ONLY
+    CLOUD_ONLY=$(tts_managed_cloud_provider "$TTS_HOME")
+    if [ -n "$CLOUD_ONLY" ]; then
+      if oc_config_set "$TTS_HOME.provider" "$CLOUD_ONLY"; then
+        echo "  ClawBox AI cloud voice selected ($CLOUD_ONLY); the box's own voice can be installed from Settings → Local AI"
+      else
+        echo "  Warning: could not select the $CLOUD_ONLY cloud voice — Settings → Voice can" >&2
+      fi
+    fi
     return "$TTS_RC"
   fi
 
@@ -6727,6 +6810,42 @@ step_openclaw_tts() {
   # Configuring the provider succeeded; whether the ENGINE the owner asked for
   # arrived is a separate verdict, and it is this one that leaves the function.
   return "$TTS_RC"
+}
+
+# The Local AI tab's Install for the box's own voice: /setup-api/tts/install
+# starts this as root (`voice_kokoro_install` is on WEB_ROOT_STEPS, and
+# deliberately not on the UI list install/run-step serves to the MCP bearer —
+# a root install is the person's decision). It is step_openclaw_tts in its
+# INSTALL mode: the same verdict reading, the same registration with every
+# harness the box runs, the same tolerance codes, so a box installed from here
+# is exactly the box an update produced back when updates installed engines.
+# The one difference is what install-voice.sh is asked for — `--kokoro`, the
+# CUDA stack and its model — and the name the failure is recorded under.
+step_voice_kokoro_install() {
+  step_openclaw_tts --kokoro
+}
+
+# The Local AI tab's Install for on-device speech-to-text: POST
+# /setup-api/whisper {action:"install-engine"} streams this root step.
+# faster-whisper, the CTranslate2 CUDA build (about five minutes on an Orin,
+# pinned to the board's own architecture) and the `base` weights — the STT
+# half the update used to run on every box. Graded by install-voice.sh's
+# `--whisper` contract, in the codes step_openclaw_tts uses for Kokoro so a
+# reader of the journal meets one vocabulary: 13 a board with no CUDA, 12 an
+# install that did not arrive, 14 the engine landed and the scripts did not.
+# Each one is the route's own error line. NOT recorded as a provisioning
+# failure: nothing about the box's provisioning asked for this engine, and the
+# marker the flash host reads must not go red over an owner's click.
+step_voice_whisper_install() {
+  local STT_RC=0
+  bash "$SRC_DIR/scripts/install-voice.sh" --whisper || STT_RC=$?
+  case "$STT_RC" in
+    0)  echo "  On-device speech-to-text installed (faster-whisper)" ;;
+    13) echo "  ERROR: faster-whisper does not apply to this board (no CUDA toolkit) — speech is transcribed in the cloud" >&2; return 13 ;;
+    12) echo "  ERROR: faster-whisper was requested and did NOT install — see the log above" >&2; return 12 ;;
+    1)  echo "  ERROR: faster-whisper is installed, but the voice scripts did not deploy to the workspace" >&2; return 14 ;;
+    *)  echo "  ERROR: install-voice.sh --whisper exited $STT_RC, which is not in its contract" >&2; return 14 ;;
+  esac
 }
 
 step_setup_config() {
@@ -7933,10 +8052,15 @@ step_post_update() {
   # good. Idempotent: a box already on the pin does one `codex --version` and
   # stops.
   optional_step codex_cli step_codex_cli
-  # On-device TTS: installs/refreshes Kokoro and the voice scripts, and seeds
-  # the tts-local-cli provider. Without this call the whole of TASK-383 would
-  # be fresh-install-only, and every already-shipped box would keep answering
-  # a spoken request with silence.
+  # On-device TTS: refreshes the voice scripts and the units of the engines
+  # that are PRESENT, and seeds the tts-local-cli provider behind an installed
+  # Kokoro. It installs NOTHING — the update used to spend a quarter of an
+  # hour here on Kokoro, faster-whisper and a from-source CTranslate2 build
+  # nobody asked for (measured 2026-09-15), and the owner's ruling is that no
+  # engine or model but the llama.cpp runtime and Gemma 4 is force-installed.
+  # A box with no Kokoro is a plain state on this path (verdict `absent`, exit
+  # 0, one informational line); the engines are the Local AI tab's Install
+  # buttons (voice_kokoro_install, voice_whisper_install).
   # The SAME tolerance table step_openclaw_setup applies to this step, and for
   # the same reason: 12, 13 and 14 are three different facts about a box's
   # speech and the update path has to keep them apart too. A single
@@ -8000,9 +8124,10 @@ step_post_update() {
   # the voice registration writes through the Hermes CLI — see the comment
   # there. It is idempotent, so the move is a reordering and not a second run.
   # step_llamacpp_model deliberately does not self-gate (see its comment).
-  # Without this the embedding model is fresh-install-only: nothing in the
-  # update path pulls it, so a box that missed it when it was built stayed on
-  # lexical FTS. Non-fatal in the register of its neighbours.
+  # The embedder is NOT downloaded here: ensure_local_embeddings wires memory
+  # search to the GGUF only when the GGUF is already on the box (the Local AI
+  # tab's Install, `--step embed_model`, is what fetches it) and says so in one
+  # line otherwise. Non-fatal in the register of its neighbours.
   # After step_systemd_services and step_resource_limits above: the helper
   # reaches the embedder through the proxy, which starts clawbox-embed.service
   # through a sudoers grant those two steps install.
@@ -8451,16 +8576,20 @@ step_performance_mode() {
     return 0
   fi
   # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
-  # box nothing is persisted, so this resolves to BALANCED: a real nvpmodel cap
-  # with jetson_clocks OFF.
+  # box nothing is persisted, so this resolves to PERFORMANCE — the script's
+  # DEFAULT_MODE since the owner's ruling of 2026-09-15 — and because this step
+  # runs on every update as well as every install, it is what turns the pinned
+  # profile on for a box already in the field that never chose. An owner's
+  # persisted `balanced` is read back as such and kept.
   #
-  # This used to be an unconditional `nvpmodel -m MAXN && jetson_clocks`, which
-  # pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load and
-  # disabled the cpuidle states — 7.21 W / ~58 C at idle, and 74.8 C median Tj
-  # under sustained 3B inference, over the 74 C passive-cooling trip. The pinned
-  # profile is unchanged and still one toggle away (Settings -> System ->
-  # Performance mode); it is simply no longer what a box does by default.
-  # TASK-455.
+  # Before TASK-455 this was an unconditional `nvpmodel -m MAXN && jetson_clocks`,
+  # which pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load
+  # and disabled the cpuidle states — 7.21 W / ~58 C at idle, and 74.8 C median
+  # Tj under sustained 3B inference, over the 74 C passive-cooling trip. That
+  # measurement is why balanced exists and stays one toggle away (Settings ->
+  # System -> Performance mode) as the owner's opt-out: TASK-455 made it the
+  # default, and 2026-09-15 made performance the default again with the same
+  # numbers stated on the switch.
   "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --apply || \
     echo "  Warning: power profile apply failed (non-fatal)"
   # Ensure persistent service is installed and enabled for next boot
@@ -8584,13 +8713,27 @@ ensure_local_embeddings() {
     # whole change removes.
     return 1
   fi
-  step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
-  # No `timeout` on the helper. It downloads a 639 MB GGUF and then runs
-  # `memory index --force`, and 600 s was a guess at both: killed at the cap it
-  # left a partial model and a half-built index, which the next run had to redo
-  # from the start. The helper has its OWN internal wait for the proxy and exits
-  # 0 on every soft failure, so it ends by itself; `|| true` covers the rest.
-  as_clawbox_login "$helper" </dev/null || true
+  # NO DOWNLOAD, on any path that reaches here (the main flow after the web
+  # server is up, and every post_update). The GGUF is the owner's click in
+  # Settings → Local AI (`--step embed_model`); this only WIRES memory search
+  # to an embedder that is already on disk, and on a box without one it says so
+  # in one line and is done — the core is not asked about an embedder nobody
+  # installed, because "could not read an embedder" over that box would be a
+  # finding about nothing.
+  local MODEL_PATH
+  MODEL_PATH="$(embed_model_path)"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "  The memory-search embedder is not installed on this box — install it from Settings → Local AI (Memory search); semantic memory keeps its current provider"
+    return 0
+  fi
+  # No `timeout` on the helper. It runs `memory index --force`, and 600 s was
+  # a guess: killed at the cap it left a half-built index, which the next run
+  # had to redo from the start. The helper has its OWN internal wait for the
+  # proxy and exits 0 on every soft failure, so it ends by itself; `|| true`
+  # covers the rest. `--no-download` is what keeps it to wiring: with the file
+  # checked above it is belt-and-braces, and it is the same flag
+  # gateway-pre-start.sh passes, so the two callers cannot drift.
+  as_clawbox_login "$helper" --no-download </dev/null || true
   # The helper exits 0 on every soft failure by design, so its exit code says
   # nothing about the outcome; ask the core. Best-effort: "could not read an
   # embedder" is reported as itself, never as a verdict. The status is the
@@ -10136,8 +10279,11 @@ step_validate_services() {
     #
     # scripts/install-voice.sh publishes its verdict to $TTS_STATUS_FILE for
     # exactly this check. The distinction the file carries tells an operator
-    # WHAT to fix, and here it decides the wording, not the outcome: `ready` is
-    # the only verdict that passes. `skipped:*` means this board declines
+    # WHAT to fix, and here it decides the wording, not the outcome: `ready`
+    # passes, and so does `absent` — the engine was never installed and never
+    # asked for, which is every fresh box now that Kokoro is the owner's click
+    # in Settings → Local AI; a check that failed every one of those would
+    # teach everyone to ignore it. `skipped:*` means this board declines
     # Kokoro (no CUDA, no Jetson build for its architecture), and with one
     # engine that is a box with NO on-device voice — a mute box, recorded and
     # named the way step_openclaw_tts records its 13. It does not pass:
@@ -10183,8 +10329,8 @@ step_validate_services() {
     # ONE line about this box's speech, so the check probe_count counts as
     # one contributes at most one.
     #
-    # The vocabulary is closed: `ready`, `skipped:<reason>`, `failed:<reason>`,
-    # or nothing at all. Anything else — a truncated write (tts_status_publish
+    # The vocabulary is closed: `ready`, `absent`, `skipped:<reason>`,
+    # `failed:<reason>`, or nothing at all. Anything else — a truncated write (tts_status_publish
     # truncates the file with `>` rather than writing-then-renaming, so a box
     # that lost power mid-publish can leave one), a typo, a stray line — used
     # to match no arm and fall out of the chain as a silent PASS, while the
@@ -10203,7 +10349,7 @@ step_validate_services() {
     # not parse is no evidence for it.
     local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
     local tts_verdict_unreadable=false
-    case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
+    case "$tts_state" in ""|ready|absent|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
     if [ "$tts_verdict_unreadable" = true ]; then
       failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: $tts_state) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
     else
@@ -10212,6 +10358,12 @@ step_validate_services() {
           failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
           ;;
         ready)
+          ;;
+        absent)
+          # Not a failed probe, and not silent either: an operator reading the
+          # report should learn where the engine comes from, in the words the
+          # install step used.
+          echo "  On-device TTS: not installed on this box (a plain state — Settings → Local AI installs it), not a failed probe"
           ;;
         skipped:?*)
           # The mute box: the same recorded, named, non-fatal fact as
@@ -10397,6 +10549,12 @@ DISPATCH_STEPS=(
   embed_model
   chromium_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
+  # The Local AI tab's two engine installs, since 2026-09-15: Kokoro and
+  # faster-whisper are opt-in now, and these are the only two steps that
+  # install either. On WEB_ROOT_STEPS, never on the UI/MCP list. No
+  # parenthesis in this comment: root-steps.test.ts parses the array up to
+  # the first closing one.
+  voice_kokoro_install voice_whisper_install
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
@@ -10590,19 +10748,15 @@ step_ollama_install
 log "Installing llama.cpp runtime..."
 step_llamacpp_install
 
-log "Caching the memory-search model..."
-# The GATE is here rather than inside step_embed_model, because
-# /setup-api/embed/install dispatches that same step as `--step embed_model` and
-# on the Hermes SKU that is the Memory Shard wizard's own provisioning click.
-# What must not happen is a flash spending 639 MB on a box whose owner may never
-# switch the feature on — so the step is announced either way (the progress
-# counter counts one line per step and every edition runs this one) and only the
-# download is conditional.
-if has_openclaw_harness; then
-  step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
-else
-  echo "  Deferred: Memory Shard fetches it when its setup is run."
-fi
+log "Memory-search model (the owner's click in Settings → Local AI)..."
+# NOT DOWNLOADED HERE, on any edition. The one model a flash fetches is Gemma 4,
+# through step_llamacpp_install above (owner's ruling, 2026-09-15: "we are not
+# force installing any models in install.sh except gemma4"); this 639 MB GGUF
+# is `--step embed_model`, dispatched by /setup-api/embed/install when the
+# owner presses Install in Settings → Local AI or runs the Memory Shard wizard.
+# The step is still announced, because the progress counter counts one line
+# per step and every edition runs this one.
+echo "  Deferred: Settings → Local AI (Memory search) fetches it on the owner's click (639 MB)."
 
 log "Installing Chromium..."
 step_chromium_install

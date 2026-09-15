@@ -153,6 +153,16 @@ function stubFetch(
     if (url.startsWith("/setup-api/coding-agent/projects")) {
       return json({ directory: null, projects: [] });
     }
+    // And for ImprovementProgramCard, mounted under the GitHub card: its own
+    // read, answered so the card draws its real face rather than its "could
+    // not read" message.
+    if (url === "/setup-api/improvement-program") {
+      return json({
+        mode: "off", repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
+        maxIssuesPerDay: 5, remainingToday: 5,
+        github: { installed: true, connected: false, login: null }, incidents: [],
+      });
+    }
     if (url.startsWith("/setup-api/coding-agent/git")) {
       if (opts.gitThrows) throw new TypeError("Failed to fetch");
       if (opts.gitStatus && opts.gitStatus !== 200) return json({ error: "gh fell over" }, opts.gitStatus);
@@ -534,6 +544,29 @@ describe("the box-wide Vercel integration", () => {
     fireEvent.click(screen.getByTestId("coding-agent-vercel-enabled-help"));
     expect(screen.getByText(translations.en["codingAgent.vercelEnabledHint"])).toBeInTheDocument();
   });
+
+  it("wears a BETA badge and says, in plain sight, that it is experimental and off by default", async () => {
+    // The badge and the line are VISIBLE, not behind the help tip: "this is
+    // experimental and off by default" is what an owner needs before reaching
+    // for the switch, and this row is the only place on the box the
+    // integration is offered at all (the setup wizard never mentions it).
+    // Whatever the switch's state — the badge is about the feature, not the
+    // answer.
+    for (const vercelEnabled of [false, true]) {
+      stubFetch({ enabled: true, readiness: READY, vercelEnabled });
+      const view = render(<CodingAgentSettingsPanel />);
+      const toggle = await screen.findByRole("switch", { name: VERCEL });
+      expect(toggle).toHaveAttribute("aria-checked", String(vercelEnabled));
+      const badge = screen.getByTestId("coding-agent-vercel-beta");
+      expect(badge.textContent).toBe(translations.en["codingAgent.vercelBetaBadge"]);
+      // Beside the label, in the same row as the switch.
+      expect(badge.closest("div")?.textContent).toContain(VERCEL);
+      expect(screen.getByTestId("coding-agent-vercel-beta-hint").textContent)
+        .toBe(translations.en["codingAgent.vercelBetaHint"]);
+      expect(translations.en["codingAgent.vercelBetaHint"]).toMatch(/off by default/i);
+      view.unmount();
+    }
+  });
 });
 
 describe("the automatic review pass", () => {
@@ -566,6 +599,25 @@ describe("the automatic review pass", () => {
     stubFetch({ enabled: true, readiness: READY, reviewPass: true });
     render(<CodingAgentSettingsPanel />);
     expect(await screen.findByRole("switch", { name: REVIEW })).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("the Improvement Program card", () => {
+  it("is mounted directly under the GitHub card, whose credential its reports go out on", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    const card = await screen.findByTestId("improvement-program-card");
+    // Right after GitHub in the DOM, not merely somewhere on the page: the
+    // two are one story, and the card used to live in Settings → System.
+    expect(screen.getByTestId("coding-agent-github-card").nextElementSibling).toBe(card);
+    expect(screen.getByTestId("improvement-mode-off")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("is drawn even when gh is not on the box, since the choice is the owner's either way", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { github: { installed: false, connected: false, login: null } });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByTestId("improvement-program-card")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-github-card")).toBeNull();
   });
 });
 

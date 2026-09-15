@@ -9,6 +9,7 @@ import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
 import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureGate";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 import { browserErrorText, runBrowserAction } from "@/lib/browser-actions";
+import { IMPROVEMENT_MODES, IMPROVEMENT_MODE_KEYS, type ImprovementMode } from "./ImprovementProgramCard";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import {
@@ -26,7 +27,9 @@ import {
  * for a delegated shell, and the two settings that decide what such a run can
  * reach — the GitHub account it pushes with and the folder it works in — used
  * to be four scrolls apart on a page the owner had no reason to open. The
- * wizard asks for them in the order a run needs them, once.
+ * wizard asks for them in the order a run needs them, once — with the ClawBox
+ * Improvement Program between them, right after GitHub, because its reports
+ * go out on that account.
  *
  * Settings keeps every one of these controls: this is an onboarding path over
  * the same routes, never the only way to change any of them.
@@ -36,7 +39,7 @@ import {
 const SMALL_BUTTON = BTN_SECONDARY;
 const PRIMARY = BTN_PRIMARY;
 
-type Step = "intro" | "github" | "project" | "browser" | "harness";
+type Step = "intro" | "github" | "improvement" | "project" | "browser" | "harness";
 
 type BrowseAnswer = {
   root: string;
@@ -172,7 +175,85 @@ export default function CodingAgentSetupWizard({
     }).catch(() => { /* the pending code simply expires */ });
   };
 
-  // ─── Project folder + how a run thinks (step 2) ───
+  // ─── The ClawBox Improvement Program (step 2) ───
+  // Asked here, right after GitHub, because a report is `gh issue create` on
+  // that credential. AUTOMATIC IS PRESELECTED — the STORED default stays
+  // `off` (src/lib/incident-report.ts: it is a consent, and an unreadable
+  // value must read as "send nothing"), and it is this preselection plus the
+  // owner's Continue that opts a new box in. There is no Skip: Continue with
+  // Off chosen is how the owner declines, and it is written explicitly all
+  // the same, so the box records an answer rather than an absence.
+  const [improvementMode, setImprovementMode] = useState<ImprovementMode>("auto");
+  const [maxIssuesPerDay, setMaxIssuesPerDay] = useState(5);
+  const improvementRefs = useRef<Partial<Record<ImprovementMode, HTMLButtonElement | null>>>({});
+  /** The owner has picked on the step: a read that lands later must not undo it. */
+  const improvementTouched = useRef(false);
+
+  const loadImprovement = useCallback(async () => {
+    try {
+      const res = await fetch("/setup-api/improvement-program", { cache: "no-store" });
+      if (!res.ok) return;
+      const out = (await res.json()) as { mode?: unknown; answered?: unknown; maxIssuesPerDay?: unknown };
+      // The daily cap the box actually enforces is the number the Automatic
+      // hint names; a read that fails keeps the card's own fallback.
+      if (typeof out.maxIssuesPerDay === "number" && Number.isFinite(out.maxIssuesPerDay)) {
+        setMaxIssuesPerDay(out.maxIssuesPerDay);
+      }
+      // The owner's own pick on this step wins over a read that lands late:
+      // the GET waits on `gh auth status`, which is seconds on a slow link.
+      if (improvementTouched.current) return;
+      // Otherwise a box that already ANSWERED keeps its answer on screen —
+      // Off included. This wizard runs again after Start over, and proposing
+      // Automatic over an explicit "ask me", or over an explicit decline,
+      // would quietly widen it on Continue. Automatic is proposed only over
+      // "never asked". A server that predates `answered` sends none, and
+      // there `off` cannot be told from never asked.
+      const known = out.mode === "off" || out.mode === "ask" || out.mode === "auto";
+      if (out.answered === true && known) setImprovementMode(out.mode as ImprovementMode);
+      else if (out.mode === "ask" || out.mode === "auto") setImprovementMode(out.mode);
+    } catch {
+      // Best effort: the step still asks, and Continue still writes.
+    }
+  }, []);
+  useEffect(() => { void loadImprovement(); }, [loadImprovement]);
+
+  const saveImprovement = async () => {
+    setBusy("improvement");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/improvement-program", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: improvementMode }),
+      });
+      if (!res.ok) {
+        const out = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(out?.error || t("improvement.saveFailed"));
+      }
+      setStep("project");
+    } catch (err) {
+      // Stay on the step: an answer the box did not record is not an answer.
+      setError(err instanceof Error ? err.message : t("improvement.saveFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** The radiogroup contract, as on the settings card: arrows move AND choose. */
+  const moveImprovementWithArrows = (event: React.KeyboardEvent, current: ImprovementMode) => {
+    const delta = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
+      : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1
+      : 0;
+    if (delta === 0) return;
+    event.preventDefault();
+    const n = IMPROVEMENT_MODES.length;
+    const next = IMPROVEMENT_MODES[(IMPROVEMENT_MODES.indexOf(current) + delta + n) % n];
+    improvementRefs.current[next]?.focus();
+    improvementTouched.current = true;
+    setImprovementMode(next);
+  };
+
+  // ─── Project folder + how a run thinks (step 3) ───
   // Pre-filled with what the device proposes (~/Projects) so the common case
   // is one tap. The folder need not exist yet — saving creates it, as long as
   // it is inside the owner's home.
@@ -282,7 +363,7 @@ export default function CodingAgentSetupWizard({
     }
   };
 
-  // ─── Which browser a run verifies its work in (step 3) ───
+  // ─── Which browser a run verifies its work in (step 4) ───
 
   /**
    * Write the owner's answer, and nothing else.
@@ -413,8 +494,12 @@ export default function CodingAgentSetupWizard({
     }
   };
 
-  const stepNumber = step === "github" ? 1 : step === "project" ? 2 : step === "browser" ? 3 : 4;
-  const TOTAL_STEPS = 4;
+  const stepNumber = step === "github" ? 1
+    : step === "improvement" ? 2
+    : step === "project" ? 3
+    : step === "browser" ? 4
+    : 5;
+  const TOTAL_STEPS = 5;
 
   return (
     <div
@@ -531,13 +616,13 @@ export default function CodingAgentSetupWizard({
           )}
 
           <div className="mt-5 flex items-center gap-2">
-            <button type="button" onClick={() => setStep("project")} className={PRIMARY} data-testid="coding-agent-wizard-next">
+            <button type="button" onClick={() => setStep("improvement")} className={PRIMARY} data-testid="coding-agent-wizard-next">
               {t("codingAgent.wizardNext")}
             </button>
             {/* GitHub is what a run PUSHES with; a run works without it, so the
                 step is skippable rather than a gate. */}
             {!github?.connected && (
-              <button type="button" onClick={() => setStep("project")} className={SMALL_BUTTON}>
+              <button type="button" onClick={() => setStep("improvement")} className={SMALL_BUTTON}>
                 {t("codingAgent.wizardSkip")}
               </button>
             )}
@@ -545,7 +630,111 @@ export default function CodingAgentSetupWizard({
         </>
       )}
 
-      {/* ── Step 2: where a run works, and how hard it thinks. ── */}
+      {/* ── Step 2: the ClawBox Improvement Program. ── */}
+      {step === "improvement" && (
+        <>
+          <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardImprovementTitle")}</h2>
+          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">
+            {t("codingAgent.wizardImprovementHint")}
+          </p>
+
+          {/* The two lists ARE the consent, in the settings card's own words:
+              what travels and what never does, in full rather than behind a
+              hint — three buttons and a reassuring sentence would be asking
+              for a signature on a blank page. */}
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <p className="text-[10px] font-semibold text-[var(--text-secondary)] uppercase tracking-widest mb-1.5">
+                {t("improvement.sendsTitle")}
+              </p>
+              <ul className="text-[11px] text-[var(--text-muted)] leading-relaxed list-disc pl-4 space-y-1">
+                <li>{t("improvement.sends1")}</li>
+                <li>{t("improvement.sends2")}</li>
+                <li>{t("improvement.sends3")}</li>
+              </ul>
+            </div>
+            <div>
+              <p className="text-[10px] font-semibold text-[var(--text-secondary)] uppercase tracking-widest mb-1.5">
+                {t("improvement.neverTitle")}
+              </p>
+              <ul className="text-[11px] text-[var(--text-muted)] leading-relaxed list-disc pl-4 space-y-1">
+                <li>{t("improvement.never1")}</li>
+                <li>{t("improvement.never2")}</li>
+                <li>{t("improvement.never3")}</li>
+              </ul>
+            </div>
+          </div>
+
+          {/* The choice is LOCAL until Next: unlike the settings card, which
+              writes on every click, the wizard records one answer on its way
+              to the next step. A real radiogroup — one tab stop, arrows move
+              the choice — as the card's is. */}
+          <div
+            role="radiogroup"
+            aria-label={t("improvement.modeTitle")}
+            className="mt-4 space-y-2"
+            data-testid="coding-agent-wizard-improvement"
+          >
+            {IMPROVEMENT_MODES.map((m) => (
+              <button
+                key={m}
+                type="button"
+                role="radio"
+                ref={(el) => { improvementRefs.current[m] = el; }}
+                aria-checked={improvementMode === m}
+                tabIndex={improvementMode === m ? 0 : -1}
+                disabled={busy === "improvement"}
+                data-testid={`coding-agent-wizard-improvement-${m}`}
+                onKeyDown={(e) => moveImprovementWithArrows(e, m)}
+                onClick={() => { improvementTouched.current = true; setImprovementMode(m); }}
+                className={`w-full text-left rounded-xl border p-3 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                  improvementMode === m
+                    ? "border-[var(--coral-bright)] bg-[var(--coral-bright)]/10"
+                    : "border-white/[0.08] bg-white/[0.02] hover:border-white/20"
+                }`}
+              >
+                <span className="text-sm text-[var(--text-primary)]">{t(IMPROVEMENT_MODE_KEYS[m].label)}</span>
+                <span className="block text-[11px] text-[var(--text-muted)] leading-relaxed mt-0.5">
+                  {t(IMPROVEMENT_MODE_KEYS[m].hint, { n: maxIssuesPerDay })}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Said where the choice is made: an enabled programme with no
+              GitHub sends nothing, and the step before this one is skippable. */}
+          {improvementMode !== "off" && !github?.connected && (
+            <p className="mt-3 text-[11px] leading-relaxed text-amber-400" data-testid="coding-agent-wizard-improvement-github">
+              {t("improvement.githubMissing")}
+            </p>
+          )}
+
+          <div className="mt-5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setStep("github")}
+              disabled={busy === "improvement"}
+              data-testid="coding-agent-wizard-improvement-back"
+              className={SMALL_BUTTON}
+            >
+              {t("codingAgent.wizardBack")}
+            </button>
+            {/* No Skip: Next with Off chosen is how the owner declines, and
+                it is written explicitly all the same. */}
+            <button
+              type="button"
+              onClick={() => void saveImprovement()}
+              disabled={busy === "improvement"}
+              data-testid="coding-agent-wizard-improvement-next"
+              className={PRIMARY}
+            >
+              {busy === "improvement" ? t("codingAgent.wizardFinishing") : t("codingAgent.wizardNext")}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Step 3: where a run works, and how hard it thinks. ── */}
       {step === "project" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardProjectTitle")}</h2>
@@ -707,7 +896,7 @@ export default function CodingAgentSetupWizard({
           </label>
 
           <div className="mt-5 flex items-center gap-2">
-            <button type="button" onClick={() => setStep("github")} className={SMALL_BUTTON}>
+            <button type="button" onClick={() => setStep("improvement")} className={SMALL_BUTTON}>
               {t("codingAgent.wizardBack")}
             </button>
             <button
@@ -723,7 +912,7 @@ export default function CodingAgentSetupWizard({
         </>
       )}
 
-      {/* ── Step 3: which browser a run checks its work in. ── */}
+      {/* ── Step 4: which browser a run checks its work in. ── */}
       {step === "browser" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardBrowserTitle")}</h2>
@@ -761,7 +950,7 @@ export default function CodingAgentSetupWizard({
         </>
       )}
 
-      {/* ── Step 4: prove the whole thing actually works, or don't. ── */}
+      {/* ── Step 5: prove the whole thing actually works, or don't. ── */}
       {step === "harness" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardHarnessTitle")}</h2>

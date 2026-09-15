@@ -1,10 +1,11 @@
 /**
  * Settings → System → Desktop environment + Performance mode (TASK-455).
  *
- * The help text carries the THERMAL RATIONALE on purpose: the measurement is
- * the reason the default changed, and an owner deciding whether to pin their
- * clocks should be told what that costs before they do it, not after their
- * living-room appliance is sitting at 75 C.
+ * The help text carries the THERMAL RATIONALE on purpose: performance mode is
+ * ON by default since the owner's ruling of 2026-09-15, and the measurement is
+ * what keeping the clocks pinned costs, so an owner deciding whether to leave
+ * the switch on should be told before their living-room appliance is sitting
+ * at 75 C, not after.
  */
 export const systemProfileEn: Record<string, string> = {
   "systemProfile.title": "Desktop & power",
@@ -15,7 +16,7 @@ export const systemProfileEn: Record<string, string> = {
 
   "systemProfile.performanceLabel": "Performance mode",
   "systemProfile.performanceHelp":
-    "Pins the CPU and GPU to their maximum clocks instead of letting them scale. Faster to first token, but the board then idles at about 7.2 W and sustained local inference measured 74.8 °C — just over the 74 °C passive-cooling limit. Leave it off unless you are running long jobs and have airflow.",
+    "Pins the CPU and GPU to their maximum clocks instead of letting them scale. Faster to first token, but the board then idles at about 7.2 W and sustained local inference measured 74.8 °C — just over the 74 °C passive-cooling limit. On by default; turn it off if the box runs warm or sits somewhere without airflow.",
 
   "systemProfile.rebootRequired": "Restart the box to apply this change.",
   "systemProfile.unsupported": "Not available on this device.",

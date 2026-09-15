@@ -93,6 +93,16 @@ let gitReads: string[];
 let vercelReads: string[];
 
 /** The device, as far as this component can tell. */
+/**
+ * Past the GitHub step and through the Improvement Program step, onto the
+ * project folder. The programme's Next is a write, so the folder is awaited.
+ */
+async function passImprovementStep() {
+  fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+  fireEvent.click(await screen.findByTestId("coding-agent-wizard-improvement-next"));
+  await screen.findByTestId("coding-agent-wizard-folder");
+}
+
 function stubFetch(
   // `setupComplete` defaults to true: every test below is about a box whose
   // owner has been through the wizard, which is also what the route answers
@@ -113,6 +123,7 @@ function stubFetch(
   } = {},
 ) {
   let runs = runsArg;
+  let improvementMode = "off";
   posts = [];
   gitReads = [];
   vercelReads = [];
@@ -318,6 +329,20 @@ function stubFetch(
       // The route answers the whole status, re-read after the change.
       return json(payload());
     }
+    // The Improvement Program: the wizard's second step reads it on mount and
+    // writes the owner's answer on Next; the settings page embeds its card.
+    if (url === "/setup-api/improvement-program") {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { mode: string };
+        posts.push({ url, body });
+        improvementMode = body.mode;
+      }
+      return json({
+        mode: improvementMode, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
+        maxIssuesPerDay: 5, remainingToday: 5,
+        github: { installed: false, connected: false, login: null }, incidents: [],
+      });
+    }
     if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
       // The started run is in the listing from the next poll on, as the
@@ -388,15 +413,21 @@ describe("CodingAgentApp", () => {
       // GitHub is what a run pushes with, not what it needs to start, so the
       // step can be passed without an account.
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-      expect(screen.getByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
+      // The Improvement Program comes next — right after GitHub, on whose
+      // credential its reports go out — with Automatic proposed; Next writes
+      // the answer and lands on the folder.
+      expect(screen.getByTestId("coding-agent-wizard-improvement-auto")).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
+      expect(await screen.findByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
       expect(screen.getByTestId("coding-agent-wizard-browse")).toBeInTheDocument();
+      expect(posts.find((p) => p.url === "/setup-api/improvement-program")?.body).toEqual({ mode: "auto" });
     });
 
     it("proposes Ultracode and says what it costs", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
       // The owner is told before they choose, not by a bill afterwards.
@@ -408,7 +439,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
@@ -436,7 +467,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-skip"));
@@ -455,7 +486,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+      await passImprovementStep();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
@@ -1840,6 +1871,66 @@ describe("the box-wide Vercel integration", () => {
     expect(screen.queryByTestId("coding-agent-vercel-card")).toBeNull();
     // And the card never asked its route, so a box with the integration off
     // makes no Vercel request at all.
+    expect(vercelReads).toEqual([]);
+  });
+
+  it("names Vercel NOWHERE while it is OFF — the project page, the run page and the delete dialog alike", async () => {
+    // The integration is a BETA flag, off by default, and "off" means the
+    // feature is not on the box: not a card, not a button, not a line in a
+    // dialog. This walks the three surfaces in one sitting, against a route
+    // that still CLAIMS a link (an older server, or one that predates the
+    // gate), so what is pinned is the app's own silence and not the route's.
+    const SHOP = { ...PROJECT, folder: "shop", directory: "/home/clawbox/Projects/shop", name: "My Shop" };
+    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false }, [DEPLOYED], {
+      projects: [SITE_PROJECT, SHOP],
+      deletePreview: {
+        folder: "shop",
+        kind: "folder",
+        directory: "/home/clawbox/Projects/shop",
+        size: { bytes: 2048, files: 7, truncated: false },
+        unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
+        liveRuns: [],
+        vercelLinked: true,
+        secretNames: ["VERCEL_TOKEN"],
+        runCount: 0,
+        retentionDays: 30,
+        retentionMax: 10,
+        trashCount: 0,
+        wouldPurge: [],
+        refusal: null,
+      },
+    });
+    render(<CodingAgentApp />);
+    const VERCEL_IDS = [
+      "coding-agent-vercel-card", "coding-agent-vercel-project", "coding-agent-deploy",
+      "coding-agent-deploy-actions", "coding-agent-pipeline",
+    ];
+    const none = () => { for (const id of VERCEL_IDS) expect(screen.queryByTestId(id)).toBeNull(); };
+
+    // The project page.
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    const project = await screen.findByTestId("coding-agent-project-page");
+    expect(project.textContent).not.toMatch(/vercel/i);
+    none();
+
+    // The run page, for a run whose record carries a deployment and a pipeline.
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${DEPLOYED.id}`));
+    await screen.findByTestId("coding-agent-run-page");
+    none();
+
+    // The delete dialog, over a preview that names a link. Home is two
+    // breadcrumb steps up — the sidebar's Home exists only in a wide window.
+    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+    await screen.findByTestId("coding-agent-project-page");
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+    fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
+    const facts = await screen.findByTestId("coding-agent-delete-facts");
+    expect(facts.textContent).not.toContain(t("codingAgent.delete.willRemoveVercel"));
+    // The secrets line is still there — it is the link that is off the box,
+    // not the folder's own credentials.
+    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
+    expect(screen.getByRole("dialog").textContent).not.toMatch(/vercel link/i);
     expect(vercelReads).toEqual([]);
   });
 });

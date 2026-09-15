@@ -8,7 +8,7 @@ import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureG
 import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
-import { type ProvisionPhase, TIME_OF_DAY } from "@/lib/memory-shard-state";
+import { type EmbedderChoiceStatus, type EmbeddingSource, parseEmbedderChoiceStatus, type ProvisionPhase, TIME_OF_DAY } from "@/lib/memory-shard-state";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 
 /**
@@ -111,6 +111,32 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
     }
   };
 
+  // ─── Where the model runs: the ClawBox AI cloud, or this box ───
+  // Read on mount so it has answered by the time the last step is on screen.
+  // The DEFAULT is the cloud whenever the box says it is on offer — a paid
+  // plan and a cloud embedder that answered (the owner's ruling, 2026-09-15:
+  // no 640 MB download for a box that has a plan) — and the owner's own pick
+  // always wins over that default. A read that fails, or an older server,
+  // leaves the model on this box, which is what every box did before.
+  const [embedder, setEmbedder] = useState<EmbedderChoiceStatus | null>(null);
+  const [pickedSource, setPickedSource] = useState<EmbeddingSource | null>(null);
+  // Whether that read has ANSWERED, apart from what it answered: `embedder` is
+  // null both while it is in flight and after it failed, and a press in the
+  // first case would take the local path and download 640 MB on a box the
+  // cloud model was about to be offered on. A failed read still settles, so
+  // the local flow stays reachable.
+  const [embedderSettled, setEmbedderSettled] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => { if (live) setEmbedder(parseEmbedderChoiceStatus(body)); })
+      .catch(() => {})
+      .finally(() => { if (live) setEmbedderSettled(true); });
+    return () => { live = false; };
+  }, []);
+  const source: EmbeddingSource = pickedSource ?? (embedder?.cloudAvailable ? "cloud" : "local");
+
   // ─── Step 4: the model, then the first index ───
   const [reachedPhase, setPhase] = useState<ProvisionPhase>("idle");
   const [progress, setProgress] = useState<number | null>(null);
@@ -148,75 +174,84 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
     setBusy("provision");
     setError(null);
     try {
-      setPhase("checking");
-      setDetail(null);
-      const status = await fetch("/setup-api/embed/status", { cache: "no-store", signal })
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null) as { installed?: boolean } | null;
-      // The probe swallows its own failure; an abort is the one it must not.
-      if (signal.aborted) return;
+      // The model on this box has to be here first; the cloud model has
+      // nothing to fetch.
+      if (source === "local") {
+        setPhase("checking");
+        setDetail(null);
+        const status = await fetch("/setup-api/embed/status", { cache: "no-store", signal })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null) as { installed?: boolean } | null;
+        // The probe swallows its own failure; an abort is the one it must not.
+        if (signal.aborted) return;
 
-      if (!status?.installed) {
-        setPhase("pulling-model");
-        setProgress(null);
-        const pull = await fetch("/setup-api/embed/install", { method: "POST", signal });
-        if (!pull.ok || !pull.body) throw new Error(t("clawkeep.memory.setup.pullFailed"));
-        // NDJSON, one object per line: `{status}` while the root step runs,
-        // then one closing `{success}` or `{error}`. A FAILURE arrives
-        // in-stream as a 200 with {error}, which is why the body is read for
-        // one even though the response was ok. The download's own progress
-        // reaches the journal as lines; a percentage in one is shown when it
-        // is there and nothing is guessed when it is not.
-        //
-        // The closing line is REQUIRED. A stream that simply ends — the web
-        // server restarting mid-download, the connection dropping — has said
-        // neither, and reading its end as "done" would switch the provider
-        // and start a full reindex against a model that is not on the box,
-        // with the owner watching the ready phase.
-        const reader = pull.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let finished = false;
-        const readLine = (line: string) => {
-          if (!line.trim()) return;
-          let parsed: PullLine;
-          try { parsed = JSON.parse(line) as PullLine; } catch { return; }
-          if (parsed.error) throw new Error(parsed.error);
-          if (parsed.success === true) finished = true;
-          if (parsed.status) {
-            setDetail(parsed.status);
-            const percent = /(\d{1,3})%/.exec(parsed.status);
-            if (percent) setProgress(Math.min(100, Number(percent[1])) / 100);
+        if (!status?.installed) {
+          setPhase("pulling-model");
+          setProgress(null);
+          const pull = await fetch("/setup-api/embed/install", { method: "POST", signal });
+          if (!pull.ok || !pull.body) throw new Error(t("clawkeep.memory.setup.pullFailed"));
+          // NDJSON, one object per line: `{status}` while the root step runs,
+          // then one closing `{success}` or `{error}`. A FAILURE arrives
+          // in-stream as a 200 with {error}, which is why the body is read for
+          // one even though the response was ok. The download's own progress
+          // reaches the journal as lines; a percentage in one is shown when it
+          // is there and nothing is guessed when it is not.
+          //
+          // The closing line is REQUIRED. A stream that simply ends — the web
+          // server restarting mid-download, the connection dropping — has said
+          // neither, and reading its end as "done" would switch the provider
+          // and start a full reindex against a model that is not on the box,
+          // with the owner watching the ready phase.
+          const reader = pull.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let finished = false;
+          const readLine = (line: string) => {
+            if (!line.trim()) return;
+            let parsed: PullLine;
+            try { parsed = JSON.parse(line) as PullLine; } catch { return; }
+            if (parsed.error) throw new Error(parsed.error);
+            if (parsed.success === true) finished = true;
+            if (parsed.status) {
+              setDetail(parsed.status);
+              const percent = /(\d{1,3})%/.exec(parsed.status);
+              if (percent) setProgress(Math.min(100, Number(percent[1])) / 100);
+            }
+          };
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+              for (const line of lines) readLine(line);
+            }
+            // The route ends every line with a newline, but the closing line is
+            // the one this step now depends on, so a final line the stream
+            // closed on without one is read rather than left in the buffer.
+            buffer += decoder.decode();
+            readLine(buffer);
+          } finally {
+            // Leaving the loop on an error line releases the body rather than
+            // holding a locked reader on it until garbage collection; on a
+            // stream that has not ended, cancelling is what tells the install
+            // route its client is gone.
+            await reader.cancel().catch(() => {});
           }
-        };
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-            for (const line of lines) readLine(line);
-          }
-          // The route ends every line with a newline, but the closing line is
-          // the one this step now depends on, so a final line the stream
-          // closed on without one is read rather than left in the buffer.
-          buffer += decoder.decode();
-          readLine(buffer);
-        } finally {
-          // Leaving the loop on an error line releases the body rather than
-          // holding a locked reader on it until garbage collection; on a
-          // stream that has not ended, cancelling is what tells the install
-          // route its client is gone.
-          await reader.cancel().catch(() => {});
+          if (!finished) throw new Error(t("clawkeep.memory.setup.pullFailed"));
+          setProgress(1);
         }
-        if (!finished) throw new Error(t("clawkeep.memory.setup.pullFailed"));
-        setProgress(1);
       }
 
       setPhase("switching-provider");
       setDetail(null);
-      const provider = await fetch("/setup-api/clawkeep/memory/provider", { method: "POST", signal });
+      const provider = await fetch(
+        "/setup-api/clawkeep/memory/provider",
+        source === "cloud"
+          ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: "cloud" }), signal }
+          : { method: "POST", signal },
+      );
       if (!provider.ok) {
         const out = (await provider.json().catch(() => null)) as { error?: string } | null;
         throw new Error(out?.error || t("clawkeep.memory.setup.providerFailed"));
@@ -410,7 +445,40 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">{t("clawkeep.memory.setup.provisionTitle")}</h2>
             <HelpTip text={t("clawkeep.memory.setup.provisionHint")} label={t("clawkeep.memory.setup.provisionTitle")} testId="memory-shard-provision-help" />
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">{t("clawkeep.memory.setup.provisionBody")}</p>
+          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]" data-testid="memory-shard-provision-body">
+            {t(source === "cloud" ? "clawkeep.memory.setup.provisionBodyCloud" : "clawkeep.memory.setup.provisionBody")}
+          </p>
+
+          {/* The choice is drawn only where both halves exist: the edition that
+              indexes on the box itself has no cloud model to offer. */}
+          {embedder?.cloudSupported && (
+            <div className="mt-3" data-testid="memory-shard-source">
+              <div className={SEGMENTED_TRACK} role="radiogroup" aria-label={t("clawkeep.memory.embedder.title")}>
+                {(["cloud", "local"] as const).map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    role="radio"
+                    aria-checked={source === option}
+                    disabled={busy === "provision" || (option === "cloud" && !embedder.cloudAvailable)}
+                    onClick={() => setPickedSource(option)}
+                    data-testid={`memory-shard-source-${option}`}
+                    className={`${source === option ? SEGMENT_ON : SEGMENT_OFF} disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    {t(`clawkeep.memory.embedder.${option}`)}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-source-hint">
+                {t(source === "cloud" ? "clawkeep.memory.embedder.cloudHint" : "clawkeep.memory.embedder.localHint")}
+              </p>
+              {!embedder.cloudAvailable && (
+                <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-source-cloud-unavailable">
+                  {t("clawkeep.memory.embedder.cloudUnavailable")}
+                </p>
+              )}
+            </div>
+          )}
 
           {phase !== "idle" && phase !== "failed" && (
             <div className="mt-4 rounded-xl bg-[var(--fill-1)] border border-[var(--border-subtle)] px-3 py-3" data-testid="memory-shard-progress">
@@ -438,7 +506,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             <button
               type="button"
               onClick={() => void provision()}
-              disabled={busy === "provision"}
+              disabled={busy === "provision" || !embedderSettled}
               data-testid="memory-shard-index-now"
               className={BTN_PRIMARY}
             >

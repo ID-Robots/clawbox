@@ -74,6 +74,20 @@ describe("GET", () => {
     expect(body.maxIssuesPerDay).toBe(5);
   });
 
+  it("says whether the owner ever answered, apart from what the answer is", async () => {
+    let body = await (await route.GET()).json();
+    expect(body).toMatchObject({ mode: "off", answered: false });
+    await store.setImprovementMode("off");
+    body = await (await route.GET()).json();
+    expect(body).toMatchObject({ mode: "off", answered: true });
+  });
+
+  it("reads a stored value that is not one of the three as never answered", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ clawbox_improvement_program: "sometimes" }));
+    const body = await (await route.GET()).json();
+    expect(body).toMatchObject({ mode: "off", answered: false });
+  });
+
   it("counts what is waiting and what has been filed", async () => {
     const a = await store.recordIncident({ source: "update", message: "one" });
     await store.recordIncident({ source: "update", message: "two" });

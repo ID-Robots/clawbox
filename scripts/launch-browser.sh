@@ -14,7 +14,7 @@ VNC_STATE_FILE="${HOME}/.cache/clawbox/vnc-display.env"
 # an argument from the page that changed it.
 BROWSER_STATE_FILE="${HOME}/.cache/clawbox/browser.env"
 DEFAULT_DISPLAY="${DISPLAY:-:99}"
-DEFAULT_START_URL="https://www.google.com"
+DEFAULT_START_URL="about:blank"
 
 display_ready() {
   local display="$1"

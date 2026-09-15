@@ -813,7 +813,9 @@ describe("SettingsApp providers and Local AI pages", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => (
       input.toString() === "/setup-api/background-jobs"
         ? jsonResponse({ harness: "openclaw", degraded: false, jobs: [{ id: "checkIns", enabled: false, supported: true, key: "agents.defaults.heartbeat.every" }] })
-        : inner(input, init)
+        : input.toString() === "/setup-api/harness/mcp"
+          ? jsonResponse({ enabled: true, registered: { openclaw: true, hermes: null } })
+          : inner(input, init)
     )));
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const labels = navButtons(container).map((b) => b.textContent ?? "");
@@ -824,11 +826,16 @@ describe("SettingsApp providers and Local AI pages", () => {
     const page = await screen.findByTestId("settings-harness-page");
     expect(within(page).getByText("settings.harnessTitle")).toBeInTheDocument();
     expect(await within(page).findByTestId("settings-background-jobs")).toBeInTheDocument();
+    // The assistant's device tools switch sits between the picker and the
+    // background jobs (owner's request, 2026-09-15).
+    const mcp = await within(page).findByTestId("clawbox-mcp-panel");
+    expect(mcp.compareDocumentPosition(within(page).getByTestId("settings-background-jobs")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "system" } }));
     await waitFor(() => expect(screen.queryByTestId("settings-harness-page")).toBeNull());
     expect(screen.queryByText("settings.harnessTitle")).toBeNull();
     expect(screen.queryByTestId("settings-background-jobs")).toBeNull();
+    expect(screen.queryByTestId("clawbox-mcp-panel")).toBeNull();
   });
 
   it("carries no Coding Agent section — its settings live in the Coding Agent app now", async () => {

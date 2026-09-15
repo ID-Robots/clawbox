@@ -78,7 +78,7 @@ import { DATA_DIR } from "@/lib/config-store";
 import { gitIn, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import type { ChildResult } from "@/lib/child-run";
 import { isLive } from "@/lib/coding-agent-status";
-import { getDefaultDirectory, listRuns, projectDirectoryOf, type CodingProjectKind, type CodingRun } from "@/lib/coding-agent";
+import { getDefaultDirectory, listRuns, projectDirectoryOf, readVercelEnabled, type CodingProjectKind, type CodingRun } from "@/lib/coding-agent";
 import { beginProjectRemoval, runStartingIn } from "@/lib/coding-project-removal-lock";
 import { deleteVercelLink, readVercelLink } from "@/lib/vercel-link";
 import { deleteSecretsForScope, listSecrets } from "@/lib/project-secrets";
@@ -957,7 +957,13 @@ export interface ProjectDeletePreview {
   size: DirectorySize;
   unsaved: UnsavedWork;
   liveRuns: LiveRunInProject[];
-  /** Whether this project has a Vercel link that would go with it. */
+  /**
+   * Whether this project has a Vercel link that would go with it — and that the
+   * owner can be TOLD about: `false` while the box-wide Vercel integration is
+   * off, whatever is on disk, because the feature is not on that box and no
+   * surface may mention it. The link still goes with the folder (see
+   * `vercelLinkRemoved`).
+   */
   vercelLinked: boolean;
   /** The names of the project-scoped secrets that would go with it. */
   secretNames: string[];
@@ -997,11 +1003,12 @@ export async function previewProjectDelete(input: { folder: unknown; kind?: unkn
   const roots = await projectRoots();
   const target = await resolveProjectTarget(input, roots);
 
-  const [size, unsaved, secretNames, vercelLink] = await Promise.all([
+  const [size, unsaved, secretNames, vercelLink, vercelOn] = await Promise.all([
     directorySize(target.real),
     unsavedWorkIn(target.real),
     projectSecretNames(target.folder),
     readLink(target.folder),
+    readVercelEnabled().catch(() => false),
   ]);
   const liveRuns = liveRunsInProject(target);
   const runCount = listRuns().filter((run) => belongsToProject(run, target)).length;
@@ -1014,7 +1021,7 @@ export async function previewProjectDelete(input: { folder: unknown; kind?: unkn
     size,
     unsaved,
     liveRuns,
-    vercelLinked: vercelLink,
+    vercelLinked: vercelOn && vercelLink,
     secretNames,
     runCount,
     retentionDays: TRASH_RETENTION_DAYS,
@@ -1051,7 +1058,13 @@ export interface ProjectDeleteOutcome {
   retentionDays: number;
   /** The count bound. See `ProjectDeletePreview.retentionMax`. */
   retentionMax: number;
-  /** Was a Vercel link taken down with it? */
+  /**
+   * Was a Vercel link the owner was shown taken down with it? `false` while the
+   * box-wide Vercel integration is off — the stored link is still cleared then,
+   * as housekeeping (a link left behind is what a later project of the same
+   * name would inherit the day the flag is switched on), but the preview said
+   * nothing about it and neither does the answer.
+   */
   vercelLinkRemoved: boolean;
   /** The project-scoped secrets that went with it, by name. */
   secretsRemoved: string[];
@@ -1154,7 +1167,11 @@ export async function deleteProject(input: {
     // the credentials of a project that is still on disk and possibly mid-run.
     // Moving the removed folder back would not bring them back either.
     const sharedWith = await otherProjectWithSameScope(target, roots);
-    const vercelLinkRemoved = sharedWith ? false : await deleteVercelLink(target.folder).catch(() => false);
+    const linkRemoved = sharedWith ? false : await deleteVercelLink(target.folder).catch(() => false);
+    // Reported only where the owner could have seen the link: while the Vercel
+    // integration is off the removal above is housekeeping the answer does not
+    // mention, the same silence the preview kept.
+    const vercelLinkRemoved = linkRemoved && await readVercelEnabled().catch(() => false);
     const secretsRemoved = sharedWith ? [] : await deleteSecretsForScope(target.folder).catch(() => [] as string[]);
     const pruned = await pruneProjectTrash(roots, deletedAt)
       .catch(() => ({ removed: [] as string[], expired: [] as string[], early: [] as string[] }));
