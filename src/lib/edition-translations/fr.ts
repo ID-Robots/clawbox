@@ -1327,7 +1327,7 @@ export const fr: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "C'est déjà sur ce boîtier.",
   "localModels.install.refusal.inUse": "C'est celui que ce boîtier utilise. Choisissez-en un autre d'abord.",
   "localModels.ollama.title": "Modèles Ollama",
-  "localModels.ollama.hint": "Des modèles de conversation supplémentaires gardés sur ce boîtier. Rien n'est téléchargé tant que vous ne le demandez pas.",
+  "localModels.ollama.hint": "Des modèles de conversation supplémentaires gardés sur ce boîtier. Rien n'est téléchargé tant que vous ne le demandez pas, et un modèle que vous téléchargez devient le modèle de conversation local de ce boîtier.",
   "localModels.ollama.none": "Aucun modèle Ollama sur ce boîtier pour l'instant.",
   "localModels.ollama.useForChat": "Utiliser pour la conversation locale",
   "localModels.ollama.nowLocal": "{model} est désormais le modèle de conversation local de ce boîtier.",

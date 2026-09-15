@@ -1337,7 +1337,7 @@ export const zh: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "它已经在这台盒子上了。",
   "localModels.install.refusal.inUse": "这台盒子正在用它。请先选择另一个。",
   "localModels.ollama.title": "Ollama 模型",
-  "localModels.ollama.hint": "存放在这台盒子上的额外聊天模型。在你提出要求之前不会下载任何东西。",
+  "localModels.ollama.hint": "存放在这台盒子上的额外聊天模型。在你提出要求之前不会下载任何东西；你下载的模型会成为这台盒子的本地聊天模型。",
   "localModels.ollama.none": "这台盒子上还没有 Ollama 模型。",
   "localModels.ollama.useForChat": "用于本地聊天",
   "localModels.ollama.nowLocal": "{model} 现在是这台盒子的本地聊天模型。",

@@ -126,7 +126,7 @@ export const localModelsEn: Record<string, string> = {
   // Extra chat models on this box. The browse-and-pull surface used to exist
   // only inside the setup wizard.
   "localModels.ollama.title": "Ollama models",
-  "localModels.ollama.hint": "Extra chat models kept on this box. Nothing is downloaded until you ask for it.",
+  "localModels.ollama.hint": "Extra chat models kept on this box. Nothing is downloaded until you ask for it, and a model you download becomes this box's local chat model.",
   "localModels.ollama.none": "No Ollama models on this box yet.",
   "localModels.ollama.useForChat": "Use for local chat",
   "localModels.ollama.nowLocal": "{model} is now this box's local chat model.",

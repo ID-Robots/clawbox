@@ -1313,7 +1313,7 @@ export const bg: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "Това вече е на тази кутия.",
   "localModels.install.refusal.inUse": "Това е моделът, който кутията използва. Първо изберете друг.",
   "localModels.ollama.title": "Модели на Ollama",
-  "localModels.ollama.hint": "Допълнителни модели за разговор, държани на тази кутия. Нищо не се изтегля, докато не поискате.",
+  "localModels.ollama.hint": "Допълнителни модели за разговор, държани на тази кутия. Нищо не се изтегля, докато не поискате, а модел, който изтеглите, става локалният модел за разговор на тази кутия.",
   "localModels.ollama.none": "Още няма модели на Ollama на тази кутия.",
   "localModels.ollama.useForChat": "Използване за локален разговор",
   "localModels.ollama.nowLocal": "{model} вече е локалният модел за разговор на тази кутия.",

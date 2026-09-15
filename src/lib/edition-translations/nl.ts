@@ -1327,7 +1327,7 @@ export const nl: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "Dat staat al op deze box.",
   "localModels.install.refusal.inUse": "Dat is wat deze box gebruikt. Kies eerst een ander.",
   "localModels.ollama.title": "Ollama-modellen",
-  "localModels.ollama.hint": "Extra chatmodellen op deze box. Er wordt niets gedownload voordat u erom vraagt.",
+  "localModels.ollama.hint": "Extra chatmodellen op deze box. Er wordt niets gedownload voordat u erom vraagt, en een model dat u downloadt wordt het lokale chatmodel van deze box.",
   "localModels.ollama.none": "Nog geen Ollama-modellen op deze box.",
   "localModels.ollama.useForChat": "Gebruiken voor lokale chat",
   "localModels.ollama.nowLocal": "{model} is nu het lokale chatmodel van deze box.",

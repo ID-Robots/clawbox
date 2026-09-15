@@ -1326,7 +1326,7 @@ export const de: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "Das ist bereits auf dieser Box.",
   "localModels.install.refusal.inUse": "Das wird von dieser Box gerade verwendet. Wählen Sie zuerst ein anderes.",
   "localModels.ollama.title": "Ollama-Modelle",
-  "localModels.ollama.hint": "Zusätzliche Chat-Modelle auf dieser Box. Es wird nichts heruntergeladen, bevor Sie es verlangen.",
+  "localModels.ollama.hint": "Zusätzliche Chat-Modelle auf dieser Box. Es wird nichts heruntergeladen, bevor Sie es verlangen, und ein heruntergeladenes Modell wird zum lokalen Chat-Modell dieser Box.",
   "localModels.ollama.none": "Noch keine Ollama-Modelle auf dieser Box.",
   "localModels.ollama.useForChat": "Für lokalen Chat verwenden",
   "localModels.ollama.nowLocal": "{model} ist jetzt das lokale Chat-Modell dieser Box.",

@@ -1323,7 +1323,7 @@ export const sv: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "Det finns redan på den här lådan.",
   "localModels.install.refusal.inUse": "Det är den som lådan använder. Välj en annan först.",
   "localModels.ollama.title": "Ollama-modeller",
-  "localModels.ollama.hint": "Extra chattmodeller som ligger på den här lådan. Ingenting laddas ner förrän du ber om det.",
+  "localModels.ollama.hint": "Extra chattmodeller som ligger på den här lådan. Ingenting laddas ner förrän du ber om det, och en modell du laddar ner blir lådans lokala chattmodell.",
   "localModels.ollama.none": "Inga Ollama-modeller på den här lådan än.",
   "localModels.ollama.useForChat": "Använd för lokal chatt",
   "localModels.ollama.nowLocal": "{model} är nu lådans lokala chattmodell.",

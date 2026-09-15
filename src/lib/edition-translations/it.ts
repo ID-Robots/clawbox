@@ -1338,7 +1338,7 @@ export const it: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "È già su questa scatola.",
   "localModels.install.refusal.inUse": "È quello che questa scatola sta usando. Scegline prima un altro.",
   "localModels.ollama.title": "Modelli Ollama",
-  "localModels.ollama.hint": "Modelli di chat aggiuntivi tenuti su questa scatola. Non viene scaricato nulla finché non lo chiedi.",
+  "localModels.ollama.hint": "Modelli di chat aggiuntivi tenuti su questa scatola. Non viene scaricato nulla finché non lo chiedi, e un modello che scarichi diventa il modello di chat locale di questa scatola.",
   "localModels.ollama.none": "Ancora nessun modello Ollama su questa scatola.",
   "localModels.ollama.useForChat": "Usa per la chat locale",
   "localModels.ollama.nowLocal": "{model} ora è il modello di chat locale di questa scatola.",

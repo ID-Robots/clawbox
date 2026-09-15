@@ -1328,7 +1328,7 @@ export const ja: Record<string, string> = {
   "localModels.install.refusal.alreadyHere": "それはすでにこの本体にあります。",
   "localModels.install.refusal.inUse": "それはこの本体が使用中のものです。先に別のものを選んでください。",
   "localModels.ollama.title": "Ollama のモデル",
-  "localModels.ollama.hint": "この本体に置く追加のチャットモデルです。指示するまで何もダウンロードしません。",
+  "localModels.ollama.hint": "この本体に置く追加のチャットモデルです。指示するまで何もダウンロードせず、ダウンロードしたモデルはこの本体のローカルチャットモデルになります。",
   "localModels.ollama.none": "この本体にはまだ Ollama のモデルがありません。",
   "localModels.ollama.useForChat": "ローカルチャットに使う",
   "localModels.ollama.nowLocal": "{model} がこの本体のローカルチャットモデルになりました。",
