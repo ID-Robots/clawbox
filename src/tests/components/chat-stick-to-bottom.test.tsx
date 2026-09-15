@@ -17,6 +17,7 @@ class FakeResizeObserver {
     FakeResizeObserver.instances.push(this);
   }
   observe(el: Element) { this.observed.add(el); }
+  /** Tracked, because a transcript replaced wholesale must not be held by the observer. */
   unobserve(el: Element) { this.observed.delete(el); }
   disconnect() { this.observed.clear(); }
   fire() { this.callback([], this as unknown as ResizeObserver); }
@@ -75,6 +76,24 @@ describe("useStickToBottom", () => {
     const observer = FakeResizeObserver.instances[0];
     expect(observer.observed.has(screen.getByTestId("transcript"))).toBe(true);
     expect(observer.observed.has(screen.getByTestId("first"))).toBe(true);
+  });
+
+  it("lets go of a child that leaves, and picks up the one that arrives", async () => {
+    render(<Transcript />);
+    const el = screen.getByTestId("transcript");
+    const observer = FakeResizeObserver.instances[0];
+    const first = screen.getByTestId("first");
+    expect(observer.observed.has(first)).toBe(true);
+
+    // A session switch replaces the transcript: the old bubbles go, new ones
+    // arrive. The observer must follow both halves of that.
+    const card = document.createElement("div");
+    el.appendChild(card);
+    await waitFor(() => expect(observer.observed.has(card)).toBe(true));
+    first.remove();
+    await waitFor(() => expect(observer.observed.has(first)).toBe(false));
+    expect(observer.observed.has(card)).toBe(true);
+    expect(observer.observed.has(el)).toBe(true);
   });
 
   it("leaves a reader who scrolled up where they are, and follows again once they are back down", () => {

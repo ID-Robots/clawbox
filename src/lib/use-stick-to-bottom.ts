@@ -70,9 +70,24 @@ export function useStickToBottom(
     // The container itself (the panel resized) and every direct child (a card
     // that grew in place, a picture that finished loading).
     const resize = typeof ResizeObserver === "function" ? new ResizeObserver(follow) : null;
+    // What is observed right now, so a child that LEAVES is let go of. A
+    // transcript is replaced wholesale on a session switch and on Clear, and an
+    // observer that only ever added would keep every removed bubble and its
+    // subtree reachable until the chat closed.
+    const observed = new Set<Element>();
     const observeChildren = () => {
       if (!resize) return;
-      for (const child of Array.from(el.children)) resize.observe(child);
+      const children = new Set<Element>(Array.from(el.children));
+      for (const child of observed) {
+        if (children.has(child)) continue;
+        resize.unobserve(child);
+        observed.delete(child);
+      }
+      for (const child of children) {
+        if (observed.has(child)) continue;
+        resize.observe(child);
+        observed.add(child);
+      }
     };
     resize?.observe(el);
     observeChildren();
@@ -91,6 +106,7 @@ export function useStickToBottom(
       disposed = true;
       el.removeEventListener("scroll", onScroll);
       resize?.disconnect();
+      observed.clear();
       mutations?.disconnect();
     };
   }, [containerRef, enabled, threshold]);
