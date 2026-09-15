@@ -353,16 +353,28 @@ export async function DELETE(req: Request) {
   if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }
-  const freed = await dirBytes(whisperCacheDir(size));
-  const removed = await removeWhisperSize(size);
-  if (!removed.ok) {
-    return NextResponse.json(
-      { error: removed.error, code: removed.code ?? "remove_failed" },
-      { status: removed.code === "in_use" ? 409 : 500 },
-    );
+  // The same reservation every other write on this route takes, held from the
+  // measurement through the re-read: the engine install pre-downloads `base`
+  // and the engine removal measures and deletes every size, and a size removal
+  // interleaved with either would measure or delete a cache under them.
+  if (inFlight || engineInFlight) {
+    return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
   }
-  const state = await readWhisperState();
-  return NextResponse.json({ ok: true, freedBytes: freed, ...state });
+  engineInFlight = true;
+  try {
+    const freed = await dirBytes(whisperCacheDir(size));
+    const removed = await removeWhisperSize(size);
+    if (!removed.ok) {
+      return NextResponse.json(
+        { error: removed.error, code: removed.code ?? "remove_failed" },
+        { status: removed.code === "in_use" ? 409 : 500 },
+      );
+    }
+    const state = await readWhisperState();
+    return NextResponse.json({ ok: true, freedBytes: freed, ...state });
+  } finally {
+    engineInFlight = false;
+  }
 }
 
 /**

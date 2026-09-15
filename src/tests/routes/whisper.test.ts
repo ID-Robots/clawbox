@@ -387,6 +387,28 @@ describe("DELETE /setup-api/whisper", () => {
     expect((await res.json()).code).toBe("in_use");
   });
 
+  it("refuses to remove a size while the engine is being installed", async () => {
+    state.installed = false;
+    let finish: () => void = () => {};
+    followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
+    const { POST, DELETE } = await load();
+    const installing = await POST(post({ action: "install-engine" }));
+    const res = await DELETE(del("base"));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("busy");
+    expect(removed).not.toHaveBeenCalled();
+    finish();
+    await readStream(installing);
+  });
+
+  it("gives the reservation back after a size removal, whether it landed or was refused", async () => {
+    const { DELETE } = await load();
+    expect((await DELETE(del("small"))).status).toBe(200);
+    removed.mockResolvedValueOnce({ ok: false, error: "That model is the one in use.", code: "in_use" });
+    expect((await DELETE(del("small"))).status).toBe(409);
+    expect((await DELETE(del("small"))).status).toBe(200);
+  });
+
   it("refuses a size it does not offer before anything is touched", async () => {
     const { DELETE } = await load();
     const res = await DELETE(del(encodeURIComponent("../../etc")));
