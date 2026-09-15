@@ -1038,10 +1038,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           plan: t("codingAgent.chatPlan"),
         },
       }}
-      // View: the run's own page in the Coding Agent app, with the whole
-      // desktop for it — the live terminal is embedded there while it runs.
+      // View: the run's own page in the Coding Agent app — the live terminal
+      // is embedded there while it runs. In a NORMAL window: the button asked
+      // for a maximize once, which threw a window the owner had sized and
+      // placed to full screen on every press; a window already up keeps its
+      // size and place now, and the chat is in the corner for a reason.
       openLabel={t("codingAgent.liveView")}
-      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true })}
+      onOpen={() => dispatchOpenCodingRun(run.id)}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
