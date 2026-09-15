@@ -6,7 +6,7 @@ import { saveEnv } from "@/tests/helpers/env";
 /**
  * What the journal is allowed to say when an MCP reload was asked for.
  *
- * Five families ask for the same reload through the same helper, and each one
+ * Six families ask for the same reload through the same helper, and each one
  * writes its own line about it. Two of them said "asked the agent to reload its
  * MCP servers" while the mechanism is HERMES' dashboard JSON-RPC and nothing
  * else: on the dual SKU that is the harness that answers even after the box has
@@ -35,7 +35,22 @@ vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
   reloadMcpServers: reloadMock,
   reportMcpReloadRefused: refusedMock,
 }));
+// The MCP switch's Hermes half writes config.yaml, reads the entry back and
+// looks at the messaging gateway around its reload. Plain functions, not
+// vi.fn, so the suite-wide mock resets cannot empty them: this file drives the
+// sentence and the transport, and these only have to answer "removed, and no
+// gateway running".
+vi.mock("@/lib/hermes-config-yaml", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-config-yaml")>()),
+  patchHermesConfig: async () => ({ mode: "merge", backupPath: null }),
+  resolveHermesConfigValue: async () => ({ state: "absent" }),
+}));
+vi.mock("@/lib/hermes-telegram", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-telegram")>()),
+  readHermesGatewayStatus: async () => ({ value: { installed: false, running: false }, answered: true }),
+}));
 
+import { applyClawboxMcpSwitch } from "@/lib/clawbox-mcp-registration";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { refreshEmailToolsIfReadabilityChanged } from "@/lib/email-mcp-refresh";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
@@ -79,6 +94,14 @@ const FAMILIES = [
     // deliberately not this sentence.
     tag: "hermes/image-refresh",
     ask: () => refreshHermesImageTools(true, false),
+    askAlreadyReloaded: null,
+  },
+  {
+    // The sixth, since 2026-09-15: the owner's switch for the ClawBox MCP
+    // server removes (or restores) `mcp_servers.clawbox` and then asks the
+    // same reload, so its line names the same mechanism.
+    tag: "clawbox-mcp",
+    ask: () => applyClawboxMcpSwitch(false),
     askAlreadyReloaded: null,
   },
 ] as const;
@@ -218,6 +241,7 @@ describe("every family names the mechanism it actually used", () => {
     }
     expect([...asking].sort()).toEqual(
       [
+        "clawbox-mcp-registration",
         "coding-agent-mcp-refresh",
         "email-mcp-refresh",
         "harness-mcp-refresh",

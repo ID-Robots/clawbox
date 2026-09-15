@@ -847,7 +847,10 @@ describe("install.sh wires TTS to the on-device chain", () => {
     const define = 'if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" "$TTS_SCRIPT_SRC"; then';
     expect(step).toContain(define);
     const defineIndex = step.indexOf(define);
-    const selectIndex = step.indexOf('oc_config_set "$TTS_HOME.provider" ');
+    // The selection of tts-local-cli, not the first provider write in the step:
+    // since 2026-09-15 a box with no Kokoro selects the cloud voice earlier, in
+    // its own branch that returns before any local definition is attempted.
+    const selectIndex = step.indexOf('if ! oc_config_set "$TTS_HOME.provider" "$TTS_SELECTED"; then');
     expect(selectIndex).toBeGreaterThan(defineIndex);
     expect(step.slice(defineIndex, selectIndex)).toContain("return 1");
     // And the helper itself writes through the retrying oc_config_set.
@@ -897,13 +900,17 @@ describe("install.sh wires TTS to the on-device chain", () => {
     expect(step).toContain('outputFormat:"wav"');
   });
 
-  it("installs Kokoro as part of the same step, and names no second engine", () => {
+  it("installs Kokoro only when asked, from the same step, and names no second engine", () => {
     expect(step).toContain("install-voice.sh");
-    // A fallback-only flag until TASK-420, which installed the CPU fallback
-    // and nothing else while this step claimed Kokoro GPU. --tts-only installs
-    // Kokoro; behaviour is covered by install-kokoro-tts.test.ts, which
-    // executes it.
-    expect(step).toMatch(/install-voice\.sh" --tts-only/);
+    // Since 2026-09-15 the step runs install-voice.sh in the mode it was handed,
+    // and the default is --scripts-only, which installs nothing: every install
+    // and update refreshes the voice scripts, and the engine arrives only through
+    // step_voice_kokoro_install, the Local AI tab's Install. Behaviour is covered
+    // by install-kokoro-tts.test.ts, which executes both modes.
+    expect(step).toMatch(/install-voice\.sh" "\$VOICE_MODE"/);
+    expect(step).toContain('local VOICE_MODE="${1:---scripts-only}"');
+    expect(step).not.toMatch(/install-voice\.sh" --tts-only/);
+    expect(extractShellFunction(INSTALL_SH, "step_voice_kokoro_install")).toContain("step_openclaw_tts --kokoro");
     // The step's own summary lines must not name an engine the box does not
     // have. Piper is gone; the only engine the step may claim is Kokoro.
     expect(step).not.toMatch(/piper/i);

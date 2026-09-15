@@ -49,8 +49,10 @@ vi.mock("@/lib/stt-preference", async (importOriginal) => ({
   setSttPrimary: (...a: unknown[]) => setPrimary(...a),
 }));
 vi.mock("@/lib/clawai-cloud-choice", () => ({ clearOwnerChoice: (...a: unknown[]) => cleared(...a) }));
-vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
+// A partial mock over importActual, so GatewayNotReadyError is the real class
+// the route narrows on (openclaw-config-mock-completeness.test.ts).
+vi.mock("@/lib/openclaw-config", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/openclaw-config")>("@/lib/openclaw-config")),
   openclawIsAbsent: () => false,
   restartGateway: () => gatewayRestart(),
 }));
@@ -453,6 +455,21 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     expect(res.status).toBe(200);
     expect(body.ok).toBe(true);
     expect(typeof body.warning).toBe("string");
+  });
+
+  it("says the gateway is still coming back, not that its restart failed, when it has not finished restarting", async () => {
+    sync.mockResolvedValue(true);
+    const { DELETE } = await load();
+    // After the load: it resets the module registry, and the route narrows on
+    // the class from THAT registry.
+    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    gatewayRestart.mockRejectedValue(new GatewayNotReadyError());
+    const res = await DELETE(del());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.warning).toMatch(/has not finished restarting/);
   });
 
   it("touches no transcription setting when the device refused the removal", async () => {
