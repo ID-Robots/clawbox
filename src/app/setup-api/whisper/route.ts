@@ -58,9 +58,9 @@ export async function GET(request: Request) {
 
   const state = await readWhisperState();
   // Measured against the cache's own filesystem, which on this box need not be
-  // the one `data/` sits on.
-  const largest = Math.max(...state.sizes.map((s) => s.bytes));
-  const disk = await checkInstallDisk(whisperCacheDir("base"), largest);
+  // the one `data/` sits on. Nothing is being asked for yet, so the requirement
+  // is 0 and only the two figures the picker draws are read off it.
+  const disk = await checkInstallDisk(whisperCacheDir("base"), 0);
   const cached = await Promise.all(
     state.sizes.map(async (s) => (s.cached ? await dirBytes(whisperCacheDir(s.id)) : null)),
   );

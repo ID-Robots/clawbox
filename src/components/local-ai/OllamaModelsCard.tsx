@@ -32,7 +32,6 @@ export default function OllamaModelsCard({ onChanged }: { onChanged?: () => void
   const { t, locale } = useT();
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [typed, setTyped] = useState("");
 
   const callbacks = useMemo<OllamaCallbacks>(() => ({
     onSaveSuccess: (model: string) => {
@@ -124,7 +123,7 @@ export default function OllamaModelsCard({ onChanged }: { onChanged?: () => void
           <input
             type="text"
             value={ollama.ollamaSearch}
-            onChange={(e) => { setError(null); ollama.handleOllamaSearchChange(e.target.value); setTyped(e.target.value); }}
+            onChange={(e) => { setError(null); ollama.handleOllamaSearchChange(e.target.value); }}
             placeholder={t("ollama.searchPlaceholder")}
             spellCheck={false}
             autoComplete="off"
@@ -189,7 +188,7 @@ export default function OllamaModelsCard({ onChanged }: { onChanged?: () => void
           <button
             type="button"
             className={BUTTON}
-            disabled={busy || !typed.trim()}
+            disabled={busy || !ollama.ollamaSearch.trim()}
             onClick={() => void pull(ollama.ollamaSearch)}
             data-testid="local-ai-ollama-pull-typed"
           >
