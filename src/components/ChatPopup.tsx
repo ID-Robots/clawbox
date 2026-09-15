@@ -1215,25 +1215,66 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // project page hands over its project and the team switch.
   const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
   const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
-  const toggleNewApp = useCallback(() => {
+  // The ONE read of the Coding Agent's status this surface makes: the card's
+  // task ceiling comes off it, and so does the + button's gate below, so the
+  // two cannot disagree about what the box says. Answers the payload, or null
+  // for a route that could not be read — it never throws, because a caller
+  // falls back to opening the card rather than leaving the button dead.
+  const readCodingAgentStatus = useCallback(async (): Promise<Record<string, unknown> | null> => {
+    try {
+      const res = await fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
+      if (!res.ok) return null
+      const data: unknown = await res.json()
+      if (!data || typeof data !== 'object') return null
+      const n = (data as { maxTaskChars?: unknown }).maxTaskChars
+      if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
+      return data as Record<string, unknown>
+    } catch {
+      return null // the card keeps the default ceiling
+    }
+  }, [])
+  // Open the card as asked, no questions. This is the Coding Agent's OWN
+  // hand-off (its home's Create button, a project page's Plan), and that app
+  // already sits behind its wizard — gating it here would be a second gate
+  // on the same door, and a slower one.
+  const openNewApp = useCallback(() => {
     // The fetch sits BESIDE the setter, not inside the updater: React may run
     // an updater more than once per call, and one click must cost one request.
-    if (!showNewApp && newAppMaxChars === null) {
-      void fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
-        .then(res => res.ok ? res.json() as Promise<{ maxTaskChars?: unknown }> : null)
-        .then(data => {
-          const n = data?.maxTaskChars
-          if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
-        })
-        .catch(() => { /* the card keeps the default ceiling */ })
-    }
-    // Closing forgets what the last opener asked for (a project, the team
-    // switch): the next "+" must open a fresh card, not the previous
-    // project's team form.
-    if (showNewApp) setNewAppOptions({})
-    setShowNewApp(open => !open)
-  }, [showNewApp, newAppMaxChars])
+    if (newAppMaxChars === null) void readCodingAgentStatus()
+    setShowNewApp(true)
+  }, [newAppMaxChars, readCodingAgentStatus])
+  // Closing forgets what the last opener asked for (a project, the team
+  // switch): the next "+" must open a fresh card, not the previous
+  // project's team form.
   const closeNewApp = useCallback(() => { setShowNewApp(false); setNewAppOptions({}) }, [])
+  // Whether the + button is still deciding where to land: a second press
+  // while the status is in flight must cost no second request, and must not
+  // toggle the card back shut the moment the first press opens it.
+  const newAppGateRef = useRef(false)
+  // The + button. Opening first asks whether the Coding Agent's setup is
+  // finished: the card composes a message that asks the assistant to
+  // DELEGATE the build, and until the owner has been through that app's
+  // wizard (or while its switch is off) the delegation is refused — so the
+  // press used to open a form whose only outcome was a refusal. It lands on
+  // the Coding Agent app instead, in a plain window, where the wizard (or the
+  // switch) is the first thing on screen. Asked on EVERY press rather than
+  // once, because the answer changes in the other window: a wizard finished
+  // there must count on the next press, without a reload. A status the box
+  // cannot read opens the card — never a dead button — and so does one that
+  // predates the field, since only an explicit `false` is a refusal.
+  const toggleNewApp = useCallback(() => {
+    if (showNewApp) { closeNewApp(); return }
+    if (newAppGateRef.current) return
+    newAppGateRef.current = true
+    void readCodingAgentStatus().then(status => {
+      newAppGateRef.current = false
+      if (status && (status.setupComplete === false || status.enabled === false)) {
+        dispatchOpenApp('coding')
+        return
+      }
+      setShowNewApp(true)
+    })
+  }, [showNewApp, closeNewApp, readCodingAgentStatus])
 
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will
@@ -1245,11 +1286,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         project: typeof detail?.project === 'string' ? detail.project : undefined,
         team: detail?.team === true,
       })
-      if (!showNewApp) toggleNewApp()
+      openNewApp()
     }
     window.addEventListener(NEW_APP_EVENT, onNewApp)
     return () => window.removeEventListener(NEW_APP_EVENT, onNewApp)
-  }, [showNewApp, toggleNewApp])
+  }, [openNewApp])
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
