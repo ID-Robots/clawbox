@@ -52,6 +52,7 @@ import {
   brandingHarness,
   brandWallpaperId,
   builtinWallpapers,
+  paintedWallpaperOpacity,
   renderedWallpaperId as resolveRenderedWallpaperId,
 } from "@/lib/builtin-wallpapers";
 import { TOAST_EVENT } from "@/components/ToastHost";
@@ -542,7 +543,11 @@ function ChromeDesktopInner() {
   type WpFit = "fill" | "fit" | "center";
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
-  const [wpOpacity, setWpOpacity] = useState(50);
+  // Null while the box holds no `wp_opacity`: what is PAINTED then is the
+  // wallpaper's own default (`wallpaperOpacity`), and nothing is written —
+  // the appearance write below leaves the key out, so the default never
+  // becomes the owner's saved value.
+  const [wpOpacity, setWpOpacity] = useState<number | null>(null);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
   // The ids a shed removed from the saved list during this load, or null when
@@ -579,7 +584,10 @@ function ChromeDesktopInner() {
         }
         if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
         if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
-        if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
+        if (data.wp_opacity !== undefined && data.wp_opacity !== null) {
+          const opacity = parseInt(String(data.wp_opacity), 10);
+          if (Number.isFinite(opacity)) setWpOpacity(opacity);
+        }
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
@@ -775,6 +783,11 @@ function ChromeDesktopInner() {
     customWallpapersLoaded ? customWallpapers.length : null,
   );
   const currentWallpaper = wallpapers.find(w => w.id === renderedWallpaperId) || wallpapers[0];
+  // The strength the picture is painted at and the slider shows: the saved
+  // value, else the wallpaper's own default (an uploaded picture has none —
+  // `currentWallpaper` is only the list's first entry then, not the picture
+  // on screen, which is why the id is resolved again rather than reused).
+  const paintedWpOpacity = paintedWallpaperOpacity(wpOpacity, renderedWallpaperId, wallpapers);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -935,8 +948,14 @@ function ChromeDesktopInner() {
     // still the owner's to change: a box whose edition never resolved must be
     // able to set its fit and opacity, and must not have a wallpaper picked for
     // it box-wide by the browser that happened to open first. One slot for both
-    // shapes, so the transition does not cost a second POST.
-    const appearance = { wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity };
+    // shapes, so the transition does not cost a second POST. `wp_opacity` is
+    // left out the same way while the box holds none: the wallpaper's own
+    // default is painted, never persisted.
+    const appearance = {
+      wp_fit: wpFit,
+      wp_bg_color: wpBgColor,
+      ...(wpOpacity === null ? {} : { wp_opacity: wpOpacity }),
+    };
     savePreferences(
       wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId },
       "appearance",
@@ -2186,7 +2205,7 @@ function ChromeDesktopInner() {
               wallpaperId: renderedWallpaperId,
               wpFit,
               wpBgColor,
-              wpOpacity,
+              wpOpacity: paintedWpOpacity,
               mascotHidden,
               wallpapers,
               customWallpapers,
@@ -2730,12 +2749,12 @@ function ChromeDesktopInner() {
         return customWp ? (
           <>
             <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
-            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: wpOpacity / 100 }} />
+            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
           </>
       ) : currentWallpaper.image ? (
         <>
           <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
-          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: wpOpacity / 100 }} />
+          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
         </>
       ) : (
         <>

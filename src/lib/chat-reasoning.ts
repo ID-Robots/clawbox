@@ -42,10 +42,12 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
 // extras (`xhigh`, `max`, `adaptive`, `minimal`) are intentionally dropped for
 // consistency.
 //
-// Defaults differ on purpose: ClawBox AI / DeepSeek default to `off` so simple
-// prompts stay fast and don't burn reasoning tokens (users opt in), while the
-// reasoning-first cloud providers default to `medium`. Both legacy ClawBox AI
-// model ids now serve Flash 4.1 and share the same `off` default.
+// Every cloud provider defaults to `medium`. ClawBox AI (spelled `clawai` by
+// the UI and `deepseek` by the gateway config — one provider, see
+// `isClawboxAiProvider`) defaulted to `off` so simple prompts stayed fast; the
+// owner's ruling of 2026-09-15 is Medium, so a fresh ClawBox AI session thinks
+// before it answers and the owner turns it DOWN rather than up. Both legacy
+// ClawBox AI model ids serve Flash 4.1 and share the same default.
 export interface ProviderReasoningConfig {
   levels: readonly ThinkingLevel[];
   default: ThinkingLevel;
@@ -60,12 +62,14 @@ export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   codex: { levels: UNIFORM_LEVELS, default: "medium" },
   anthropic: { levels: UNIFORM_LEVELS, default: "medium" },
   google: { levels: UNIFORM_LEVELS, default: "medium" },
-  // ClawBox AI/DeepSeek keeps `off` as its default so simple prompts stay fast;
-  // low/medium/high are offered for parity but the gateway folds low/medium up
+  // ClawBox AI, in the gateway's spelling: Medium by default (2026-09-15);
+  // low/medium/high are offered for parity and the gateway folds low/medium up
   // to DeepSeek's single reasoning tier.
-  deepseek: { levels: UNIFORM_LEVELS, default: "off" },
-  // ClawBox AI routes via DeepSeek today.
-  clawai: { levels: UNIFORM_LEVELS, default: "off" },
+  deepseek: { levels: UNIFORM_LEVELS, default: "medium" },
+  // ClawBox AI routes via DeepSeek today — the same provider, the UI's
+  // spelling (the chat/model route normalises `deepseek` to this), and so the
+  // same default: a fresh ClawBox AI session runs at Medium.
+  clawai: { levels: UNIFORM_LEVELS, default: "medium" },
   openrouter: { levels: UNIFORM_LEVELS, default: "medium" },
   // Local Gemma (llama.cpp) exposes no reasoning-effort control — the gateway
   // rejects any thinkingLevel other than `off` ("thinkingLevel … is not
