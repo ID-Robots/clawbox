@@ -40,6 +40,7 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import ClawboxMcpPanel from "./ClawboxMcpPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
@@ -5845,6 +5846,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 where their switches pushed the device's own figures off the
                 screen. */}
             <HarnessPicker />
+            {/* The assistant's device tools — the ClawBox MCP server's on/off
+                switch (owner's request, 2026-09-15). Beside the harness it
+                runs on, because that is the thing it is a capability OF. */}
+            <ClawboxMcpPanel />
             <BackgroundJobsPanel />
 
             {/* Desktop environment, Performance mode and the box's password,
