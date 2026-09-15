@@ -35,9 +35,11 @@ describe("chat-reasoning", () => {
       }
     });
 
-    it("keeps ClawBox AI / DeepSeek fast-by-default (off) while cloud providers default to medium", () => {
-      expect(getProviderReasoningConfig("deepseek").default).toBe("off");
-      expect(getProviderReasoningConfig("clawai").default).toBe("off");
+    it("defaults ClawBox AI — both spellings — and every cloud provider to medium", () => {
+      // The owner's ruling of 2026-09-15: a fresh ClawBox AI session thinks at
+      // Medium. `deepseek` is the gateway's spelling of the same provider.
+      expect(getProviderReasoningConfig("deepseek").default).toBe("medium");
+      expect(getProviderReasoningConfig("clawai").default).toBe("medium");
       expect(getProviderReasoningConfig("codex").default).toBe("medium");
       expect(getProviderReasoningConfig("openai").default).toBe("medium");
       expect(getProviderReasoningConfig("anthropic").default).toBe("medium");
@@ -70,16 +72,16 @@ describe("chat-reasoning", () => {
       vi.unstubAllGlobals();
     });
 
-    it.each(["clawai", "deepseek"])("defaults both legacy aliases to off under %s", (provider) => {
+    it.each(["clawai", "deepseek"])("defaults both legacy aliases to medium under %s", (provider) => {
       for (const model of [PRO, FLASH, "clawai/deepseek-v4-pro", "clawai/deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash"]) {
-        expect(getProviderReasoningConfig(provider, model).default).toBe("off");
+        expect(getProviderReasoningConfig(provider, model).default).toBe("medium");
       }
     });
 
-    it("keeps provider-only callers at the same off default", () => {
-      expect(getProviderReasoningConfig("clawai", FLASH).default).toBe("off");
-      expect(getProviderReasoningConfig("deepseek", FLASH).default).toBe("off");
-      expect(getProviderReasoningConfig("clawai", null).default).toBe("off");
+    it("keeps provider-only callers at the same medium default", () => {
+      expect(getProviderReasoningConfig("clawai", FLASH).default).toBe("medium");
+      expect(getProviderReasoningConfig("deepseek", FLASH).default).toBe("medium");
+      expect(getProviderReasoningConfig("clawai", null).default).toBe("medium");
       expect(getProviderReasoningConfig("clawai", undefined)).toBe(REASONING_BY_PROVIDER.clawai);
       expect(getProviderReasoningConfig("clawai")).toBe(REASONING_BY_PROVIDER.clawai);
     });
@@ -95,10 +97,10 @@ describe("chat-reasoning", () => {
       expect(getProviderReasoningConfig("bogus", PRO)).toBe(FALLBACK_REASONING_CONFIG);
     });
 
-    it("starts both legacy aliases at off when the user has never touched the picker", () => {
+    it("starts both legacy aliases at medium when the user has never touched the picker", () => {
       vi.stubGlobal("window", { localStorage: { getItem: () => null } });
-      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", PRO))).toBe("off");
-      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", FLASH))).toBe("off");
+      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", PRO))).toBe("medium");
+      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", FLASH))).toBe("medium");
     });
 
     it.each(["clawai", "deepseek"])("honours a saved %s level with either legacy model alias", (provider) => {
@@ -111,10 +113,11 @@ describe("chat-reasoning", () => {
       expect(readPersistedThinkingLevel(provider, getProviderReasoningConfig(provider, FLASH))).toBe("high");
     });
 
-    it("clamps an unsupported wire level to off for both legacy aliases", () => {
-      expect(resolveWireThinkingLevel("clawai", "xhigh", PRO)).toBe("off");
-      expect(resolveWireThinkingLevel("clawai", "xhigh", FLASH)).toBe("off");
-      expect(resolveWireThinkingLevel("clawai", "xhigh")).toBe("off");
+    it("clamps an unsupported wire level to the medium default for both legacy aliases", () => {
+      // A stale `xhigh` from the old picker lands on the default, not on off.
+      expect(resolveWireThinkingLevel("clawai", "xhigh", PRO)).toBe("medium");
+      expect(resolveWireThinkingLevel("clawai", "xhigh", FLASH)).toBe("medium");
+      expect(resolveWireThinkingLevel("clawai", "xhigh")).toBe("medium");
       // Supported levels pass through on both aliases.
       expect(resolveWireThinkingLevel("clawai", "off", PRO)).toBe("off");
       expect(resolveWireThinkingLevel("clawai", "high", PRO)).toBe("high");
