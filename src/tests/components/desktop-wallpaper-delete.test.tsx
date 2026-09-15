@@ -44,6 +44,8 @@ const WP = [
 let savedWallpaperId = "custom-2";
 /** Which harness the box reports — the fallback wallpaper follows it. */
 let activeHarness = "openclaw";
+/** The `wp_opacity` the box answers, or null for a box that holds none. */
+let savedOpacity: number | null = 100;
 /** Whether the device could actually RESOLVE its harness, or `active` is its own default. */
 let activeKnown = true;
 /**
@@ -95,7 +97,7 @@ function installFetch() {
       return answer({ active: activeHarness, edition: activeHarness, activeKnown });
     }
     if (url.includes("/setup-api/preferences?all=1")) {
-      return answer({ wp_id: savedWallpaperId, wp_opacity: 100 });
+      return answer({ wp_id: savedWallpaperId, ...(savedOpacity === null ? {} : { wp_opacity: savedOpacity }) });
     }
     return answer({});
   }));
@@ -167,6 +169,7 @@ beforeEach(() => {
   window.localStorage.clear();
   window.localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(WP));
   savedWallpaperId = "custom-2";
+  savedOpacity = 100;
   activeHarness = "openclaw";
   activeKnown = true;
   harnessHold = null;
@@ -247,11 +250,11 @@ describe("deleting a custom wallpaper", () => {
     // fallback below is what THIS browser paints; the box keeps what it holds.
     window.localStorage.removeItem("clawbox-custom-wallpapers");
     savedWallpaperId = "custom-2";
-    await mountDesktop("clawbox-wallpaper");
+    await mountDesktop("lobster-orbital-wallpaper");
 
     // Well past the 500 ms preference debounce.
     await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(lastSavedWallpaperId()).not.toBe("clawbox");
+    expect(lastSavedWallpaperId()).not.toBe("lobster-orbital");
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });
 
@@ -264,7 +267,7 @@ describe("deleting a custom wallpaper", () => {
     // list it has no standing to renumber, which is the very write the mount
     // path above refuses to make.
     savedWallpaperId = "custom-5";
-    await mountDesktop("clawbox-wallpaper");
+    await mountDesktop("lobster-orbital-wallpaper");
 
     await openAppearanceSettings();
     fireEvent.click(await screen.findByRole("button", { name: /Remove custom 1/i }, PAINTS_SOON));
@@ -277,7 +280,7 @@ describe("deleting a custom wallpaper", () => {
     // Rendered locally, persisted nowhere: still the local fallback, and the
     // box still holds the selection it held. Well past the 500 ms debounce.
     await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(true);
+    expect(wallpaperUrls().some((u) => u.includes("lobster-orbital-wallpaper"))).toBe(true);
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-5")).toBe(false);
   });
 
@@ -291,6 +294,7 @@ describe("deleting a custom wallpaper", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(false);
+    expect(wallpaperUrls().some((u) => u.includes("lobster-orbital-wallpaper"))).toBe(false);
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });
 
@@ -383,7 +387,7 @@ describe("deleting a custom wallpaper", () => {
     });
     // Well past the 500 ms debounce, and the probe is still held.
     await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(saved.some((body) => "wp_id" in body && body.wp_id === "clawbox")).toBe(false);
+    expect(saved.some((body) => "wp_id" in body && body.wp_id === "lobster-orbital")).toBe(false);
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
     releaseHarnessProbe();
   });
@@ -394,11 +398,45 @@ describe("deleting a custom wallpaper", () => {
     // is the selected one and the row names it.
     window.localStorage.removeItem("clawbox-custom-wallpapers");
     savedWallpaperId = "custom-2";
-    await mountDesktop("clawbox-wallpaper");
+    await mountDesktop("lobster-orbital-wallpaper");
 
     await openAppearanceSettings();
-    const tile = await screen.findByRole("button", { name: /^ClawBox$/i }, PAINTS_SOON);
+    const tile = await screen.findByRole("button", { name: /^Lobster Orbital$/i }, PAINTS_SOON);
     expect(tile.getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+/**
+ * Lobster Orbital is a 50% picture (2026-09-15): painted at half strength
+ * while the box holds no `wp_opacity`, and that default is PAINTED, never
+ * written — the rule builtin-wallpapers.ts documents for `wp_id`, applied to
+ * the slider's value. A saved opacity always wins.
+ */
+describe("the wallpaper's own opacity", () => {
+  /** The opacity the painted picture carries, as the desktop's style sets it. */
+  function paintedOpacity(): string | undefined {
+    const el = Array.from(document.querySelectorAll<HTMLElement>("div[style*='background-image']"))
+      .find((node) => node.style.backgroundImage.includes("-wallpaper.jpeg"));
+    return el?.style.opacity;
+  }
+
+  it("paints Lobster Orbital at half strength on a box that never moved the slider, and writes nothing", async () => {
+    savedOpacity = null;
+    savedWallpaperId = "lobster-orbital";
+    await mountDesktop("lobster-orbital-wallpaper");
+    expect(paintedOpacity()).toBe("0.5");
+
+    // Opening the desktop is not a choice; nothing about the default reaches
+    // the box, so it cannot follow the owner onto another wallpaper later.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(saved.some((body) => "wp_opacity" in body)).toBe(false);
+  });
+
+  it("lets the owner's saved opacity win over the picture's own", async () => {
+    savedOpacity = 100;
+    savedWallpaperId = "lobster-orbital";
+    await mountDesktop("lobster-orbital-wallpaper");
+    expect(paintedOpacity()).toBe("1");
   });
 });
 
@@ -414,7 +452,9 @@ describe("deleting a custom wallpaper", () => {
  * screen.
  */
 describe("the built-in wallpapers this edition offers", () => {
-  it("offers ClawBox and Deep Space on an OpenClaw box, and never the Hermes art", async () => {
+  it("offers Lobster Orbital, ClawBox and Deep Space on an OpenClaw box, and never the Hermes art", async () => {
+    // The older ClawBox picture stays selectable — a box that chose it keeps
+    // it — behind the default.
     savedWallpaperId = "clawbox";
     await mountDesktop("clawbox-wallpaper");
     await openAppearanceSettings();
@@ -422,7 +462,7 @@ describe("the built-in wallpapers this edition offers", () => {
     // Not merely unselectable — not fetched. The tile is an <img src>, so a
     // tile for the other edition would still pull the other product's picture.
     expect(brandWallpaperAssets().some((url) => url.includes("hermes-wallpaper"))).toBe(false);
-    expect(builtinWallpaperTiles()).toEqual(["clawbox", "deep-space"]);
+    expect(builtinWallpaperTiles()).toEqual(["lobster-orbital", "clawbox", "deep-space"]);
   });
 
   it("offers Hermes and Deep Space on a Hermes box, and never the ClawBox art", async () => {
@@ -432,6 +472,7 @@ describe("the built-in wallpapers this edition offers", () => {
     await openAppearanceSettings();
 
     expect(brandWallpaperAssets().some((url) => url.includes("clawbox-wallpaper"))).toBe(false);
+    expect(brandWallpaperAssets().some((url) => url.includes("lobster-orbital-wallpaper"))).toBe(false);
     expect(builtinWallpaperTiles()).toEqual(["hermes", "deep-space"]);
   });
 

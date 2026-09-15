@@ -3,8 +3,12 @@ import {
   brandingHarness,
   brandWallpaperId,
   builtinWallpapers,
+  DEFAULT_WALLPAPER_OPACITY,
   defaultWallpaperId,
+  LOBSTER_ORBITAL_WALLPAPER,
+  paintedWallpaperOpacity,
   renderedWallpaperId,
+  wallpaperOpacity,
 } from "@/lib/builtin-wallpapers";
 
 /**
@@ -22,7 +26,9 @@ const ids = (harness: string | null) => builtinWallpapers(harness).map((wp) => w
 
 describe("which built-ins an edition offers", () => {
   it("gives an OpenClaw box its own brand and the neutral one", () => {
-    expect(ids("openclaw")).toEqual(["clawbox", "deep-space"]);
+    // Lobster Orbital first — the default since 2026-09-15 — with the older
+    // ClawBox picture kept selectable behind it.
+    expect(ids("openclaw")).toEqual(["lobster-orbital", "clawbox", "deep-space"]);
   });
 
   it("gives a Hermes box its own brand and the neutral one", () => {
@@ -42,6 +48,7 @@ describe("which built-ins an edition offers", () => {
     // does not ask about.
     expect(builtinWallpapers("openclaw").map((wp) => wp.image)).not.toContain("/hermes-wallpaper.jpeg");
     expect(builtinWallpapers("hermes").map((wp) => wp.image)).not.toContain("/clawbox-wallpaper.jpeg");
+    expect(builtinWallpapers("hermes").map((wp) => wp.image)).not.toContain("/lobster-orbital-wallpaper.jpeg");
     expect(builtinWallpapers(null).every((wp) => wp.image === "")).toBe(true);
   });
 
@@ -76,9 +83,9 @@ describe("which harness's branding the device wears", () => {
 
 describe("painting a fallback vs persisting one", () => {
   it("paints — and offers to write — this edition's own brand once it is known", () => {
-    expect(defaultWallpaperId("openclaw")).toBe("clawbox");
+    expect(defaultWallpaperId("openclaw")).toBe("lobster-orbital");
     expect(defaultWallpaperId("hermes")).toBe("hermes");
-    expect(brandWallpaperId("openclaw")).toBe("clawbox");
+    expect(brandWallpaperId("openclaw")).toBe("lobster-orbital");
     expect(brandWallpaperId("hermes")).toBe("hermes");
   });
 
@@ -93,15 +100,18 @@ describe("painting a fallback vs persisting one", () => {
 
 describe("what a saved wp_id actually paints", () => {
   it("keeps a built-in this edition ships", () => {
+    // The older ClawBox picture included: a box that chose it keeps it.
     expect(renderedWallpaperId("clawbox", "openclaw", 0)).toBe("clawbox");
+    expect(renderedWallpaperId("lobster-orbital", "openclaw", 0)).toBe("lobster-orbital");
     expect(renderedWallpaperId("deep-space", "hermes", 0)).toBe("deep-space");
   });
 
   it("heals the OTHER edition's brand to this one", () => {
     // A box re-imaged onto the other edition, or a choice made before the
     // ruling. For the PAINT only — the caller writes nothing back.
-    expect(renderedWallpaperId("hermes", "openclaw", 0)).toBe("clawbox");
+    expect(renderedWallpaperId("hermes", "openclaw", 0)).toBe("lobster-orbital");
     expect(renderedWallpaperId("clawbox", "hermes", 0)).toBe("hermes");
+    expect(renderedWallpaperId("lobster-orbital", "hermes", 0)).toBe("hermes");
   });
 
   it("shows neither brand while the edition is unknown", () => {
@@ -126,7 +136,46 @@ describe("what a saved wp_id actually paints", () => {
   });
 
   it("lands on the default for nothing chosen at all", () => {
-    expect(renderedWallpaperId("", "openclaw", 0)).toBe("clawbox");
+    expect(renderedWallpaperId("", "openclaw", 0)).toBe("lobster-orbital");
     expect(renderedWallpaperId("", null, 0)).toBe("deep-space");
+  });
+});
+
+describe("what opacity a wallpaper is painted at", () => {
+  const clawbox = builtinWallpapers("openclaw").find((wp) => wp.id === "clawbox");
+
+  it("paints Lobster Orbital at half strength while the box holds no wp_opacity", () => {
+    expect(LOBSTER_ORBITAL_WALLPAPER.defaultOpacity).toBe(50);
+    expect(wallpaperOpacity(null, LOBSTER_ORBITAL_WALLPAPER)).toBe(50);
+  });
+
+  it("paints every other wallpaper — and an upload — at the general default", () => {
+    expect(clawbox?.defaultOpacity).toBeUndefined();
+    expect(wallpaperOpacity(null, clawbox)).toBe(DEFAULT_WALLPAPER_OPACITY);
+    // An uploaded picture is not a built-in and has no default of its own.
+    expect(wallpaperOpacity(null, undefined)).toBe(DEFAULT_WALLPAPER_OPACITY);
+  });
+
+  it("lets a saved value win over the wallpaper's own default, whatever it is", () => {
+    expect(wallpaperOpacity(100, LOBSTER_ORBITAL_WALLPAPER)).toBe(100);
+    expect(wallpaperOpacity(0, LOBSTER_ORBITAL_WALLPAPER)).toBe(0);
+    expect(wallpaperOpacity(80, undefined)).toBe(80);
+  });
+
+  it("does not take a saved value it cannot paint with", () => {
+    expect(wallpaperOpacity(Number.NaN, LOBSTER_ORBITAL_WALLPAPER)).toBe(50);
+  });
+
+  it("resolves the picture on screen by id, and gives an upload no built-in's default", () => {
+    const list = builtinWallpapers("openclaw");
+    expect(paintedWallpaperOpacity(null, "lobster-orbital", list)).toBe(50);
+    expect(paintedWallpaperOpacity(null, "clawbox", list)).toBe(DEFAULT_WALLPAPER_OPACITY);
+    // `custom-0` is not in the list; it must not inherit the FIRST entry's 50
+    // — the two are equal today, so the point is pinned through a list whose
+    // first entry says something else.
+    const loud = [{ ...LOBSTER_ORBITAL_WALLPAPER, defaultOpacity: 90 }, ...list.slice(1)];
+    expect(paintedWallpaperOpacity(null, "custom-0", loud)).toBe(DEFAULT_WALLPAPER_OPACITY);
+    expect(paintedWallpaperOpacity(null, "lobster-orbital", loud)).toBe(90);
+    expect(paintedWallpaperOpacity(70, "custom-0", loud)).toBe(70);
   });
 });

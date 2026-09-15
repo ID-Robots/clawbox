@@ -4,10 +4,12 @@
  * The owner's ruling (2026-09-06): "Remove the Hermes wallpaper from the
  * OpenClaw version. And vice versa — the ClawBox wallpaper from the Hermes
  * version." So the built-in list is edition-scoped — the OpenClaw edition
- * offers its own brand plus the neutral Deep Space, the Hermes edition offers
- * the Hermes art plus Deep Space, the premium `dual` SKU follows whichever
- * harness is active, and the pictures the owner uploaded are on every edition.
- * A customer never sees the other product's artwork on a box they bought.
+ * offers its own brand (Lobster Orbital, the default since 2026-09-15, and the
+ * older ClawBox picture, still selectable) plus the neutral Deep Space, the
+ * Hermes edition offers the Hermes art plus Deep Space, the premium `dual` SKU
+ * follows whichever harness is active, and the pictures the owner uploaded are
+ * on every edition. A customer never sees the other product's artwork on a box
+ * they bought.
  *
  * ONE list, because there are five readers of it — the desktop's painted
  * background, the desktop's Appearance grid, `/app/settings`'s Appearance grid,
@@ -42,6 +44,16 @@
  * other browser and for the box's own screen, permanently. That is the whole
  * difference between `defaultWallpaperId` (always names one) and
  * `brandWallpaperId` (null on a doubt, and so the only one safe to write).
+ *
+ * The same rule holds for a wallpaper's OPACITY. A built-in may carry a
+ * `defaultOpacity` — the strength its picture is meant to be painted at when
+ * the owner has never moved the slider (Lobster Orbital is a 50% picture: at
+ * full strength it swallows the icons) — and `wallpaperOpacity` is the one
+ * reader: a saved `wp_opacity` always wins, the wallpaper's own default comes
+ * next, then the desktop's general default. It is painted and handed to the
+ * slider, and never written to the store — a default that reached `wp_opacity`
+ * would follow the owner onto every other wallpaper, and would still be there
+ * after the default itself changed.
  */
 
 import { customWallpaperIndex } from "@/lib/custom-wallpapers";
@@ -62,7 +74,31 @@ export interface BuiltinWallpaper {
   readonly gradient: string;
   readonly stars: boolean;
   readonly nebula: boolean;
+  /**
+   * The opacity (0–100) this picture is painted at while the box has NO saved
+   * `wp_opacity`. Absent means {@link DEFAULT_WALLPAPER_OPACITY}. Never
+   * persisted — see {@link wallpaperOpacity}.
+   */
+  readonly defaultOpacity?: number;
 }
+
+/** What every wallpaper without a `defaultOpacity` of its own is painted at. */
+export const DEFAULT_WALLPAPER_OPACITY = 50;
+
+/**
+ * The OpenClaw edition's default wallpaper (2026-09-15): a 3840×2160 picture
+ * the owner supplies as `public/lobster-orbital-wallpaper.jpeg`, meant to be
+ * seen at half strength.
+ */
+export const LOBSTER_ORBITAL_WALLPAPER: BuiltinWallpaper = {
+  id: "lobster-orbital",
+  name: "Lobster Orbital",
+  image: "/lobster-orbital-wallpaper.jpeg",
+  gradient: "",
+  stars: false,
+  nebula: false,
+  defaultOpacity: 50,
+};
 
 const CLAWBOX_WALLPAPER: BuiltinWallpaper = {
   id: "clawbox",
@@ -92,7 +128,7 @@ const DEEP_SPACE_WALLPAPER: BuiltinWallpaper = {
 };
 
 const NEUTRAL_ONLY: readonly BuiltinWallpaper[] = [DEEP_SPACE_WALLPAPER];
-const OPENCLAW_WALLPAPERS: readonly BuiltinWallpaper[] = [CLAWBOX_WALLPAPER, DEEP_SPACE_WALLPAPER];
+const OPENCLAW_WALLPAPERS: readonly BuiltinWallpaper[] = [LOBSTER_ORBITAL_WALLPAPER, CLAWBOX_WALLPAPER, DEEP_SPACE_WALLPAPER];
 const HERMES_WALLPAPERS: readonly BuiltinWallpaper[] = [HERMES_WALLPAPER, DEEP_SPACE_WALLPAPER];
 
 /**
@@ -128,8 +164,39 @@ export function brandingHarness(
  */
 export function brandWallpaperId(harness: string | null): string | null {
   if (harness === "hermes") return HERMES_WALLPAPER.id;
-  if (harness === "openclaw") return CLAWBOX_WALLPAPER.id;
+  if (harness === "openclaw") return LOBSTER_ORBITAL_WALLPAPER.id;
   return null;
+}
+
+/**
+ * What OPACITY to paint — and to show on the slider — for the wallpaper on
+ * screen. A saved `wp_opacity` (`null` while the box holds none) always wins;
+ * otherwise the wallpaper's own `defaultOpacity`, then the general default.
+ * `wallpaper` is undefined for an uploaded picture, which has no default of
+ * its own. The answer is never written back: see the module comment.
+ */
+export function wallpaperOpacity(
+  saved: number | null,
+  wallpaper: { readonly defaultOpacity?: number } | undefined,
+): number {
+  if (saved !== null && Number.isFinite(saved)) return saved;
+  return wallpaper?.defaultOpacity ?? DEFAULT_WALLPAPER_OPACITY;
+}
+
+/**
+ * {@link wallpaperOpacity} for the wallpaper actually ON SCREEN — the one
+ * `renderedWallpaperId` names — looked up in this edition's list. An uploaded
+ * picture (`custom-<n>`) is not in that list and has no default of its own;
+ * it must not inherit the first built-in's. Both pages call this rather than
+ * looking the entry up themselves, so the two cannot drift.
+ */
+export function paintedWallpaperOpacity(
+  saved: number | null,
+  renderedId: string,
+  wallpapers: readonly BuiltinWallpaper[],
+): number {
+  if (customWallpaperIndex(renderedId) !== null) return wallpaperOpacity(saved, undefined);
+  return wallpaperOpacity(saved, wallpapers.find((wp) => wp.id === renderedId));
 }
 
 /** The built-in wallpapers this edition offers, in the order they are shown. */

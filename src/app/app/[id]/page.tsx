@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Image from "next/image";
@@ -11,6 +11,7 @@ import {
   brandingHarness,
   brandWallpaperId,
   builtinWallpapers,
+  paintedWallpaperOpacity,
   renderedWallpaperId as resolveRenderedWallpaperId,
 } from "@/lib/builtin-wallpapers";
 import { apps } from "@/lib/desktop-apps";
@@ -134,7 +135,9 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   const [wallpaperId, setWallpaperId] = useState<string | null>(null);
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
-  const [wpOpacity, setWpOpacity] = useState(50);
+  // Null while the box holds no `wp_opacity` — the desktop's rule: the
+  // wallpaper's own default is shown and never written.
+  const [wpOpacity, setWpOpacity] = useState<number | null>(null);
   const [mascotHidden, setMascotHidden] = useState(false);
   const [customWallpapers, setCustomWallpapers] = useState<string[]>(readCustomWallpapers);
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -200,12 +203,26 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
     customWallpapers.length,
   );
 
+  // Painted, not persisted: the wallpaper's own default while the box holds
+  // no `wp_opacity`, an uploaded picture having none of its own — the
+  // desktop's `paintedWpOpacity`. Memoised because the React Compiler refuses
+  // this hook outright ("existing memoization could not be preserved", on
+  // `onUploadFile` below) when `wallpapers` is read in a plain derived value.
+  const paintedWpOpacity = useMemo(
+    () => paintedWallpaperOpacity(wpOpacity, renderedWallpaperId, wallpapers),
+    [wpOpacity, renderedWallpaperId, wallpapers],
+  );
+
   const save = usePreferenceSaver(loaded);
   useEffect(() => {
     // `wp_id` is left out while nothing has chosen one — the desktop's rule and
     // for the same reason: this page must not pick a wallpaper box-wide for a
     // box whose edition it could not read. One slot for both shapes.
-    const appearance = { wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity };
+    const appearance = {
+      wp_fit: wpFit,
+      wp_bg_color: wpBgColor,
+      ...(wpOpacity === null ? {} : { wp_opacity: wpOpacity }),
+    };
     save(wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId }, "appearance");
   }, [wallpaperId, wpFit, wpBgColor, wpOpacity, save]);
   useEffect(() => { save({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, save]);
@@ -248,7 +265,7 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
       wallpaperId: renderedWallpaperId,
       wpFit,
       wpBgColor,
-      wpOpacity,
+      wpOpacity: paintedWpOpacity,
       mascotHidden,
       wallpapers,
       customWallpapers,
