@@ -5,6 +5,11 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
 }));
 
+// Removing a model is the OWNER's verb now, not the MCP bearer's — the same
+// gate the install routes keep. The handler had none of its own before.
+const owner = { value: true };
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+
 describe("POST /setup-api/ollama/delete", () => {
   let ollamaDeletePost: (req: Request) => Promise<Response>;
 
@@ -18,6 +23,7 @@ describe("POST /setup-api/ollama/delete", () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    owner.value = true;
     vi.stubGlobal("fetch", vi.fn());
     const mod = await import("@/app/setup-api/ollama/delete/route");
     ollamaDeletePost = mod.POST;
@@ -156,5 +162,27 @@ describe("POST /setup-api/ollama/delete", () => {
       const res = await ollamaDeletePost(jsonRequest({ model }));
       expect(res.status).toBe(200);
     }
+  });
+
+  it("refuses a caller that is not the owner", async () => {
+    owner.value = false;
+    const res = await ollamaDeletePost(jsonRequest({ model: "llama2:7b" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.code).toBe("owner_only");
+  });
+
+  it("refuses a request from another site's page", async () => {
+    const req = new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example" },
+      body: JSON.stringify({ model: "llama2:7b" }),
+    });
+    const res = await ollamaDeletePost(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.code).toBe("cross_origin");
   });
 });

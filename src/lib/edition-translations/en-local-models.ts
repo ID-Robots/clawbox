@@ -99,4 +99,67 @@ export const localModelsEn: Record<string, string> = {
   "localModels.error.changeFailed": "Could not change that model.",
   "localModels.error.unreachable": "Could not reach the box to change that model.",
   "localModels.notice.voiceFallback": "Kokoro could not be made the primary voice, so the default voice stays.",
+
+  // === Install on click (owner's decision, 2026-09-14) ===
+  // Settings → Local AI is the one place a local model is installed from, so
+  // every card below says three things: what the download costs against what
+  // the box has, what it is doing while it runs, and how it ended.
+  "localModels.install.download": "Download",
+  "localModels.install.downloading": "Downloading…",
+  "localModels.install.working": "Working…",
+  "localModels.install.remove": "Remove",
+  "localModels.install.removing": "Removing…",
+  "localModels.install.installed": "Installed.",
+  "localModels.install.failed": "Failed: {reason}",
+  "localModels.install.freed": "Freed {size}.",
+  "localModels.install.diskBoth": "{need} to download · {free} free",
+  "localModels.install.diskNeed": "{need} to download",
+  // The one refusal with figures in it. "Not enough space" on its own is the
+  // sentence that sends somebody to look at the wrong disk.
+  "localModels.install.diskShort": "Not enough room: needs {need}, only {free} free.",
+  "localModels.install.refusal.busy": "Something else is being downloaded right now.",
+  "localModels.install.refusal.notInstalled": "That part is not installed on this box yet.",
+  "localModels.install.refusal.noDownloader": "The downloader is not on this box yet. Install the local model first.",
+  "localModels.install.refusal.alreadyHere": "That is already on this box.",
+  "localModels.install.refusal.inUse": "That is the one this box is using. Pick another one first.",
+
+  // Extra chat models on this box. The browse-and-pull surface used to exist
+  // only inside the setup wizard.
+  "localModels.ollama.title": "Ollama models",
+  "localModels.ollama.hint": "Extra chat models kept on this box. Nothing is downloaded until you ask for it, and a model you download becomes this box's local chat model.",
+  "localModels.ollama.none": "No Ollama models on this box yet.",
+  "localModels.ollama.useForChat": "Use for local chat",
+  "localModels.ollama.nowLocal": "{model} is now this box's local chat model.",
+
+  // The speech-to-text size. The weights are fetched whole BEFORE the engine is
+  // pointed at them, so the microphone keeps working throughout.
+  "localModels.whisper.title": "Speech model size",
+  "localModels.whisper.hint": "Bigger is more accurate and slower. This box keeps using the current one until the new one is here.",
+  "localModels.whisper.active": "In use",
+  "localModels.whisper.use": "Use this one",
+  "localModels.whisper.notInstalled": "Speech on this box is not installed yet.",
+
+  // The memory-search model: the one download that still happens on its own,
+  // because the memory index is unusable without it. Shown here so its state is
+  // visible, with the two buttons that used to be a terminal job.
+  "localModels.embed.title": "Memory search model",
+  "localModels.embed.hint": "What your memory is searched with. It is fetched in the background on a new box; these are here for when that did not finish.",
+  "localModels.embed.present": "{model} is on this box ({size}).",
+  "localModels.embed.missing": "{model} is not on this box.",
+  "localModels.embed.again": "Download again",
+
+  // Any other llama.cpp model, by its Hugging Face repository and file.
+  "localModels.gguf.title": "Other llama.cpp models",
+  "localModels.gguf.hint": "Fetch any GGUF from Hugging Face. It is kept in this box's library; the box goes on answering with its own model.",
+  "localModels.gguf.repo": "Repository",
+  "localModels.gguf.file": "File",
+  "localModels.gguf.check": "Check size",
+  "localModels.gguf.size": "{size} to download · {free} free",
+  "localModels.gguf.sizeUnknown": "Hugging Face did not say how big that file is.",
+  "localModels.gguf.notFound": "Hugging Face has no such repository.",
+  "localModels.gguf.noSuchFile": "That repository has no such file.",
+  "localModels.gguf.alreadyHere": "That file is already in this box's library.",
+  "localModels.gguf.invalid": "Name a repository like owner/name, and a file ending in .gguf.",
+  "localModels.gguf.inUse": "Answering with this one",
+  "localModels.gguf.noDownloader": "The Hugging Face downloader is not on this box yet. Install the local model first.",
 };
