@@ -881,18 +881,30 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-        {/* Deploying to Vercel, as one box-wide answer. Above the pull-request
-            controls because it is the same question one level up — where this
-            box's work is allowed to go — and off unless the owner says
-            otherwise: `?? false`, because it is standing consent for pushing
-            their code to another company's account, not a preference about how
-            a run works. Off hides the link card, the Deploy buttons, the run's
-            deployment card and the pipeline's deploy stages; the per-project
-            settings live behind it, so there is nothing left to switch. */}
+        {/* Deploying to Vercel, as one box-wide answer — and a BETA flag. Above
+            the pull-request controls because it is the same question one level
+            up — where this box's work is allowed to go — and off unless the
+            owner says otherwise: `?? false`, because it is standing consent for
+            pushing their code to another company's account, not a preference
+            about how a run works. Off hides the link card, the Deploy buttons,
+            the run's deployment card, the delete dialog's link lines and the
+            pipeline's deploy stages; the per-project settings live behind it,
+            so there is nothing left to switch. The badge and the line under
+            the row are visible rather than in the help tip, because "this is
+            experimental and off by default" is what an owner needs to know
+            BEFORE reaching for the switch, not after wondering why it is off;
+            this is the only place the integration is offered — the setup
+            wizard never mentions it. */}
         <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
+          <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
             <span className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.vercelEnabledLabel")}
+            </span>
+            <span
+              className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-1.5 py-0.5 text-amber-300 border-amber-400/40"
+              data-testid="coding-agent-vercel-beta"
+            >
+              {t("codingAgent.vercelBetaBadge")}
             </span>
             <HelpTip
               text={t("codingAgent.vercelEnabledHint")}
@@ -909,6 +921,9 @@ export default function CodingAgentSettingsPanel({
             onChange={(next) => void saveSetting({ vercelEnabled: next }, "vercelEnabled", t("codingAgent.vercelEnabledFailed"))}
           />
         </div>
+        <p className="mt-1 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-vercel-beta-hint">
+          {t("codingAgent.vercelBetaHint")}
+        </p>
 
         {/* Branch -> pull request -> wait for Actions -> merge. Under the
             review pass because it runs after it, and the review's verdict is
