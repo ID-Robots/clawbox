@@ -6,6 +6,10 @@ import {
   isLocalGgufName,
   isWhisperSize,
   OLLAMA_PRESET_MODELS,
+  safeHfGgufFile,
+  safeHfRepo,
+  safeLocalGgufName,
+  safeWhisperSize,
   WHISPER_SIZES,
   whisperSize,
 } from "@/lib/local-install";
@@ -70,6 +74,46 @@ describe("local-install: what may be asked for", () => {
       expect(preset.id).toMatch(/^[a-z0-9.:_-]+$/i);
       expect(preset.label.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("local-install: what a path and a URL are made of", () => {
+  // The repo's `safeAppId` rule: a value that reaches `path.join` or `fetch` is
+  // REBUILT out of a constant alphabet rather than tested and passed through,
+  // so the data flow itself shows the cut.
+  it("answers a value made only of the alphabet, character for character", () => {
+    const safe = safeHfRepo("google/gemma-4-E2B-it-qat-q4_0-gguf");
+    expect(safe).toBe("google/gemma-4-E2B-it-qat-q4_0-gguf");
+    expect(safe).toMatch(/^[A-Za-z0-9._/-]+$/);
+    // One character outside it and nothing comes back — there is no partial
+    // answer to strip and pass on.
+    expect(safeHfRepo("google/gemma\u0000-4")).toBeNull();
+    expect(safeHfRepo("owner/na me")).toBeNull();
+    expect(safeHfRepo("owner/naméé")).toBeNull();
+  });
+
+  it("answers the catalogue's own size string for a Whisper pick", () => {
+    const safe = safeWhisperSize("small");
+    expect(safe).toBe("small");
+    expect(safe).toBe(WHISPER_SIZES.find((s) => s.id === "small")?.id);
+    expect(safeWhisperSize("large-v3")).toBeNull();
+    expect(safeWhisperSize(null)).toBeNull();
+  });
+
+  it("answers null for everything the predicates refuse", () => {
+    for (const bad of ["owner/../etc", "-oops/name", "too/many/slashes", "bare", "", 7]) {
+      expect(safeHfRepo(bad)).toBeNull();
+    }
+    for (const bad of ["../x.gguf", "-rf.gguf", "README.md", ""]) {
+      expect(safeHfGgufFile(bad)).toBeNull();
+    }
+    for (const bad of ["sub/model.gguf", "..", "model.bin"]) {
+      expect(safeLocalGgufName(bad)).toBeNull();
+    }
+  });
+
+  it("refuses a reference longer than any real one", () => {
+    expect(safeHfRepo(`${"a".repeat(300)}/name`)).toBeNull();
   });
 });
 

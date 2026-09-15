@@ -19,7 +19,7 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { isWhisperSize, WHISPER_SIZES, type WhisperSize } from "@/lib/local-install";
+import { safeWhisperSize, WHISPER_SIZES, type WhisperSize } from "@/lib/local-install";
 import { readUnitState, reloadAndRestartUserEngine, SYSTEMD_USER_DIR, WHISPER_UNIT } from "@/lib/local-models";
 
 const HOME = process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox";
@@ -27,8 +27,16 @@ const HOME = process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox";
 /** The unit `scripts/install-voice.sh::write_whisper_unit` writes. */
 export const WHISPER_UNIT_PATH = path.join(SYSTEMD_USER_DIR, WHISPER_UNIT);
 
-/** Where `faster_whisper.utils.download_model` puts a size's weights. */
-export function whisperCacheDir(size: string): string {
+/**
+ * Where `faster_whisper.utils.download_model` puts a size's weights.
+ *
+ * The name is taken from the CATALOGUE rather than from the argument, so this
+ * function cannot build a path out of a caller's string even when one reaches
+ * it — the `safeAppId` rule, applied at the place that joins. A size nobody
+ * offers has no directory here, and the callers read that as "not cached".
+ */
+export function whisperCacheDir(requested: string): string {
+  const size = safeWhisperSize(requested) ?? "";
   return path.join(HOME, ".cache/huggingface/hub", `models--Systran--faster-whisper-${size}`);
 }
 
@@ -135,8 +143,9 @@ export async function readWhisperState(): Promise<WhisperState> {
  *
  * tmp+rename in the same directory, so a reader never sees a half-written unit.
  */
-export async function setActiveWhisperSize(size: string): Promise<{ ok: boolean; error?: string }> {
-  if (!isWhisperSize(size)) return { ok: false, error: "Unknown Whisper size." };
+export async function setActiveWhisperSize(requested: string): Promise<{ ok: boolean; error?: string }> {
+  const size = safeWhisperSize(requested);
+  if (size === null) return { ok: false, error: "Unknown Whisper size." };
   let unit: string;
   try {
     unit = await fs.readFile(WHISPER_UNIT_PATH, "utf-8");
@@ -173,8 +182,9 @@ export async function restartWhisper(): Promise<{ ok: boolean; error?: string }>
  * `whisperCacheDir` builds a path, and `isWhisperSize` is what makes that path
  * one of four literals.
  */
-export async function removeWhisperSize(size: string): Promise<{ ok: boolean; error?: string; code?: string }> {
-  if (!isWhisperSize(size)) return { ok: false, error: "Unknown Whisper size.", code: "invalid" };
+export async function removeWhisperSize(requested: string): Promise<{ ok: boolean; error?: string; code?: string }> {
+  const size = safeWhisperSize(requested);
+  if (size === null) return { ok: false, error: "Unknown Whisper size.", code: "invalid" };
   const active = await readActiveWhisperSize();
   if (active === size) {
     return { ok: false, error: "That is the size this box transcribes with. Pick another one first.", code: "in_use" };

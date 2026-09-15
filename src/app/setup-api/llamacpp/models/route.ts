@@ -6,7 +6,7 @@ import path from "path";
 import { NextResponse } from "next/server";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
 import { getLlamaCppLaunchSpec } from "@/lib/llamacpp-server";
-import { isHfGgufFile, isHfRepo, isLocalGgufName } from "@/lib/local-install";
+import { safeHfGgufFile, safeHfRepo, safeLocalGgufName } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -116,8 +116,8 @@ export async function GET(request: Request) {
 
   const spec = getLlamaCppLaunchSpec();
   const params = new URL(request.url).searchParams;
-  const repo = params.get("repo");
-  const file = params.get("file");
+  const askedRepo = params.get("repo");
+  const askedFile = params.get("file");
 
   // The "how big is it" probe the panel makes before it offers Download.
   //
@@ -126,11 +126,16 @@ export async function GET(request: Request) {
   // the box and is fine for anything middleware admits; a request this box
   // makes to the internet on someone else's word is the person's, and the MCP
   // bearer is the party the install gates exist for.
-  if (repo !== null || file !== null) {
+  if (askedRepo !== null || askedFile !== null) {
     if (!(await hasOwnerSession(request))) {
       return NextResponse.json({ error: "Checking a model's size needs a signed-in browser session.", code: "owner_only" }, { status: 403 });
     }
-    if (!isHfRepo(repo) || !isHfGgufFile(file)) {
+    // Rebuilt, not tested: from here on the caller's own strings are out of
+    // play and only these two are used — in a path, and in a URL this box
+    // fetches.
+    const repo = safeHfRepo(askedRepo);
+    const file = safeHfGgufFile(askedFile);
+    if (repo === null || file === null) {
       return NextResponse.json({ error: "That is not a Hugging Face repository and GGUF file.", code: "invalid" }, { status: 400 });
     }
     const probed = await probeSize(repo, file);
@@ -192,8 +197,11 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON", code: "invalid" }, { status: 400 });
   }
-  const { repo, file } = body;
-  if (!isHfRepo(repo) || !isHfGgufFile(file)) {
+  // Rebuilt from the alphabet, so what reaches `path.join`, `fetch` and
+  // `execFile` below is made of those characters and nothing the caller sent.
+  const repo = safeHfRepo(body.repo);
+  const file = safeHfGgufFile(body.file);
+  if (repo === null || file === null) {
     return NextResponse.json(
       { error: "Name the model as a Hugging Face repository and a .gguf file inside it.", code: "invalid" },
       { status: 400 },
@@ -287,11 +295,11 @@ export async function DELETE(req: Request) {
   const refused = await guard(req, "Removing a model");
   if (refused) return refused;
 
-  const name = new URL(req.url).searchParams.get("file") ?? "";
   // The plain file name only. Rebuilt from the alphabet rather than tested and
   // passed through, so no caller's string ever reaches `path.join` — the rule
   // `safeAppId` and `safeSkillName` keep for the same reason.
-  if (!isLocalGgufName(name)) {
+  const name = safeLocalGgufName(new URL(req.url).searchParams.get("file"));
+  if (name === null) {
     return NextResponse.json({ error: "That is not a model file in this box's library.", code: "invalid" }, { status: 400 });
   }
   const spec = getLlamaCppLaunchSpec();

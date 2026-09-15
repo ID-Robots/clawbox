@@ -56,60 +56,102 @@ export const OLLAMA_PRESET_MODELS: readonly { id: string; label: string }[] = [
 ] as const;
 
 /**
- * The alphabet a Hugging Face reference may use. The brief's charset, with
- * three exclusions the charset alone does not cover:
+ * The alphabets these references may be made of, and the rule about the shape
+ * they have to take.
  *
- *  - a `..` segment, because the file name becomes a path under the model
- *    directory and the repo becomes a path under the Hub's own cache;
+ * REBUILT, never tested and passed through. Every one of these values ends up
+ * in a filesystem path or in the path of a request this box makes, and the
+ * repo's rule for that is `safeAppId`'s (src/lib/webapp-icon.ts): the value
+ * that reaches `path.join` or `fetch` is assembled here one character at a
+ * time out of a constant alphabet, so whatever the caller sent, what is used
+ * downstream is made of these characters and no more than this many of them.
+ * The rule is exactly a regex test; it is written this way because the data
+ * flow itself has to show the cut — a `.test()` guard leaves the caller's
+ * string in play, and a static analyser rightly keeps flagging every path and
+ * every URL built from it.
+ *
+ * The charset is the brief's `^[A-Za-z0-9._/-]+$`, with three exclusions it
+ * does not cover on its own:
+ *
+ *  - a `..` (or empty, or `.`) segment, because a file name becomes a path
+ *    under the model directory and a repo id becomes a path under the Hub's;
  *  - a leading `-`, because the value is passed to `hf download` as a
  *    positional argument and a leading dash is an option, not a name;
  *  - an empty string.
- *
- * A repo is `owner/name` exactly — one slash — and a file is a path with no
- * leading or trailing slash. Both are REBUILT from nothing by the caller: the
- * route passes the validated string to `execFile` as one argv element, never
- * through a shell.
  */
-const HF_CHARSET = /^[A-Za-z0-9._/-]+$/;
+const HF_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/";
+/** The same, without the separator: a file already on this box has no directory part. */
+const LOCAL_NAME_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-";
+const MAX_HF_REF_CHARS = 200;
 
-function hfShapeOk(value: string): boolean {
-  if (!value || value.length > 200) return false;
-  if (!HF_CHARSET.test(value)) return false;
+function rebuild(value: unknown, alphabet: string, maxChars: number): string | null {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxChars) return null;
+  let safe = "";
+  for (const ch of value) {
+    const at = alphabet.indexOf(ch);
+    if (at < 0) return null;
+    safe += alphabet[at];
+  }
+  return safe;
+}
+
+function shapeOk(value: string): boolean {
   if (value.startsWith("-")) return false;
   return !value.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
 }
 
-/** `owner/name` — the form `hf download` takes as its repo id. */
-export function isHfRepo(value: unknown): value is string {
-  if (typeof value !== "string" || !hfShapeOk(value)) return false;
-  return value.split("/").length === 2;
+/** `owner/name` — the form `hf download` takes as its repo id, rebuilt. */
+export function safeHfRepo(value: unknown): string | null {
+  const safe = rebuild(value, HF_ALPHABET, MAX_HF_REF_CHARS);
+  if (safe === null || !shapeOk(safe)) return null;
+  return safe.split("/").length === 2 ? safe : null;
 }
 
 /**
- * A file inside that repo. It must end in `.gguf`: this library is the
+ * A file inside that repo, rebuilt. It must end in `.gguf`: this library is the
  * llama.cpp model directory, `start-llamacpp.sh` passes its entries to
  * `llama-server --model`, and a repo's README or tokenizer downloaded into it
  * is a file the owner has to notice and delete by hand.
  */
-export function isHfGgufFile(value: unknown): value is string {
-  if (typeof value !== "string" || !hfShapeOk(value)) return false;
-  return /\.gguf$/i.test(value);
+export function safeHfGgufFile(value: unknown): string | null {
+  const safe = rebuild(value, HF_ALPHABET, MAX_HF_REF_CHARS);
+  if (safe === null || !shapeOk(safe)) return null;
+  return /\.gguf$/i.test(safe) ? safe : null;
 }
 
 /**
  * A GGUF already on the box, named the way `DELETE` takes it: the plain file
  * name `hf download --local-dir` left behind, with no directory part at all.
- * Kept separate from `isHfGgufFile` — that one may carry the repo's own
+ * Kept separate from `safeHfGgufFile` — that one may carry the repo's own
  * sub-directory, this one addresses something already on disk.
  */
+export function safeLocalGgufName(value: unknown): string | null {
+  const safe = rebuild(value, LOCAL_NAME_ALPHABET, MAX_HF_REF_CHARS);
+  if (safe === null || safe.startsWith("-") || safe === "." || safe === "..") return null;
+  return /\.gguf$/i.test(safe) ? safe : null;
+}
+
+/**
+ * The offered size this value names — the CATALOGUE's own string, not the
+ * caller's. `whisperCacheDir` builds a path from it, so the same rule applies:
+ * what reaches `path.join` is one of four literals defined in this file.
+ */
+export function safeWhisperSize(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  return WHISPER_SIZES.find((size) => size.id === value)?.id ?? null;
+}
+
+/** The predicates the panel validates with; the `safe*` builders are what a path or a URL is made from. */
+export function isHfRepo(value: unknown): value is string {
+  return safeHfRepo(value) !== null;
+}
+
+export function isHfGgufFile(value: unknown): value is string {
+  return safeHfGgufFile(value) !== null;
+}
+
 export function isLocalGgufName(value: unknown): value is string {
-  return typeof value === "string"
-    && value.length > 0
-    && value.length <= 200
-    && /^[A-Za-z0-9._-]+\.gguf$/i.test(value)
-    && !value.startsWith("-")
-    && value !== "."
-    && value !== "..";
+  return safeLocalGgufName(value) !== null;
 }
 
 export interface DiskVerdict {

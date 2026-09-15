@@ -5,7 +5,7 @@ import path from "path";
 import { NextResponse } from "next/server";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { checkInstallDisk, dirBytes, diskRefusal } from "@/lib/install-disk";
-import { isWhisperSize, whisperSize } from "@/lib/local-install";
+import { safeWhisperSize, whisperSize } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -95,8 +95,11 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON", code: "invalid" }, { status: 400 });
   }
-  const size = body.size;
-  if (!isWhisperSize(size)) {
+  // The CATALOGUE's own string, not the caller's: `whisperCacheDir` builds a
+  // path from it, and the repo's rule is that what reaches `path.join` is
+  // rebuilt rather than tested and passed through (`safeAppId`).
+  const size = safeWhisperSize(body.size);
+  if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }
 
@@ -190,8 +193,8 @@ export async function DELETE(req: Request) {
   const refused = await guard(req, "Removing a speech model");
   if (refused) return refused;
 
-  const size = new URL(req.url).searchParams.get("size") ?? "";
-  if (!isWhisperSize(size)) {
+  const size = safeWhisperSize(new URL(req.url).searchParams.get("size"));
+  if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }
   const freed = await dirBytes(whisperCacheDir(size));
