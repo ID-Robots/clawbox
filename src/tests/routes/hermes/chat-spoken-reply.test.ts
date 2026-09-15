@@ -143,6 +143,11 @@ beforeEach(() => {
   process.env.CLAWBOX_ROOT = root;
   process.env.HOME = root;
   fs.mkdirSync(path.join(root, "data", "chat-media"), { recursive: true });
+  // The owner's switch is ON for every test here unless one says otherwise:
+  // spoken replies are OFF by default (2026-09-15), and a reply that goes
+  // unspoken because nobody asked would let the voice-broken cases below pass
+  // for the wrong reason.
+  fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ voice_auto_reply: true }));
   // A box whose on-device voice is registered and selected. The command names
   // a REAL file: the capability checks the script is on disk, not merely that
   // the config names one — the same third condition the Voice tab applies.
@@ -243,6 +248,19 @@ describe("the owner's spoken-replies switch, on a Hermes box", () => {
     const assistant = transcript().filter((m) => m.role === "assistant").pop();
     // The answer is untouched: switching the voice off is not switching the
     // chat off.
+    expect(assistant.text).toBe("The lantern is green.");
+    expect(assistant.audio).toBeUndefined();
+  });
+
+  it("says nothing on a box that was never asked — the switch is off by default", async () => {
+    // No `voice_auto_reply` in the store at all (the owner's ruling,
+    // 2026-09-15): the box speaks nothing until the owner turns it on.
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({}));
+    const res = await post({ message: "what colour" });
+
+    expect(res.status).toBe(200);
+    expect(speakCalls.map((c) => c.path)).not.toContain("/api/audio/speak");
+    const assistant = transcript().filter((m) => m.role === "assistant").pop();
     expect(assistant.text).toBe("The lantern is green.");
     expect(assistant.audio).toBeUndefined();
   });

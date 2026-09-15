@@ -29,6 +29,8 @@ const warmCalls: string[] = [];
 /** Which engine the box says spoke, as the speak route's header names it. */
 let speakEngine = "local";
 let autoReplyAnswer = true;
+/** When set, `/setup-api/tts` answers a server error instead of the switch. */
+let ttsRefuses = false;
 let replyText = "**Fine**, thanks.";
 /** When set, a turn is acked with "Sent." and the reply arrives from history instead. */
 let ackOnly = false;
@@ -212,6 +214,7 @@ function installFetch() {
       }
       if (url.includes("/setup-api/tts")) {
         ttsReads += 1;
+        if (ttsRefuses) return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
         return {
           ok: true,
           json: async () => ({
@@ -260,6 +263,7 @@ describe("spoken replies in the desktop chat", () => {
     speakEngine = "local";
     FakeMediaRecorder.instances.length = 0;
     autoReplyAnswer = true;
+    ttsRefuses = false;
     replyText = "**Fine**, thanks.";
     ackOnly = false;
     ttsEngines = null;
@@ -384,6 +388,23 @@ describe("spoken replies in the desktop chat", () => {
     await typeIntoTheChat();
     await settleAfterTheTurn();
     expect(speakBodies).toEqual([]);
+    expect(screen.queryByTestId("chat-audio")).not.toBeInTheDocument();
+  });
+
+  it("stays silent while the box has not said the switch is on", async () => {
+    // Off by default (the owner's ruling, 2026-09-15): the chat opens with the
+    // switch OFF and only a body that STATES `autoReply: true` moves it. A
+    // status read that failed used to leave the initial `true` in place, so a
+    // spoken question was answered out loud on a box nobody had asked.
+    ttsRefuses = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(screen.getAllByText("Fine, thanks.", { exact: false }).length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(ttsReads).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(speakBodies).toEqual([]);
+    expect(warmCalls).toEqual([]);
     expect(screen.queryByTestId("chat-audio")).not.toBeInTheDocument();
   });
 

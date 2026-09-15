@@ -3470,8 +3470,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // typed one gets the player and nothing more. Where a clip is already on the
   // reply — Hermes, whose chat route attaches it inside the turn — nothing is
   // asked for at all.
-  const [voiceAutoReply, setVoiceAutoReply] = useState(true)
-  const voiceAutoReplyRef = useRef(true)
+  // OFF until the box says otherwise: spoken replies are off by default
+  // (src/lib/voice-reply.ts), and a reply that lands before `/setup-api/tts`
+  // has answered — or after it refused — must not be synthesised on a guess.
+  const [voiceAutoReply, setVoiceAutoReply] = useState(false)
+  const voiceAutoReplyRef = useRef(false)
   useEffect(() => { voiceAutoReplyRef.current = voiceAutoReply }, [voiceAutoReply])
   // Whether the box has a voice to speak WITH, as it last said. `null` while
   // nothing is known — see speechEngineAvailable. A ref rather than state:
@@ -3529,10 +3532,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (!active) return
         // Only a body that actually STATES the switch moves it. A refusal or a
         // server error answers an error object, and `data?.autoReply !== false`
-        // reads that as ON — so the composer would show spoken replies on for a
-        // box that was never asked, and `speakReply` would go on to synthesise
-        // for a state nothing confirmed. "Keep the last reading" has to mean
-        // the last real one.
+        // read that as ON — so `speakReply` went on to synthesise for a state
+        // nothing confirmed. "Keep the last reading" has to mean the last real
+        // one, and before there is one the switch is off, as on the box.
         if (typeof data?.autoReply === 'boolean') setVoiceAutoReply(data.autoReply)
         // Only a body that LISTS engines moves this, exactly as the event path
         // below does. A refusal or an error object has no `engines` key, and

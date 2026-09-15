@@ -382,8 +382,22 @@ describe("status validation", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("offers the spoken-replies switch, on by default, and posts a flip", async () => {
-    mockFetch(status(), { answer: { ...status(), autoReply: false } });
+  it("offers the spoken-replies switch off until the box says it is on", async () => {
+    // Off by default (the owner's ruling, 2026-09-15): a status that carries
+    // no `autoReply` at all — a server that predates the field — is read as
+    // off too, never as on, and the flip the switch offers is the one that
+    // turns it ON.
+    mockFetch(status(), { answer: { ...status(), autoReply: true } });
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-reply");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "autoReply", enabled: true } }));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+  });
+
+  it("shows the switch on when the box says so, and posts a flip", async () => {
+    mockFetch(status({ autoReply: true }), { answer: { ...status(), autoReply: false } });
     const heard: unknown[] = [];
     const listener = (e: Event) => heard.push((e as CustomEvent).detail);
     window.addEventListener("clawbox:voice-settings-changed", listener);
@@ -416,7 +430,7 @@ describe("channel voice notes", () => {
   const channels = (voiceNoteReady: boolean) => ({ channels: { supportedOnEdition: true, voiceNoteReady } });
 
   it("says which voice the channels will use, and offers the repair", async () => {
-    mockFetch(status(channels(false)));
+    mockFetch(status({ ...channels(false), autoReply: true }));
     render(<VoiceOutputPanel active />);
     const note = await screen.findByTestId("voice-channel-voice-notes");
     expect(note).toHaveTextContent(/cloud voice/i);
@@ -452,9 +466,9 @@ describe("channel voice notes", () => {
     // The Local AI tab's Install only appears on a Kokoro that is MISSING, so
     // on a shipped box whose engine is installed this is the only route to the
     // fix — the same root step, which now asks apt for ffmpeg.
-    mockFetch(status(channels(false)), {
+    mockFetch(status({ ...channels(false), autoReply: true }), {
       install: '{"status":"Installing the voice on this box (Kokoro)…"}\n{"success":true}\n',
-      after: status(channels(true)),
+      after: status({ ...channels(true), autoReply: true }),
     });
     render(<VoiceOutputPanel active />);
     fireEvent.click(await screen.findByTestId("voice-channel-voice-notes-fix"));
@@ -465,7 +479,7 @@ describe("channel voice notes", () => {
   });
 
   it("says the repair did not finish, rather than clearing the warning it did not fix", async () => {
-    mockFetch(status(channels(false)), {
+    mockFetch(status({ ...channels(false), autoReply: true }), {
       install: '{"error":"The voice install did not finish."}\n',
     });
     render(<VoiceOutputPanel active />);

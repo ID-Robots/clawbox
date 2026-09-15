@@ -1,8 +1,10 @@
 /**
  * Replying with voice to a voice message.
  *
- * One switch, Settings → Voice → "Reply with voice to voice messages", on by
- * default, reaching two surfaces that must agree:
+ * One switch, Settings → Voice → "Spoken replies", OFF by default — a box
+ * that has never been asked speaks nothing, on a channel or in the chat, until
+ * the owner turns it on (the owner's ruling, 2026-09-15; it was on by default
+ * until then) — reaching two surfaces that must agree:
  *
  *  - a CHANNEL voice note (Telegram and friends) is answered by the gateway:
  *    OpenClaw's `tts.auto: "inbound"` sends audio only after an inbound voice
@@ -37,10 +39,14 @@ export const VOICE_AUTO_REPLY_KEY = "voice_auto_reply";
 
 export type TtsAutoMode = "inbound" | "off";
 
-/** On unless the owner switched it off: a voice message gets a voice back. */
+/**
+ * Off unless the owner switched it on: only a stored `true` speaks. Anything
+ * else — absent, `false`, a value that is not a boolean — is off, because a
+ * reply spoken by a box nobody asked to speak is the worse mistake.
+ */
 export async function getVoiceAutoReply(): Promise<boolean> {
   const stored = await get(VOICE_AUTO_REPLY_KEY);
-  return stored !== false;
+  return stored === true;
 }
 
 export async function setVoiceAutoReply(enabled: boolean): Promise<void> {
@@ -75,8 +81,10 @@ function ttsBlockOf(config: OpenClawConfig, home: "tts" | "messages.tts"): Recor
 
 /**
  * Boot-time repair: a box that predates the switch has no `tts.auto` at all,
- * and the switch's default — on — means nothing to the gateway until the
- * mode is in the file. Written only when the key is ABSENT: a value that is
+ * and the switch's position — off unless the owner set it — means nothing to
+ * the gateway until the mode is in the file (a fresh box is seeded "off", and
+ * only the owner's own `true` seeds "inbound"). Written only when the key is
+ * ABSENT: a value that is
  * there is either this switch's own last write or the owner's hand edit
  * ("always", "tagged"), and neither is overwritten at boot. Answers whether
  * it wrote, so the caller knows whether a gateway restart is owed.
