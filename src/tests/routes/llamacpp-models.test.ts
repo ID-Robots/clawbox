@@ -34,8 +34,8 @@ vi.mock("@/lib/llamacpp-server", () => ({
 /** The engine uninstall's two collaborators: the runtime stop, and the Local AI off switch. */
 const stopped = vi.fn(async () => {});
 vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: (...a: unknown[]) => stopped(...(a as [])) }));
-const disabled = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
-vi.mock("@/app/setup-api/local-ai/route", () => ({ POST: (...a: unknown[]) => disabled(...(a as [])) }));
+const disabled = vi.fn<(req: Request) => Promise<Response>>(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+vi.mock("@/app/setup-api/local-ai/route", () => ({ POST: (req: Request) => disabled(req) }));
 
 /** The `hf download` child. */
 const child = { code: 0, stderr: "", writes: null as string | null, bytes: 32 };
@@ -361,7 +361,7 @@ describe("DELETE /setup-api/llamacpp/models?engine=1", () => {
 
     expect(res.status).toBe(200);
     expect(disabled).toHaveBeenCalledTimes(1);
-    expect(await (disabled.mock.calls[0][0] as Request).json()).toEqual({ action: "disable" });
+    expect(await disabled.mock.calls[0][0].json()).toEqual({ action: "disable" });
     expect(body).toMatchObject({ ok: true, freedBytes: 4096, installed: false, files: [] });
     expect(fs.existsSync(path.join(modelDir, GEMMA))).toBe(false);
     // The off switch stops the runtime itself; a second stop is not asked for.
