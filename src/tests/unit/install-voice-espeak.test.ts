@@ -444,16 +444,18 @@ describe.runIf(canRun)("kokoro_check_phonemiser fails a box that drops out-of-vo
 
 describe("the phonemiser remediation prints a command that works on the box", () => {
   /**
-   * Both places that tell an operator how to repair the wheel. A printed fix
-   * that cannot be pasted is a false remedy: the box stays mute and the
-   * operator believes it was told what to do.
+   * Every place that tells an operator how to repair the wheel — the install
+   * (install_kokoro_tts), the full pipeline, and the present-engine check the
+   * update runs (kokoro_report_present). A printed fix that cannot be pasted
+   * is a false remedy: the box stays mute and the operator believes it was
+   * told what to do.
    */
   const remediations = INSTALL_VOICE_SH.split("\n").filter(
     (line) => /^\s*(echo|printf) /.test(line) && /espeakng-loader misaki/.test(line),
   );
 
-  it("finds both of them", () => {
-    expect(remediations).toHaveLength(2);
+  it("finds all three of them", () => {
+    expect(remediations).toHaveLength(3);
   });
 
   /** Bash single-quoting, for putting a hostile value into a fixture safely. */
