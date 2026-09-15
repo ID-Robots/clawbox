@@ -30,12 +30,14 @@ const state = {
 const pointed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined }));
 const restarted = vi.fn(async () => ({ ok: true as boolean }));
 const removed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined, code: undefined as string | undefined }));
+const uninstalled = vi.fn(async () => ({ ok: true as boolean, freedBytes: 228 * 1024 * 1024 as number | null, error: undefined as string | undefined, code: undefined as string | undefined }));
 
 vi.mock("@/lib/whisper-models", () => ({
   readWhisperState: async () => structuredClone(state),
   setActiveWhisperSize: (...a: unknown[]) => pointed(...(a as [])),
   restartWhisper: () => restarted(),
   removeWhisperSize: (...a: unknown[]) => removed(...(a as [])),
+  uninstallWhisperEngine: () => uninstalled(),
   whisperCacheDir: (size: string) => `/tmp/whisper-${size}`,
   whisperFetchScript: () => "/tmp/fetch-whisper-model.py",
 }));
@@ -105,6 +107,7 @@ beforeEach(() => {
   pointed.mockClear().mockResolvedValue({ ok: true, error: undefined });
   restarted.mockClear().mockResolvedValue({ ok: true });
   removed.mockClear().mockResolvedValue({ ok: true, error: undefined, code: undefined });
+  uninstalled.mockClear().mockResolvedValue({ ok: true, freedBytes: 228 * 1024 * 1024, error: undefined, code: undefined });
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -259,5 +262,62 @@ describe("DELETE /setup-api/whisper", () => {
 
     expect(res.status).toBe(400);
     expect(removed).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `?scope=engine` — Settings → Local AI's Uninstall on the Whisper row: every
+ * size, the stamp and the unit, in one request.
+ */
+describe("DELETE /setup-api/whisper?scope=engine", () => {
+  function del(headers: Record<string, string> = {}): Request {
+    return new Request("http://localhost/setup-api/whisper?scope=engine", { method: "DELETE", headers });
+  }
+
+  it("refuses the MCP bearer and any other site's page before anything is touched", async () => {
+    const { DELETE } = await load();
+
+    owner.value = false;
+    const notOwner = await DELETE(del());
+    expect(notOwner.status).toBe(403);
+    expect((await notOwner.json()).code).toBe("owner_only");
+
+    owner.value = true;
+    const elsewhere = await DELETE(del({ Origin: "http://evil.example" }));
+    expect(elsewhere.status).toBe(403);
+    expect((await elsewhere.json()).code).toBe("cross_origin");
+    expect(uninstalled).not.toHaveBeenCalled();
+  });
+
+  it("takes the engine off and answers what came back beside the re-read state", async () => {
+    state.installed = false;
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(uninstalled).toHaveBeenCalledTimes(1);
+    expect(body).toMatchObject({ ok: true, freedBytes: 228 * 1024 * 1024, installed: false });
+    expect(removed).not.toHaveBeenCalled();
+  });
+
+  it("passes the device's refusal through with its code", async () => {
+    uninstalled.mockResolvedValue({ ok: false, freedBytes: null, error: "Could not remove the service file.", code: "remove_failed" });
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Could not remove the service file.", code: "remove_failed" });
+  });
+
+  it("refuses while a size is being fetched, so the fetcher cannot write into a cache being deleted", async () => {
+    const { POST, DELETE } = await load();
+    const fetching = await POST(post({ size: "small" }));
+    const res = await DELETE(del());
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("busy");
+    expect(uninstalled).not.toHaveBeenCalled();
+    await readStream(fetching);
   });
 });

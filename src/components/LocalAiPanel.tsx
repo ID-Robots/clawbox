@@ -6,17 +6,14 @@ import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
 import { readInstallStream } from "@/lib/install-stream";
-import CloudDefaultsCard from "@/components/CloudDefaultsCard";
-import { FOCUS_RING as PANEL_FOCUS_RING } from "@/components/local-ai/ui";
+import { ConfirmDialog } from "@/components/clawkeep-ui";
+import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
-import GgufLibraryCard from "@/components/local-ai/GgufLibraryCard";
-import OllamaModelsCard from "@/components/local-ai/OllamaModelsCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
 
 /**
- * Settings → Local AI: everything that runs on the box itself, grouped by
- * what it is for, one compact row each, with the actions behind a "more"
- * menu instead of a card per concern.
+ * Settings → Local AI: a plain inventory of everything that runs on the box
+ * itself, grouped by what it is for, one compact row each.
  *
  * Three stacked cards (a provider list, a status card, a set-up wizard) and a
  * separate inventory tab all described the same handful of engines; the owner
@@ -25,6 +22,16 @@ import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
  * decision (the provider default for the language model, the voice order for
  * speech out, the transcription order for speech in), so this panel never
  * holds a second copy of any of those.
+ *
+ * Every row carries the SAME four verbs as its own buttons (the owner's
+ * ruling of 2026-09-15): Install when it is not here, otherwise Enable or
+ * Disable and Uninstall — behind a confirm, because it takes a model off the
+ * disk. The role actions (make primary, use as fallback, wake it now) stay
+ * behind the "more" menu. What an engine offers beyond that — the Whisper
+ * size picker, the embedder's "download again" — is drawn under its row only
+ * while the engine is installed AND enabled; a disabled engine's settings are
+ * settings for nothing. The ClawBox AI cloud card, the Ollama card and the
+ * GGUF library that used to sit here are gone at the owner's word.
  */
 
 type Kind = LocalModelEntry["kind"];
@@ -131,17 +138,37 @@ interface Action {
   id: string;
   labelKey: string;
   run: () => Promise<Response>;
-  /** Red, for the one action that takes a configured model away. */
+  /** Red, for an action that takes a configured model away. */
   destructive?: boolean;
   /** The route streams progress (see readInstallStream) instead of answering JSON. */
   streams?: true;
 }
 
+/**
+ * What one row offers, decided from the facts the row shows.
+ *
+ * `install` stands alone on a row that is not here; `toggle` is the standing
+ * switch (Enable or Disable) and `uninstall` the removal, both on an installed
+ * row; `menu` is the role actions behind the "more" button.
+ */
+interface RowControls {
+  install: Action | null;
+  toggle: Action | null;
+  uninstall: Action | null;
+  menu: Action[];
+}
+
+const NO_CONTROLS: RowControls = { install: null, toggle: null, uninstall: null, menu: [] };
+
 const post = (url: string, body: unknown) =>
   fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const del = (url: string) => fetch(url, { method: "DELETE" });
+
+/** An engine whose extra settings are worth drawing: here, and not switched off. */
+const usable = (entry: LocalModelEntry) => entry.installed && entry.enabled !== false;
 
 export default function LocalAiPanel({ active, edition }: { active: boolean; edition: string | null }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
   const [roles, setRoles] = useState<Roles>({});
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
@@ -167,6 +194,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [progress, setProgress] = useState<Record<string, string>>({});
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [focusedItem, setFocusedItem] = useState(0);
+  // The Uninstall waiting on the owner's yes. The action is kept with the
+  // row, so a dialog opened over one engine cannot run another's removal.
+  const [confirm, setConfirm] = useState<{ entry: LocalModelEntry; action: Action } | null>(null);
   // An action takes seconds; the poll must not overwrite any row mid-flight.
   const pendingRef = useRef(new Set<string>());
   const snapshotRef = useRef<LocalModelsSnapshot | null>(null);
@@ -305,9 +335,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     }
   };
 
-  const runAction = useCallback(async (entry: LocalModelEntry, action: Action) => {
-    // The item just activated unmounts with the menu; its button stays.
-    triggerRefs.current.get(entry.id)?.focus();
+  const runAction = useCallback(async (entry: LocalModelEntry, action: Action, from: "menu" | "row" = "row") => {
+    // The item just activated unmounts with the menu; its button stays. A
+    // row button keeps its own focus.
+    if (from === "menu") triggerRefs.current.get(entry.id)?.focus();
     setMenuFor(null);
     pendingRef.current.add(entry.id);
     setPending((p) => new Set(p).add(entry.id));
@@ -333,11 +364,19 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       }
       const data = await res.json().catch(() => ({}));
       if (entry.kind === "llm") notifyProvidersChanged();
-      if (typeof data?.warning === "string" && data.warning) setNotice(data.warning);
       if (isSnapshot(data)) applySnapshot(data);
+      // Everything the box qualified a landed change with, in one line: the
+      // gateway restart it could not confirm, the disk an uninstall gave back,
+      // a voice pick it settled on the default — the last said for the case it
+      // was: a pick refused, or the picked engine just taken off the box.
+      const notes: string[] = [];
+      if (typeof data?.warning === "string" && data.warning) notes.push(data.warning);
+      const freed = typeof data?.freedBytes === "number" ? formatBytes(data.freedBytes, locale) : null;
+      if (freed) notes.push(t("localModels.install.freed", { size: freed }));
       if (data && typeof data === "object" && "fallback" in data && data.fallback) {
-        setNotice(t("localModels.notice.voiceFallback"));
+        notes.push(t(action.id === "uninstall" ? "localModels.notice.voiceReleased" : "localModels.notice.voiceFallback"));
       }
+      if (notes.length > 0) setNotice(notes.join(" "));
     } catch {
       setError(t("localModels.error.unreachable"));
     } finally {
@@ -357,7 +396,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       void refresh();
       void refreshRoles();
     }
-  }, [applySnapshot, refresh, refreshRoles, t]);
+  }, [applySnapshot, locale, refresh, refreshRoles, t]);
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
@@ -388,66 +427,117 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   }, [refresh, refreshRoles]);
 
   /**
-   * What a row can do, decided from the same facts the row shows. Only actions
-   * that have a route on this box are offered — a voice engine is installed by
-   * the installer, not from here, so "install" appears only for the language
-   * model, which has one.
+   * What a row can do, decided from the same facts the row shows. Only verbs
+   * that have a route on this box are offered, and each posts to the surface
+   * that owns the change — this panel never writes routing state of its own.
+   *
+   *  - Kokoro and Whisper: the standing switch is their user unit
+   *    (`/setup-api/local-models`, stop + disable, never a removal); Install is
+   *    install.sh's own voice step for the one and the speech engine install
+   *    for the other; Uninstall is each route's own DELETE.
+   *  - Gemma: Enable wires it as the fallback (the install route, which also
+   *    starts it), Disable is "turn off Local AI"; Make primary stays in the
+   *    menu. Uninstall takes the blessed GGUF, which the next update puts back.
+   *  - The memory embedder: Install and Uninstall through its own route; it
+   *    has no switch, because the proxy owns its lifecycle, and its deeper
+   *    controls are Memory Shard's.
    */
-  const actionsFor = (entry: LocalModelEntry): Action[] => {
-    const actions: Action[] = [];
+  const controlsFor = (entry: LocalModelEntry): RowControls => {
+    if (entry.running === "not-on-this-edition") return NO_CONTROLS;
+    const menu: Action[] = [];
+    let install: Action | null = null;
+    let toggle: Action | null = null;
+    let uninstall: Action | null = null;
+    const unitToggle = (): Action => ({
+      id: entry.enabled ? "disable" : "enable",
+      labelKey: entry.enabled ? "localModels.menu.disable" : "localModels.menu.enable",
+      run: () => post("/setup-api/local-models", { id: entry.id, enabled: !entry.enabled }),
+    });
+    const removal = (url: string): Action => ({
+      id: "uninstall",
+      labelKey: "localModels.menu.uninstall",
+      destructive: true,
+      run: () => del(url),
+    });
+
     if (entry.control !== "none" && entry.enabled !== null && entry.installed) {
-      // Enabled but not running is Ollama's standby (or a unit that exited
-      // with an error): the next request would start it, and so does this,
-      // without the wait. Same route, same body as Enable — the engine is
-      // already enabled, so the route only has the start left to do.
+      // Enabled but not running is the engine's standby (or a unit that
+      // exited with an error): the next request would start it, and so does
+      // this, without the wait. Same route, same body as Enable — the engine
+      // is already enabled, so the route only has the start left to do.
       if (entry.enabled && entry.running !== "running") {
-        actions.push({
+        menu.push({
           id: "turn-on",
           labelKey: "localModels.menu.turnOn",
           run: () => post("/setup-api/local-models", { id: entry.id, enabled: true }),
         });
       }
-      actions.push({
-        id: entry.enabled ? "disable" : "enable",
-        labelKey: entry.enabled ? "localModels.menu.disable" : "localModels.menu.enable",
-        run: () => post("/setup-api/local-models", { id: entry.id, enabled: !entry.enabled }),
-      });
+      toggle = unitToggle();
     }
-    if (entry.kind === "llm" && entry.id === "llamacpp") {
-      if (!entry.installed) {
-        actions.push({ id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local" }) });
-      } else if (roles.llm === "primary") {
-        actions.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/providers/default", { provider: "clawai" }) });
-      } else {
-        actions.push({ id: "primary", labelKey: "localModels.menu.makePrimary", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local", activate: true }) });
-        if (roles.llm == null) {
-          actions.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local" }) });
+
+    switch (entry.kind) {
+      case "llm": {
+        if (entry.id !== "llamacpp") break;
+        if (!entry.installed) {
+          install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local" }) };
+          break;
         }
+        const makePrimary: Action = { id: "primary", labelKey: "localModels.menu.makePrimary", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local", activate: true }) };
+        if (roles.llm == null) {
+          // Not wired to anything: Enable is what "use as fallback" did.
+          toggle = { id: "enable", labelKey: "localModels.menu.enable", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local" }) };
+          menu.push(makePrimary);
+        } else {
+          toggle = { id: "disable", labelKey: "localModels.menu.disable", destructive: true, run: () => post("/setup-api/local-ai", { action: "disable" }) };
+          if (roles.llm === "primary") {
+            menu.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/providers/default", { provider: "clawai" }) });
+          } else {
+            menu.push(makePrimary);
+          }
+        }
+        uninstall = removal("/setup-api/llamacpp/models?engine=1");
+        break;
       }
-      if (roles.llm != null) {
-        actions.push({ id: "turn-off", labelKey: "localModels.menu.turnOffLocalAi", destructive: true, run: () => post("/setup-api/local-ai", { action: "disable" }) });
+      case "tts": {
+        if (entry.installed) {
+          if (roles.tts === "primary") {
+            menu.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/tts", { action: "select", choice: "auto" }) });
+          } else {
+            menu.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/tts", { action: "select", choice: "local" }) });
+          }
+          uninstall = removal("/setup-api/tts/install");
+        } else if (edition !== "hermes") {
+          // The voice on the box is installed by install.sh's own step, started
+          // as root and followed line by line — the same stream shape the Gemma
+          // install answers with. OpenClaw only: the step is the gateway's.
+          install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/tts/install", {}) };
+        }
+        break;
+      }
+      case "stt": {
+        if (entry.installed) {
+          if (roles.stt === "primary") {
+            menu.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/stt", { primary: "cloud" }) });
+          } else {
+            menu.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/stt", { primary: "local" }) });
+          }
+          uninstall = removal("/setup-api/whisper?scope=engine");
+        } else {
+          // The engine itself (faster-whisper and its unit); a size is picked
+          // from the card under the row once it is here.
+          install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/whisper", { action: "install-engine" }) };
+        }
+        break;
+      }
+      case "embedding": {
+        // An embedder somewhere else has nothing on this box to remove.
+        if (entry.detailCode === "embeddingsCloud") break;
+        if (entry.installed) uninstall = removal("/setup-api/embed/install");
+        else install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/embed/install", {}) };
+        break;
       }
     }
-    if (entry.kind === "tts" && entry.installed) {
-      if (roles.tts === "primary") {
-        actions.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/tts", { action: "select", choice: "auto" }) });
-      } else {
-        actions.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/tts", { action: "select", choice: "local" }) });
-      }
-    } else if (entry.kind === "tts" && edition !== "hermes") {
-      // The voice on the box is installed by install.sh's own step, started
-      // as root and followed line by line — the same stream shape the Gemma
-      // install answers with. OpenClaw only: the step is the gateway's.
-      actions.push({ id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/tts/install", {}) });
-    }
-    if (entry.kind === "stt" && entry.installed) {
-      if (roles.stt === "primary") {
-        actions.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/stt", { primary: "cloud" }) });
-      } else {
-        actions.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/stt", { primary: "local" }) });
-      }
-    }
-    return actions;
+    return { install, toggle, uninstall, menu };
   };
 
   // The agent-model role belongs to the engine Local AI manages (llama.cpp);
@@ -459,23 +549,19 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   };
 
   /**
-   * The install cards, by the group each belongs under.
-   *
-   * Built here rather than inside the map so the panel's own refresh is what
-   * every card reports a change to: an install writes something the inventory
-   * row above it describes (a Whisper size, the embedder's GGUF, an Ollama
-   * model), and a card that updated only itself would leave the row beside it
-   * claiming the old state until the five-second poll came round.
+   * The card an engine draws under its group — its settings beyond the four
+   * verbs — and only while the engine is installed and not switched off. The
+   * panel's own refresh is what every card reports a change to: a size
+   * download writes something the row above describes, and a card that
+   * updated only itself would leave the row claiming the old state until the
+   * five-second poll came round.
    */
-  const installCards: Partial<Record<Kind, React.ReactNode>> = {
-    llm: (
-      <>
-        <OllamaModelsCard onChanged={afterInstall} />
-        <GgufLibraryCard onChanged={afterInstall} />
-      </>
-    ),
-    stt: <WhisperSizesCard onChanged={afterInstall} />,
-    embedding: <EmbeddingModelCard onChanged={afterInstall} />,
+  const cardFor = (kind: Kind, entries: LocalModelEntry[]): React.ReactNode => {
+    const engine = entries.find((e) => e.kind === kind);
+    if (!engine || !usable(engine)) return null;
+    if (kind === "stt") return <WhisperSizesCard onChanged={afterInstall} />;
+    if (kind === "embedding" && engine.detailCode !== "embeddingsCloud") return <EmbeddingModelCard onChanged={afterInstall} />;
+    return null;
   };
 
   if (!snapshot) {
@@ -556,31 +642,21 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         </div>
       )}
 
-      {/* Where the three cloud-capable engines actually run. Above the
-          inventory on purpose: the inventory answers "what is installed", and
-          this answers the question the owner opened the page with — what is
-          being done on the box and what is being sent away. */}
-      <CloudDefaultsCard active={active} />
-
       {GROUPS.map((group) => {
         const entries = snapshot.models.filter((m) => m.kind === group.kind);
-        // The install cards belong under the group whose engines they add to,
-        // and they stand on their own: a group whose inventory row could not be
-        // read still has to offer its installs, which is the state an owner is
-        // most likely to be on this page for.
-        const extras = installCards[group.kind];
-        if (entries.length === 0 && !extras) return null;
+        if (entries.length === 0) return null;
+        const card = cardFor(group.kind, entries);
         return (
           <section key={group.kind} data-testid={`local-ai-group-${group.kind}`}>
             <h3 className="flex items-center gap-2 text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2 px-1">
               <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">{group.icon}</span>
               {t(group.titleKey)}
             </h3>
-            {entries.length > 0 && (
             <ul className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] divide-y divide-white/[0.06]">
               {entries.map((entry) => {
                 const role = roleFor(entry);
-                const actions = entry.managedBy === "clawkeep" ? [] : actionsFor(entry);
+                const controls = controlsFor(entry);
+                const actions = controls.menu;
                 const busy = pending.has(entry.id);
                 const disk = formatBytes(entry.diskBytes);
                 const memory = formatBytes(entry.memoryBytes);
@@ -633,86 +709,151 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                       </span>
                     )}
 
-                    {entry.managedBy === "clawkeep" ? (
-                      // The index this row embeds for is managed in Memory
-                      // Shard now; ClawKeep only keeps a card pointing there.
-                      // Opening ClawKeep would cost the owner a second click
-                      // to reach the thing they were sent to manage. On the
-                      // standalone page there is no desktop to open a window
-                      // into, so the button navigates there instead.
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (onStandaloneAppPage()) window.location.assign("/app/memory-shard");
-                          else dispatchOpenApp("memory-shard");
-                        }}
-                        className={`text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0 ${FOCUS_RING}`}
-                        data-testid={`local-model-manage-${entry.id}`}
-                      >
-                        {t("localModels.menu.manageInMemoryShard")}
-                      </button>
-                    ) : actions.length > 0 && (
-                      <div className="relative shrink-0" ref={open ? menuRef : undefined}>
-                        {/* aria-disabled, not disabled: the button keeps
-                            focus through the seconds the action takes, so
-                            a keyboard user is not dropped to <body>. */}
+                    {/* The row's own verbs, then the role menu. aria-disabled
+                        rather than disabled while the action runs, so a
+                        keyboard user is not dropped to <body> for the seconds
+                        it takes. */}
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                      {entry.managedBy === "clawkeep" && (
+                        // The index this row embeds for is managed in Memory
+                        // Shard now; ClawKeep only keeps a card pointing there.
+                        // Opening ClawKeep would cost the owner a second click
+                        // to reach the thing they were sent to manage. On the
+                        // standalone page there is no desktop to open a window
+                        // into, so the button navigates there instead.
                         <button
                           type="button"
-                          ref={(el) => {
-                            if (el) triggerRefs.current.set(entry.id, el);
-                            else triggerRefs.current.delete(entry.id);
-                          }}
-                          aria-label={t("localModels.menu.more", { name })}
-                          aria-haspopup="menu"
-                          aria-expanded={open}
-                          aria-disabled={busy}
                           onClick={() => {
-                            if (busy) return;
-                            if (open) setMenuFor(null);
-                            else openMenu(entry.id);
+                            if (onStandaloneAppPage()) window.location.assign("/app/memory-shard");
+                            else dispatchOpenApp("memory-shard");
                           }}
-                          data-testid={`local-model-menu-${entry.id}`}
-                          className={`w-8 h-8 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 aria-disabled:opacity-50 aria-disabled:cursor-default flex items-center justify-center ${FOCUS_RING}`}
+                          className={BUTTON}
+                          data-testid={`local-model-manage-${entry.id}`}
                         >
-                          <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">more_horiz</span>
+                          {t("localModels.menu.manageInMemoryShard")}
                         </button>
-                        {open && (
-                          <div
-                            role="menu"
+                      )}
+                      {controls.install && (
+                        <button
+                          type="button"
+                          aria-disabled={busy}
+                          onClick={() => { if (!busy && controls.install) void runAction(entry, controls.install); }}
+                          className={`${PRIMARY_BUTTON} aria-disabled:opacity-50 aria-disabled:cursor-default`}
+                          data-testid={`local-model-action-${entry.id}-install`}
+                        >
+                          {t(controls.install.labelKey)}
+                        </button>
+                      )}
+                      {controls.toggle && (
+                        <button
+                          type="button"
+                          aria-disabled={busy}
+                          onClick={() => { if (!busy && controls.toggle) void runAction(entry, controls.toggle); }}
+                          className={`${BUTTON} aria-disabled:opacity-50 aria-disabled:cursor-default`}
+                          data-testid={`local-model-action-${entry.id}-${controls.toggle.id}`}
+                        >
+                          {t(controls.toggle.labelKey)}
+                        </button>
+                      )}
+                      {controls.uninstall && (
+                        <button
+                          type="button"
+                          aria-disabled={busy}
+                          onClick={() => { if (!busy && controls.uninstall) setConfirm({ entry, action: controls.uninstall }); }}
+                          className={`${BUTTON} text-red-300 aria-disabled:opacity-50 aria-disabled:cursor-default`}
+                          data-testid={`local-model-action-${entry.id}-uninstall`}
+                        >
+                          {t(controls.uninstall.labelKey)}
+                        </button>
+                      )}
+                      {actions.length > 0 && (
+                        <div className="relative shrink-0" ref={open ? menuRef : undefined}>
+                          {/* aria-disabled, not disabled: the button keeps
+                              focus through the seconds the action takes, so
+                              a keyboard user is not dropped to <body>. */}
+                          <button
+                            type="button"
+                            ref={(el) => {
+                              if (el) triggerRefs.current.set(entry.id, el);
+                              else triggerRefs.current.delete(entry.id);
+                            }}
                             aria-label={t("localModels.menu.more", { name })}
-                            onKeyDown={(e) => onMenuKeyDown(e, entry.id, actions.length)}
-                            className="absolute right-0 top-9 z-20 min-w-[12rem] rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] shadow-2xl py-1"
+                            aria-haspopup="menu"
+                            aria-expanded={open}
+                            aria-disabled={busy}
+                            onClick={() => {
+                              if (busy) return;
+                              if (open) setMenuFor(null);
+                              else openMenu(entry.id);
+                            }}
+                            data-testid={`local-model-menu-${entry.id}`}
+                            className={`w-8 h-8 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 aria-disabled:opacity-50 aria-disabled:cursor-default flex items-center justify-center ${FOCUS_RING}`}
                           >
-                            {actions.map((action, i) => (
-                              <button
-                                key={action.id}
-                                type="button"
-                                role="menuitem"
-                                tabIndex={i === focusedItem ? 0 : -1}
-                                onClick={() => void runAction(entry, action)}
-                                data-testid={`local-model-action-${entry.id}-${action.id}`}
-                                className={`w-full text-left px-3 py-2 text-sm hover:bg-white/[0.06] ${FOCUS_RING} focus-visible:-outline-offset-2 ${
-                                  action.destructive ? "text-red-300" : "text-[var(--text-primary)]"
-                                }`}
-                              >
-                                {t(action.labelKey)}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                            <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">more_horiz</span>
+                          </button>
+                          {open && (
+                            <div
+                              role="menu"
+                              aria-label={t("localModels.menu.more", { name })}
+                              onKeyDown={(e) => onMenuKeyDown(e, entry.id, actions.length)}
+                              className="absolute right-0 top-9 z-20 min-w-[12rem] rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] shadow-2xl py-1"
+                            >
+                              {actions.map((action, i) => (
+                                <button
+                                  key={action.id}
+                                  type="button"
+                                  role="menuitem"
+                                  tabIndex={i === focusedItem ? 0 : -1}
+                                  onClick={() => void runAction(entry, action, "menu")}
+                                  data-testid={`local-model-action-${entry.id}-${action.id}`}
+                                  className={`w-full text-left px-3 py-2 text-sm hover:bg-white/[0.06] ${FOCUS_RING} focus-visible:-outline-offset-2 ${
+                                    action.destructive ? "text-red-300" : "text-[var(--text-primary)]"
+                                  }`}
+                                >
+                                  {t(action.labelKey)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </li>
                 );
               })}
             </ul>
-            )}
-            {extras && <div className="mt-3 space-y-3">{extras}</div>}
+            {card && <div className="mt-3">{card}</div>}
           </section>
         );
       })}
 
-      <p className="text-xs text-[var(--text-secondary)]">{t("localModels.footer")}</p>
+      {confirm && (() => {
+        const name = rowText(t, "localModels.name", confirm.entry.nameCode, confirm.entry.params, confirm.entry.name);
+        const { entry, action } = confirm;
+        return (
+          <ConfirmDialog
+            title={t("localModels.uninstall.title", { name })}
+            body={(
+              <div data-testid="local-ai-uninstall-dialog">
+                <p>{t("localModels.uninstall.body", { name })}</p>
+                {/* Gemma is the one model install.sh caches on every box, so a
+                    removal here lasts until the next update — said before the
+                    button, not discovered after it. */}
+                {entry.id === "llamacpp" && (
+                  <p className="mt-2" data-testid="local-ai-uninstall-gemma-note">{t("localModels.uninstall.gemmaNote")}</p>
+                )}
+              </div>
+            )}
+            confirmLabel={t("localModels.uninstall.confirm")}
+            danger
+            onCancel={() => setConfirm(null)}
+            onConfirm={() => {
+              setConfirm(null);
+              void runAction(entry, action);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

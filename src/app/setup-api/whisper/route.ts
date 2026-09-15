@@ -14,6 +14,7 @@ import {
   removeWhisperSize,
   restartWhisper,
   setActiveWhisperSize,
+  uninstallWhisperEngine,
   whisperCacheDir,
   whisperFetchScript,
 } from "@/lib/whisper-models";
@@ -23,7 +24,9 @@ import {
  *
  * Every box ships with `base`. The owner's decision of 2026-09-14 is that the
  * other sizes are one click away, so this is the click: GET the picker's facts,
- * POST a size to fetch it and switch to it, DELETE one to get the disk back.
+ * POST a size to fetch it and switch to it, DELETE one to get the disk back —
+ * or, with `?scope=engine`, take speech-to-text off the box altogether (every
+ * size, the stamp, the unit), which is Settings → Local AI's Uninstall.
  *
  * OWNER ONLY for both writes, and same-origin with it. A size change spends
  * hundreds of megabytes and swaps the engine the microphone speaks to; the
@@ -193,7 +196,23 @@ export async function DELETE(req: Request) {
   const refused = await guard(req, "Removing a speech model");
   if (refused) return refused;
 
-  const size = safeWhisperSize(new URL(req.url).searchParams.get("size"));
+  const params = new URL(req.url).searchParams;
+  if (params.get("scope") === "engine") {
+    // The whole engine, not one size. Refused while a size is being fetched:
+    // the fetcher would go on writing into a cache this is deleting, and the
+    // stream would then point the unit at weights that are gone.
+    if (inFlight) {
+      return NextResponse.json({ error: "A speech model is being fetched right now.", code: "busy" }, { status: 409 });
+    }
+    const removed = await uninstallWhisperEngine();
+    if (!removed.ok) {
+      return NextResponse.json({ error: removed.error, code: removed.code ?? "remove_failed" }, { status: 500 });
+    }
+    const state = await readWhisperState();
+    return NextResponse.json({ ok: true, freedBytes: removed.freedBytes, ...state });
+  }
+
+  const size = safeWhisperSize(params.get("size"));
   if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }

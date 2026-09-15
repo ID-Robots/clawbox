@@ -4,8 +4,10 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
+import { POST as disableLocalAi } from "@/app/setup-api/local-ai/route";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
-import { getLlamaCppLaunchSpec } from "@/lib/llamacpp-server";
+import { getLlamaCppLaunchSpec, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
+import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { safeGgufName, safeHfRepo } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
@@ -297,6 +299,9 @@ export async function DELETE(req: Request) {
   const refused = await guard(req, "Removing a model");
   if (refused) return refused;
 
+  const params = new URL(req.url).searchParams;
+  if (params.get("engine") === "1") return uninstallEngine();
+
   // The plain file name only. Rebuilt from the alphabet rather than tested and
   // passed through, so no caller's string ever reaches `path.join` — the rule
   // `safeAppId` and `safeSkillName` keep for the same reason.
@@ -329,6 +334,65 @@ export async function DELETE(req: Request) {
   const files = await listLibrary(spec.modelDir, spec.hfFile);
   const disk = await checkInstallDisk(spec.modelDir, 0);
   return NextResponse.json({ ok: true, freedBytes, files, freeBytes: disk.freeBytes, reserveBytes: disk.reserveBytes });
+}
+
+/**
+ * `DELETE ?engine=1` — the model the box answers with, which the plain form
+ * refuses as `in_use`. Settings → Local AI's Uninstall on the Gemma row.
+ *
+ * The blessed GGUF is what makes the local model "installed" (the binary is
+ * install.sh's and stays), so this is the whole uninstall. Local AI wired to
+ * it is turned OFF first, through the route the panel's own Disable posts —
+ * the stop, the flag clear, OpenClaw's fallback list, Hermes' provider block,
+ * the gateway restart — because a fallback list that still names a model
+ * whose file is gone sends the next turn that falls back to an endpoint with
+ * nothing behind it. A refusal there leaves the file in place: half an
+ * uninstall is the state nothing can retry from. An unwired model only needs
+ * its runtime stopped, since llama-server holds the file open.
+ *
+ * The next system update puts Gemma back — it is the one model install.sh
+ * caches on every box — and the panel's dialog says so.
+ */
+async function uninstallEngine(): Promise<NextResponse> {
+  if (inFlight) {
+    return NextResponse.json({ error: "A model is being downloaded right now.", code: "busy" }, { status: 409 });
+  }
+  const spec = getLlamaCppLaunchSpec();
+  const target = path.join(spec.modelDir, spec.hfFile);
+  let freedBytes: number | null = null;
+  try {
+    freedBytes = (await fs.stat(target)).size;
+  } catch {
+    return NextResponse.json({ error: "The local model is not on this box.", code: "not_found" }, { status: 404 });
+  }
+  const wired = await resolveConfiguredLlamaCppAlias().catch(() => null);
+  if (wired !== null) {
+    const res = await disableLocalAi(new Request("http://127.0.0.1/setup-api/local-ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "disable" }),
+    })).catch(() => null);
+    if (!res || !res.ok) {
+      const data = res ? await res.json().catch(() => ({})) : {};
+      return NextResponse.json(
+        { error: typeof data?.error === "string" ? data.error : "Local AI could not be turned off, so the model was left in place.", code: "disable_failed" },
+        { status: 502 },
+      );
+    }
+  } else {
+    await stopLocalAiProvider("llamacpp").catch(() => {});
+  }
+  try {
+    await fs.unlink(target);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not remove the local model.", code: "remove_failed" },
+      { status: 500 },
+    );
+  }
+  const files = await listLibrary(spec.modelDir, spec.hfFile);
+  const disk = await checkInstallDisk(spec.modelDir, 0);
+  return NextResponse.json({ ok: true, freedBytes, installed: false, files, freeBytes: disk.freeBytes, reserveBytes: disk.reserveBytes });
 }
 
 /**

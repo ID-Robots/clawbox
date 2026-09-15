@@ -19,13 +19,22 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import { dirBytes } from "@/lib/install-disk";
 import { safeWhisperSize, WHISPER_SIZES, type WhisperSize } from "@/lib/local-install";
-import { readUnitState, reloadAndRestartUserEngine, SYSTEMD_USER_DIR, WHISPER_UNIT } from "@/lib/local-models";
+import { readUnitState, reloadAndRestartUserEngine, removeUserUnit, SYSTEMD_USER_DIR, WHISPER_UNIT } from "@/lib/local-models";
 
 const HOME = process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox";
 
 /** The unit `scripts/install-voice.sh::write_whisper_unit` writes. */
 export const WHISPER_UNIT_PATH = path.join(SYSTEMD_USER_DIR, WHISPER_UNIT);
+
+/**
+ * The stamp `whisper_mark_installed` in install-voice.sh writes after a
+ * complete faster-whisper install, and reads as the idempotence gate on every
+ * update — see the KOKORO_STAMP note beside it. Removing it is what makes the
+ * next update (or the Install button) put the engine back.
+ */
+export const WHISPER_STAMP = path.join(HOME, ".cache/clawbox/whisper-installed");
 
 /**
  * Where `faster_whisper.utils.download_model` puts a size's weights.
@@ -195,4 +204,47 @@ export async function removeWhisperSize(requested: string): Promise<{ ok: boolea
     return { ok: false, error: err instanceof Error ? err.message : "Could not remove those weights.", code: "remove_failed" };
   }
   return { ok: true };
+}
+
+export interface WhisperUninstallResult {
+  ok: boolean;
+  /** Bytes the cached sizes occupied, or null when nothing could be measured. */
+  freedBytes: number | null;
+  error?: string;
+  code?: "remove_failed";
+}
+
+/**
+ * Take speech-to-text off the box: every cached size, the install stamp and
+ * the user unit — stopped, disabled and deleted. Settings → Local AI's
+ * Uninstall on the Whisper row.
+ *
+ * The UNIT goes first. `readWhisperState().installed` IS the unit file, so a
+ * failure there leaves the row honestly saying "installed" with everything
+ * still in place to retry from; a failure after it leaves the row saying "not
+ * installed" over some stray weights, which is only disk. The engine's Python
+ * packages stay: they are install.sh's (a root install into the account's
+ * site-packages) and the stamp is what tells the next update to redo them.
+ */
+export async function uninstallWhisperEngine(): Promise<WhisperUninstallResult> {
+  let freed = 0;
+  let measured = false;
+  for (const size of WHISPER_SIZES) {
+    const bytes = await dirBytes(whisperCacheDir(size.id));
+    if (bytes !== null) {
+      freed += bytes;
+      measured = true;
+    }
+  }
+  const unit = await removeUserUnit(WHISPER_UNIT);
+  if (!unit.ok) return { ok: false, freedBytes: null, error: unit.error, code: "remove_failed" };
+  try {
+    await fs.rm(WHISPER_STAMP, { force: true });
+    for (const size of WHISPER_SIZES) {
+      await fs.rm(whisperCacheDir(size.id), { recursive: true, force: true });
+    }
+  } catch (err) {
+    return { ok: false, freedBytes: null, error: err instanceof Error ? err.message : "Could not remove the speech model.", code: "remove_failed" };
+  }
+  return { ok: true, freedBytes: measured ? freed : null };
 }

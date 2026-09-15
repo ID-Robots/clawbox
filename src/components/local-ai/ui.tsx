@@ -7,19 +7,18 @@ import { progressPercent, type InstallOutcome, type InstallProgress } from "@/li
 /**
  * The pieces every install card on Settings → Local AI draws the same way.
  *
- * One module rather than a copy per card: four cards now show a download's
- * progress and its verdict, and the first two had already drifted into two
- * different words for "failed" before this existed.
+ * One module rather than a copy per card: the cards and the panel's own row
+ * buttons show a download's progress and its verdict, and the first two cards
+ * had already drifted into two different words for "failed" before this
+ * existed.
  */
 
 /** The keyboard ring the whole panel uses — the wizard's, so one ring across the app. */
 export const FOCUS_RING = "focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--coral-ring)]";
 
 export const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)]";
-export const ROW = "flex items-center gap-3 px-4 py-3";
 export const BUTTON = `text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 disabled:cursor-default shrink-0 ${FOCUS_RING}`;
 export const PRIMARY_BUTTON = `text-[11px] px-2.5 py-1 rounded-lg border border-[var(--coral-bright)]/40 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/10 disabled:opacity-50 disabled:cursor-default shrink-0 ${FOCUS_RING}`;
-export const INPUT = `w-full px-3 py-2 rounded-lg bg-[var(--bg-deep)] border border-white/10 text-sm text-[var(--text-primary)] outline-none placeholder-[var(--text-muted)] ${FOCUS_RING}`;
 
 export function CardHeading({ title, hint }: { title: string; hint?: string }) {
   return (
