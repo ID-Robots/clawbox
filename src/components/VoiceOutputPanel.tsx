@@ -286,7 +286,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   /**
    * Repair the channel voice, from the page that says it is broken.
    *
-   * The work is install.sh's own `openclaw_tts` step — the same one the Local
+   * The work is install.sh's own `voice_kokoro_install` step — the same one the Local
    * AI tab's Kokoro install runs, which now asks apt for ffmpeg — started as
    * root through /setup-api/tts/install. The route STREAMS NDJSON: `status`
    * lines while it works, then one closing `success` or `error`. The lines are

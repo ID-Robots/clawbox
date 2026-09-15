@@ -3,10 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * POST /setup-api/tts/install — the Local AI tab's Install on an absent Kokoro.
  *
- * Pinned: the work is install.sh's own openclaw_tts step, started as root
- * through the launcher and followed line by line in the same stream shape
- * the Gemma install answers with; the MCP bearer is refused, because
- * installing software as root is the person's decision.
+ * Pinned: the work is install.sh's `voice_kokoro_install` step — the INSTALL
+ * mode of step_openclaw_tts, and since 2026-09-15 the only path that puts
+ * Kokoro on a box, because `openclaw_tts` itself (every install, every
+ * update) installs nothing any more — started as root through the launcher
+ * and followed line by line in the same stream shape the Gemma install
+ * answers with; the MCP bearer is refused, because installing software as
+ * root is the person's decision.
  */
 
 const ownerMock = vi.fn();
@@ -44,7 +47,7 @@ describe("POST /setup-api/tts/install", () => {
     expect(followMock).not.toHaveBeenCalled();
   });
 
-  it("runs the openclaw_tts root step and streams its lines, then a closing success", async () => {
+  it("runs the voice_kokoro_install root step and streams its lines, then a closing success", async () => {
     followMock.mockImplementation(async (step: string, opts: { onStatus: (line: string) => void }) => {
       opts.onStatus("=== On-device TTS (Kokoro GPU) ===");
       opts.onStatus("Kokoro GPU TTS installed");
@@ -53,10 +56,18 @@ describe("POST /setup-api/tts/install", () => {
     const { POST } = await route();
     const res = await POST(post());
     expect(res.status).toBe(200);
-    expect(followMock.mock.calls[0][0]).toBe("openclaw_tts");
+    expect(followMock.mock.calls[0][0]).toBe("voice_kokoro_install");
     const out = await lines(res);
     expect(out.map((l) => l.status)).toContain("Kokoro GPU TTS installed");
     expect(out[out.length - 1]).toMatchObject({ success: true });
+  });
+
+  it("never asks for openclaw_tts — that step refreshes what is present and installs nothing", async () => {
+    followMock.mockResolvedValue({ ok: true });
+    const { POST } = await route();
+    await lines(await POST(post()));
+    expect(followMock).toHaveBeenCalledTimes(1);
+    expect(followMock.mock.calls[0][0]).not.toBe("openclaw_tts");
   });
 
   it("closes with the step's error when it failed", async () => {
