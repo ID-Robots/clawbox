@@ -64,8 +64,14 @@ async function exists(target: string): Promise<boolean> {
  */
 async function probeSize(repo: string, file: string): Promise<{ bytes: number | null; error?: string }> {
   try {
+    // The repo id goes into the PATH unencoded, and that is deliberate: the
+    // Hub's route is `/api/models/{owner}/{name}/tree/...`, so a `%2F` in place
+    // of the slash is a different path and answers 404. It is safe to
+    // interpolate because `isHfRepo` has already rebuilt it from an alphabet
+    // with no `%`, no `?`, no `#` and no `..` segment — the same reasoning
+    // `require_safe_hf_ref` applies before install.sh hands one to `hf`.
     const res = await fetch(
-      `https://huggingface.co/api/models/${encodeURIComponent(repo)}/tree/main?recursive=1`,
+      `https://huggingface.co/api/models/${repo}/tree/main?recursive=1`,
       { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) },
     );
     if (res.status === 404) return { bytes: null, error: "not_found" };

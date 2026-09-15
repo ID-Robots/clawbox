@@ -139,6 +139,15 @@ describe("GET /setup-api/llamacpp/models", () => {
     expect(body.fits).toBe(false);
   });
 
+  it("asks the Hub for the repository by its real path, not a percent-encoded one", async () => {
+    // `/api/models/owner%2Fname/tree/main` is a different path and answers 404.
+    const { GET } = await load();
+    await GET(new Request("http://localhost/setup-api/llamacpp/models?repo=owner%2Fname&file=other.gguf"));
+
+    const asked = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+    expect(asked).toBe("https://huggingface.co/api/models/owner/name/tree/main?recursive=1");
+  });
+
   it("refuses a reference that is not owner/name plus a .gguf", async () => {
     const { GET } = await load();
     for (const query of ["repo=owner&file=other.gguf", "repo=owner/name&file=README.md", "repo=owner/../x&file=a.gguf"]) {
