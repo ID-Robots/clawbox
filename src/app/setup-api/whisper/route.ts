@@ -1,11 +1,12 @@
 export const dynamic = "force-dynamic";
 
 import { spawn } from "child_process";
+import os from "os";
 import path from "path";
 import { NextResponse } from "next/server";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { CONFIG_ROOT } from "@/lib/config-store";
-import { checkInstallDisk, dirBytes, diskRefusal } from "@/lib/install-disk";
+import { checkInstallDisk, checkInstallDisks, dirBytes, diskRefusal } from "@/lib/install-disk";
 import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
 import { safeWhisperSize, whisperSize } from "@/lib/local-install";
 import { hasOwnerSession } from "@/lib/owner-session";
@@ -74,14 +75,25 @@ let engineInFlight = false;
  * keeps, and the CTranslate2 build alone is five minutes on an Orin.
  */
 const ENGINE_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+/** Whose home the engine installs into — the account `install-voice.sh --whisper` runs pip as. */
+const ENGINE_HOME = process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox";
+const MIB = 1024 * 1024;
 /**
- * What the WHOLE engine install may need on the cache's filesystem, not one
- * size's weights: the faster-whisper and CTranslate2 wheels, the CTranslate2
- * CUDA source and build tree while it compiles, and the `base` weights. A
- * deliberately generous ceiling — refusing up front costs a click, while
- * running out part-way costs minutes of build and a half-installed engine.
+ * Where the WHOLE engine install writes, and a generous ceiling for each —
+ * refusing up front costs a click, while running out part-way costs minutes of
+ * build and a half-installed engine. Three places, measured per filesystem
+ * (they share one on a stock Jetson, and nothing guarantees it): the CTranslate2
+ * CUDA source and build tree under /tmp, the faster-whisper and CTranslate2
+ * wheels plus `libctranslate2` under ~/.local, and the `base` weights in the
+ * Hugging Face cache. 3 GiB in all.
  */
-const WHISPER_ENGINE_INSTALL_BYTES = 3 * 1024 * 1024 * 1024;
+function whisperEngineInstallParts() {
+  return [
+    { dir: "/tmp/CTranslate2-build", bytes: 2048 * MIB },
+    { dir: path.join(ENGINE_HOME, ".local"), bytes: 768 * MIB },
+    { dir: whisperCacheDir("base"), bytes: 256 * MIB },
+  ];
+}
 
 export async function GET(request: Request) {
   const unauthorized = await requireSession(request);
@@ -244,7 +256,7 @@ async function installEngine(): Promise<Response> {
   }
   // Before anything starts: a build that fails on a full disk minutes in is
   // the outcome this refuses in one request.
-  const disk = await checkInstallDisk(whisperCacheDir("base"), WHISPER_ENGINE_INSTALL_BYTES);
+  const disk = await checkInstallDisks(whisperEngineInstallParts());
   if (!disk.ok) return diskRefusal(disk);
   engineInFlight = true;
 

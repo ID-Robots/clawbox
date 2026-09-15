@@ -300,7 +300,10 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     const body = await res.json();
     expect(res.status).toBe(507);
     expect(body.code).toBe("disk_full");
-    expect(body.requiredBytes).toBe(3 * 1024 * 1024 * 1024);
+    // The build tree, the wheels and the weights: on one filesystem they add
+    // up to 3 GiB; spread over several, the short one answers with its share.
+    expect(body.requiredBytes).toBeGreaterThan(0);
+    expect(body.requiredBytes).toBeLessThanOrEqual(3 * 1024 * 1024 * 1024);
     expect(followMock).not.toHaveBeenCalled();
 
     // The refusal left no install marked as running.
