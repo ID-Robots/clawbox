@@ -124,3 +124,39 @@ export function stringList(raw: unknown): string[] {
  * 03:00).
  */
 export const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** Where the memory index is embedded: the ClawBox AI cloud, or the model on this box. */
+export type EmbeddingSource = "cloud" | "local";
+
+/** GET /setup-api/clawkeep/memory/provider: what the embedder switch draws from. */
+export interface EmbedderChoiceStatus {
+  /** Where the index is embedded right now. */
+  source: EmbeddingSource;
+  /**
+   * False on the edition where ClawBox itself is the indexer: its embedder
+   * client refuses any endpoint that is not loopback, because the owner's
+   * document text is the request body there.
+   */
+  cloudSupported: boolean;
+  /** Linked, on a paid ClawBox AI plan, and the cloud embedder answered this box. */
+  cloudAvailable: boolean;
+  /** The model for this box is on disk. */
+  localInstalled: boolean;
+}
+
+/**
+ * Read a GET answer defensively. An older server answers 404, and a status
+ * route that shares the path prefix answers something else entirely; neither
+ * may be drawn as a choice.
+ */
+export function parseEmbedderChoiceStatus(raw: unknown): EmbedderChoiceStatus | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (r.source !== "cloud" && r.source !== "local") return null;
+  return {
+    source: r.source,
+    cloudSupported: r.cloudSupported === true,
+    cloudAvailable: r.cloudAvailable === true,
+    localInstalled: r.localInstalled === true,
+  };
+}

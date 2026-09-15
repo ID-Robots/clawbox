@@ -1,0 +1,191 @@
+/**
+ * /setup-api/clawkeep/memory/provider — where the memory index is embedded,
+ * and the owner's switch between the ClawBox AI cloud and the model on this box
+ * (2026-09-15).
+ *
+ * Pinned: the GET's "on offer" means what the cloud-defaults resolver means by
+ * it (linked, paid, answered), and the edition that indexes on the box itself
+ * never offers the cloud; a POST with no body is still the model on this box;
+ * the cloud is refused where it cannot work rather than written and left to
+ * find nothing; and every refusal lands before anything is written.
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const h = vi.hoisted(() => ({
+  owner: true,
+  absent: false,
+  baseUrl: "http://127.0.0.1/setup-api/local-ai/embed/v1" as string | null,
+  routeReady: true,
+  factsThrow: false,
+  token: "claw_test_token" as string | null,
+  installed: false,
+  switchLocal: vi.fn(async () => {}),
+  switchCloud: vi.fn(async (..._a: unknown[]) => {}),
+  note: vi.fn(async (..._a: unknown[]) => {}),
+  invalidate: vi.fn(() => {}),
+  facts: vi.fn(),
+}));
+
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => h.owner }));
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
+  openclawIsAbsent: () => h.absent,
+}));
+vi.mock("@/lib/memory-shard", () => ({
+  switchToLocalEmbeddings: () => h.switchLocal(),
+  switchToCloudEmbeddings: (...a: unknown[]) => h.switchCloud(...a),
+  readEmbeddingChoice: async () => ({ provider: "openai-compatible", model: "m", baseUrl: h.baseUrl }),
+}));
+vi.mock("@/lib/clawai-cloud-choice", () => ({ noteOwnerChoice: (...a: unknown[]) => h.note(...a) }));
+vi.mock("@/lib/clawkeep-memory", () => ({ invalidateMemoryStatusCache: () => h.invalidate() }));
+vi.mock("@/lib/embed-server", () => ({ getEmbedProvisioningStatus: async () => ({ installed: h.installed }) }));
+vi.mock("@/lib/clawai-cloud-defaults", () => ({ readCloudDefaultsFacts: () => h.facts() }));
+vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken: async () => h.token }));
+vi.mock("@/lib/clawai-cloud-embeddings", () => ({
+  cloudEmbeddingsUrl: () => "https://ai.clawbox.com/v1/embeddings",
+  CLOUD_EMBEDDING_PROVIDER: "openai-compatible",
+  CLOUD_EMBEDDING_MODEL: "text-embedding-3-large",
+  CLOUD_EMBEDDING_ENGINE: "ClawBox AI",
+}));
+
+const URL_ = "http://localhost/setup-api/clawkeep/memory/provider";
+function post(body?: unknown, headers: Record<string, string> = {}): Request {
+  return new Request(URL_, {
+    method: "POST",
+    headers: { host: "localhost", origin: "http://localhost", "content-type": "application/json", ...headers },
+    ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+  });
+}
+const route = () => import("@/app/setup-api/clawkeep/memory/provider/route");
+
+beforeEach(() => {
+  h.owner = true;
+  h.absent = false;
+  h.baseUrl = "http://127.0.0.1/setup-api/local-ai/embed/v1";
+  h.routeReady = true;
+  h.factsThrow = false;
+  h.token = "claw_test_token";
+  h.installed = false;
+  for (const fn of [h.switchLocal, h.switchCloud, h.note, h.invalidate]) fn.mockClear();
+  h.facts.mockReset().mockImplementation(async () => {
+    if (h.factsThrow) throw new Error("probe failed");
+    return { linked: true, entitlement: "flash", embeddingsSupported: true, embeddingsRouteReady: h.routeReady };
+  });
+});
+
+describe("GET", () => {
+  it("answers the model on this box, the cloud on offer, and whether the GGUF is here", async () => {
+    const res = await (await route()).GET();
+    expect(await res.json()).toEqual({ source: "local", cloudSupported: true, cloudAvailable: true, localInstalled: false });
+  });
+
+  it("calls an index pointed off the box the cloud", async () => {
+    h.baseUrl = "https://ai.clawbox.com/v1";
+    h.installed = true;
+    const body = await (await (await route()).GET()).json();
+    expect(body).toMatchObject({ source: "cloud", localInstalled: true });
+  });
+
+  it("offers no cloud on the edition that indexes on the box itself, and does not ask the resolver", async () => {
+    h.absent = true;
+    const body = await (await (await route()).GET()).json();
+    expect(body).toEqual({ source: "local", cloudSupported: false, cloudAvailable: false, localInstalled: false });
+    expect(h.facts).not.toHaveBeenCalled();
+  });
+
+  it("reads a cloud the resolver could not vouch for as not on offer, never as an error", async () => {
+    h.factsThrow = true;
+    const res = await (await route()).GET();
+    expect(res.status).toBe(200);
+    expect((await res.json()).cloudAvailable).toBe(false);
+  });
+});
+
+describe("POST — who may switch", () => {
+  it("refuses the MCP bearer before anything is written", async () => {
+    h.owner = false;
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(h.switchCloud).not.toHaveBeenCalled();
+    expect(h.note).not.toHaveBeenCalled();
+  });
+
+  it("refuses another site's page", async () => {
+    const res = await (await route()).POST(post({ source: "cloud" }, { origin: "https://evil.example" }));
+    expect(res.status).toBe(403);
+    expect(h.switchCloud).not.toHaveBeenCalled();
+  });
+
+  it("refuses a source that is neither", async () => {
+    for (const body of [{ source: "elsewhere" }, "not json", [1, 2]]) {
+      const res = await (await route()).POST(post(body));
+      expect(res.status).toBe(400);
+      expect((await res.json()).kind).toBe("invalid");
+    }
+    expect(h.switchLocal).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST — the model on this box", () => {
+  it("is what a body-less call still means", async () => {
+    const res = await (await route()).POST(post());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ source: "local", model: "qwen3-embedding-0.6b" });
+    expect(h.note).toHaveBeenCalledWith("embeddings");
+    expect(h.switchLocal).toHaveBeenCalledTimes(1);
+    expect(h.switchCloud).not.toHaveBeenCalled();
+  });
+
+  it("is what an explicit local means", async () => {
+    const res = await (await route()).POST(post({ source: "local" }));
+    expect(res.status).toBe(200);
+    expect(h.switchLocal).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST — the ClawBox AI cloud", () => {
+  it("points the index at the cloud embedder with the box's own credential, pinned as the owner's pick", async () => {
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      source: "cloud", provider: "openai-compatible", model: "text-embedding-3-large", engine: "ClawBox AI",
+    });
+    expect(h.switchCloud).toHaveBeenCalledWith("https://ai.clawbox.com/v1/embeddings", "claw_test_token");
+    expect(h.note).toHaveBeenCalledWith("embeddings");
+    expect(h.invalidate).toHaveBeenCalledTimes(1);
+    expect(h.switchLocal).not.toHaveBeenCalled();
+  });
+
+  it("is refused on the edition that indexes on the box itself", async () => {
+    h.absent = true;
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("cloud_unsupported");
+    expect(h.switchCloud).not.toHaveBeenCalled();
+    expect(h.note).not.toHaveBeenCalled();
+  });
+
+  it("is refused where the cloud embedder is not on offer, before any pin is written", async () => {
+    h.routeReady = false;
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("cloud_unavailable");
+    expect(h.switchCloud).not.toHaveBeenCalled();
+    expect(h.note).not.toHaveBeenCalled();
+  });
+
+  it("is refused when the box holds no ClawBox AI credential", async () => {
+    h.token = null;
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(409);
+    expect(h.switchCloud).not.toHaveBeenCalled();
+  });
+
+  it("answers a 500 in the device's words when the config write fails", async () => {
+    h.switchCloud.mockRejectedValueOnce(new Error("openclaw config set timed out"));
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ kind: "failed", error: "openclaw config set timed out" });
+  });
+});
