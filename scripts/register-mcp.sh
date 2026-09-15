@@ -1082,7 +1082,7 @@ fi
 # what the boot leaves behind", and every `hermes config set` below is a full
 # CLI load -> save_config of the same file. Running after it would put four such
 # writes past the read-back that stamps `data/background-optouts.json` as
-# seeded — and the CLI has been seen to exit 0 while storing a string, which is
+# done — and the CLI has been seen to exit 0 while storing a string, which is
 # the exact drift §4b's record exists to prevent. This block has no dependency
 # on §4b, so it goes first and §4b keeps its invariant.
 # TASK-717 (the arm) and TASK-718 (the withdrawal). One block, because they are
@@ -1747,12 +1747,11 @@ TOKENPY
     ;;
 esac
 
-# ── 4b. Hermes' own background jobs, opted out of ONCE per box. ─────────────
-# TASK-609 / owner ruling 2026-09-03: the assistant must not message the owner
-# or spend his tokens on its own initiative unless he asked it to. OpenClaw 2's
-# three such jobs are seeded by `gateway-pre-start.sh`; these are Hermes' two,
-# and they are the harness's own documented keys, read off the installed 0.20.5
-# package on the box:
+# ── 4b. Hermes' own background jobs, brought to their defaults ONCE per box. ─
+# Owner ruling 2026-09-15, reversing TASK-609's opt-outs of 2026-09-03: the box
+# works on its own by default. OpenClaw 2's three such jobs are brought back by
+# `gateway-pre-start.sh`; these are Hermes' two, and they are the harness's own
+# documented keys, read off the installed 0.20.5 package on the box:
 #
 #   auxiliary.background_review.enabled  default TRUE — `agent/background_review.py`
 #     (`aux.get("background_review")` -> `is_truthy_value(task.get("enabled"),
@@ -1763,8 +1762,24 @@ esac
 #
 # Hermes has NO heartbeat: its only `heartbeat` keys are transport-level
 # (`compute_host_heartbeat_secs`, `websocket_heartbeat_ack_max_age_seconds`),
-# so there is no third row to seed. Settings -> System draws the two switches
-# and reports the check-ins row `supported: false` (src/lib/background-jobs.ts).
+# so there is no third row. Settings -> Harness draws the two switches and
+# reports the check-ins row `supported: false` (src/lib/background-jobs.ts).
+#
+# TASK-609 seeded `false` into both once per box and recorded it in
+# `data/background-optouts.json` as `{"seeded": [<key>...]}`. This is the
+# SECOND GENERATION of that record, the same one `gateway-pre-start.sh` keeps:
+#   generation 2 naming both keys  DONE — one small file read, no YAML load.
+#   generation absent              the previous build's opt-outs were ClawBox's:
+#                                  a key still at a real YAML `false` is written
+#                                  `true` — the value Settings' own ON writes —
+#                                  and anything else is the owner's and stays.
+#   no record                      a fresh box, whose defaults are already on;
+#                                  a config restored from an opted-out box's
+#                                  backup carries `false` and is flipped the
+#                                  same way. Then generation 2 is recorded.
+#   unusable                       nothing written, nothing recorded, a WARN:
+#                                  it may be a generation 2 whose owner has
+#                                  since switched a job off.
 #
 # WHY HERE, AND NOT IN THE WEB SERVER. This was first written as a Node boot
 # hook calling `patchHermesConfig`, the comment-preserving writer the Settings
@@ -1775,13 +1790,12 @@ esac
 # that lock from §3 to exit while doing a PyYAML read-modify-write plus two CLI
 # calls; `setup-hermes-dashboard-auth.sh` is a third, concurrent, locked writer.
 # `patchHermesConfig` cannot take the lock (it is a Python `filelock`, i.e. a
-# flock, and its own header says so), so a Node seed would win or lose the
-# rename by luck: either recording the keys as seeded and then having them
-# erased — never offered again, both jobs running, and its own read-back cannot
-# see a clobber that lands after it — or erasing `mcp_servers.clawbox`, the
-# protected-path `approvals.deny` table and `skills.disabled`, leaving the agent
-# with no device tools and no path guard. One writer per harness, inside the
-# lock it already holds, is the fix.
+# flock, and its own header says so), so a Node write would win or lose the
+# rename by luck: either recording the keys as done and then having the write
+# erased — never offered again, both jobs off for ever — or erasing
+# `mcp_servers.clawbox`, the protected-path `approvals.deny` table and
+# `skills.disabled`, leaving the agent with no device tools and no path guard.
+# One writer per harness, inside the lock it already holds, is the fix.
 #
 # WHY NOT `hermes config set`, which IS the native surface. §3 above already
 # gives the reason for this file, in this script: the CLI "rewrites the whole
@@ -1793,39 +1807,37 @@ esac
 # CLI has been seen to exit 0 while storing a STRING, and `agent/curator.py`
 # reads `bool(cfg.get("enabled", True))`, so a stored `"false"` would leave the
 # curator ON with a config that looks right. The read-back below is what makes
-# either writer safe, and this one writes a real YAML boolean.
+# either writer safe, and this one writes a real YAML boolean. That is also why
+# only a real boolean `false` is ClawBox's to take back: a string is not what
+# the seed wrote.
 #
 # WHAT THIS COSTS, measured rather than assumed: the live config.yaml on the
 # Hermes box carries 36 comment lines (of 275), including Hermes' own
-# "── Security ──" and "── Fallback Model ──" blocks, so the ONE boot that seeds
-# re-serialises them away. It is once per box — the record below means a seeded
-# box never writes again — and the previous revision is kept at
-# `config.yaml.bak`, the same recovery path `hermes-config-yaml.ts` uses for its
-# own writes. §3's "already current, skipping write" means an ALREADY-REGISTERED
-# box pays this on the upgrade boot alone rather than alongside a write it was
-# making anyway; a fresh box pays it with §3's first write.
+# "── Security ──" and "── Fallback Model ──" blocks, so the ONE boot that
+# flips a key re-serialises them away. It is at most once per box — the record
+# below means a done box never writes again — and the previous revision is kept
+# at `config.yaml.bak`, the same recovery path `hermes-config-yaml.ts` uses for
+# its own writes. A box with nothing at `false` pays no write at all.
 #
 # GATED ON THE EDITION, not on the active harness: on a dual box the owner can
-# switch to Hermes at any time without restarting the web server, so a seed that
-# asked which harness was active at boot would leave a switched-over box running
-# both jobs at the harness default until something restarted the server.
+# switch to Hermes at any time without restarting the web server, so a step
+# that asked which harness was active at boot would leave a switched-over box
+# with its opt-outs until something restarted the server.
 #
 # THE RECORD, and the drift it accepts. `data/background-optouts.json` is
 # ClawBox's own file, shared with the OpenClaw half, and it is a marker for
 # state that lives in `~/.hermes` — the shape §4 above argues against, because a
 # marker and the thing it stands for can drift. Kept anyway, and the difference
 # from §4's case is that re-converging is not free here: `tools disable browser`
-# is idempotent, whereas re-writing an opt-out every boot would put `false` back
-# over a key the owner had unset by hand to mean "back to the default". The
-# accepted residual is the mirror of that: something that restores or reinstalls
-# `~/.hermes` without touching `data/` (a ClawKeep harness restore, a manual
-# reinstall) leaves the record saying "seeded" over a config that no longer
-# carries the keys, and both jobs run at the harness default until the owner
-# uses Settings or the box is factory reset — which empties `data/` and offers
-# the seed again.
+# is idempotent, whereas re-judging the keys every boot would flip a `false`
+# the owner wrote in Settings after the migration. The accepted residual is the
+# mirror of that: something that restores `~/.hermes` from an opted-out backup
+# without touching `data/` leaves the record saying "done" over a config that
+# carries `false` again, and both jobs stay off until the owner uses Settings or
+# the box is factory reset — which empties `data/` and judges the keys again.
 CLAWBOX_OPTOUT_STATE="$PROJECT_DIR/data/background-optouts.json" \
 CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" \
-python3 - <<'PY' || log "WARNING: the Hermes background-job opt-out seed did not complete; see the note above it for what was and was not written"
+python3 - <<'PY' || log "WARNING: the Hermes background-job step did not complete; see the note above it for what was and was not written"
 import json, os, sys, tempfile
 
 try:
@@ -1833,35 +1845,34 @@ try:
 except ImportError:
     # Defence in depth: §3 above already exits 1 on this, so it cannot be
     # reached from there — but this block must not be the one that assumes it.
-    print("[register-mcp] NOTE: PyYAML is unavailable; the background-job opt-outs were not seeded",
+    print("[register-mcp] NOTE: PyYAML is unavailable; the background-job keys were not looked at",
           file=sys.stderr)
     raise SystemExit(0)
 
-# path -> the value ClawBox seeds when the owner has expressed no opinion.
-# Unlike OpenClaw's heartbeat row, BOTH of these are written explicitly in both
-# directions (`true` for on, `false` for off), so an absent value can only mean
-# "no opinion expressed" — there is no key here whose "on" looks like an absence.
+# path -> the opt-out literal TASK-609 seeded, and the harness default it is
+# brought back to — the same real YAML boolean Settings' own ON writes.
 WANTED = [
-    (("auxiliary", "background_review", "enabled"), False),
-    (("curator", "enabled"), False),
+    (("auxiliary", "background_review", "enabled"), False, True),
+    (("curator", "enabled"), False, True),
 ]
+GENERATION = 2
+KEYS = [".".join(path) for path, _, _ in WANTED]
 
 state_path = os.environ["CLAWBOX_OPTOUT_STATE"]
 cfg_path = os.environ["CLAWBOX_HERMES_CONFIG"]
 
 
-def read_seeded(path):
-    """The keys this box has already been offered, or None if the record is unusable.
+def read_record(path):
+    """(seeded keys, generation) — absent is (set(), 0); None if the record is unusable.
 
-    Absent is the normal first boot. Unusable — unreadable, undecodable, or
-    valid JSON that is not `{"seeded": [<string>, ...]}` — is a third fact, and
-    the difference matters on a DUAL box, where `gateway-pre-start.sh` keeps its
-    own three keys in this same file: rewriting an unusable record would replace
-    it with a valid one naming only these two, and the OpenClaw half would then
-    read a well-formed record that does not mention `heartbeat.every`, find the
-    key absent because the owner had switched check-ins back ON, and write `0m`
-    over his choice. So an unusable record still SEEDS (safe, see WANTED) and
-    records nothing, leaving the file for the half that can repair it safely.
+    Absent is a fresh box. Unusable — unreadable, undecodable, or valid JSON
+    that is not `{"seeded": [<string>, ...]}` with an integer `generation` or
+    none — is a third fact: it may be a generation 2 whose owner has since
+    switched a job off, so it is neither acted on nor rewritten. On a DUAL box
+    `gateway-pre-start.sh` keeps its own three keys in this same file, and
+    replacing an unusable record with a valid one naming only these two would
+    make that half read its keys as never judged — the same reason it leaves
+    the file alone.
 
     Total, because the caller cannot tell a raised exception from a real
     failure: `ValueError` covers JSONDecodeError AND UnicodeDecodeError (a
@@ -1872,7 +1883,7 @@ def read_seeded(path):
         with open(path, encoding="utf-8") as fh:
             record = json.load(fh)
     except FileNotFoundError:
-        return set()
+        return set(), 0
     except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(record, dict):
@@ -1880,21 +1891,24 @@ def read_seeded(path):
     rows = record.get("seeded")
     if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
         return None
-    return set(rows)
+    generation = record.get("generation", 0)
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        return None
+    return set(rows), generation
 
 
-record = read_seeded(state_path)
-unusable = record is None
-seeded = set() if unusable else record
-if unusable:
-    print("[register-mcp] WARN: the background-job opt-out record exists but cannot be read;"
-          " the Hermes opt-outs are still seeded where the key is absent, and nothing is recorded",
-          file=sys.stderr)
-
-pending = [(path, value) for path, value in WANTED if ".".join(path) not in seeded]
-# A seeded box pays one small file read and nothing else — no YAML load, no
-# write. This runs on every web-server boot.
-if not pending:
+record = read_record(state_path)
+if record is None:
+    print("[register-mcp] WARN: the background-job record (data/background-optouts.json) exists but"
+          " cannot be read; the Hermes background jobs are left exactly as they are and nothing is"
+          " recorded. Settings -> Harness switches each of them.", file=sys.stderr)
+    raise SystemExit(0)
+seeded, generation = record
+# A done box pays one small file read and nothing else — no YAML load, no
+# write. This runs on every web-server boot. Done is generation 2 naming BOTH
+# of these keys: on a dual box the OpenClaw half writes generation 2 for its
+# own, and that must not read as this half's.
+if generation >= GENERATION and all(key in seeded for key in KEYS):
     raise SystemExit(0)
 
 try:
@@ -1906,69 +1920,66 @@ except Exception as exc:  # noqa: BLE001 - any unreadable config defers, never s
     # Also defence in depth: §3 exits 1 on an unreadable or unparseable config,
     # so the script never reaches here with one.
     print("[register-mcp] NOTE: the Hermes config could not be read (%s); the background-job"
-          " opt-outs will be offered again at the next start" % type(exc).__name__, file=sys.stderr)
+          " keys will be looked at again at the next start" % type(exc).__name__, file=sys.stderr)
     raise SystemExit(0)
 if cfg is None:
     cfg = {}
 if not isinstance(cfg, dict):
-    print("[register-mcp] NOTE: the Hermes config is not a mapping; the background-job opt-outs"
-          " were not seeded", file=sys.stderr)
+    print("[register-mcp] NOTE: the Hermes config is not a mapping; the background-job keys"
+          " were not looked at", file=sys.stderr)
     raise SystemExit(0)
 
 
 def resolve(path):
-    """'value' (the owner has said something), 'absent', or 'unusable'.
+    """('value', v) when the key holds something, ('absent', None), or ('unusable', None).
 
     `None` is an ABSENCE, not an unusable shape. `curator:` written as a bare
     header with nothing under it loads as `None`, and calling that unusable
-    would refuse the opt-out on every boot for ever over an empty section — the
-    write below replaces a null parent with a mapping exactly as it creates a
-    missing one. Only a parent holding something ELSE (a scalar, a list) is a
-    shape this seed will not reshape.
+    would look at it again on every boot for ever over an empty section. Only
+    a parent holding something ELSE (a scalar, a list) is a shape this step
+    will not reshape.
     """
     node = cfg
     for part in path[:-1]:
         if node is None:
-            return "absent"
+            return "absent", None
         if not isinstance(node, dict):
-            return "unusable"
+            return "unusable", None
         if part not in node:
-            # Nothing below an absent parent exists either, and the parents are
-            # ours to create.
-            return "absent"
+            return "absent", None
         node = node[part]
     if node is None:
-        return "absent"
+        return "absent", None
     if not isinstance(node, dict):
-        return "unusable"
-    return "value" if node.get(path[-1]) is not None else "absent"
+        return "unusable", None
+    value = node.get(path[-1])
+    return ("value", value) if value is not None else ("absent", None)
 
 
 settled = []
 wrote = []
-for path, value in pending:
+for path, literal, default in WANTED:
     key = ".".join(path)
-    state = resolve(path)
+    state, value = resolve(path)
     if state == "unusable":
         # A parent written as something other than a mapping. Not ours to
-        # reshape, and not settled either: "we could not look" is not "the owner
-        # has an opinion", and settling it would give up the opt-out for ever.
-        print("[register-mcp] NOTE: %s sits under a key this seed cannot read; it will be"
-              " offered again at the next start" % key, file=sys.stderr)
+        # reshape, and not settled either: "we could not look" is not a verdict,
+        # so it is looked at again at the next start.
+        print("[register-mcp] NOTE: %s sits under a key this step cannot read; it will be"
+              " looked at again at the next start" % key, file=sys.stderr)
         continue
-    # Settled whether it was written or was already the owner's: ClawBox has had
-    # its say about this key, and offering it again could only ever undo him.
+    # Settled whether it was flipped or was already the owner's: ClawBox has
+    # had its say about this key, and looking again could only ever undo him.
     settled.append(key)
-    if state == "value":
+    # Only a REAL boolean `false` — what TASK-609 seeded and what Settings' OFF
+    # writes — is ClawBox's to take back. Absent is the harness default and is
+    # left absent; a string, a number, `true`: the owner's, and left alone.
+    if state != "value" or value is not literal:
         continue
     node = cfg
     for part in path[:-1]:
-        child = node.get(part)
-        if not isinstance(child, dict):
-            child = {}
-            node[part] = child
-        node = child
-    node[path[-1]] = value
+        node = node[part]
+    node[path[-1]] = default
     wrote.append(key)
 
 if not settled:
@@ -2014,18 +2025,18 @@ if wrote:
     except Exception as exc:  # noqa: BLE001
         # NOT a bare raise: a top-level `python3` under `set -euo pipefail` puts
         # the whole traceback in the clawbox-setup journal, which is what
-        # TASK-657 took out of §3. Nothing was recorded, so the next boot offers
-        # the seed again.
-        print("[register-mcp] WARN: could not write the Hermes background-job opt-outs (%s);"
-              " the box may spend tokens on background jobs until Settings is used"
+        # TASK-657 took out of §3. Nothing was recorded, so the next boot looks
+        # at the keys again.
+        print("[register-mcp] WARN: could not bring the Hermes background jobs to their defaults (%s);"
+              " the box keeps its opt-outs until the next start or until Settings is used"
               % type(exc).__name__, file=sys.stderr)
         raise SystemExit(0)
     # READ BACK OFF THE FILE, not off `cfg`. A dump that lost a key, a rename
     # that landed somewhere else, a config a concurrent writer replaced inside
     # this critical section — all of them leave `cfg` saying the right thing and
-    # the box saying the old one, and recording that as seeded would mean the
-    # keys are never offered again. This block sits AFTER §4 and §4a for the same
-    # reason: `hermes tools disable browser` does the CLI's own load ->
+    # the box saying the old one, and recording that as done would mean the
+    # keys are never looked at again. This block sits AFTER §4 and §4a for the
+    # same reason: `hermes tools disable browser` does the CLI's own load ->
     # save_config on this file, so a read-back above it would not be the last
     # word on what the boot leaves behind.
     try:
@@ -2037,32 +2048,37 @@ if wrote:
         node = back
         for part in key.split("."):
             node = node.get(part) if isinstance(node, dict) else None
-        if node is not False:
-            print("[register-mcp] WARN: %s did not read back as off after the write; nothing was"
-                  " recorded, so the opt-outs are offered again at the next start" % key,
+        if node is not True:
+            print("[register-mcp] WARN: %s did not read back as on after the write; nothing was"
+                  " recorded, so the keys are looked at again at the next start" % key,
                   file=sys.stderr)
             raise SystemExit(0)
-    print("[register-mcp] seeded the Hermes background-job opt-outs (%s) — Settings can switch"
-          " them back on" % ", ".join(wrote))
+    print("[register-mcp] brought the Hermes background jobs (%s) to their defaults — on; Settings"
+          " can switch them off" % ", ".join(wrote))
 
 # RECORDED ONLY AFTER THE WRITE LANDED, and merged rather than replaced: on a
 # dual box `gateway-pre-start.sh` keeps its own three keys in this file, and a
-# wholesale rewrite would drop them and offer that half's seed all over again.
+# wholesale rewrite would drop them and make that half judge its keys again.
 # Merging is SEQUENTIAL safety only — neither half locks this file, and on a
 # dual box the gateway's ExecStartPre can run beside this script — so the record
 # is re-read here rather than reused from the top, which is as narrow as the
 # window gets. The verdict is re-derived from that second read too: a record
-# that went bad in between must not be laundered into a valid one naming only
-# these two keys, which is the `heartbeat.every` revert `read_seeded` refuses.
-if unusable:
-    raise SystemExit(0)
-again = read_seeded(state_path)
+# that went bad in between must not be laundered into a valid one.
+again = read_record(state_path)
 if again is None:
-    print("[register-mcp] WARN: the background-job opt-out record became unreadable while the"
-          " opt-outs were being written; nothing was recorded", file=sys.stderr)
+    print("[register-mcp] WARN: the background-job record became unreadable while the keys were"
+          " being written; nothing was recorded", file=sys.stderr)
     raise SystemExit(0)
-keep = set(again)
+rows, generation = again
+# Rows are carried forward ONLY from a generation-2 record. At generation 2 a
+# row means "brought to the default by this build", and a row carried over
+# from the previous build's opt-out list would tell the OpenClaw half of a dual
+# box it was done when it had not yet looked. Nothing is lost by the drop: the
+# flips are decided off the config's own values, never off the list.
+keep = set(rows) if generation >= GENERATION else set()
 keep.update(settled)
+if generation >= GENERATION and keep == set(rows):
+    raise SystemExit(0)
 
 directory = os.path.dirname(state_path) or "."
 try:
@@ -2070,7 +2086,7 @@ try:
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".background-optouts.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump({"seeded": sorted(keep)}, fh, indent=2)
+            json.dump({"seeded": sorted(keep), "generation": GENERATION}, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, state_path)
     except Exception:
@@ -2080,12 +2096,12 @@ try:
             pass
         raise
 except Exception as exc:  # noqa: BLE001
-    # The config IS seeded and verified at this point — only the record is
-    # missing, so the next boot writes the same values over themselves and
-    # records them then. Said precisely, because "the box may spend tokens" is
-    # false on this arm.
-    print("[register-mcp] NOTE: the Hermes background-job opt-outs are in place, but the record"
-          " of them could not be written (%s); the next start will write them again"
+    # The config IS at its defaults and verified at this point — only the
+    # record is missing, so the next boot looks at the keys, finds nothing at
+    # `false`, and records then. Said precisely, because "the box keeps its
+    # opt-outs" is false on this arm.
+    print("[register-mcp] NOTE: the Hermes background jobs are at their defaults, but the record"
+          " of them could not be written (%s); the next start looks at them again"
           % type(exc).__name__, file=sys.stderr)
 PY
 

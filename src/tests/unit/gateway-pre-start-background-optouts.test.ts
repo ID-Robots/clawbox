@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,25 +11,25 @@ import { testEnv } from "@/tests/helpers/env";
 // src/tests/unit/test-timeout-hygiene.test.ts.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-// TASK-609: OpenClaw 2 switches on three background jobs by default —
-// heartbeat DMs to the owner, memory dreaming on the default model, and
-// self-learning's weekly collection review — and ClawBox wrote none of those
-// keys, so a box that upgraded started messaging its owner and spending his
-// tokens without being asked.
+// "Working on its own" is ON by default (owner ruling 2026-09-15, reversing
+// TASK-609's opt-outs of 2026-09-03). TASK-609 seeded `0m` / `false` / `off`
+// into the three OpenClaw background-job keys once per box and recorded it in
+// `data/background-optouts.json` as `{"seeded": [...]}`; this is the SECOND
+// GENERATION of that record — a box is brought to all three ON once, the
+// record says `generation: 2`, and the harness keys are the owner's for ever.
 //
-// The owner's ruling (2026-09-03) is a SEED, not a policy: write the opt-out
-// only where the key is absent, so a value he set is never overwritten and
-// switching one back on is not undone at the next boot.
-//
-// The three failure shapes pinned:
-//   probe-once    — the seed runs every boot, so a key the core adds later is
-//                   still caught; it is the KEY's absence that gates it, not a
-//                   marker file.
-//   false success — a `config set` that fails must not be reported as a seeded
-//                   box, and must not stop the gateway.
-//   false failure — an owner who switched heartbeat back on must not find it
-//                   off again after a reboot. That is the case this suite
-//                   exists for.
+// The failure shapes pinned:
+//   pays nothing  — a generation-2 record is one file read: no CLI start (10 s
+//                   on a Jetson, inside a blocking ExecStartPre), no write.
+//   the owner's   — only a key still AT the literal ClawBox seeded is flipped;
+//                   a value he set, or an absent key, is left exactly there.
+//   never `0m`    — the block writes the cadence key in ONE direction only:
+//                   removal. Re-seeding `0m` at boot is the one-way switch
+//                   TASK-609 had to guard against, and now nothing writes it.
+//   false success — nothing is recorded until every write landed, and an
+//                   unusable record changes nothing and records nothing.
+//   dual box      — the file also carries `register-mcp.sh`'s Hermes rows;
+//                   each half is done only when generation 2 names ITS keys.
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
 
@@ -37,10 +37,16 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 const d = hasPython3 && hasBash ? describe : describe.skip;
 
+const HEARTBEAT = "agents.defaults.heartbeat.every";
+const DREAMING = "plugins.entries.memory-core.config.dreaming.enabled";
+const MODE = "skills.workshop.autonomous.mode";
+const OPENCLAW_KEYS = [HEARTBEAT, DREAMING, MODE];
+const HERMES_KEYS = ["auxiliary.background_review.enabled", "curator.enabled"];
+
 /** The shipped block, out of the real script rather than a copy of it. */
 function block(): string {
   const src = readFileSync(SCRIPT, "utf-8");
-  const from = "# ── OpenClaw 2's three background jobs, opted out of ONCE ";
+  const from = "# ── OpenClaw 2's three background jobs, brought to their defaults ONCE ";
   // Ends where the Codex flow begins. The block sits ABOVE that on purpose:
   // `gateway-pre-start-codex-runtime.test.ts` extracts from
   // `CODEX_SHOULD_LOAD=` to the managed-consent banner and runs it under
@@ -49,7 +55,7 @@ function block(): string {
   const to = 'CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"';
   const start = src.indexOf(from);
   const end = src.indexOf(to, start);
-  if (start < 0 || end < 0) throw new Error("the background-job opt-out block is not in gateway-pre-start.sh");
+  if (start < 0 || end < 0) throw new Error("the background-job block is not in gateway-pre-start.sh");
   return src.slice(start, end);
 }
 
@@ -58,7 +64,10 @@ let binDir: string;
 let configPath: string;
 let statePath: string;
 
-/** An `openclaw` that applies `config set --batch-json` the way the CLI does. */
+/**
+ * An `openclaw` that applies `config set --batch-json` and `config unset` the
+ * way the CLI does — including `unset`'s exit 1 on an absent path.
+ */
 function stubOpenclaw(exitCode = 0) {
   const p = path.join(binDir, "openclaw");
   writeFileSync(
@@ -66,18 +75,28 @@ function stubOpenclaw(exitCode = 0) {
     `#!/usr/bin/env bash\n`
     + `printf '%s\\n' "$*" >> "$OC_CALLS"\n`
     + `if [ "\${OC_EXIT:-${exitCode}}" != "0" ]; then exit "\${OC_EXIT:-${exitCode}}"; fi\n`
-    + `if [ "$1" = "config" ] && [ "$2" = "set" ] && [ "$3" = "--batch-json" ]; then\n`
-    + `  CLAWBOX_BATCH="$4" python3 - "$OPENCLAW_CONFIG" <<'PY'\n`
+    + `if [ "$1" = "config" ] && [ "$2" = "unset" ] && [ "\${OC_UNSET_EXIT:-0}" != "0" ]; then exit "$OC_UNSET_EXIT"; fi\n`
+    + `if [ "$1" = "config" ] && { [ "$2" = "set" ] && [ "$3" = "--batch-json" ] || [ "$2" = "unset" ]; }; then\n`
+    + `  CLAWBOX_VERB="$2" CLAWBOX_ARG="\${4:-$3}" python3 - "$OPENCLAW_CONFIG" <<'PY'\n`
     + `import json, os, sys\n`
     + `cfg_path = sys.argv[1]\n`
     + `with open(cfg_path) as fh:\n`
     + `    cfg = json.load(fh)\n`
-    + `for entry in json.loads(os.environ["CLAWBOX_BATCH"]):\n`
+    + `if os.environ["CLAWBOX_VERB"] == "unset":\n`
+    + `    parts = os.environ["CLAWBOX_ARG"].split(".")\n`
     + `    node = cfg\n`
-    + `    parts = entry["path"].split(".")\n`
     + `    for part in parts[:-1]:\n`
-    + `        node = node.setdefault(part, {})\n`
-    + `    node[parts[-1]] = entry["value"]\n`
+    + `        node = node.get(part) if isinstance(node, dict) else None\n`
+    + `    if not isinstance(node, dict) or parts[-1] not in node:\n`
+    + `        sys.exit(1)\n`
+    + `    del node[parts[-1]]\n`
+    + `else:\n`
+    + `    for entry in json.loads(os.environ["CLAWBOX_ARG"]):\n`
+    + `        node = cfg\n`
+    + `        parts = entry["path"].split(".")\n`
+    + `        for part in parts[:-1]:\n`
+    + `            node = node.setdefault(part, {})\n`
+    + `        node[parts[-1]] = entry["value"]\n`
     + `with open(cfg_path, "w") as fh:\n`
     + `    json.dump(cfg, fh, indent=2)\n`
     + `PY\n`
@@ -121,9 +140,29 @@ function at(pathStr: string): unknown {
   return node;
 }
 
-function calls(): string {
+function calls(): string[] {
   const p = path.join(dir, "calls.log");
-  return existsSync(p) ? readFileSync(p, "utf-8") : "";
+  return existsSync(p) ? readFileSync(p, "utf-8").trim().split("\n").filter(Boolean) : [];
+}
+
+function record(): { seeded: string[]; generation?: number } {
+  return JSON.parse(readFileSync(statePath, "utf-8"));
+}
+
+/** The config the previous build left behind: all three opt-outs seeded. */
+const OPTED_OUT = {
+  agents: { defaults: { heartbeat: { every: "0m" } } },
+  plugins: { entries: { "memory-core": { config: { dreaming: { enabled: false } } } } },
+  skills: { workshop: { autonomous: { mode: "off" } } },
+};
+
+function writeConfig(body: unknown) {
+  writeFileSync(configPath, JSON.stringify(body, null, 2));
+}
+
+/** The previous build's record: every key named, no generation. */
+function writeGen1(keys: string[] = OPENCLAW_KEYS) {
+  writeFileSync(statePath, JSON.stringify({ seeded: keys }, null, 2));
 }
 
 beforeEach(() => {
@@ -133,7 +172,7 @@ beforeEach(() => {
   statePath = path.join(dir, "root", "data", "background-optouts.json");
   mkdirSync(path.dirname(statePath), { recursive: true });
   mkdirSync(binDir, { recursive: true });
-  writeFileSync(configPath, JSON.stringify({}, null, 2));
+  writeConfig({});
   stubOpenclaw();
 });
 
@@ -146,8 +185,10 @@ const UNUSABLE: [string, string | Buffer][] = [
   ["a `seeded` that is not a list", JSON.stringify({ seeded: 5 })],
   ["rows that are not strings", JSON.stringify({ seeded: [1, 2] })],
   ["rows that are not even hashable", JSON.stringify({ seeded: [[1]] })],
+  ["a `generation` that is not an integer", JSON.stringify({ seeded: [], generation: "2" })],
+  ["a `generation` that is a boolean", JSON.stringify({ seeded: [], generation: true })],
   ["a file that is not JSON at all", "{ broken"],
-  // REAL BYTES. `"\uFFFD"` in a source file is written out as EF BF BD, which
+  // REAL BYTES. `"�"` in a source file is written out as EF BF BD, which
   // is valid UTF-8 and decodes fine — so a case named for the decode guard was
   // passing through `JSONDecodeError`, the branch that was already there.
   // These are the shapes a power cut mid-write actually leaves.
@@ -155,120 +196,244 @@ const UNUSABLE: [string, string | Buffer][] = [
   ["a document nested past the decoder's limit", "[".repeat(200_000)],
 ];
 
-d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
-  it("seeds all three on a box that has never expressed an opinion", () => {
+d("gateway-pre-start.sh — a fresh box", () => {
+  it("seeds nothing into the config and records generation 2", () => {
+    // The core's defaults are already on. No CLI start, and the config is not
+    // even rewritten — the record alone says this box has been judged.
     const r = run();
     expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
-    expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
-    expect(at("skills.workshop.autonomous.mode")).toBe("off");
-    expect(r.stdout).toContain("Seeded the OpenClaw 2 background-job opt-outs");
-    // One CLI start for the three keys, not three.
-    expect(calls().trim().split("\n")).toHaveLength(1);
+    expect(config()).toEqual({});
+    expect(calls()).toEqual([]);
+    expect(r.stdout).not.toContain("Brought");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
   });
 
-  it("leaves a value the owner set alone, on every later boot", () => {
-    // THE case this exists for: switching heartbeat back on in Settings must
-    // not be undone by the next reboot.
-    writeFileSync(
-      configPath,
-      JSON.stringify({ agents: { defaults: { heartbeat: { every: "30m" } } } }, null, 2),
-    );
-    run();
-    expect(at("agents.defaults.heartbeat.every")).toBe("30m");
-    // …while the two he has said nothing about are still seeded.
-    expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
-    expect(at("skills.workshop.autonomous.mode")).toBe("off");
-  });
-
-  it("costs nothing on a box that is already seeded", () => {
-    run();
-    rmSync(path.join(dir, "calls.log"), { force: true });
+  it("flips a config restored from a backup of an opted-out box", () => {
+    // No record — `data/` is not in the backup — but the literals are. That
+    // is the migration case in every way but the file, and gets the same answer.
+    writeConfig(OPTED_OUT);
     const r = run();
     expect(r.status).toBe(0);
-    // No batch to write, so the CLI is never started at all — this runs inside
-    // a blocking ExecStartPre and a CLI cold start is 10-12 s on a Jetson.
-    expect(calls()).toBe("");
-    expect(r.stdout).not.toContain("Seeded");
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("auto");
+    expect(r.stdout).toContain("Brought the OpenClaw 2 background jobs");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
   });
 
-  it("does NOT re-seed a switch the owner turned back on", () => {
-    // THE ONE-WAY-SWITCH BUG. Turning check-ins on removes the key — the core's
-    // own default cadence is what should decide it — and the write is followed
-    // by a gateway restart whose ExecStartPre is this very script. An
-    // absence-gated seed put `0m` straight back, before the gateway started, so
-    // the switch could never be turned on at all.
-    run();
-    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
-
-    writeFileSync(configPath, JSON.stringify({}, null, 2));  // the owner's "on"
-    rmSync(path.join(dir, "calls.log"), { force: true });
+  it("leaves a value the owner set alone, whatever it is", () => {
+    writeConfig({
+      agents: { defaults: { heartbeat: { every: "30m" } } },
+      plugins: { entries: { "memory-core": { config: { dreaming: { enabled: true } } } } },
+      skills: { workshop: { autonomous: { mode: "propose" } } },
+    });
     const r = run();
     expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
-    expect(calls()).toBe("");
+    expect(at(HEARTBEAT)).toBe("30m");
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("propose");
+    expect(calls()).toEqual([]);
+    expect(record().generation).toBe(2);
+  });
+});
+
+d("gateway-pre-start.sh — a box the previous build seeded off", () => {
+  it("flips every key still at its opt-out, and writes generation 2", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run();
+    expect(r.status).toBe(0);
+    // Check-ins by REMOVING the key — the core's own cadence decides, and it
+    // differs by auth mode, so ClawBox pins nothing.
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(at("agents.defaults.heartbeat")).toEqual({});
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("auto");
+    expect(r.stdout).toContain("Brought the OpenClaw 2 background jobs");
+    // One batch for the two values, one unset for the cadence: two CLI starts
+    // on the migrating boot and never more.
+    expect(calls()).toHaveLength(2);
+    expect(calls()[0]).toContain("config set --batch-json");
+    expect(calls()[1]).toBe(`config unset ${HEARTBEAT}`);
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
   });
 
-  it("records only what actually landed, so a failed seed is offered again", () => {
+  it("leaves the one key the owner changed afterwards, and flips the rest", () => {
+    writeGen1();
+    writeConfig({ ...OPTED_OUT, agents: { defaults: { heartbeat: { every: "2h" } } } });
+    run();
+    expect(at(HEARTBEAT)).toBe("2h");
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("auto");
+    // No unset was issued for a cadence that is his.
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain("config set --batch-json");
+    expect(record().generation).toBe(2);
+  });
+
+  it("leaves a switch the owner had already turned back on", () => {
+    // Check-ins ON removed the key; `propose` is a mode ClawBox never wrote.
+    writeGen1();
+    writeConfig({
+      plugins: { entries: { "memory-core": { config: { dreaming: { enabled: false } } } } },
+      skills: { workshop: { autonomous: { mode: "propose" } } },
+    });
+    run();
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(at(MODE)).toBe("propose");
+    expect(at(DREAMING)).toBe(true);
+    expect(calls()).toHaveLength(1);
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("never writes `0m`, in any state", () => {
+    // The one-way switch TASK-609 had to guard against: the panel's ON REMOVES
+    // the key and is followed by a gateway restart whose ExecStartPre is this
+    // script. Nothing this block hands the CLI may carry the literal.
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    run();
+    for (const line of calls()) expect(line).not.toContain("0m");
+    expect(block()).not.toMatch(/"value":\s*"0m"/);
+    expect(block()).not.toMatch(/\bevery\b[^\n]*"0m",\s*True\)/);
+  });
+
+  it("records nothing when a write fails, and finishes the job next boot", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
     const failed = run({ OC_EXIT: "1" });
     expect(failed.status).toBe(0);
-    expect(existsSync(statePath)).toBe(false);
+    expect(failed.stderr).toContain("could not bring the OpenClaw 2 background jobs");
+    expect(at(HEARTBEAT)).toBe("0m");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS });
 
+    rmSync(path.join(dir, "calls.log"), { force: true });
     const r = run();
-    expect(r.stdout).toContain("Seeded");
-    expect(at("skills.workshop.autonomous.mode")).toBe("off");
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toEqual([
-      "agents.defaults.heartbeat.every",
-      "plugins.entries.memory-core.config.dreaming.enabled",
-      "skills.workshop.autonomous.mode",
-    ]);
+    expect(r.stdout).toContain("Brought");
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(at(MODE)).toBe("auto");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
   });
 
-  it("settles a key the owner had already set, so removing it later is not re-seeded", () => {
-    // He had a cadence of his own on the first boot. That key is recorded as
-    // settled without being written — and when he later switches check-ins ON,
-    // which REMOVES the key, the next boot leaves it alone.
-    writeFileSync(
-      configPath,
-      JSON.stringify({ agents: { defaults: { heartbeat: { every: "30m" } } } }, null, 2),
-    );
-    run();
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded)
-      .toContain("agents.defaults.heartbeat.every");
+  it("retries only what did not land when the batch landed and the unset did not", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const half = run({ OC_UNSET_EXIT: "1" });
+    expect(half.status).toBe(0);
+    expect(half.stderr).toContain("could not bring");
+    expect(at(DREAMING)).toBe(true);
+    expect(at(HEARTBEAT)).toBe("0m");
+    expect(record().generation).toBeUndefined();
 
-    writeFileSync(configPath, JSON.stringify({}, null, 2));
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    run();
+    // The two values are no longer at their literal, so only the cadence is
+    // touched — one CLI start, the removal.
+    expect(calls()).toEqual([`config unset ${HEARTBEAT}`]);
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(record().generation).toBe(2);
+  });
+});
+
+d("gateway-pre-start.sh — a box already at generation 2", () => {
+  it("pays nothing: no CLI start, no write, the opt-outs the owner set since untouched", () => {
+    // The owner switched two of them back OFF through the panel after the
+    // migration. A generation-2 record is what makes those his.
+    writeFileSync(statePath, JSON.stringify({ seeded: OPENCLAW_KEYS, generation: 2 }, null, 2) + "\n");
+    writeConfig(OPTED_OUT);
+    const before = readFileSync(statePath, "utf-8");
+    const stat = statSync(configPath);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(calls()).toEqual([]);
+    expect(at(HEARTBEAT)).toBe("0m");
+    expect(at(DREAMING)).toBe(false);
+    expect(statSync(configPath).mtimeMs).toBe(stat.mtimeMs);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("");
+  });
+
+  it("is idempotent across boots after a migration", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    run();
     rmSync(path.join(dir, "calls.log"), { force: true });
     const r = run();
     expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
-    expect(calls()).toBe("");
+    expect(calls()).toEqual([]);
+    expect(r.stdout).not.toContain("Brought");
   });
 
-  it("offers them again after a factory reset has emptied data/", () => {
+  it("offers the defaults again after a factory reset has emptied data/", () => {
+    // `setup/reset` empties DATA_DIR; a restored opted-out config with no record
+    // is the fresh-box case and is flipped.
+    writeGen1();
+    writeConfig(OPTED_OUT);
     run();
-    // `setup/reset` empties DATA_DIR and wipes ~/.openclaw; the record goes with
-    // it, and a box with the core's noisy defaults back gets the opt-outs back.
     rmSync(statePath, { force: true });
-    writeFileSync(configPath, JSON.stringify({}, null, 2));
+    writeConfig(OPTED_OUT);
     const r = run();
-    expect(r.stdout).toContain("Seeded");
-    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
+    expect(r.stdout).toContain("Brought");
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(record().generation).toBe(2);
   });
+});
 
-  it("keeps an owner's explicit `false` for a switch, not just a truthy one", () => {
-    writeFileSync(
-      configPath,
-      JSON.stringify({ skills: { workshop: { autonomous: { mode: "auto" } } } }, null, 2),
-    );
-    run();
-    expect(at("skills.workshop.autonomous.mode")).toBe("auto");
-  });
-
-  it("never fails the unit when the CLI does, and says so", () => {
-    const r = run({ OC_EXIT: "1" });
+d("gateway-pre-start.sh — the shared record on a dual box", () => {
+  it("reads a record that names only the other harness's keys", () => {
+    // `register-mcp.sh` seeded its two Hermes keys first (the previous build).
+    // Readable, and this half then judges its own.
+    writeGen1(HERMES_KEYS);
+    writeConfig(OPTED_OUT);
+    const r = run();
     expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
-    expect(r.stderr).toContain("could not seed");
+    expect(r.stderr).not.toContain("cannot be read");
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(at(MODE)).toBe("auto");
+    // The previous build's rows are NOT carried into generation 2: at
+    // generation 2 a row means "brought to the default by this build", and a
+    // carried-over Hermes row would tell that half it was done before it had
+    // looked. The Hermes half judges its own keys the same way this one did.
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("keeps the other half's generation-2 rows when it writes its own", () => {
+    writeFileSync(statePath, JSON.stringify({ seeded: HERMES_KEYS, generation: 2 }, null, 2));
+    writeConfig(OPTED_OUT);
+    run();
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(record()).toEqual({ seeded: [...HERMES_KEYS, ...OPENCLAW_KEYS].sort(), generation: 2 });
+  });
+
+  it("is not done on a generation-2 record that names none of its keys", () => {
+    writeFileSync(statePath, JSON.stringify({ seeded: HERMES_KEYS, generation: 2 }, null, 2));
+    run();
+    expect(record().seeded).toEqual([...HERMES_KEYS, ...OPENCLAW_KEYS].sort());
+  });
+});
+
+d("gateway-pre-start.sh — what it refuses to guess about", () => {
+  it.each(UNUSABLE)("changes nothing and records nothing on an unusable record: %s", (_name, body) => {
+    // Only STATEPY writes this file and it always writes `{"seeded": [...],
+    // "generation": 2}`, so this needs a hand edit or a corrupted filesystem.
+    // A record that is there and unreadable may be a generation 2 whose owner
+    // has since switched a job off, and flipping it would undo him — so the
+    // box says so and leaves the config exactly as it is.
+    writeFileSync(statePath, body);
+    writeConfig(OPTED_OUT);
+    const stat = statSync(configPath);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("cannot be read");
+    // No traceback: every one of these shapes used to raise out of the Python,
+    // which `|| true` swallowed, and the box neither acted nor said why.
+    expect(r.stderr).not.toContain("Traceback");
+    expect(calls()).toEqual([]);
+    expect(at(HEARTBEAT)).toBe("0m");
+    expect(at(DREAMING)).toBe(false);
+    expect(statSync(configPath).mtimeMs).toBe(stat.mtimeMs);
+    expect(readFileSync(statePath)).toEqual(Buffer.from(body));
   });
 
   it("does nothing on an unreadable config rather than writing a fresh one", () => {
@@ -276,99 +441,31 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(readFileSync(configPath, "utf-8")).toBe("{ broken");
-    expect(calls()).toBe("");
-  });
-  it.each(UNUSABLE)("leaves the AMBIGUOUS key alone when the record is there but unusable: %s", (_name, body) => {
-    // Only STATEPY writes this file and it always writes `{"seeded": [...]}`,
-    // so this needs a hand edit or a corrupted filesystem — but every one of
-    // these shapes used to raise out of the Python, which `|| true` swallowed:
-    // the box neither seeded nor said why.
-    //
-    // "THERE AND UNUSABLE" IS NOT "ABSENT", for ONE of the three keys. Switching
-    // check-ins on REMOVES `heartbeat.every`, so an absent value there is also
-    // what his "on" looks like and a re-seed would write `0m` back over it.
-    // The other two are written explicitly in both directions, so an absent
-    // value can only mean "no opinion" and is always safe to seed.
-    writeFileSync(statePath, body);
-    const r = run();
-    expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
-    expect(r.stderr).toContain("cannot be read");
-    // No traceback: BOTH readers have to survive the record, not just the first.
-    // SEEDPY used to exit on an unusable one, so the recorder never saw it;
-    // now that it continues, a record it cannot decode reached the recorder and
-    // came back as a raw Python traceback that no later boot ever repaired.
-    expect(r.stderr).not.toContain("Traceback");
-    expect(r.stderr).not.toContain("could not record");
-
-    expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
-    expect(at("skills.workshop.autonomous.mode")).toBe("off");
-
-    // All three are recorded as settled — including the one deliberately not
-    // written, so the next boot does not offer it either — and the unusable
-    // record is REPLACED with a well-formed one, which is what makes the box
-    // converge instead of repeating this every boot for ever.
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toEqual([
-      "agents.defaults.heartbeat.every",
-      "plugins.entries.memory-core.config.dreaming.enabled",
-      "skills.workshop.autonomous.mode",
-    ]);
+    expect(calls()).toEqual([]);
+    expect(existsSync(statePath)).toBe(false);
   });
 
-  it.each(UNUSABLE)("does not offer the ambiguous key again on the boot after: %s", (_name, body) => {
-    // THE PROPERTY THE WHOLE ROUND IS ABOUT. Boot 1 replaces the unusable record
-    // with a well-formed one; boot 2 must then be silent — otherwise the revert
-    // this guards against simply arrives one boot later, which is the shape the
-    // recorder's own narrow guard used to produce for ever.
-    writeFileSync(statePath, body);
-    run();
-    rmSync(path.join(dir, "calls.log"), { force: true });
-    // The owner's "on" is still an absence, and the record is well-formed now.
-    const r = run();
-    expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
-    expect(calls()).toBe("");
-    expect(r.stderr).not.toContain("cannot be read");
-  });
-
-  it("does not promise the check-ins opt-out is settled when the write has not happened", () => {
-    // FALSE SUCCESS IN AN OPERATOR MESSAGE. The recording is downstream of the
-    // `config set` below, so on the failing path NOTHING is written to the
-    // record and every later boot repeats this — while the WARN has already
-    // told the operator the key was "recorded as settled, so it will not be
-    // offered again". Its own boot contradicts it two lines down.
-    writeFileSync(statePath, "[1, 2]");
+  it("never fails the unit when the CLI does, and says so", () => {
+    writeConfig(OPTED_OUT);
     const r = run({ OC_EXIT: "1" });
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("cannot be read");
-    // The same boot says the seed did not happen.
-    expect(r.stderr).toContain("could not seed");
-    expect(r.stderr).not.toContain("recorded as settled, so it will not be offered again");
-    // THE PROPERTY, not just the absence of the old sentence: the message has
-    // to scope itself to the boot it is describing, and make the settling
-    // conditional on the write that earns it.
-    expect(r.stderr).toContain("SKIPPED this boot");
-    expect(r.stderr).toContain("once this boot's write and its record both land");
-    // And nothing was recorded, which is what makes the promise false.
-    expect(readFileSync(statePath, "utf-8")).toBe("[1, 2]");
+    expect(at(HEARTBEAT)).toBe("0m");
+    expect(r.stderr).toContain("could not bring");
+    expect(existsSync(statePath)).toBe(false);
   });
 
-  it("keeps the gateway starting when the batch reader fails", () => {
+  it("keeps the gateway starting when the plan reader fails", () => {
     // NO GATEWAY, the one outcome this block's own comment says its design
-    // refuses. The batch reader was the one Python call in the block that was
-    // not guarded at all — SEEDPY carries `|| true`, STATEPY runs inside an
-    // `if !` — so under `set -euo pipefail` a failure here aborted
-    // gateway-pre-start.sh outright, and this runs as a BLOCKING ExecStartPre:
-    // the box comes up with no gateway at all rather than with noisy defaults.
+    // refuses. The readers are plain assignments in a BLOCKING ExecStartPre
+    // under `set -euo pipefail`, so an unguarded failure there aborted
+    // gateway-pre-start.sh outright: the box came up with no gateway at all.
     //
     // The realistic trigger is stdout pollution from a `sitecustomize`, which
     // leaves the reader an unparseable stdin. (NOT PYTHONSTARTUP: CPython reads
     // that only for an interactive interpreter, never for `-c` or `-`.) The
     // failure is injected AT the guarded call rather than modelled through its
-    // cause — `python3 -c` is the reader's shape and nothing else in this block
-    // uses it — so this pins the guard, not one way of reaching it. The
-    // polluted-but-NON-EMPTY shape, which an emptiness test would miss, is
-    // pinned by the case below.
+    // cause — `python3 -c` is the readers' shape and nothing else in this block
+    // uses it — so this pins the guard, not one way of reaching it.
     const real = spawnSync("bash", ["-c", "command -v python3"], { encoding: "utf-8" })
       .stdout.trim();
     const py = path.join(binDir, "python3");
@@ -380,25 +477,25 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     );
     chmodSync(py, 0o755);
 
+    writeConfig(OPTED_OUT);
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("could not read the background-job opt-out batch");
+    expect(r.stderr).toContain("could not read the background-job plan");
     // Nothing guessed at either: no CLI start, no config write, and no record,
     // so the next boot tries the whole thing again.
-    expect(calls()).toBe("");
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(calls()).toEqual([]);
+    expect(at(HEARTBEAT)).toBe("0m");
     expect(existsSync(statePath)).toBe(false);
   });
 
-  it("never hands the CLI what a FAILED batch reader left on stdout", () => {
-    // The shape an emptiness test cannot catch, and the one the realistic cause
-    // actually produces. A `sitecustomize` that prints pollutes EVERY python3 in
-    // the block: SEEDPY's stdout is then unparseable, so the reader raises — but
-    // the reader's own banner is already on ITS stdout, so the variable is
-    // non-empty garbage. `|| true` alone would walk that straight into
-    // `openclaw config set --batch-json "sitecustomize: hello"`, which is the
-    // harness's own config writer being handed unvalidated text. So the SHAPE is
-    // what is checked, not the length.
+  it("never hands the CLI what a FAILED plan reader left on stdout", () => {
+    // The shape an emptiness test cannot catch. A `sitecustomize` that prints
+    // pollutes EVERY python3 in the block: SEEDPY's stdout is then unparseable,
+    // so the readers raise — but their own banner is already on THEIR stdout,
+    // so the variables are non-empty garbage. `|| true` alone would walk that
+    // straight into `openclaw config set --batch-json "sitecustomize: hello"`,
+    // and the removal's flag would be a banner. So the SHAPE is what is
+    // checked, not the length — and the cadence key never travels as text.
     const real = spawnSync("bash", ["-c", "command -v python3"], { encoding: "utf-8" })
       .stdout.trim();
     const py = path.join(binDir, "python3");
@@ -410,17 +507,12 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     );
     chmodSync(py, 0o755);
 
+    writeConfig(OPTED_OUT);
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("could not read the background-job opt-out batch");
-    // Nothing was handed to the config writer at all.
-    expect(calls()).toBe("");
-    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(r.stderr).toContain("could not read the background-job plan");
+    expect(calls()).toEqual([]);
+    expect(at(HEARTBEAT)).toBe("0m");
     expect(existsSync(statePath)).toBe(false);
-  });
-
-  it("records a well-formed set on a normal first boot", () => {
-    run();
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toHaveLength(3);
   });
 });
