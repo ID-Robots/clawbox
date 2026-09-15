@@ -315,6 +315,33 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     expect(followMock).toHaveBeenCalledTimes(1);
   });
 
+  it("starts ONE engine install for two requests that arrive together", async () => {
+    let finish: () => void = () => {};
+    followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
+    const { POST } = await load();
+    const [a, b] = await Promise.all([
+      POST(post({ action: "install-engine" })),
+      POST(post({ action: "install-engine" })),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const refused = a.status === 409 ? a : b;
+    expect((await refused.json()).code).toBe("busy");
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalledTimes(1));
+    finish();
+    await readStream(a.status === 200 ? a : b);
+  });
+
+  it("gives the reservation back when the engine is already installed", async () => {
+    state.installed = true;
+    const { POST } = await load();
+    expect((await POST(post({ action: "install-engine" }))).status).toBe(409);
+    state.installed = false;
+    followMock.mockResolvedValue({ ok: true });
+    const next = await POST(post({ action: "install-engine" }));
+    expect(next.status).toBe(200);
+    await readStream(next);
+  });
+
   it("refuses when the engine is already installed — the sizes are the picker's job", async () => {
     state.installed = true;
     const { POST } = await load();
@@ -477,6 +504,20 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     expect(res.status).toBe(200);
     expect(body.ok).toBe(true);
     expect(typeof body.warning).toBe("string");
+  });
+
+  it("refuses an engine install while the engine is being removed", async () => {
+    let finish: () => void = () => {};
+    uninstalled.mockImplementation(() => new Promise((resolve) => { finish = () => resolve({ ok: true, freedBytes: 1, error: undefined, code: undefined }); }));
+    const { POST, DELETE } = await load();
+    const removing = DELETE(del());
+    await vi.waitFor(() => expect(uninstalled).toHaveBeenCalled());
+    const res = await POST(post({ action: "install-engine" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("busy");
+    expect(followMock).not.toHaveBeenCalled();
+    finish();
+    expect((await removing).status).toBe(200);
   });
 
   it("says the gateway is still coming back, not that its restart failed, when it has not finished restarting", async () => {

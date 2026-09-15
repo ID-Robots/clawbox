@@ -1,7 +1,6 @@
 export const dynamic = "force-dynamic";
 
 import { spawn } from "child_process";
-import os from "os";
 import path from "path";
 import { NextResponse } from "next/server";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
@@ -75,8 +74,15 @@ let engineInFlight = false;
  * keeps, and the CTranslate2 build alone is five minutes on an Orin.
  */
 const ENGINE_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
-/** Whose home the engine installs into — the account `install-voice.sh --whisper` runs pip as. */
-const ENGINE_HOME = process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox";
+/**
+ * The home the engine installs into, as the ROOT STEP sees it — not this
+ * process's `CLAWBOX_HOME`. `clawbox-setup.service` loads `.env`, the root
+ * step's unit does not, and install.sh fixes the installer's home to exactly
+ * this literal (`CLAWBOX_HOME="/home/clawbox"`, inherited by install-voice.sh),
+ * so an override here would measure a filesystem the files never land on.
+ * `whisper-install-home.test.ts` pins the two literals together.
+ */
+const INSTALLER_HOME = "/home/clawbox";
 const MIB = 1024 * 1024;
 /**
  * Where the WHOLE engine install writes, and a generous ceiling for each —
@@ -90,8 +96,8 @@ const MIB = 1024 * 1024;
 function whisperEngineInstallParts() {
   return [
     { dir: "/tmp/CTranslate2-build", bytes: 2048 * MIB },
-    { dir: path.join(ENGINE_HOME, ".local"), bytes: 768 * MIB },
-    { dir: whisperCacheDir("base"), bytes: 256 * MIB },
+    { dir: path.join(INSTALLER_HOME, ".local"), bytes: 768 * MIB },
+    { dir: path.join(INSTALLER_HOME, ".cache", "huggingface", "hub"), bytes: 256 * MIB },
   ];
 }
 
@@ -165,7 +171,7 @@ export async function POST(req: Request) {
     if (!disk.ok) return diskRefusal(disk);
   }
 
-  if (inFlight) {
+  if (inFlight || engineInFlight) {
     return NextResponse.json({ error: "A speech model is already being fetched.", code: "busy" }, { status: 409 });
   }
   inFlight = true;
@@ -244,21 +250,37 @@ export async function POST(req: Request) {
  * build under the first.
  */
 async function installEngine(): Promise<Response> {
-  const state = await readWhisperState();
+  // Reserved BEFORE the first await, and shared with the engine removal and a
+  // size fetch: two requests that arrive together must not both pass this and
+  // start two pip installs and two CTranslate2 builds in the same paths. Every
+  // early answer below gives the reservation back; the stream's own `finally`
+  // gives it back once an install has started.
+  if (engineInFlight || inFlight) {
+    return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
+  }
+  engineInFlight = true;
+  let state: Awaited<ReturnType<typeof readWhisperState>>;
+  let disk: Awaited<ReturnType<typeof checkInstallDisks>> | null = null;
+  try {
+    state = await readWhisperState();
+    // Before anything starts: a build that fails on a full disk minutes in is
+    // the outcome this refuses in one request.
+    if (!state.installed) disk = await checkInstallDisks(whisperEngineInstallParts());
+  } catch (err) {
+    engineInFlight = false;
+    throw err;
+  }
   if (state.installed) {
+    engineInFlight = false;
     return NextResponse.json(
       { error: "Speech on this box is already installed.", code: "already_installed" },
       { status: 409 },
     );
   }
-  if (engineInFlight) {
-    return NextResponse.json({ error: "Speech on this box is already being installed.", code: "busy" }, { status: 409 });
+  if (!disk || !disk.ok) {
+    engineInFlight = false;
+    return diskRefusal(disk ?? (await checkInstallDisks(whisperEngineInstallParts())));
   }
-  // Before anything starts: a build that fails on a full disk minutes in is
-  // the outcome this refuses in one request.
-  const disk = await checkInstallDisks(whisperEngineInstallParts());
-  if (!disk.ok) return diskRefusal(disk);
-  engineInFlight = true;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -302,22 +324,29 @@ export async function DELETE(req: Request) {
     if (inFlight || engineInFlight) {
       return NextResponse.json({ error: "Speech on this box is being installed, or a model is being fetched, right now.", code: "busy" }, { status: 409 });
     }
-    // Read BEFORE the removal, the Kokoro DELETE's pattern: afterwards the
-    // stored preference is the only trace that the box's engine was chosen.
-    const pickedLocal = await getSttPrimary().then((p) => p === "local", () => false);
-    const removed = await uninstallWhisperEngine();
-    if (!removed.ok) {
-      return NextResponse.json({ error: removed.error, code: removed.code ?? "remove_failed" }, { status: 500 });
+    // The same reservation as the install, for the whole removal: an install
+    // or a second removal started now would write into what this deletes.
+    engineInFlight = true;
+    try {
+      // Read BEFORE the removal, the Kokoro DELETE's pattern: afterwards the
+      // stored preference is the only trace that the box's engine was chosen.
+      const pickedLocal = await getSttPrimary().then((p) => p === "local", () => false);
+      const removed = await uninstallWhisperEngine();
+      if (!removed.ok) {
+        return NextResponse.json({ error: removed.error, code: removed.code ?? "remove_failed" }, { status: 500 });
+      }
+      const warning = await releaseLocalTranscription();
+      const state = await readWhisperState();
+      return NextResponse.json({
+        ok: true,
+        freedBytes: removed.freedBytes,
+        ...state,
+        ...(pickedLocal ? { fallback: { requested: "local", reason: "not_installed" } } : {}),
+        ...(warning ? { warning } : {}),
+      });
+    } finally {
+      engineInFlight = false;
     }
-    const warning = await releaseLocalTranscription();
-    const state = await readWhisperState();
-    return NextResponse.json({
-      ok: true,
-      freedBytes: removed.freedBytes,
-      ...state,
-      ...(pickedLocal ? { fallback: { requested: "local", reason: "not_installed" } } : {}),
-      ...(warning ? { warning } : {}),
-    });
   }
 
   const size = safeWhisperSize(params.get("size"));
