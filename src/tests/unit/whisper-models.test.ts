@@ -15,12 +15,18 @@ import path from "path";
 let home: string;
 const unitState = { present: true, active: true, enabled: true, failed: false, answered: true };
 const restart = vi.fn(async () => ({ ok: true }));
+/** The unit removal, standing in: it deletes the file the way the real one does. */
+const removeUnit = vi.fn(async (unit: string) => {
+  fs.rmSync(path.join(home, ".config/systemd/user", unit), { force: true });
+  return { ok: true as boolean, error: undefined as string | undefined };
+});
 
 vi.mock("@/lib/local-models", () => ({
   WHISPER_UNIT: "whisper-server.service",
   get SYSTEMD_USER_DIR() { return path.join(home, ".config/systemd/user"); },
   readUnitState: async () => unitState,
   reloadAndRestartUserEngine: (...args: unknown[]) => restart(...(args as [])),
+  removeUserUnit: (unit: string) => removeUnit(unit),
 }));
 
 const UNIT = `[Unit]
@@ -65,6 +71,10 @@ beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-whisper-"));
   process.env.CLAWBOX_HOME = home;
   restart.mockClear();
+  removeUnit.mockClear().mockImplementation(async (unit: string) => {
+    fs.rmSync(path.join(home, ".config/systemd/user", unit), { force: true });
+    return { ok: true, error: undefined };
+  });
   unitState.present = true;
 });
 
@@ -197,5 +207,61 @@ describe("restartWhisper", () => {
     const { restartWhisper } = await load();
     expect(await restartWhisper()).toEqual({ ok: true });
     expect(restart).toHaveBeenCalledWith("whisper-server.service");
+  });
+});
+
+describe("uninstallWhisperEngine", () => {
+  function stamp() {
+    const file = path.join(home, ".cache/clawbox/whisper-installed");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "1\n");
+    return file;
+  }
+
+  it("takes every cached size, the stamp and the unit, and says what came back", async () => {
+    writeUnit();
+    const file = stamp();
+    const base = cacheSize("base");
+    const small = cacheSize("small");
+    const { uninstallWhisperEngine, WHISPER_STAMP } = await load();
+
+    expect(WHISPER_STAMP).toBe(file);
+    const answer = await uninstallWhisperEngine();
+    expect(answer.ok).toBe(true);
+    // Three 64-byte blobs per size, links counted as the few bytes they are.
+    expect(answer.freedBytes).toBeGreaterThanOrEqual(2 * 3 * 64);
+    expect(removeUnit).toHaveBeenCalledWith("whisper-server.service");
+    expect(fs.existsSync(path.join(home, ".config/systemd/user/whisper-server.service"))).toBe(false);
+    expect(fs.existsSync(file)).toBe(false);
+    expect(fs.existsSync(base)).toBe(false);
+    expect(fs.existsSync(small)).toBe(false);
+  });
+
+  it("leaves the stamp and the weights in place when the unit could not be removed", async () => {
+    // `installed` IS the unit file: a row that still says installed with
+    // everything in place is the state a retry can start from.
+    writeUnit();
+    const file = stamp();
+    const base = cacheSize("base");
+    removeUnit.mockResolvedValue({ ok: false, error: "Could not remove the service file." });
+    const { uninstallWhisperEngine } = await load();
+
+    const answer = await uninstallWhisperEngine();
+    expect(answer).toEqual({ ok: false, freedBytes: null, error: "Could not remove the service file.", code: "remove_failed" });
+    expect(fs.existsSync(file)).toBe(true);
+    expect(fs.existsSync(base)).toBe(true);
+  });
+
+  it("answers no figure on a box with nothing cached, and still succeeds", async () => {
+    writeUnit();
+    const { uninstallWhisperEngine } = await load();
+    expect(await uninstallWhisperEngine()).toEqual({ ok: true, freedBytes: null });
+  });
+
+  it("names the stamp install-voice.sh writes", async () => {
+    const script = fs.readFileSync(new URL("../../../scripts/install-voice.sh", import.meta.url), "utf8");
+    expect(script).toContain('WHISPER_STAMP="$CLAWBOX_HOME/.cache/clawbox/whisper-installed"');
+    const { WHISPER_STAMP } = await load();
+    expect(WHISPER_STAMP.endsWith("/.cache/clawbox/whisper-installed")).toBe(true);
   });
 });

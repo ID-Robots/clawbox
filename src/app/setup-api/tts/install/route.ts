@@ -1,10 +1,14 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { POST as selectVoice } from "@/app/setup-api/tts/route";
+import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
+import { uninstallKokoro } from "@/lib/kokoro-uninstall";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
+import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
 
 /**
  * POST /setup-api/tts/install → install the box's own voice (Kokoro), streamed.
@@ -84,4 +88,73 @@ export async function POST(req: Request) {
   return new Response(stream, {
     headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * DELETE /setup-api/tts/install → take the box's own voice back off.
+ *
+ * The undo of the POST, on the same route for that reason (the embed route's
+ * precedent). What it removes is `src/lib/kokoro-uninstall.ts`'s list — the
+ * weights, the stamp, the unit — and the row on Settings → Local AI reads
+ * "not installed" the moment the stamp is gone. Not gated on the edition the
+ * way the POST is: install-voice.sh writes the Kokoro unit on every SKU and
+ * both harnesses speak through the same script, so there is a voice to remove
+ * on either.
+ *
+ * A pick of "this box" that is left standing would read back a voice that
+ * cannot speak, so it is settled on Auto the way the tts route settles a pick
+ * it cannot honour — through that route's own selection, so the harness's
+ * provider moves with it — and the answer carries the same `fallback` shape so
+ * the panel says so in one amber line.
+ *
+ * OWNER ONLY and same-origin: the agent holds the MCP bearer the middleware
+ * also admits here, and taking the owner's voice away is not its call.
+ */
+export async function DELETE(req: Request) {
+  if (!(await hasOwnerSession(req))) {
+    return NextResponse.json({ error: "Removing the voice needs a signed-in browser session.", code: "owner_only" }, { status: 403 });
+  }
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "Removing the voice only works from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
+  if (inFlight) {
+    return NextResponse.json({ error: "The voice is being installed right now.", code: "busy" }, { status: 409 });
+  }
+
+  // Read BEFORE the removal: afterwards the status route reports the engine
+  // as unconfigured and the stored pick is the only trace that it was chosen.
+  const pickedLocal = await readVoiceState().then((s) => s.choice === "local", () => false);
+  const removed = await uninstallKokoro();
+  if (!removed.ok) {
+    return NextResponse.json({ error: removed.error ?? "Could not remove the voice.", code: removed.code ?? "remove_failed" }, { status: 500 });
+  }
+  const fallback = pickedLocal ? await releaseLocalVoicePick() : null;
+  return NextResponse.json({
+    ok: true,
+    freedBytes: removed.freedBytes,
+    installed: false,
+    ...(fallback ? { fallback } : {}),
+  });
+}
+
+/**
+ * Settle a standing "this box" pick on Auto now that there is no box voice.
+ *
+ * Through the tts route's own `select`, which also moves the harness's provider
+ * off `tts-local-cli` and releases the owner pin. When that route refuses —
+ * a box with no cloud voice either answers `no_voice` — the stored choice is
+ * still written to Auto directly, because the one outcome this must not leave
+ * is a pick that names an engine which is no longer there.
+ */
+async function releaseLocalVoicePick(): Promise<{ requested: "local"; reason: "not_installed" }> {
+  const settled = await selectVoice(new Request("http://127.0.0.1/setup-api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "select", choice: "auto" }),
+  })).then((res) => res.ok, () => false);
+  if (!settled) {
+    await writeVoiceState({ ...(await readVoiceState()), choice: "auto" }).catch(() => {});
+    await clearOwnerChoice("tts").catch(() => {});
+  }
+  return { requested: "local", reason: "not_installed" };
 }

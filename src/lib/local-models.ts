@@ -894,6 +894,37 @@ export async function reloadAndRestartUserEngine(unit: string): Promise<ToggleRe
   }
 }
 
+/**
+ * Take a user unit off the box for good: stop and disable it, delete its unit
+ * file and tell systemd. The uninstall half of an engine whose unit
+ * `install-voice.sh` writes — the file is the clawbox account's own, so the
+ * web server removes it directly, the same reasoning `whisper-models.ts` gives
+ * for rewriting it.
+ *
+ * `disable --now` FIRST, and best-effort: a unit file deleted under a running
+ * service leaves the process up with a unit systemd can no longer name, and a
+ * unit that is already gone answers "no such unit" to the disable, which is
+ * not a reason to refuse the removal. The `daemon-reload` after the unlink is
+ * what makes `is-enabled` stop answering for the deleted file.
+ */
+export async function removeUserUnit(unit: string): Promise<ToggleResult> {
+  if (!USER_UNITS.has(unit)) return { ok: false, error: "Unknown service." };
+  const env = userSystemctlEnv();
+  await execFileAsync("/usr/bin/systemctl", ["--user", "disable", "--now", unit], { timeout: 30_000, env })
+    .catch(() => {});
+  try {
+    await fs.unlink(path.join(SYSTEMD_USER_DIR, unit));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      // Never the path: the sentence reaches the owner's screen.
+      return { ok: false, error: "Could not remove the service file." };
+    }
+  }
+  await execFileAsync("/usr/bin/systemctl", ["--user", "daemon-reload"], { timeout: 15_000, env })
+    .catch(() => {});
+  return { ok: true };
+}
+
 /** Every engine the inventory can name, so a route can tell "unknown" from "has no switch". */
 export const ENGINE_IDS: ReadonlySet<string> = new Set(["llamacpp", "kokoro", "whisper", "embeddings"]);
 
