@@ -23,11 +23,13 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const listRuns = vi.hoisted(() => vi.fn(() => [] as unknown[]));
 const getDefaultDirectory = vi.hoisted(() => vi.fn(async () => null as string | null));
 const listProjects = vi.hoisted(() => vi.fn(async () => ({ directory: null as string | null, projects: [] as unknown[] })));
+const readVercelEnabled = vi.hoisted(() => vi.fn(async () => true));
 vi.mock("@/lib/coding-agent", () => ({
   listRuns,
   getDefaultDirectory,
   listProjects,
   projectDirectoryOf: (run: { directory: string; worktree?: { project: string } | null }) => run.worktree?.project ?? run.directory,
+  readVercelEnabled,
 }));
 
 const deleteVercelLink = vi.hoisted(() => vi.fn(async () => false));
@@ -106,6 +108,7 @@ beforeEach(async () => {
   listProjects.mockResolvedValue({ directory: owner, projects: [] });
   deleteVercelLink.mockResolvedValue(false);
   readVercelLink.mockResolvedValue(null);
+  readVercelEnabled.mockResolvedValue(true);
   deleteSecretsForScope.mockResolvedValue([]);
   listSecrets.mockResolvedValue([]);
 
@@ -528,6 +531,31 @@ describe("the success path", () => {
     // root as `directory` is the bug this pins.
     expect(body.directory).toBe(project);
     expect(body.projectsDirectory).toBe(owner);
+  });
+
+  it("says nothing about the Vercel link while the integration is OFF, and still clears it", async () => {
+    // The integration is a BETA flag, off by default, and off means the
+    // feature is not on the box: the preview does not offer "its link is
+    // taken down" and the answer does not report it — whatever is on disk.
+    // The stored link still goes with the folder, as housekeeping: left
+    // behind, it is what a later project of the same name would inherit the
+    // day the flag is switched on.
+    repo("shop", { pushed: true });
+    readVercelEnabled.mockResolvedValue(false);
+    readVercelLink.mockResolvedValue({ projectId: "prj_1" });
+    deleteVercelLink.mockResolvedValue(true);
+    listSecrets.mockResolvedValue([{ name: "VERCEL_TOKEN", scope: "shop" }]);
+    deleteSecretsForScope.mockResolvedValue(["VERCEL_TOKEN"]);
+    listProjects.mockResolvedValue({ directory: owner, projects: [] });
+
+    const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
+    expect(preview).toMatchObject({ folder: "shop", refusal: null, vercelLinked: false, secretNames: ["VERCEL_TOKEN"] });
+
+    const res = await DELETE(del({ folder: "shop", confirm: "shop" }, owned()));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: true, folder: "shop", vercelLinkRemoved: false, secretsRemoved: ["VERCEL_TOKEN"] });
+    expect(deleteVercelLink).toHaveBeenCalledWith("shop");
   });
 
   it("removes a code project by its id", async () => {
