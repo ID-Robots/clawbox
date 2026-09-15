@@ -364,6 +364,7 @@ import {
   type StagingFailure,
 } from '@/lib/chat-attachments'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
+import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
 import {
@@ -1864,6 +1865,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // cancellable on unmount.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  // The transcript itself, so it can follow content that grows without a new
+  // message: pills, run and approval cards, pictures that load late.
+  const transcriptRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   const hasEverConnectedRef = useRef(false)
@@ -1884,6 +1888,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, queuedSends, scrollToBottom])
   useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
+  // Everything else that grows the transcript — see useStickToBottom. Only
+  // while the reader is at the bottom: a reader who scrolled up is left there.
+  useStickToBottom(transcriptRef, visible)
 
 
   /**
@@ -5975,6 +5982,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           focusable, and the transcript is the one thing here worth paging
           through. */}
       <div
+        ref={transcriptRef}
         id={TRANSCRIPT_PANEL_ID}
         role="tabpanel"
         aria-labelledby={tabDomId(activeTabKey)}
