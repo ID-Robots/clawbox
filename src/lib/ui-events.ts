@@ -68,9 +68,11 @@ export function handoffCodingRun(runId: string): void {
 
 /**
  * Open the Coding Agent app on a run. `maximize` opens (or brings) the window
- * full-screen: the chat's View button lands the owner on the run's page with
- * the whole desktop for it. (The page's separate Live view is gone: the run
- * page itself carries the browser preview, the terminal and the timeline.)
+ * full-screen for a caller that wants that; the chat's View button does NOT
+ * ask for it — the run's page opens in the window's own size and place, so a
+ * window the owner has sized is left as they left it. (The page's separate
+ * Live view is gone: the run page itself carries the browser preview, the
+ * terminal and the timeline.)
  */
 export function dispatchOpenCodingRun(runId: string, opts: OpenCodingRunOptions = {}): void {
   if (typeof window === "undefined") return;
