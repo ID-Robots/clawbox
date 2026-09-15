@@ -52,9 +52,9 @@ const NAMES = [
   "coding_deploy_preview", "coding_deploy_production",
 ];
 
-function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
+function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true, codingVercel = codingAgent) {
   const h = captureRegistrar(edition);
-  registerCodingAgentTools(h.reg, { codingAgent, codingVercel: codingAgent });
+  registerCodingAgentTools(h.reg, { codingAgent, codingVercel });
   return h;
 }
 
@@ -284,6 +284,38 @@ describe("coding_agent_status", () => {
     if (out.isError) return;
     expect(out.text).toMatch(/^Run run-k3x9q2ab: draft \(not started\)/);
     expect(out.text).not.toMatch(/draft after/);
+  });
+
+  it("describes a run's deployment only on a box whose Vercel integration is ON", async () => {
+    // The record still carries the deployment made while the integration was
+    // on; the status is what the assistant relays, and on a box whose owner
+    // has the beta flag OFF a line naming a Vercel build would have it offer a
+    // feature the box does not have. The pipeline's own line stays — its review
+    // laps run either way — with Vercel left out of its wording.
+    const deployed = {
+      ...RUN,
+      vercel: { phase: "ready", projectId: "prj_1", url: "https://site-abc.vercel.app", detail: null, fixRunId: null, promotion: null },
+      pipeline: {
+        stage: "review", status: "failed", round: 1, maxRounds: 2, production: false,
+        failure: { stage: "review", reason: "The review found a broken link." },
+        steps: [{ stage: "build", state: "passed" }],
+        lastVerification: null,
+      },
+    };
+    apiGet.mockResolvedValue({ run: deployed });
+
+    const on = await harness("openclaw", true, true).call("coding_agent_status", { run_id: RUN.id });
+    expect(on.isError).toBe(false);
+    if (on.isError) return;
+    expect(on.text).toMatch(/Vercel project prj_1/);
+    expect(on.text).toMatch(/delivery pipeline/);
+
+    const off = await harness("openclaw", true, false).call("coding_agent_status", { run_id: RUN.id });
+    expect(off.isError).toBe(false);
+    if (off.isError) return;
+    expect(off.text).not.toMatch(/vercel/i);
+    expect(off.text).toMatch(/delivery pipeline/);
+    expect(off.text).toMatch(/The review found a broken link/);
   });
 
   it("names the run an automatic review pass belongs to, in the description and the listing", async () => {

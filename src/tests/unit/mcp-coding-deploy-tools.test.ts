@@ -106,6 +106,11 @@ describe("registration", () => {
     expect(described(true)).not.toMatch(/switched off/i);
     expect(described(false)).toMatch(/switched off on this ClawBox/i);
     expect(described(false)).toMatch(/skipped/i);
+    // And on such a box the parameter never NAMES the integration: it is a
+    // beta flag the owner has not turned on, and a description that named it
+    // would have the assistant offering a feature the box has not shown them.
+    expect(described(false)).not.toMatch(/vercel/i);
+    expect(described(true)).toMatch(/vercel/i);
   });
 
   it("offers no parameter that could name a Vercel project, team or token", () => {
