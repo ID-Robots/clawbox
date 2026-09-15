@@ -109,12 +109,22 @@ describe("clawbox-power-mode.sh --check", () => {
     expect(out.performanceId).toBe(2);  // MAXN_SUPER
   });
 
-  it("defaults to balanced when nothing is persisted", () => {
+  it("defaults to performance when nothing is persisted", () => {
+    // The owner's ruling of 2026-09-15: a fresh box, and a box already in the
+    // field that never chose, run the pinned profile. install.sh's
+    // step_performance_mode runs `--apply` on every install AND update, and
+    // this resolution is what carries the default onto a box that predates it.
     const out = lastJson(run(POWER, ["--check"], {
       CLAWBOX_NVPMODEL_CONF: conf,
       CLAWBOX_STATE_DIR: tmpdir(),
     }));
-    expect(out.mode).toBe("balanced");
+    expect(out.mode).toBe("performance");
+  });
+
+  it("pins DEFAULT_MODE to performance in the script itself", () => {
+    // The literal as well as the behaviour: read_mode() resolves an absent or
+    // invalid state file to this one line, so it is where the default lives.
+    expect(fs.readFileSync(POWER, "utf-8")).toContain('DEFAULT_MODE="performance"');
   });
 
   it("reads the persisted profile back", () => {
@@ -127,16 +137,32 @@ describe("clawbox-power-mode.sh --check", () => {
     expect(out.mode).toBe("performance");
   });
 
-  it("falls back to balanced when the state file holds junk", () => {
-    // The file is root-owned, but a truncated write or a hand-edit must never
-    // leave the box pinned by accident — the safe default is the cool one.
+  it("honours a persisted balanced — the owner's opt-out survives the update", () => {
+    // read_mode returns the persisted literal when there is one and consults
+    // DEFAULT_MODE only when there is none, so an owner who chose balanced
+    // before performance became the default keeps it when the update's
+    // --apply resolves the mode. Whitespace around the literal is the file's
+    // own trailing newline, never a reason to fall back.
+    const state = tmpdir();
+    fs.writeFileSync(path.join(state, "power-mode"), "balanced\n");
+    const out = lastJson(run(POWER, ["--check"], {
+      CLAWBOX_NVPMODEL_CONF: conf,
+      CLAWBOX_STATE_DIR: state,
+    }));
+    expect(out.mode).toBe("balanced");
+  });
+
+  it("falls back to the default when the state file holds junk", () => {
+    // The file is root-owned, but a truncated write or a hand-edit resolves to
+    // DEFAULT_MODE — never to whatever the junk was trying to name. The
+    // opt-out is only ever the literal "balanced".
     const state = tmpdir();
     fs.writeFileSync(path.join(state, "power-mode"), "MAXN; rm -rf /\n");
     const out = lastJson(run(POWER, ["--check"], {
       CLAWBOX_NVPMODEL_CONF: conf,
       CLAWBOX_STATE_DIR: state,
     }));
-    expect(out.mode).toBe("balanced");
+    expect(out.mode).toBe("performance");
   });
 
   it("still emits valid JSON with no nvpmodel.conf at all", () => {
@@ -145,7 +171,7 @@ describe("clawbox-power-mode.sh --check", () => {
       CLAWBOX_STATE_DIR: tmpdir(),
     }));
     expect(out.performanceId).toBeNull();
-    expect(out.mode).toBe("balanced");
+    expect(out.mode).toBe("performance");
   });
 
   it("rejects an unknown mode", () => {

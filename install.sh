@@ -8451,16 +8451,20 @@ step_performance_mode() {
     return 0
   fi
   # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
-  # box nothing is persisted, so this resolves to BALANCED: a real nvpmodel cap
-  # with jetson_clocks OFF.
+  # box nothing is persisted, so this resolves to PERFORMANCE — the script's
+  # DEFAULT_MODE since the owner's ruling of 2026-09-15 — and because this step
+  # runs on every update as well as every install, it is what turns the pinned
+  # profile on for a box already in the field that never chose. An owner's
+  # persisted `balanced` is read back as such and kept.
   #
-  # This used to be an unconditional `nvpmodel -m MAXN && jetson_clocks`, which
-  # pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load and
-  # disabled the cpuidle states — 7.21 W / ~58 C at idle, and 74.8 C median Tj
-  # under sustained 3B inference, over the 74 C passive-cooling trip. The pinned
-  # profile is unchanged and still one toggle away (Settings -> System ->
-  # Performance mode); it is simply no longer what a box does by default.
-  # TASK-455.
+  # Before TASK-455 this was an unconditional `nvpmodel -m MAXN && jetson_clocks`,
+  # which pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load
+  # and disabled the cpuidle states — 7.21 W / ~58 C at idle, and 74.8 C median
+  # Tj under sustained 3B inference, over the 74 C passive-cooling trip. That
+  # measurement is why balanced exists and stays one toggle away (Settings ->
+  # System -> Performance mode) as the owner's opt-out: TASK-455 made it the
+  # default, and 2026-09-15 made performance the default again with the same
+  # numbers stated on the switch.
   "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --apply || \
     echo "  Warning: power profile apply failed (non-fatal)"
   # Ensure persistent service is installed and enabled for next boot

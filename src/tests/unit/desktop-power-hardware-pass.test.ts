@@ -112,6 +112,15 @@ describe("clawbox-power-mode.sh — leaving performance mode gives the clocks ba
     expect(code).toMatch(/\[ -e "\$CLOCK_SNAPSHOT" \] && return 0/);
   });
 
+  it("does not snapshot clocks that are already pinned", () => {
+    // Since performance became the default (2026-09-15), an update's --apply
+    // reaches store_clock_state on a box the pre-TASK-455 unit pinned at boot.
+    // A snapshot taken there is a pinned one, and --balanced would restore it —
+    // so the guard leaves it unstored and --balanced takes the EMC-lock
+    // fallback below instead.
+    expect(code).toMatch(/store_clock_state\(\)[\s\S]{0,300}if clocks_pinned; then[\s\S]{0,200}return 0/);
+  });
+
   it("restores the clocks when switching back to balanced", () => {
     expect(code).toContain("jetson_clocks --restore");
     expect(code).toMatch(/apply_balanced\(\)[\s\S]{0,300}restore_clock_state/);
