@@ -119,6 +119,14 @@ describe("useStickToBottom", () => {
   });
 });
 
+describe("the full-page chat", () => {
+  it("wires its messages area to the hook, always on", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src/components/ChatApp.tsx"), "utf8");
+    expect(source).toContain("useStickToBottom(transcriptRef, true)");
+    expect(source).toMatch(/\{\/\* Messages area \*\/\}\s*<div ref=\{transcriptRef\}/);
+  });
+});
+
 describe("the mascot chat", () => {
   it("wires the transcript it renders to the hook", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/components/ChatPopup.tsx"), "utf8");
