@@ -1873,6 +1873,66 @@ describe("the box-wide Vercel integration", () => {
     // makes no Vercel request at all.
     expect(vercelReads).toEqual([]);
   });
+
+  it("names Vercel NOWHERE while it is OFF — the project page, the run page and the delete dialog alike", async () => {
+    // The integration is a BETA flag, off by default, and "off" means the
+    // feature is not on the box: not a card, not a button, not a line in a
+    // dialog. This walks the three surfaces in one sitting, against a route
+    // that still CLAIMS a link (an older server, or one that predates the
+    // gate), so what is pinned is the app's own silence and not the route's.
+    const SHOP = { ...PROJECT, folder: "shop", directory: "/home/clawbox/Projects/shop", name: "My Shop" };
+    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false }, [DEPLOYED], {
+      projects: [SITE_PROJECT, SHOP],
+      deletePreview: {
+        folder: "shop",
+        kind: "folder",
+        directory: "/home/clawbox/Projects/shop",
+        size: { bytes: 2048, files: 7, truncated: false },
+        unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
+        liveRuns: [],
+        vercelLinked: true,
+        secretNames: ["VERCEL_TOKEN"],
+        runCount: 0,
+        retentionDays: 30,
+        retentionMax: 10,
+        trashCount: 0,
+        wouldPurge: [],
+        refusal: null,
+      },
+    });
+    render(<CodingAgentApp />);
+    const VERCEL_IDS = [
+      "coding-agent-vercel-card", "coding-agent-vercel-project", "coding-agent-deploy",
+      "coding-agent-deploy-actions", "coding-agent-pipeline",
+    ];
+    const none = () => { for (const id of VERCEL_IDS) expect(screen.queryByTestId(id)).toBeNull(); };
+
+    // The project page.
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    const project = await screen.findByTestId("coding-agent-project-page");
+    expect(project.textContent).not.toMatch(/vercel/i);
+    none();
+
+    // The run page, for a run whose record carries a deployment and a pipeline.
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${DEPLOYED.id}`));
+    await screen.findByTestId("coding-agent-run-page");
+    none();
+
+    // The delete dialog, over a preview that names a link. Home is two
+    // breadcrumb steps up — the sidebar's Home exists only in a wide window.
+    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+    await screen.findByTestId("coding-agent-project-page");
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+    fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
+    const facts = await screen.findByTestId("coding-agent-delete-facts");
+    expect(facts.textContent).not.toContain(t("codingAgent.delete.willRemoveVercel"));
+    // The secrets line is still there — it is the link that is off the box,
+    // not the folder's own credentials.
+    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
+    expect(screen.getByRole("dialog").textContent).not.toMatch(/vercel link/i);
+    expect(vercelReads).toEqual([]);
+  });
 });
 
 describe("projects", () => {

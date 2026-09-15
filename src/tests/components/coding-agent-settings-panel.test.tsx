@@ -544,6 +544,29 @@ describe("the box-wide Vercel integration", () => {
     fireEvent.click(screen.getByTestId("coding-agent-vercel-enabled-help"));
     expect(screen.getByText(translations.en["codingAgent.vercelEnabledHint"])).toBeInTheDocument();
   });
+
+  it("wears a BETA badge and says, in plain sight, that it is experimental and off by default", async () => {
+    // The badge and the line are VISIBLE, not behind the help tip: "this is
+    // experimental and off by default" is what an owner needs before reaching
+    // for the switch, and this row is the only place on the box the
+    // integration is offered at all (the setup wizard never mentions it).
+    // Whatever the switch's state — the badge is about the feature, not the
+    // answer.
+    for (const vercelEnabled of [false, true]) {
+      stubFetch({ enabled: true, readiness: READY, vercelEnabled });
+      const view = render(<CodingAgentSettingsPanel />);
+      const toggle = await screen.findByRole("switch", { name: VERCEL });
+      expect(toggle).toHaveAttribute("aria-checked", String(vercelEnabled));
+      const badge = screen.getByTestId("coding-agent-vercel-beta");
+      expect(badge.textContent).toBe(translations.en["codingAgent.vercelBetaBadge"]);
+      // Beside the label, in the same row as the switch.
+      expect(badge.closest("div")?.textContent).toContain(VERCEL);
+      expect(screen.getByTestId("coding-agent-vercel-beta-hint").textContent)
+        .toBe(translations.en["codingAgent.vercelBetaHint"]);
+      expect(translations.en["codingAgent.vercelBetaHint"]).toMatch(/off by default/i);
+      view.unmount();
+    }
+  });
 });
 
 describe("the automatic review pass", () => {

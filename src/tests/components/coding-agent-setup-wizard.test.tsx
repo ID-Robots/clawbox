@@ -273,6 +273,42 @@ describe("the improvement step", () => {
       .toBe(translations.en["improvement.githubMissing"]);
     fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-off"));
     expect(screen.queryByTestId("coding-agent-wizard-improvement-github")).toBeNull();
+describe("what the wizard never offers", () => {
+  it("never mentions Vercel, on any step", async () => {
+    // The Vercel integration is a BETA flag, off by default, offered in ONE
+    // place — Coding Agent → Settings, behind a Beta badge — and never as part
+    // of setup. Every step's rendered text is read, case-insensitively, so a
+    // deploy step added to this flow fails here rather than on a new owner's
+    // screen.
+    stubDevice();
+    const mentions = () => expect(document.body.textContent ?? "").not.toMatch(/vercel/i);
+
+    render(<CodingAgentSetupWizard status={STATUS} onDone={vi.fn()} />);
+    const enable = screen.getByTestId("coding-agent-wizard-enable");
+    await waitFor(() => expect(enable).not.toBeDisabled());
+    mentions(); // intro
+
+    fireEvent.click(enable);
+    await screen.findByTestId("coding-agent-wizard-next");
+    mentions(); // github
+
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
+    await screen.findByTestId("coding-agent-wizard-improvement-next");
+    mentions(); // the Improvement Program
+
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
+    await screen.findByTestId("coding-agent-wizard-next-harness");
+    mentions(); // project folder
+
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+    await screen.findByTestId("coding-agent-wizard-browser-enable");
+    mentions(); // browser
+
+    fireEvent.click(screen.getByTestId("coding-agent-wizard-browser-skip"));
+    await screen.findByTestId("coding-agent-wizard-harness-run");
+    mentions(); // harness, the last step
+    // And the wizard wrote nothing about the integration on the way through.
+    expect(calls.filter((c) => c.body !== undefined && "vercelEnabled" in (c.body as object))).toEqual([]);
   });
 });
 

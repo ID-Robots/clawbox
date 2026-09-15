@@ -597,10 +597,11 @@ export default function CodingAgentApp() {
    * cannot ask about is the guess worth not making.
    *
    * Every Vercel surface in this file hangs off it: the project page's link
-   * card, a run's deployment card, the compact Deploy buttons on a run, and
-   * the delivery pipeline's strip — which goes too, rather than showing four
-   * greyed-out deploy stages, since the pipeline IS the delivery flow and a
-   * strip advertising it is exactly what the owner switched off.
+   * card, a run's deployment card, the compact Deploy buttons on a run, the
+   * delete dialog's two "its Vercel link" lines, and the delivery pipeline's
+   * strip — which goes too, rather than showing four greyed-out deploy stages,
+   * since the pipeline IS the delivery flow and a strip advertising it is
+   * exactly what the owner switched off. It is a BETA flag, off by default.
    */
   const vercelOn = status?.vercelEnabled ?? false;
   const [projects, setProjects] = useState<Project[]>([]);
@@ -3132,6 +3133,7 @@ export default function CodingAgentApp() {
           folder={deleteTarget.folder}
           kind={deleteTarget.kind}
           name={deleteTarget.name}
+          vercelEnabled={vercelOn}
           onClose={() => setDeleteTarget(null)}
           onDeleted={(outcome) => {
             setRemovedProject({ folder: outcome.folder, trashPath: outcome.trashPath });

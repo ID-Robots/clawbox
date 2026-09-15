@@ -476,6 +476,10 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.vercelEnabledLabel": "Vercel integration",
   "codingAgent.vercelEnabledHint": "Let this box deploy your projects to Vercel. With it on, a project's page gets a card for attaching a Vercel project and buttons to deploy a preview or production, and the assistant can deploy for you. Off, none of that is on the box at all. Off unless you turn it on — or unless you had already attached a Vercel project, which turns it on for you.",
   "codingAgent.vercelEnabledFailed": "Could not change the Vercel setting.",
+  // The BETA badge beside the switch and the line under it: experimental,
+  // off by default, never part of setup.
+  "codingAgent.vercelBetaBadge": "Beta",
+  "codingAgent.vercelBetaHint": "Experimental and off by default. Turn it on only if you want this box to deploy your projects to Vercel; it is never part of setup, and you can switch it off again here at any time.",
 
   // A run that finished on its own keeps whatever it started — the way an app
   // that serves itself on a port is meant to work — so the page says so and
@@ -834,6 +838,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.delete.unsavedIgnored": "{n} ignored files and folders, which git does not track and a push never takes:",
   "codingAgent.delete.purgeOldestLabel": "I accept that this deletes those for good, before their time was up.",
   "codingAgent.delete.metadataKept": "Its stored secrets and Vercel link were left alone: another project of the same name is still using them.",
+  // The same line while the Vercel integration is OFF: the secrets alone,
+  // since nothing on that box may name the link.
+  "codingAgent.delete.metadataKeptSecrets": "Its stored secrets were left alone: another project of the same name is still using them.",
   "codingAgent.delete.refusal.trashFull": "This ClawBox is already keeping the most removed projects it can, and all of them can still be recovered. Empty the deleted projects first, or agree to lose the oldest.",
   "codingAgent.delete.forceLabel": "I have read this and want the folder removed anyway.",
   "codingAgent.delete.typeName": "Type {folder} to confirm.",

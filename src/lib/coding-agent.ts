@@ -584,6 +584,10 @@ export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
  * two `coding_deploy_*` MCP tools and the three routes behind all of them. Off
  * means the feature is not there — not a button that refuses when pressed.
  *
+ * It is a BETA flag: found under Coding Agent → Settings with a Beta badge,
+ * never part of the setup wizard, and nothing on the box switches it on for
+ * the owner (the one narrow exception is `migrateVercelEnabled`, below).
+ *
  * OFF WHEN THE KEY IS ABSENT, unlike the media and browser preferences beside
  * it, because this one is not a preference about how a run works: it is
  * standing consent for the box to push the owner's code to another company's
@@ -2270,17 +2274,24 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
 }
 
 /**
- * The one-time adoption of a box that was already deploying to Vercel.
+ * The one-time adoption of a box that was already deploying to Vercel — and
+ * NOTHING wider: it honours an EXPLICIT earlier opt-in and never infers one.
  *
- * The switch ships OFF, and a setting that ships off takes a working feature
- * away from everyone who already had it — the owner's project page would lose
- * its link card, its Deploy buttons and its last deployment overnight, with
- * nothing on the screen to say where they went.
+ * The switch ships OFF and is a BETA flag the owner finds under Coding Agent →
+ * Settings; it is never part of the setup wizard and nothing on the box turns
+ * it on for them. The one exception is this function, and it is narrow on
+ * purpose: a setting that ships off takes a working feature away from everyone
+ * who already had it — the owner's project page would lose its link card, its
+ * Deploy buttons and its last deployment overnight, with nothing on the screen
+ * to say where they went.
  *
- * So an ABSENT key is answered by asking the box a question it can answer for
- * itself: has the owner attached a Vercel project to anything? Attaching one
- * takes an owner session, a Vercel project id and a stored token — it is a yes,
- * said in the only way this feature ever offered. One link is enough.
+ * So an ABSENT key is answered by the one act that could only have been the
+ * owner's: has a Vercel project been ATTACHED to anything? Attaching one takes
+ * an owner session, a Vercel project id and a stored token — it is the opt-in,
+ * said in the only way this feature ever offered before the switch existed.
+ * One link is enough. Nothing else counts: not a `VERCEL_TOKEN` in the secret
+ * store, not a `.vercel/` folder in a project, not a deployment on a run's
+ * record — none of those is the owner saying yes to THIS box deploying.
  *
  * AT THE READ, not in an install step, because there is no install step a box
  * in a customer's hands is guaranteed to run before something asks: the status
@@ -2291,7 +2302,9 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
  * ONCE, because the write makes the key a boolean and every later read returns
  * before reaching here. A box with no links writes NOTHING — the key stays
  * absent and the answer stays `false`, so an owner who attaches nothing is
- * never given a stored `false` they would have to find and undo.
+ * never given a stored `false` they would have to find and undo. And an owner
+ * who switches the flag OFF afterwards has written a `false` that is never
+ * re-migrated, however many links stay on disk.
  *
  * A write that FAILS still answers `true` for this read and is retried at the
  * next one: an unwritable config must not be the reason the owner's cards
@@ -7115,6 +7128,14 @@ export function resumePullRequestWatches(): void {
 // ─── The Vercel deployment of a run's push ───────────────────────────────────
 
 /**
+ * Why a deployment watch stopped on a box whose owner switched the integration
+ * off: on the record as the `abandoned` detail, since the app hides the
+ * deployment card altogether while the flag is off and the record is the one
+ * place this stays readable.
+ */
+export const DEPLOY_WATCH_DISABLED_DETAIL = "The Vercel integration is switched off on this ClawBox.";
+
+/**
  * What happens to a run's work on VERCEL, once the owner has attached a Vercel
  * project to the project the run works in (src/lib/vercel-link.ts).
  *
@@ -7166,6 +7187,12 @@ function settleDeploy(run: CodingRun, phase: VercelPhase, detail: string | null)
 async function deployContextFor(run: CodingRun): Promise<
   { scope: string; projectId: string; teamId: string | null; auth: VercelAuth } | { error: string }
 > {
+  // The box-wide switch, re-read here for the reason the link and the token
+  // are: an owner who switches the integration OFF while a build is being
+  // watched is obeyed at the next tick — the watch settles as `abandoned` and
+  // nothing more reaches Vercel — rather than outlived by a poll armed when
+  // it was on.
+  if (!(await readVercelEnabled())) return { error: DEPLOY_WATCH_DISABLED_DETAIL };
   const scope = await projectScopeFor(run);
   if (!scope) return { error: "This run is not in a project, so there is no Vercel link for it." };
   const link = await readVercelLink(scope);
@@ -7189,6 +7216,11 @@ async function startDeployWatch(runId: string): Promise<void> {
   try {
     const run = loadRuns().find((r) => r.id === runId);
     if (!run || run.vercel) return;
+    // With the integration OFF nothing is armed and nothing is written: a link
+    // left on disk from before the owner switched it off must not make a push
+    // put a Vercel state on the record, which the run's page and the MCP
+    // status would then have to hide. Off means the feature is not there.
+    if (!(await readVercelEnabled())) return;
     // A DELIVERY PIPELINE deploys this work itself, a moment from now, and
     // records THAT deployment on the same `run.vercel` field. Two watchers
     // there is not a duplicate, it is a wrong answer: whichever settles first
