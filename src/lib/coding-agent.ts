@@ -395,8 +395,11 @@ export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** How often the idle check runs. */
 const IDLE_CHECK_MS = 60_000;
 /** Default agent turns before Claude Code stops itself (`error_max_turns`).
- *  The owner can change it; a long project needs more than a short one. */
-export const DEFAULT_MAX_TURNS = 150;
+ *  The owner can change it; a long project needs more than a short one.
+ *  400, raised from 150 (owner's decision, 2026-09-15): a delivery run that
+ *  builds, verifies in the browser and opens a pull request was hitting the
+ *  ceiling on ordinary tasks. */
+export const DEFAULT_MAX_TURNS = 400;
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";

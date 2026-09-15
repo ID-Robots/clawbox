@@ -106,6 +106,8 @@ describe("steps and tokens", () => {
   it("defaults to the shipped step count and accepts a new one", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(await lib.getMaxTurns()).toBe(lib.DEFAULT_MAX_TURNS);
+    // The number itself, so a change to the default is a deliberate edit here too.
+    expect(lib.DEFAULT_MAX_TURNS).toBe(400);
     expect(await lib.setMaxTurns(500)).toBe(500);
     expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_TURNS_CONFIG_KEY, 500);
   });
