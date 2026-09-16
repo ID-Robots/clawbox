@@ -123,6 +123,15 @@ export interface AgentStatus {
   running: number;
   /** The folder a run uses when the assistant names neither project nor path. */
   defaultDirectory: string | null;
+  /**
+   * Who the box authors its commits as when a PROJECT has no git identity of
+   * its own. Optional: a server that predates the setting answers with
+   * neither, and the fields are simply not drawn there.
+   */
+  gitAuthorName?: string | null;
+  gitAuthorEmail?: string | null;
+  /** How long either half may be. Optional for the same reason. */
+  maxGitAuthorChars?: number;
   effort: Effort;
   effortLevels: Effort[];
   /** The owner's default account for a run nobody names one for. Optional:
@@ -177,12 +186,12 @@ const CONFIRM_MS = 5_000;
  * message sat below the GitHub card, a screen away from a Steps field that
  * still held the refused number.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "settings" | "github";
+type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "gitAuthor" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns", "gitAuthor"]);
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -261,6 +270,8 @@ export default function CodingAgentSettingsPanel({
   const [dirDraft, setDirDraft] = useState<string | null>(null);
   const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
   const [tokensDraft, setTokensDraft] = useState<string | null>(null);
+  const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
+  const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
   // `load` must not re-run because a translation function or a parent's
   // callback was re-created: a refetch on every render would overwrite a
@@ -291,6 +302,8 @@ export default function CodingAgentSettingsPanel({
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
       setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
       setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
+      setAuthorNameDraft(prev => (prev === null ? (next.gitAuthorName ?? "") : prev));
+      setAuthorEmailDraft(prev => (prev === null ? (next.gitAuthorEmail ?? "") : prev));
     } catch {
       setError({ slot: "settings", message: tRef.current("codingAgent.loadFailed") });
     } finally {
@@ -478,6 +491,29 @@ export default function CodingAgentSettingsPanel({
     if (next) setDirDraft(next.defaultDirectory ?? "");
   };
 
+  /**
+   * The commit identity, saved as a PAIR.
+   *
+   * Both halves go in one request because the resolver uses them as one: a
+   * name with no address (or an address with no name) is not an identity, and
+   * it falls through to the placeholder exactly as an empty pair does. Saving
+   * them separately would leave the owner looking at one saved field and a
+   * device still committing as nobody.
+   */
+  const saveGitAuthor = async () => {
+    const name = (authorNameDraft ?? "").trim();
+    const email = (authorEmailDraft ?? "").trim();
+    const next = await saveSetting(
+      { gitAuthorName: name === "" ? null : name, gitAuthorEmail: email === "" ? null : email },
+      "gitAuthor",
+      t("codingAgent.commitAuthorFailed"),
+    );
+    if (next) {
+      setAuthorNameDraft(next.gitAuthorName ?? "");
+      setAuthorEmailDraft(next.gitAuthorEmail ?? "");
+    }
+  };
+
   // The two blur-saved fields go back to the stored value whenever what was
   // typed is not saved — blank, or refused by the route. A draft left holding
   // a refused number would re-post that refusal on every blur, and the
@@ -657,6 +693,80 @@ export default function CodingAgentSettingsPanel({
           </div>
           {errorIn("dir")}
         </div>
+
+        {/* WHO THE BOX COMMITS AS. Drawn only by a server that answers with the
+            limit, so an older box shows nothing rather than two fields whose
+            Save it would refuse as an unknown body.
+
+            Left blank, a project's own git config decides and the placeholder
+            catches what is left — which is what every box did before this
+            existed. It is worth filling in for one concrete reason, and the
+            hint says it: Vercel's GitHub integration refuses a deployment
+            whose git author cannot deploy the project, so the box's own
+            bookkeeping commits fail the check on a pull request it opened. */}
+        {typeof status?.maxGitAuthorChars === "number" && (
+          <div className="mt-4" data-testid="coding-agent-commit-author">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.commitAuthorTitle")}
+            </span>
+            <div className="grid gap-2 mt-1.5 sm:grid-cols-2">
+              <div>
+                <label htmlFor="coding-agent-author-name" className="sr-only">
+                  {t("codingAgent.commitAuthorNameLabel")}
+                </label>
+                <input
+                  id="coding-agent-author-name"
+                  type="text"
+                  value={authorNameDraft ?? ""}
+                  onChange={(e) => setAuthorNameDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
+                  placeholder={t("codingAgent.commitAuthorNamePlaceholder")}
+                  aria-label={t("codingAgent.commitAuthorNameLabel")}
+                  maxLength={status.maxGitAuthorChars}
+                  spellCheck={false}
+                  data-testid="coding-agent-author-name"
+                  className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
+                />
+              </div>
+              <div>
+                <label htmlFor="coding-agent-author-email" className="sr-only">
+                  {t("codingAgent.commitAuthorEmailLabel")}
+                </label>
+                <input
+                  id="coding-agent-author-email"
+                  type="email"
+                  value={authorEmailDraft ?? ""}
+                  onChange={(e) => setAuthorEmailDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
+                  placeholder={t("codingAgent.commitAuthorEmailPlaceholder")}
+                  aria-label={t("codingAgent.commitAuthorEmailLabel")}
+                  maxLength={status.maxGitAuthorChars}
+                  spellCheck={false}
+                  autoComplete="off"
+                  data-testid="coding-agent-author-email"
+                  className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => void saveGitAuthor()}
+                disabled={saving
+                  || ((authorNameDraft ?? "") === (status?.gitAuthorName ?? "")
+                    && (authorEmailDraft ?? "") === (status?.gitAuthorEmail ?? ""))}
+                data-testid="coding-agent-author-save"
+                className={BTN_SECONDARY}
+              >
+                {t("codingAgent.commitAuthorSave")}
+              </button>
+            </div>
+            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+              {t("codingAgent.commitAuthorHint")}
+            </p>
+            {errorIn("gitAuthor")}
+          </div>
+        )}
 
         {/* WHICH ACCOUNT PAYS. Drawn only by a server that answers with the
             list, so an older box shows nothing rather than a picker with one

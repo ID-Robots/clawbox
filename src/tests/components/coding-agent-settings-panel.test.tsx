@@ -63,6 +63,8 @@ function stubFetch(
     completionAttempts?: number;
     maxParallelRuns?: number;
     vercelEnabled?: boolean;
+    gitAuthorName?: string | null;
+    gitAuthorEmail?: string | null;
   },
   opts: {
     resolveTo?: string;
@@ -89,6 +91,11 @@ function stubFetch(
     /** A server from before the box-wide Vercel switch: no field at all, which
      *  the panel must read as OFF — it is a consent, not a preference. */
     noVercelEnabled?: boolean;
+    /** A server from before the commit-author setting: no fields at all, so the
+     *  two inputs must not be drawn — their Save would post a body it refuses. */
+    noGitAuthor?: boolean;
+    /** The route's own refusal of an address that is not one. */
+    rejectAuthor?: string;
   } = {},
 ) {
   posts = [];
@@ -107,6 +114,10 @@ function stubFetch(
   let maxParallelRuns = status.maxParallelRuns ?? 2;
   // OFF when the device has never stored it, unlike the media switches above.
   let vercelEnabled = status.vercelEnabled ?? false;
+  // Both halves unset means "use the project's own git identity", which is
+  // what every box did before the setting existed.
+  let gitAuthorName: string | null = status.gitAuthorName ?? null;
+  let gitAuthorEmail: string | null = status.gitAuthorEmail ?? null;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -131,6 +142,7 @@ function stubFetch(
     ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
     ...(opts.noVercelEnabled ? {} : { vercelEnabled }),
+    ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -202,6 +214,13 @@ function stubFetch(
           return json({ error: "The number of review rounds must be between 0 and 6.", kind: "invalid" }, 400);
         }
         reviewRounds = body.reviewRounds;
+      }
+      if ("gitAuthorName" in body || "gitAuthorEmail" in body) {
+        if (opts.rejectAuthor && body.gitAuthorEmail !== null) {
+          return json({ error: opts.rejectAuthor, kind: "invalid" }, 400);
+        }
+        if ("gitAuthorName" in body) gitAuthorName = body.gitAuthorName;
+        if ("gitAuthorEmail" in body) gitAuthorEmail = body.gitAuthorEmail;
       }
       if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
       if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
@@ -349,6 +368,77 @@ describe("the default project folder", () => {
     fireEvent.change(await screen.findByTestId("coding-agent-folder"), { target: { value: "/home/clawbox/clawbox" } });
     fireEvent.click(screen.getByRole("button", { name: SAVE }));
     expect(await screen.findByText(/off limits/)).toBeInTheDocument();
+  });
+});
+
+describe("the commit author", () => {
+  const AUTHOR_SAVE = translations.en["codingAgent.commitAuthorSave"];
+
+  it("shows what the device has stored, and says why it matters", async () => {
+    stubFetch({
+      enabled: true, readiness: READY,
+      gitAuthorName: "Ada Lovelace", gitAuthorEmail: "ada@example.com",
+    });
+    render(<CodingAgentSettingsPanel />);
+    await waitFor(() => expect(screen.getByTestId("coding-agent-author-name")).toHaveValue("Ada Lovelace"));
+    expect(screen.getByTestId("coding-agent-author-email")).toHaveValue("ada@example.com");
+    // The hint itself, by its whole string: the card's Vercel switch names
+    // Vercel too, so a /Vercel/ matcher here finds two elements and pins
+    // neither. This one has to say what the e-mail is FOR.
+    const hint = translations.en["codingAgent.commitAuthorHint"];
+    expect(screen.getByText(hint)).toBeInTheDocument();
+    expect(hint).toContain("Vercel");
+  });
+
+  it("saves both halves in ONE request, because the device uses them as a pair", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    const name = await screen.findByTestId("coding-agent-author-name");
+    const email = screen.getByTestId("coding-agent-author-email");
+    fireEvent.change(name, { target: { value: "  Ada Lovelace  " } });
+    fireEvent.change(email, { target: { value: "ada@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: AUTHOR_SAVE }));
+
+    await waitFor(() => expect(posts).toContainEqual({
+      url: "/setup-api/coding-agent/enable",
+      body: { gitAuthorName: "Ada Lovelace", gitAuthorEmail: "ada@example.com" },
+    }));
+    await waitFor(() => expect(name).toHaveValue("Ada Lovelace"));
+  });
+
+  it("clears both halves with empty fields rather than saving blanks", async () => {
+    stubFetch({
+      enabled: true, readiness: READY,
+      gitAuthorName: "Ada Lovelace", gitAuthorEmail: "ada@example.com",
+    });
+    render(<CodingAgentSettingsPanel />);
+    const name = await screen.findByTestId("coding-agent-author-name");
+    await waitFor(() => expect(name).toHaveValue("Ada Lovelace"));
+    fireEvent.change(name, { target: { value: "  " } });
+    fireEvent.change(screen.getByTestId("coding-agent-author-email"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: AUTHOR_SAVE }));
+    await waitFor(() => expect(posts).toContainEqual({
+      url: "/setup-api/coding-agent/enable",
+      body: { gitAuthorName: null, gitAuthorEmail: null },
+    }));
+  });
+
+  it("shows the device's own refusal beside the fields", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { rejectAuthor: "Give an e-mail address, e.g. you@example.com." });
+    render(<CodingAgentSettingsPanel />);
+    fireEvent.change(await screen.findByTestId("coding-agent-author-email"), { target: { value: "nobody" } });
+    fireEvent.click(screen.getByRole("button", { name: AUTHOR_SAVE }));
+    expect(await screen.findByText(/Give an e-mail address/)).toBeInTheDocument();
+  });
+
+  it("draws nothing at all on a server that predates the setting", async () => {
+    // Its Save would post a body that server answers 400 to, so the honest
+    // face of an older device is no control.
+    stubFetch({ enabled: true, readiness: READY }, { noGitAuthor: true });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-folder");
+    expect(screen.queryByTestId("coding-agent-commit-author")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-author-email")).toBeNull();
   });
 });
 

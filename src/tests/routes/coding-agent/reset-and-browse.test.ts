@@ -259,6 +259,12 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // rather than leaving a run started after the wizard with permissions
       // granted before it.
       "coding_agent_allow_rules",
+      // WHO the box signs the owner's commits as. A setting they chose — the
+      // name and address a project's history carries when the folder has no
+      // git identity of its own — so "start over" puts it back to the
+      // project's own config and the placeholder underneath it.
+      "coding_agent_git_name",
+      "coding_agent_git_email",
       // The CONSENT for handing a run the owner's stored secrets, and the same
       // reasoning: a run started after the wizard must not be given
       // credentials on the strength of a yes the owner has just wiped. The

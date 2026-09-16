@@ -70,7 +70,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
-import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet } from "@/lib/config-store";
+import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import {
   type CodingPauseMeter,
@@ -218,6 +218,15 @@ import {
 } from "@/lib/coding-deliverable";
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
 import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
+import {
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_GIT_EMAIL_REFUSAL,
+  CODING_GIT_NAME_REFUSAL,
+  MAX_GIT_IDENTITY_CHARS,
+  normalizeCodingGitEmail,
+  normalizeCodingGitName,
+} from "@/lib/coding-git-identity";
 import {
   buildDeployFeedback,
   decideDeployment,
@@ -620,6 +629,17 @@ export const CODING_VERCEL_ENABLED_CONFIG_KEY = "coding_vercel_enabled";
  */
 export const CODING_AGENT_ALLOW_RULES_CONFIG_KEY = "coding_agent_allow_rules";
 
+/**
+ * The commit identity the box authors the owner's work as — both halves
+ * optional, and re-exported here so the settings page, the reset list and the
+ * status payload all name the same two keys as the resolver that reads them
+ * (src/lib/coding-git-identity.ts).
+ */
+export {
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+} from "@/lib/coding-git-identity";
+
 /** Every key the reset clears. The switch is last: it is the consent, and a
  *  half-cleared box that is still switched on would be the one state where the
  *  wizard shows over a live delegated shell. */
@@ -638,6 +658,11 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
+  // The commit identity is a SETTING — the owner chose who the box signs their
+  // work as — so "start over" puts it back to the project's own git config and
+  // the placeholder underneath it.
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
   // The CONSENT for handing a run the owner's stored secrets, so "start over"
   // withdraws it. The SECRETS themselves are deliberately not cleared — they
   // are credentials the owner pasted, and the same reasoning applies as to the
@@ -1824,6 +1849,16 @@ export interface CodingAgentStatus {
   /** May a run be handed the owner's stored secrets? OFF when absent — it is a
    *  consent, not a preference (src/lib/project-secrets.ts). */
   injectSecrets: boolean;
+  /**
+   * Who the box authors its commits as when the PROJECT has no git identity of
+   * its own. Null for either half means "not set" — the resolver then falls
+   * through to the placeholder, which is what every box did before this
+   * setting existed (src/lib/coding-git-identity.ts).
+   */
+  gitAuthorName: string | null;
+  gitAuthorEmail: string | null;
+  /** How long either half may be, so the fields can say so without guessing. */
+  maxGitAuthorChars: number;
   harnessCommand: string;
   maxTaskChars: number;
   /** Which account pays for a run the caller does not name one for. */
@@ -2085,6 +2120,72 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
   const { directory: resolved } = await resolveWorkingDirectory({ directory, asDefault: true });
   await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
   return resolved;
+}
+
+/** What `setCodingGitAuthor` stored. A half the caller did not supply is
+ *  ABSENT here, not null: it was left exactly as it was. */
+export interface CodingGitAuthorSaved {
+  name?: string | null;
+  email?: string | null;
+}
+
+/**
+ * Set (or clear, with null/"") the identity the box authors the owner's
+ * commits as.
+ *
+ * ONE setter for both halves, and EVERY supplied half is validated before any
+ * of it is written. Two setters called in a row looked equivalent and was not:
+ * a body carrying a good name and a bad address stored the name and then
+ * answered 400, leaving the owner with half an identity — the state that reads
+ * as configured and is not, which is exactly what the resolver's
+ * "both halves or neither" rule exists to avoid. `setMany` then lands the pair
+ * in one write of the file rather than two.
+ *
+ * Validated here rather than only at the route for the same reason
+ * `setDefaultDirectory` is: there is ONE answer to "is this usable", and it is
+ * the resolver's own. A value the settings page accepted but
+ * `resolveCodingGitIdentity` would then skip is a setting that reads as saved
+ * and does nothing.
+ *
+ * The e-mail is the half that matters to a deployment check: Vercel's GitHub
+ * integration refuses a deployment whose git author cannot deploy the project,
+ * so the address has to belong to an account that can.
+ */
+export async function setCodingGitAuthor(input: { name?: string | null; email?: string | null }): Promise<CodingGitAuthorSaved> {
+  const entries: Record<string, unknown> = {};
+  const saved: CodingGitAuthorSaved = {};
+
+  // `!== undefined` rather than `in`: an explicit `undefined` reads as "the
+  // caller did not supply this half", which is the safe half of the ambiguity
+  // — `null` and `""` are how a half is CLEARED, and those are unmistakable.
+  if (input.name !== undefined) {
+    const raw = input.name;
+    if (raw === null || raw.trim() === "") {
+      saved.name = null;
+    } else {
+      const value = normalizeCodingGitName(raw);
+      if (!value) throw new CodingAgentError("invalid", CODING_GIT_NAME_REFUSAL);
+      saved.name = value;
+    }
+    // `undefined` is config-store's documented delete, and setMany honours it
+    // inside a batch the same way `set` does on its own.
+    entries[CODING_AGENT_GIT_NAME_CONFIG_KEY] = saved.name ?? undefined;
+  }
+
+  if (input.email !== undefined) {
+    const raw = input.email;
+    if (raw === null || raw.trim() === "") {
+      saved.email = null;
+    } else {
+      const value = normalizeCodingGitEmail(raw);
+      if (!value) throw new CodingAgentError("invalid", CODING_GIT_EMAIL_REFUSAL);
+      saved.email = value;
+    }
+    entries[CODING_AGENT_GIT_EMAIL_CONFIG_KEY] = saved.email ?? undefined;
+  }
+
+  if (Object.keys(entries).length > 0) await configSetMany(entries);
+  return saved;
 }
 
 function isEffort(value: unknown): value is CodingEffort {
@@ -3266,6 +3367,12 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // through `getInjectSecrets`, which would open the file a second time on a
     // route the app polls. `=== true` is the same reading that getter makes.
     injectSecrets: config[SECRET_INJECT_CONFIG_KEY] === true,
+    // Normalized on the way out as well as on the way in: a value stored before
+    // the validation existed must not be shown back as if the device would use
+    // it, because the resolver would refuse exactly the same value.
+    gitAuthorName: normalizeCodingGitName(config[CODING_AGENT_GIT_NAME_CONFIG_KEY]),
+    gitAuthorEmail: normalizeCodingGitEmail(config[CODING_AGENT_GIT_EMAIL_CONFIG_KEY]),
+    maxGitAuthorChars: MAX_GIT_IDENTITY_CHARS,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     provider,

@@ -12,6 +12,7 @@ import {
   MAX_MAX_PARALLEL_RUNS,
   MIN_MAX_PARALLEL_RUNS,
   setCodingAgentEnabled,
+  setCodingGitAuthor,
   setCodingProvider,
   setDefaultDirectory,
   setEffort,
@@ -174,6 +175,8 @@ export async function POST(request: Request) {
     setupComplete?: unknown;
     clearHarnessFault?: unknown;
     provider?: unknown;
+    gitAuthorName?: unknown;
+    gitAuthorEmail?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -200,7 +203,14 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasVercelEnabled && !clearsFault) {
+  // Both halves of the commit identity are optional and independently
+  // clearable, so — like the folder and the token ceiling — presence decides,
+  // not truthiness: `null` and `""` are the request that CLEARS one.
+  const hasGitAuthorName = "gitAuthorName" in fields
+    && (typeof fields.gitAuthorName === "string" || fields.gitAuthorName === null);
+  const hasGitAuthorEmail = "gitAuthorEmail" in fields
+    && (typeof fields.gitAuthorEmail === "string" || fields.gitAuthorEmail === null);
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasVercelEnabled && !hasGitAuthorName && !hasGitAuthorEmail && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -212,6 +222,7 @@ export async function POST(request: Request) {
           + "{ reviewRounds: number }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
           + "{ maxParallelRuns: number }, "
+          + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -283,6 +294,22 @@ export async function POST(request: Request) {
     if (hasDirectory) {
       const saved = await setDefaultDirectory(fields.defaultDirectory as string | null);
       console.error(`[coding-agent] default folder ${saved ? "set" : "cleared"} by the owner`);
+    }
+    if (hasGitAuthorName || hasGitAuthorEmail) {
+      // ONE call for both halves. Two setters in a row stored the name and
+      // then answered 400 for a bad address in the same body, leaving half an
+      // identity behind — and half an identity is the state that reads as
+      // configured and is not. The setter validates everything it was given
+      // before it writes any of it.
+      const saved = await setCodingGitAuthor({
+        ...(hasGitAuthorName ? { name: fields.gitAuthorName as string | null } : {}),
+        ...(hasGitAuthorEmail ? { email: fields.gitAuthorEmail as string | null } : {}),
+      });
+      // Never the values themselves — they are the owner's own name and
+      // e-mail, and this line goes to the box's journal. Only whether each
+      // supplied half ended up set.
+      if (hasGitAuthorName) console.error(`[coding-agent] commit author name ${saved.name ? "set" : "cleared"} by the owner`);
+      if (hasGitAuthorEmail) console.error(`[coding-agent] commit author e-mail ${saved.email ? "set" : "cleared"} by the owner`);
     }
     if (hasEffort) {
       const saved = await setEffort(fields.effort as string);
