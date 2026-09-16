@@ -59,8 +59,10 @@ interface CliLoginDriver {
   prepare?: (resolvedBin: string) => Promise<void>;
   args: readonly string[];
   flow: CliLoginFlow;
-  /** The link the owner has to open. */
-  url: RegExp;
+  /** The link the owner has to open: only a URL on this host, under this
+   *  path, is taken from the tool's output. Checked by parsing, not by a
+   *  pattern, so nothing before or after the host can pass as it. */
+  link: { host: string; pathPrefix: string };
   /** pkce: the prompt after which the CLI reads the pasted code from stdin. */
   codePrompt?: RegExp;
   /** device_code: the short code the owner types on the provider's page. */
@@ -78,7 +80,7 @@ const DRIVERS: Readonly<Record<string, CliLoginDriver>> = {
     // v0.21.1, 2026.9.7): a boxed banner, then the URL alone on its own line
     // indented two spaces, then "Authorization code: " read from stdin. The
     // fixture in the unit test is that capture.
-    url: /https:\/\/claude\.ai\/oauth\/authorize\?[^\s│]+/,
+    link: { host: "claude.ai", pathPrefix: "/oauth/authorize" },
     codePrompt: /Authorization code:/,
   },
   "copilot-acp": {
@@ -97,7 +99,7 @@ const DRIVERS: Readonly<Record<string, CliLoginDriver>> = {
         await setHermesEnvValues({ [HERMES_COPILOT_COMMAND_ENV]: resolvedBin });
       }
     },
-    url: /https:\/\/github\.com\/login\/device[^\s]*/,
+    link: { host: "github.com", pathPrefix: "/login/device" },
     userCode: /\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/,
   },
 };
@@ -277,12 +279,33 @@ function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * The first https link in `text` that is on the driver's host and path — by
+ * parsing it, so a lookalike host, a userinfo trick or a link merely
+ * containing the real one is never taken. The result is what the browser
+ * will open.
+ */
+export function findSignInLink(text: string, link: { host: string; pathPrefix: string }): string | null {
+  for (const candidate of text.match(/https:\/\/[^\s│]+/g) ?? []) {
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === "https:" && url.username === "" && url.password === ""
+        && url.hostname === link.host && url.pathname.startsWith(link.pathPrefix)) {
+        return url.toString();
+      }
+    } catch {
+      /* not a URL */
+    }
+  }
+  return null;
+}
+
 function onOutput(session: LiveSession, chunk: string): void {
   // Keep the TAIL: the line `scrubReason` wants is the last one printed.
   session.buffer = (session.buffer + chunk).slice(-OUTPUT_CAP);
   const driver = DRIVERS[session.providerId];
   if (!session.authUrl) {
-    const link = session.buffer.match(driver.url)?.[0];
+    const link = findSignInLink(session.buffer, driver.link);
     if (link) {
       session.authUrl = link;
       if (driver.flow === "device_code") session.verificationUrl = link;

@@ -210,6 +210,19 @@ describe("GitHub Copilot — GitHub's device flow, read off the CLI", () => {
   });
 });
 
+describe("the link taken from the tool's output", () => {
+  it("is only a link on the provider's own host and path — never a lookalike or a wrapper", () => {
+    const anthropic = { host: "claude.ai", pathPrefix: "/oauth/authorize" };
+    expect(lib.findSignInLink("  https://claude.ai/oauth/authorize?code=true&state=s\n", anthropic))
+      .toBe("https://claude.ai/oauth/authorize?code=true&state=s");
+    expect(lib.findSignInLink("https://evil.example/?next=https://claude.ai/oauth/authorize?x", anthropic)).toBeNull();
+    expect(lib.findSignInLink("https://claude.ai.evil.example/oauth/authorize?x", anthropic)).toBeNull();
+    expect(lib.findSignInLink("https://user@claude.ai/oauth/authorize?x", anthropic)).toBeNull();
+    expect(lib.findSignInLink("https://claude.ai/elsewhere?x", anthropic)).toBeNull();
+    expect(lib.findSignInLink("http://claude.ai/oauth/authorize?x", anthropic)).toBeNull();
+  });
+});
+
 describe("what the panel may drive", () => {
   it("knows the flow for the two drivers and nothing for the rest", () => {
     expect(lib.cliLoginDriverFor("anthropic")).toBe("pkce");
