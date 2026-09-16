@@ -1551,6 +1551,45 @@ describe("/setup-api/chat/model", () => {
       expect(response.status).toBe(200);
       expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
     });
+
+    it("answers the retryable code when the append lost the config race", async () => {
+      // The same passing collision as the primary write, one step earlier. The
+      // 502 below it says "Re-save it in Settings", which is the wrong remedy
+      // here — the provider is fine, another writer simply held the config —
+      // and a 502 gives the client nothing to retry on.
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(
+        "The config file changed while this command was writing (config changed since last load), "
+        + "so nothing was changed. Re-run the same command to pick up the new file and try again.",
+      ));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await pick("google/gemini-3-pro");
+      const body = await response.json();
+      errorSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      expect(JSON.stringify(body)).not.toMatch(/config file|last load|Re-run|Re-save/i);
+    });
+
+    it("keeps the re-save remedy for a failure that is not the race", async () => {
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("EACCES: permission denied"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await pick("google/gemini-3-pro");
+      const body = await response.json();
+      errorSpy.mockRestore();
+
+      expect(response.status).toBe(502);
+      expect(body.code).toBeUndefined();
+      expect(body.error).toMatch(/Re-save it in Settings/);
+    });
   });
 
   describe("the anthropic plugin around the primary write", () => {

@@ -1172,6 +1172,19 @@ export async function POST(request: Request) {
                 ]);
               } catch (err) {
                 console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
+                // A collision here is the same passing state as the one the
+                // outer catch answers, and "Re-save it in Settings" is the
+                // wrong remedy for it — the provider is fine, another writer
+                // simply held the config. Answering the conflict by name is
+                // also what gives the client its one retry; the 502 below
+                // cannot be retried, because every other failure it covers
+                // would still be there a second later.
+                if (isConfigMutationConflict(err)) {
+                  return NextResponse.json(
+                    { error: CONFIG_BUSY_MESSAGE, code: CONFIG_BUSY_ERROR_CODE },
+                    { status: 409, headers: { "Cache-Control": "no-store" } },
+                  );
+                }
                 return NextResponse.json(
                   {
                     error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
