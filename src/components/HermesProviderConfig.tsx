@@ -1440,11 +1440,7 @@ export default function HermesProviderConfig({
                 >
                   {loading && <option value="">{t("hermesProvider.model.loading")}</option>}
                   {!loading && !scope?.models.length && (
-                    <option value="">
-                      {scope?.authenticated === false
-                        ? t("hermesProvider.model.noCredentials")
-                        : t("hermesProvider.model.noModels")}
-                    </option>
+                    <option value="">{t("hermesProvider.model.noModels")}</option>
                   )}
                   {(scope?.models ?? []).map((m) => (
                     <option key={m.id} value={m.id}>

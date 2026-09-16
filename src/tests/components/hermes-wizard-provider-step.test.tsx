@@ -193,7 +193,19 @@ describe("wizard step 4 on Hermes — the OpenClaw provider step", () => {
   });
 });
 
-describe("the same panel in Settings — unchanged", () => {
+describe("the same panel in Settings", () => {
+  it("hides the default-model picker while the provider has no credentials", async () => {
+    // The mocked catalogue answers `authenticated: false`: the harness lists
+    // no models, so the picker used to be a disabled box reading "No
+    // credentials for this provider yet" — a control that could not pick.
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /OpenRouter/ }));
+    await screen.findByLabelText(/OpenRouter API key/i);
+    expect(screen.queryByLabelText(/Default model/i)).toBeNull();
+    expect(screen.queryByText("No credentials for this provider yet")).toBeNull();
+  });
+
   it("still lists every provider and still shows the default hero", async () => {
     statusBody = summary({
       defaultProvider: "clawai",
