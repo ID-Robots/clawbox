@@ -5,6 +5,7 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ProviderRadioRow from "./ProviderRadioRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
+import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, GENERIC_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
@@ -132,6 +133,12 @@ interface Props {
 // the cyan "Connected" affirmation (see the wizard overlay below) draws and is
 // read as a deliberate beat rather than a jarring jump to the next step.
 const AUTO_ADVANCE_DELAY_MS = 1000;
+/** The overlay stays up at least this long even when the connect is instant —
+ *  two rows light up (0 s and 2 s) before the DONE beat. */
+const WIZARD_MIN_CONFIGURING_MS = 2500;
+/** How long the "Connected!" beat shows before the wizard advances. */
+const CONFIGURING_DONE_DWELL_MS = 900;
+const LAST_CONFIGURING_PHASE = GENERIC_CONFIGURING_STEP_KEYS.length - 1;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
 // imports it), so it cannot call `t` — but a row's `description` is copy, not
@@ -165,6 +172,19 @@ export default function HermesProviderConfig({
   // away — the same shape as the OpenClaw step. Settings always shows every
   // row (this panel is the connection strip there).
   const [showMoreProviders, setShowMoreProviders] = useState(false);
+  // Wizard-only progress overlay, the same one the OpenClaw step shows: every
+  // connect on the wizard (device-code handoff, OAuth sign-in, API key, Save)
+  // runs behind it, holds it for at least WIZARD_MIN_CONFIGURING_MS so the
+  // rows are seen to light up, then shows the DONE beat and advances. Before
+  // this the ClawBox AI handoff surfaced as one muted line and every other
+  // connect jumped straight to a tick — nothing read as "connecting".
+  const [configuring, setConfiguring] = useState<{
+    provider: string;
+    startedAt: number;
+    phase: number;
+    completed: boolean;
+  } | null>(null);
+  const configuringSteps = useMemo(() => GENERIC_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
 
   // Seeded from the DEVICE's configured provider by the mount effect below;
   // "openrouter" is only the pre-resolution placeholder. Under REQ 1's scoping
@@ -201,17 +221,43 @@ export default function HermesProviderConfig({
   const onNextRef = useRef(onNext);
   useEffect(() => { onNextRef.current = onNext; }, [onNext]);
 
+  /** Wizard only: put the overlay up for `provider` (no-op if already up). */
+  const beginConfiguring = useCallback((provider: string) => {
+    if (embedded) return;
+    setConfiguring((current) => current ?? { provider, startedAt: Date.now(), phase: 0, completed: false });
+  }, [embedded]);
+  const abortConfiguring = useCallback(() => setConfiguring(null), []);
+  /** The step is done: mark it, and make sure the overlay is up to carry the
+   *  DONE beat and the advance. Settings only records the flag. */
+  const finishWizardStep = useCallback((provider: string) => {
+    setConfigured(true);
+    beginConfiguring(provider);
+  }, [beginConfiguring]);
+
+  // Once the step is done, let the overlay run out its minimum, then tick the
+  // last row. Re-armed on every phase tick, but the deadline is absolute.
+  useEffect(() => {
+    if (!configured || embedded || !configuring || configuring.completed) return;
+    const wait = Math.max(0, WIZARD_MIN_CONFIGURING_MS - (Date.now() - configuring.startedAt));
+    const timer = setTimeout(() => {
+      setConfiguring((current) => (current ? { ...current, phase: LAST_CONFIGURING_PHASE, completed: true } : current));
+    }, wait);
+    return () => clearTimeout(timer);
+  }, [configured, embedded, configuring]);
+
   useEffect(() => {
     // Settings embeds this panel with nowhere to advance to; only the wizard
-    // passes an onNext.
+    // passes an onNext. While the overlay is still running the advance waits
+    // for its DONE beat.
     if (!configured || embedded) return;
+    if (configuring && !configuring.completed) return;
     const timer = setTimeout(() => {
       if (advancedRef.current) return;
       advancedRef.current = true;
       onNextRef.current?.();
-    }, AUTO_ADVANCE_DELAY_MS);
+    }, configuring?.completed ? CONFIGURING_DONE_DWELL_MS : AUTO_ADVANCE_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [configured, embedded]);
+  }, [configured, embedded, configuring]);
 
   // Tell every already-open view — the chat popup's provider picker, and this
   // panel's own scoped model list — that the device's providers/model/tier
@@ -574,6 +620,7 @@ export default function HermesProviderConfig({
   // they have finished. Settings never calls this: there the owner picks a
   // default deliberately and there is nowhere to advance to.
   const commitWizardDefault = useCallback(async (providerId: string) => {
+    beginConfiguring(providerId);
     try {
       const res = await fetch("/setup-api/hermes/models", {
         method: "POST",
@@ -584,8 +631,8 @@ export default function HermesProviderConfig({
     } catch {
       // Non-fatal — see above. Chat falls back to the provider's own default.
     }
-    setConfigured(true);
-  }, [notifyChatHeader]);
+    finishWizardStep(providerId);
+  }, [notifyChatHeader, finishWizardStep]);
 
   // A finished sign-in is a credential appearing server-side — the panel, the
   // model cache and the chat header all have to re-read, same as the old
@@ -787,7 +834,10 @@ export default function HermesProviderConfig({
     getTier: () => uiTier,
     onStart: () => setClawaiStatus(null),
     onBusyChange: setLoginBusy,
-    onConfiguring: () => setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.finishingSetup") }),
+    onConfiguring: () => {
+      setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.finishingSetup") });
+      beginConfiguring(CLAWAI_PROVIDER);
+    },
     onComplete: () => {
       // Only reached on the poll's terminal `complete` status, i.e. after the
       // device finished configuring — never mid-handshake.
@@ -797,10 +847,33 @@ export default function HermesProviderConfig({
       // a successful configure like any other — the chat picker has to hear it.
       notifyChatHeader();
       setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
-      setConfigured(true);
+      finishWizardStep(CLAWAI_PROVIDER);
     },
-    onError: (msg) => setClawaiStatus({ kind: "err", msg }),
+    onError: (msg) => {
+      abortConfiguring();
+      setClawaiStatus({ kind: "err", msg });
+    },
   });
+
+  // Advance the overlay rows on the same schedule as the OpenClaw step. The
+  // last row is only ticked by the poll's terminal `complete`, never by time.
+  const configuringRunning = configuring !== null && !configuring.completed;
+  useEffect(() => {
+    if (!configuringRunning) return;
+    const timers = CONFIGURING_STEP_DELAYS.slice(1, -1).map((delay, index) =>
+      setTimeout(() => {
+        setConfiguring((current) =>
+          current && !current.completed ? { ...current, phase: Math.max(current.phase, index + 1) } : current,
+        );
+      }, delay),
+    );
+    return () => timers.forEach(clearTimeout);
+  }, [configuringRunning]);
+  const configuringProviderName = configuring
+    ? (configuring.provider === CLAWAI_PROVIDER
+      ? "ClawBox AI"
+      : HERMES_PANEL_PROVIDERS.find((p) => p.id === configuring.provider)?.name ?? configuring.provider)
+    : "";
 
   // ADVANCED FALLBACK ONLY: the Hermes dashboard's /env page via its auth-gated
   // proxy on :8090. LAN-only — tunnels don't forward that port, which is
@@ -846,12 +919,13 @@ export default function HermesProviderConfig({
     setSelectedProvider(CLAWAI_PROVIDER);
     notifyChatHeader();
     setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
-    setConfigured(true);
+    finishWizardStep(CLAWAI_PROVIDER);
   }
 
   async function applyClawai() {
     setApplyingClawai(true);
     setClawaiStatus(null);
+    beginConfiguring(CLAWAI_PROVIDER);
     try {
       const res = await fetch("/setup-api/hermes/clawai", {
         method: "POST",
@@ -868,8 +942,9 @@ export default function HermesProviderConfig({
       setAppliedUiTier(uiTier);
       setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
       notifyChatHeader();
-      setConfigured(true);
+      finishWizardStep(CLAWAI_PROVIDER);
     } catch (e) {
+      abortConfiguring();
       setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : t("hermesProvider.clawai.switchFailed") });
     } finally {
       setApplyingClawai(false);
@@ -894,6 +969,7 @@ export default function HermesProviderConfig({
 
   async function saveModelProvider() {
     setSaving(true);
+    beginConfiguring(selectedProvider);
     setSaveStatus(null);
     try {
       const key = apiKey.trim();
@@ -941,8 +1017,9 @@ export default function HermesProviderConfig({
         msg: savingKey ? t("hermesProvider.save.keySavedOk") : t("hermesProvider.save.ok"),
       });
       notifyChatHeader();
-      setConfigured(true);
+      finishWizardStep(selectedProvider);
     } catch (e) {
+      abortConfiguring();
       setSaveStatus({ kind: "err", msg: e instanceof Error ? e.message : t("hermesProvider.save.failed") });
     } finally {
       setSaving(false);
@@ -979,58 +1056,24 @@ export default function HermesProviderConfig({
   }
 
 
-  // The wizard's success beat: once a provider is connected (`configured`) a
-  // cyan check draws over the card for the auto-advance second, so the jump to
-  // the next step reads as a deliberate confirmation. Settings never advances,
-  // so it never shows this. `--cyan-bright` is the product's DONE colour.
-  const showConnectedAffirmation = !embedded && configured;
   const Title = embedded ? "h2" : "h1";
 
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
       <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
-        {showConnectedAffirmation && (
-          <>
-            <style>{`
-              @keyframes hpc-connected-draw { to { stroke-dashoffset: 0 } }
-              @keyframes hpc-connected-fade { from { opacity: 0 } to { opacity: 1 } }
-              @keyframes hpc-connected-rise { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: translateY(0) } }
-              .hpc-connected-overlay { animation: hpc-connected-fade 0.2s ease-out both }
-              .hpc-connected-circle { animation: hpc-connected-draw 0.5s ease-out 0.05s forwards }
-              .hpc-connected-tick { animation: hpc-connected-draw 0.35s ease-out 0.45s forwards }
-              .hpc-connected-label { animation: hpc-connected-rise 0.3s ease-out 0.55s both }
-              @media (prefers-reduced-motion: reduce) {
-                .hpc-connected-overlay, .hpc-connected-label { animation: none }
-                .hpc-connected-circle, .hpc-connected-tick { animation: none; stroke-dashoffset: 0 }
-              }
-            `}</style>
-            <div
-              className="hpc-connected-overlay absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-deep)]/92 backdrop-blur-sm text-center px-6"
-              role="status"
-              aria-live="polite"
-              data-testid="hermes-connected-affirmation"
-            >
-              <svg width="72" height="72" viewBox="0 0 56 56" fill="none" aria-hidden="true">
-                <circle
-                  cx="28" cy="28" r="25"
-                  stroke="var(--cyan-bright)" strokeWidth="3"
-                  strokeDasharray="157" strokeDashoffset="157"
-                  className="hpc-connected-circle"
-                />
-                <path
-                  d="M17 28l7 7 15-15"
-                  stroke="var(--cyan-bright)" strokeWidth="3"
-                  strokeLinecap="round" strokeLinejoin="round"
-                  strokeDasharray="35" strokeDashoffset="35"
-                  className="hpc-connected-tick"
-                />
-              </svg>
-              <span className="hpc-connected-label text-[var(--cyan-bright)] font-semibold text-sm">
-                {t("hermesProvider.connected.affirmation")}
-              </span>
-            </div>
-          </>
+        {configuring && (
+          <ConfiguringOverlay
+            provider={configuring.provider}
+            providerName={configuringProviderName}
+            steps={configuringSteps}
+            phase={configuring.phase}
+            detail={null}
+            progressPercent={null}
+            completed={configuring.completed}
+            t={t}
+          />
         )}
+        <div className={configuring ? "invisible h-0 overflow-hidden" : ""} aria-hidden={configuring ? true : undefined}>
         {/* Embedded in Settings the window already owns the page's h1; one
             document with two of them claims two titles. */}
         <Title className="text-xl sm:text-2xl font-bold font-display mb-1">{title ?? t("hermesProvider.title")}</Title>
@@ -1484,6 +1527,7 @@ export default function HermesProviderConfig({
             {t("ai.skipUseLocalOnly")}
           </button>
         )}
+        </div>
       </div>
     </div>
   );

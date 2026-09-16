@@ -13,13 +13,14 @@ import HermesProviderConfig from "@/components/HermesProviderConfig";
 // below stay on the sentence a customer actually reads.
 vi.mock("@/lib/i18n", async () => {
   const { providerEn } = await import("@/lib/edition-translations/en-provider");
+  const { translations } = await import("@/lib/translations");
   return {
     I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
     useT: () => ({
       t: (key: string, params?: Record<string, string | number>) =>
         Object.entries(params ?? {}).reduce(
           (out, [name, value]) => out.replaceAll(`{${name}}`, String(value)),
-          providerEn[key] ?? key,
+          providerEn[key] ?? translations.en[key] ?? key,
         ),
       locale: "en",
       setLocale: vi.fn(),
@@ -103,10 +104,13 @@ describe("HermesProviderConfig auto-advance", () => {
 
     fireEvent.click(await saveButton());
 
+    // The save runs behind the progress overlay; the wizard advances after
+    // the overlay's minimum dwell and DONE beat, not the instant the POST lands.
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
     await waitFor(() => {
       expect(onNext).toHaveBeenCalledTimes(1);
-    }, { timeout: 4_000 });
-  });
+    }, { timeout: 6_000 });
+  }, 10_000);
 
   it("advances exactly once even when the step is saved repeatedly", async () => {
     stubFetch();
@@ -120,7 +124,7 @@ describe("HermesProviderConfig auto-advance", () => {
 
     await waitFor(() => {
       expect(onNext).toHaveBeenCalledTimes(1);
-    }, { timeout: 4_000 });
+    }, { timeout: 6_000 });
 
     // Give a second timer every chance to fire before declaring it doesn't.
     await new Promise((resolve) => setTimeout(resolve, 1_500));

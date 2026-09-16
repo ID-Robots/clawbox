@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import HermesProviderConfig from "@/components/HermesProviderConfig";
 import type { ProviderStatusSummary } from "@/lib/provider-status";
 
@@ -58,6 +58,22 @@ vi.mock("@/hooks/useHermesModelOptions", () => ({
     refresh: vi.fn(),
   }),
   notifyHermesModelState: vi.fn(),
+}));
+
+/**
+ * The device-code hook is driven by its callbacks here: the poll's
+ * `configuring` → `complete` transitions are what the wizard has to visualise.
+ */
+let loginCallbacks: {
+  onConfiguring?: () => void;
+  onComplete?: () => void;
+  onError?: (msg: string) => void;
+} = {};
+vi.mock("@/hooks/useClawaiDeviceLogin", () => ({
+  useClawaiDeviceLogin: (options: typeof loginCallbacks) => {
+    loginCallbacks = options;
+    return { deviceCode: null, verificationUrl: null, polling: false, start: vi.fn(), reset: vi.fn() };
+  },
 }));
 
 /** A box mid-setup: nothing connected yet, no default. */
@@ -194,5 +210,48 @@ describe("the same panel in Settings — unchanged", () => {
     expect(await screen.findByTestId("provider-default-hero")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "AI Providers" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Show more providers/i })).toBeNull();
+  });
+});
+
+describe("connecting ClawBox AI on the wizard — the same progress overlay as OpenClaw", () => {
+  it("shows the setting-up overlay while the device configures, holds it, then Connected!, then advances", async () => {
+    const onNext = vi.fn();
+    render(<HermesProviderConfig testId="hermes-ai" onNext={onNext} />);
+    await screen.findByRole("button", { name: /Get device code/i });
+
+    // The device code was entered on the phone; the box is now applying the
+    // credential. Before this the only cue was one muted status line.
+    act(() => loginCallbacks.onConfiguring?.());
+
+    expect(screen.getByText("Setting up ClawBox AI")).toBeInTheDocument();
+    const rows = screen.getAllByRole("listitem").filter((row) => row.hasAttribute("data-step-state"));
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    expect(rows[0]).toHaveAttribute("data-step-state", "active");
+    // The form underneath is parked (hidden, not torn down), so nothing re-fetches.
+    const parked = screen.getByRole("button", { name: /Get device code/i, hidden: true });
+    expect(parked.closest("[aria-hidden='true']")).not.toBeNull();
+
+    act(() => loginCallbacks.onComplete?.());
+
+    // An instant connect must not flash: the overlay stays up for its minimum
+    // dwell before the DONE beat, and only then does the wizard move on.
+    expect(screen.getByText("Setting up ClawBox AI")).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
+  }, 10_000);
+
+  it("drops the overlay and shows the error when the handoff fails", async () => {
+    render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);
+    await screen.findByRole("button", { name: /Get device code/i });
+
+    act(() => loginCallbacks.onConfiguring?.());
+    expect(screen.getByText("Setting up ClawBox AI")).toBeInTheDocument();
+
+    act(() => loginCallbacks.onError?.("Device code expired"));
+
+    expect(screen.queryByText("Setting up ClawBox AI")).toBeNull();
+    expect(screen.getByText("Device code expired")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Get device code/i })).toBeInTheDocument();
   });
 });

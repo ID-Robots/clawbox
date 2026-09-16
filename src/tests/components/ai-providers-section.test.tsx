@@ -435,14 +435,17 @@ describe("in the setup wizard (not embedded)", () => {
     fireEvent.change(codeInput, { target: { value: "auth-code-abc123" } });
     fireEvent.click(screen.getByRole("button", { name: "Submit code" }));
 
-    // The success beat draws before the jump.
-    expect(await screen.findByTestId("hermes-connected-affirmation")).toBeInTheDocument();
+    // The connect runs behind the same progress overlay the OpenClaw step
+    // shows, and the wizard only moves on after its DONE beat.
+    expect(await screen.findByText("Setting up Anthropic")).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
     // The just-connected provider is pinned as the device default with its OWN
     // recommended model (no `model` field → the server picks it), so chat works.
     await waitFor(() => expect(modelsPostCalls()).toContainEqual({ provider: "anthropic" }));
-    // …and the wizard advances after the affirmation.
-    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2500 });
-  });
+    // …and the wizard advances after the overlay's DONE beat.
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
+  }, 10_000);
 
   it("also finishes the step when a provider is connected with an API key", async () => {
     const onNext = vi.fn();
@@ -456,9 +459,10 @@ describe("in the setup wizard (not embedded)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Save model & provider" }));
 
-    expect(await screen.findByTestId("hermes-connected-affirmation")).toBeInTheDocument();
-    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2500 });
-  });
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
+  }, 10_000);
 
   it("does NOT auto-advance in Settings — there is nowhere to go", async () => {
     const onNext = vi.fn();
@@ -474,6 +478,6 @@ describe("in the setup wizard (not embedded)", () => {
 
     await new Promise((r) => setTimeout(r, 1200));
     expect(onNext).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("hermes-connected-affirmation")).toBeNull();
+    expect(screen.queryByText(/Setting up/)).toBeNull();
   });
 });
