@@ -112,6 +112,17 @@ const MAX_QUEUED_SENDS = 20
  */
 const FIRST_CONVERSATION_OPENER = 'hi'
 
+/**
+ * How long a model switch waits before its one retry after a config conflict.
+ *
+ * Long enough to be worth taking: the writer it lost to is a gateway restart or
+ * another `openclaw config set`, and on a Jetson the CLI alone costs ~10 s to
+ * start, so an immediate second POST would collide with the same write. Short
+ * enough that a switch the owner CLICKED still feels like one action — the
+ * dropdown stays in its switching state for the whole wait.
+ */
+const CONFIG_BUSY_RETRY_DELAY_MS = 1_200
+
 /** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
 const SPOKEN_REPLIES_KEPT = 12
 /** The most one ask for a spoken reply may take, queue and cold start included. */
@@ -365,6 +376,7 @@ import {
 } from '@/lib/chat-attachments'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
+import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
 import {
@@ -4962,7 +4974,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setSwitchingModel(true)
     setErrorMsg('')
     try {
-      const res = await fetch('/setup-api/chat/model', {
+      const postModel = () => fetch('/setup-api/chat/model', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -4973,7 +4985,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           ...(target.automatic ? { automatic: true } : {}),
         }),
       })
-      const data = await res.json()
+      let res = await postModel()
+      let data = await res.json()
+      // The box was writing its config somewhere else while this write ran, and
+      // the server's own retries did not outlast it. That is what the first
+      // screen after setup looks like: this switch is the chat normalizing the
+      // ClawBox AI alias as the desktop paints, against a gateway still
+      // restarting from the ClawBox AI connect. The whole request is sent once
+      // more — a fresh POST re-reads the config from disk, which is the only
+      // thing that makes the retry meaningful — and only a second conflict is
+      // worth a word to the owner.
+      if (isConfigBusyPayload(data)) {
+        await new Promise(resolve => setTimeout(resolve, CONFIG_BUSY_RETRY_DELAY_MS))
+        res = await postModel()
+        data = await res.json()
+      }
+      if (isConfigBusyPayload(data)) {
+        setMessages(prev => [...prev, {
+          role: 'system',
+          text: t('chat.modelSwitchBusy'),
+          timestamp: Date.now(),
+        }])
+        return false
+      }
       // 502 WITH a warning = the model IS written and the route returned the new
       // state; only the gateway has not finished coming back. Throwing there
       // would revert the dropdown to a model the box is no longer configured
@@ -5006,6 +5040,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connect()
       return true
     } catch (err) {
+      // Whatever reaches here is NOT the config conflict: `isConfigBusyPayload`
+      // claims that body above — by its code and, for a server that predates
+      // the code, by the CLI's own wording — so the sentence this fix exists to
+      // remove can no longer be thrown as `data.error` and relayed from here.
       setMessages(prev => [...prev, {
         role: 'system',
         text: `Error: ${err instanceof Error ? err.message : 'Failed to switch chat model'}`,
@@ -5015,7 +5053,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel])
+  }, [chatModelState, connect, switchingModel, t])
 
   // The old Pro and Flash aliases now serve the same Flash model. Move a
   // saved chat choice to the Flash alias once, without clearing its history.
