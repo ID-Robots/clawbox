@@ -522,11 +522,28 @@ async function ensureRepository(directory: string, from: string): Promise<{ init
   if (!who.ok) return { initialized: false, detail: who.detail };
   const init = await run("git", ["init", "--quiet"], { cwd: directory });
   if (init.code !== 0) return { initialized: false, detail: failureDetail(init, "Creating a git repository for the folder") };
-  await run("git", ["config", "user.name", who.identity.name], { cwd: directory });
-  await run("git", ["config", "user.email", who.identity.email], { cwd: directory });
+  const named = await run("git", ["config", "user.name", who.identity.name], { cwd: directory });
+  const mailed = await run("git", ["config", "user.email", who.identity.email], { cwd: directory });
+  // NEITHER RESULT IS DISCARDED. A `git config` that failed is not on its own
+  // fatal — the box may have a global identity, and the settle passes
+  // `-c user.name`/`-c user.email` on every commit it makes, so a project whose
+  // config could not be written still commits correctly afterwards. But it is
+  // the usual CAUSE of the commit below failing with git's own "Committer
+  // identity unknown", and reporting that as "Recording the first commit" names
+  // the wrong step for a fault that happened two steps earlier — the owner then
+  // looks at the commit, which was fine.
+  //
+  // The repository is NOT torn down for it. The folder has already arrived and
+  // is the owner's; deleting its `.git` to punish a failed `config` would turn a
+  // state the settle recovers from into a destroyed one.
+  const unconfigured = named.code !== 0 ? named : mailed.code !== 0 ? mailed : null;
   await run("git", ["add", "-A"], { cwd: directory });
   const commit = await run("git", ["commit", "--quiet", "--allow-empty", "-m", `Imported from ${from}`], { cwd: directory });
-  if (commit.code !== 0) return { initialized: true, detail: failureDetail(commit, "Recording the first commit") };
+  if (commit.code !== 0) {
+    return unconfigured
+      ? { initialized: true, detail: failureDetail(unconfigured, "Recording the commit identity for the new repository") }
+      : { initialized: true, detail: failureDetail(commit, "Recording the first commit") };
+  }
   return { initialized: true, detail: null };
 }
 

@@ -41,11 +41,21 @@ const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
  * boot that starts under alice and lands under bob answers as bob.
  */
 const ghHoldEarly = vi.hoisted(() => ({ current: null as Promise<void> | null }));
+/**
+ * While set, a `git` invocation whose argv begins with this string fails
+ * instead of running — the only way to see what an import reports when one
+ * step of setting a new repository up goes wrong. Every other git call is the
+ * real thing.
+ */
+const gitFails = vi.hoisted(() => ({ current: null as string | null }));
 vi.mock("@/lib/child-run", async () => {
   const actual = await vi.importActual<typeof import("@/lib/child-run")>("@/lib/child-run");
   return {
     ...actual,
     runChild: async (bin: string, args: string[], opts: Parameters<typeof actual.runChild>[2]) => {
+      if (bin === "git" && gitFails.current && args.join(" ").startsWith(gitFails.current)) {
+        return { code: 1, stdout: "", stderr: "error: could not lock config file .git/config", signal: null, timedOut: false, startFailed: false, startError: null };
+      }
       if (bin !== "gh") return actual.runChild(bin, args, opts);
       ghCalls.push(args);
       if (ghHoldEarly.current && args.join(" ").startsWith("api user/repos")) await ghHoldEarly.current;
@@ -97,6 +107,7 @@ beforeEach(async () => {
   fs.mkdirSync(projects, { recursive: true });
   process.env.HOME = home;
   process.env.CLAWBOX_ROOT = path.join(home, "clawbox");
+  gitFails.current = null;
   ghAnswers.clear();
   ghCalls.length = 0;
   ghHold.current = null;
@@ -187,6 +198,35 @@ describe("importFolder", () => {
     const dir = path.join(projects, "bare-site");
     expect(git(dir, "log", "--oneline")).toMatch(/Imported from /);
     expect(git(dir, "config", "user.email")).toBe(CODING_GIT_PLACEHOLDER.email);
+  });
+
+  it("blames the identity write, not the commit, when that is what failed", async () => {
+    // The two `git config` results used to be discarded. If writing the
+    // identity failed, the commit right after it failed with git's own
+    // "Committer identity unknown" — and the owner was told "Recording the
+    // first commit" for a fault that happened two steps earlier, pointing them
+    // at the one step that was fine.
+    const errors: string[] = [];
+    const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((a) => String(a)).join(" "));
+    });
+    try {
+      gitFails.current = "config user.email";
+      const src = makeSource("unlucky-site");
+      const out = await lib.importFolder({ source: src, projectsRoot: projects });
+      // The import still stands: the folder is the owner's and it arrived.
+      expect(out).toMatchObject({ ok: true, initialized: true });
+      // And the repository is still there — a failed `config` is recoverable
+      // (the settle passes the identity on every commit), so nothing is torn
+      // down for it.
+      expect(fs.existsSync(path.join(projects, "unlucky-site", ".git"))).toBe(true);
+      // What reached the owner is what git said about the step that actually
+      // broke, not about the commit it took down with it.
+      expect(errors.join("\n")).toMatch(/could not lock config file/i);
+      expect(errors.join("\n")).not.toMatch(/identity unknown|auto-detect/i);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("keeps a folder's own history rather than starting one", async () => {
