@@ -126,7 +126,13 @@ const nextConfig: NextConfig = {
       "./node_modules/@img/sharp-linux*/lib/**",
     ],
   },
-  allowedDevOrigins: ["http://clawbox.local"],
+  // CLAWBOX_DEV_ORIGINS: extra hostnames (comma-separated, wildcards allowed)
+  // a `next dev` session may be opened from — e.g. "*.trycloudflare.com" for
+  // a live-edit tunnel to a phone. Dev-only; production ignores the list.
+  allowedDevOrigins: [
+    "http://clawbox.local",
+    ...(process.env.CLAWBOX_DEV_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean),
+  ],
   devIndicators: false,
   compress: true,
   poweredByHeader: false,
