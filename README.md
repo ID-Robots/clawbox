@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h1 align="center">ClawBox — the official OpenClaw AI assistant hardware</h1>
+<h1 align="center">ClawBox — a private AI assistant appliance built on OpenClaw</h1>
 
 <p align="center">
   <strong>ClawBox is a private, always-on AI assistant appliance built on NVIDIA Jetson.</strong><br/>
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  Designed, built and shipped from the EU by <a href="https://github.com/ID-Robots"><strong>ID Robots Ltd.</strong></a> — the makers of ClawBox and the official hardware partner for <a href="https://github.com/openclaw/openclaw">OpenClaw</a>.<br/>
+  Designed, built and shipped from the EU by <a href="https://github.com/ID-Robots"><strong>ID Robots Ltd.</strong></a> — the makers of ClawBox, a hardware appliance built on <a href="https://github.com/openclaw/openclaw">OpenClaw</a>.<br/>
   Official website: <a href="https://clawbox.com"><strong>clawbox.com</strong></a>
 </p>
 
@@ -41,13 +41,13 @@
 
 ## What is ClawBox?
 
-**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd., and the official hardware for the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription.
+**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd. that runs the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription.
 
 This repository contains **OpenClaw OS**, the operating system that ships on every ClawBox. Local-first: with local models nothing leaves the box — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
 
 **Real on-device inference, not a cloud relay.** ClawBox runs 7–8B parameter models locally on Jetson silicon. It is not a low-power router that forwards every prompt to someone else's API — local inference is the default, and cloud providers are an option you switch on yourself.
 
-> ### ℹ️ The official ClawBox
+> ### ℹ️ Genuine ClawBox
 >
 > ClawBox is designed, manufactured and supported by **ID Robots Ltd.** (Plovdiv, Bulgaria 🇪🇺). The only official channels are:
 >
@@ -56,6 +56,8 @@ This repository contains **OpenClaw OS**, the operating system that ships on eve
 > - **Contact:** yanko@idrobots.com
 >
 > Unrelated products sold under similar names exist and are **not affiliated with ID Robots, this repository, or ClawBox support**. If it did not come from `clawbox.com`, it is not a ClawBox and we cannot support it.
+>
+> ClawBox is an independent product by **ID Robots Ltd.** It is **not affiliated with, endorsed by, or an official partner of** the OpenClaw project.
 
 The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox **an OS the AI can operate**, not just a UI the user clicks through:
 
@@ -379,6 +381,6 @@ ClawBox is released under the [ClawBox Source Available License v1.0](LICENSE). 
 </p>
 
 <p align="center">
-  <sub><strong>ClawBox™</strong> — the official OpenClaw AI assistant appliance. Designed, built and supported by <a href="https://github.com/ID-Robots">ID Robots Ltd.</a>, Plovdiv, Bulgaria 🇪🇺<br/>
+  <sub><strong>ClawBox™</strong> — a private AI assistant appliance that runs OpenClaw. Designed, built and supported by <a href="https://github.com/ID-Robots">ID Robots Ltd.</a>, Plovdiv, Bulgaria 🇪🇺<br/>
   Personal AI server · Local AI assistant hardware · NVIDIA Jetson Orin Nano · Edge AI appliance · Self-hosted AI · Powered by <a href="https://github.com/openclaw/openclaw">OpenClaw</a></sub>
 </p>
