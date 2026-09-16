@@ -1262,7 +1262,11 @@ step_fix_git_perms() {
 }
 
 x64_sudoers_rule() {
-  printf '%s' "$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE"
+  # The launcher first: it is the web server's ONLY route to a root step, and it
+  # is scoped to one root-owned entrypoint that takes a step name, never a unit
+  # name (the appliance's TASK-539 contract). Everything else here is a service
+  # action.
+  printf '%s' "$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-run-root-step.sh, /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE"
   if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
     printf '%s' ", /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service"
   fi
@@ -1292,6 +1296,111 @@ validate_reserved_port_env() {
     echo "Error: $PROJECT_DIR/.env defines installer-managed port variable(s): $(printf '%s\n' "$conflicting_keys" | paste -sd, -). Remove them and use CLAWBOX_PORT, CLAWBOX_GATEWAY_PORT, or CLAWBOX_TERMINAL_WS_PORT when running the installer." >&2
     return 1
   fi
+}
+
+# ── Root-step contract (the web server's root hand-off) ──────────────────────
+#
+# The appliance has had this since TASK-539; the x64 installer shipped without
+# it, so every root step the web app depends on was unreachable — the wizard
+# could not set the owner's password at all. It wrote data/.chpasswd-input and
+# started clawbox-root-update@chpasswd.service, a unit that did not exist.
+#
+# This installs the same contract on the same paths the app already calls:
+# src/lib/root-step-runner.ts pins the launcher, src/lib/chpasswd.ts pins the
+# step name, and root-step-journal.ts pins the unit name.
+ROOT_STEP_DIR="/usr/local/libexec/clawbox"
+ROOT_STEP_CONF_DIR="/etc/clawbox"
+ROOT_STEP_CONF="$ROOT_STEP_CONF_DIR/x64.env"
+ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"
+
+# A desktop install user normally arrives with a password of their own, and the
+# wizard's Security step can then never apply: src/app/setup-api/system/
+# credentials treats the request as first-boot only when data/config.json's flag
+# is false AND hasOwnerPassword() is not true, and /login redirects back to
+# /setup while setup is incomplete — so the session it demands cannot exist.
+# /etc/shadow is the authority and it already says "an owner password is set",
+# so record exactly that and let the wizard move on to the AI Provider step
+# instead of asking for a password it will refuse to set.
+reconcile_owner_password_flag() {
+  local cfg="$PROJECT_DIR/data/config.json" status
+  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk '{print $2}')"
+  # NP/L: no usable password yet, so first boot applies and WILL set one.
+  [ "$status" = "P" ] || return 0
+  [ -f "$cfg" ] || return 0
+  if ! as_user_runtime python3 - "$cfg" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict) or data.get("password_configured") is True:
+    sys.exit(0)
+data["password_configured"] = True
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=directory)
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+    sys.exit(1)
+PY
+  then
+    echo "  Warning: could not record password_configured in data/config.json" >&2
+  fi
+}
+
+step_root_step_contract() {
+  local src
+  src="$PROJECT_DIR/scripts/x64-migration"
+  # A first install that has not cloned yet still has the scripts beside the
+  # installer (the tarball path install.sh also defends).
+  if [ ! -f "$src/clawbox-x64-run-root-step.sh" ] || [ ! -f "$src/clawbox-x64-root-step.sh" ]; then
+    src="$(cd "$(dirname "$0")" && pwd)/scripts/x64-migration"
+  fi
+  if [ ! -f "$src/clawbox-x64-run-root-step.sh" ] || [ ! -f "$src/clawbox-x64-root-step.sh" ]; then
+    echo "Error: root-step scripts not found under $src" >&2
+    return 1
+  fi
+
+  install -d -o root -g root -m 0755 "$ROOT_STEP_DIR" "$ROOT_STEP_CONF_DIR"
+  install -o root -g root -m 0755 "$src/clawbox-x64-run-root-step.sh" "$ROOT_STEP_DIR/clawbox-run-root-step.sh"
+  install -o root -g root -m 0755 "$src/clawbox-x64-root-step.sh" "$ROOT_STEP_DIR/clawbox-root-step.sh"
+
+  # Root runs a root-owned copy of this installer, never $PROJECT_DIR/install-x64.sh:
+  # that tree belongs to the install user, so exec'ing it as root would make the
+  # dispatcher a one-step local root (the appliance's TASK-445 / TASK-733).
+  install -o root -g root -m 0755 "$0" "$ROOT_INSTALLER_COPY"
+
+  printf 'CLAWBOX_USER=%s\nPROJECT_DIR=%s\nROOT_INSTALLER=%s\n' \
+    "$CLAWBOX_USER" "$PROJECT_DIR" "$ROOT_INSTALLER_COPY" > "$ROOT_STEP_CONF"
+  chown root:root "$ROOT_STEP_CONF"
+  chmod 0644 "$ROOT_STEP_CONF"
+
+  cat > "/etc/systemd/system/clawbox-root-update@.service" <<'UNIT'
+[Unit]
+Description=ClawBox root update step (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i
+TimeoutStartSec=1800
+UNIT
+  chown root:root "/etc/systemd/system/clawbox-root-update@.service"
+  chmod 0644 "/etc/systemd/system/clawbox-root-update@.service"
+  systemctl daemon-reload
+
+  reconcile_owner_password_flag
+  echo "  Root-step contract installed (launcher, dispatcher, template unit)"
 }
 
 step_systemd_services() {
@@ -1761,7 +1870,7 @@ DISPATCH_STEPS=(
   directories_permissions
   ollama_install llamacpp_install chromium_install ai_tools_install
   vnc_install ffmpeg_install fix_git_perms clawkeep_install
-  systemd_services start_gateway start_ui
+  systemd_services root_step_contract start_gateway start_ui
 )
 
 if [ "${1:-}" = "--step" ]; then
@@ -1784,7 +1893,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=16
+TOTAL_STEPS=17
 step=0
 log() {
   step=$((step + 1))
@@ -1842,6 +1951,9 @@ step_clawkeep_install
 
 log "Installing persistent x64 services..."
 step_systemd_services
+
+log "Installing the root-step contract..."
+step_root_step_contract
 
 log "Starting OpenClaw gateway..."
 step_start_gateway
