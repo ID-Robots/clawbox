@@ -82,7 +82,12 @@ export const localModelsEn: Record<string, string> = {
   // The box lost a race with its own config writer. Nothing is broken and
   // there is nothing to repair — so the banner names the state and the wait,
   // never the config file and never a command to re-run.
-  "localModels.error.configBusy": "The box was saving its settings, so the switch did not finish. Try again in a moment.",
+  //
+  // "that change", not "the switch": this banner is shared by the Local-only
+  // switch AND the row actions, and `providers/default` forwards
+  // `chat/model`'s config_busy answer verbatim — so "Use as fallback" reaches
+  // it too, on a row where there is no switch to name.
+  "localModels.error.configBusy": "The box was saving its settings, so that change did not finish. Try again in a moment.",
   "localModels.error.unreachable": "Could not reach the box to change that model.",
   "localModels.notice.voiceFallback": "Kokoro could not be made the primary voice, so the default voice stays.",
   "localModels.notice.voiceReleased": "Kokoro was the voice this box spoke with; the default voice speaks now.",

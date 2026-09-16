@@ -428,7 +428,7 @@ export const nl: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Kan dat model niet wijzigen.",
-  "localModels.error.configBusy": "De box was zijn instellingen aan het opslaan, dus het omschakelen is niet voltooid. Probeer het zo meteen opnieuw.",
+  "localModels.error.configBusy": "De box was zijn instellingen aan het opslaan, dus de wijziging is niet voltooid. Probeer het zo meteen opnieuw.",
   "localModels.error.unreachable": "Kan de box niet bereiken om dat model te wijzigen.",
   "localModels.notice.voiceFallback": "Kokoro kon niet de hoofdstem worden, dus de standaardstem blijft.",
   "localModels.notice.voiceReleased": "Kokoro was de stem van deze box; nu spreekt de standaardstem.",

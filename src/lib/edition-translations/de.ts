@@ -427,7 +427,7 @@ export const de: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Dieses Modell konnte nicht geändert werden.",
-  "localModels.error.configBusy": "Die Box hat gerade ihre Einstellungen gespeichert, deshalb wurde die Umschaltung nicht abgeschlossen. Versuchen Sie es gleich noch einmal.",
+  "localModels.error.configBusy": "Die Box hat gerade ihre Einstellungen gespeichert, deshalb wurde die Änderung nicht abgeschlossen. Versuchen Sie es gleich noch einmal.",
   "localModels.error.unreachable": "Die Box ist nicht erreichbar — dieses Modell konnte nicht geändert werden.",
   "localModels.notice.voiceFallback": "Kokoro konnte nicht zur Hauptstimme werden, daher bleibt die Standardstimme.",
   "localModels.notice.voiceReleased": "Kokoro war die Stimme dieser Box; jetzt spricht die Standardstimme.",

@@ -439,7 +439,7 @@ export const zh: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "无法更改该模型。",
-  "localModels.error.configBusy": "设备正在保存设置，因此切换未完成。请稍后再试一次。",
+  "localModels.error.configBusy": "设备正在保存设置，因此更改未完成。请稍后再试一次。",
   "localModels.error.unreachable": "无法连接到这台 ClawBox，因此无法更改该模型。",
   "localModels.notice.voiceFallback": "无法将 Kokoro 设为主要声音，因此仍使用默认声音。",
   "localModels.notice.voiceReleased": "Kokoro 曾是这台盒子的声音；现在由默认声音说话。",
