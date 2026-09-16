@@ -204,6 +204,16 @@ export async function seedProcessTimeZone(deps: {
  */
 export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
+  // A second server on the same data/ — a `next dev` live-edit session beside
+  // the running clawbox-setup — must not run the boot jobs too: it would
+  // reconcile and reattach the coding runs, resume their pipelines and PR
+  // watches, start a second email-approval poller and both schedulers, and
+  // repair openclaw.json (restarting the gateway) against the same files the
+  // real server owns. It serves pages and routes; the real server keeps the jobs.
+  if (process.env.CLAWBOX_SKIP_BOOT_JOBS === '1') {
+    console.log('[instrumentation] CLAWBOX_SKIP_BOOT_JOBS=1: serving only, boot jobs left to the main server')
+    return
+  }
 
   // Dynamic require avoids Next.js Edge Runtime static analysis of Node.js APIs
   // eslint-disable-next-line @typescript-eslint/no-require-imports
