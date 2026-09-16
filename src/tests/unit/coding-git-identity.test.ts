@@ -192,6 +192,51 @@ describe("resolving the commit identity", () => {
     expect((await identityOf(repo())).source).toBe("placeholder");
   });
 
+  it("does not let the box's OWN placeholder in .git/config outvote the owner", async () => {
+    // `initRepo` stamps the resolved identity into a folder the settle had to
+    // create, so every project this device made before the setting existed
+    // carries the placeholder locally. Read back as "the project's identity"
+    // it outranks the setting, and the owner fills the fields in, watches them
+    // save, and still gets coding-agent@clawbox.local on every commit — in
+    // exactly the projects this resolver exists to unblock.
+    const stamped = repo({ ...CODING_GIT_PLACEHOLDER });
+    // With nothing configured the answer is unchanged: the placeholder, which
+    // is what that folder committed as before and still does.
+    expect((await identityOf(stamped)).source).toBe("placeholder");
+
+    stored[CODING_AGENT_GIT_NAME_CONFIG_KEY] = "Box Owner";
+    stored[CODING_AGENT_GIT_EMAIL_CONFIG_KEY] = "owner@example.com";
+    expect(await identityOf(stamped)).toEqual({
+      name: "Box Owner",
+      email: "owner@example.com",
+      source: "config",
+    });
+
+    // A real identity in the same folder still wins, which is the whole rule
+    // this one is carved out of.
+    const real = repo({ name: "Ada Lovelace", email: "ada@example.com" });
+    expect((await identityOf(real)).source).toBe("git");
+  });
+
+  it("commits as the owner in a folder the box had already stamped", async () => {
+    // End to end, through the settle: first run with nothing configured stamps
+    // the folder, second run after the owner fills the setting in must carry
+    // the owner's name.
+    const dir = fs.mkdtempSync(path.join(root, "stamped-"));
+    fs.writeFileSync(path.join(dir, "one.txt"), "one\n");
+    expect(await commitRunWork({ directory: dir, runId: "run-5", task: "first", summary: null }))
+      .toMatchObject({ committed: true, initialized: true });
+    expect(authorOf(dir)).toBe(`${CODING_GIT_PLACEHOLDER.name} <${CODING_GIT_PLACEHOLDER.email}>`);
+    expect(git(dir, "config", "user.email")).toBe(CODING_GIT_PLACEHOLDER.email);
+
+    stored[CODING_AGENT_GIT_NAME_CONFIG_KEY] = "Box Owner";
+    stored[CODING_AGENT_GIT_EMAIL_CONFIG_KEY] = "owner@example.com";
+    fs.writeFileSync(path.join(dir, "two.txt"), "two\n");
+    expect(await commitRunWork({ directory: dir, runId: "run-6", task: "second", summary: null }))
+      .toMatchObject({ committed: true });
+    expect(authorOf(dir)).toBe("Box Owner <owner@example.com>");
+  });
+
   it("refuses a stored value git could not author", async () => {
     // `Name <email>` is a FORMAT: an angle bracket or a line break in either
     // half produces a commit header that is not what was typed.

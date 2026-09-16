@@ -227,7 +227,23 @@ async function gitConfiguredIdentity(dir: string): Promise<GitIdentityProbe> {
   if (!email.known) return email;
   const cleanName = normalizeCodingGitName(name.value);
   const cleanEmail = normalizeCodingGitEmail(email.value);
-  return { known: true, identity: cleanName && cleanEmail ? { name: cleanName, email: cleanEmail } : null };
+  if (!cleanName || !cleanEmail) return { known: true, identity: null };
+  // THE BOX'S OWN MARK IS NOT THE PROJECT'S CHOICE.
+  //
+  // `initRepo` writes the resolved identity into a folder it had to `git init`
+  // itself, so every project this device created before the owner had anywhere
+  // to state an identity carries the placeholder in its `.git/config`. Read
+  // back as "the project's own identity" that outranks the setting — and the
+  // owner could fill in the settings page, watch it save, and go on getting
+  // `coding-agent@clawbox.local` on every commit in exactly the projects this
+  // resolver exists to unblock. Nobody types that address; the box wrote it,
+  // and the box does not get to outvote the owner with it.
+  //
+  // Matched on the ADDRESS alone: it is the half a deployment check reads and
+  // the half that is distinctive, and a folder carrying it under some other
+  // name is still a folder the box stamped.
+  if (cleanEmail === CODING_GIT_PLACEHOLDER.email) return { known: true, identity: null };
+  return { known: true, identity: { name: cleanName, email: cleanEmail } };
 }
 
 /** What the owner typed on the Coding Agent settings page, when they filled in
