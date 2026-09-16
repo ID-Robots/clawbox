@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
+import { cancelCliLogin } from "@/lib/hermes-cli-login";
 import { dashboardUnreachable, isValidSessionId, ownerGate, readJsonBody, relayJson } from "../shared";
 
 // Abandon an in-flight OAuth session (panel unmounted, user hit Start over).
@@ -19,6 +20,11 @@ export async function DELETE(request: Request) {
   }
   if (!isValidSessionId(body.sessionId)) {
     return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+  }
+
+  // A CLI-backed session lives in this process, not in the dashboard.
+  if (cancelCliLogin(body.sessionId)) {
+    return NextResponse.json({ ok: true, status: "cancelled" });
   }
 
   try {

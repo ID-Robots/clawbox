@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
+import { cliLoginDriverFor, readCliLogin } from "@/lib/hermes-cli-login";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { dashboardUnreachable, hermesGate, isValidProviderId, isValidSessionId, relayJson } from "../shared";
@@ -63,6 +64,23 @@ export async function GET(request: Request) {
   // `getModelOptions`); that is deliberate — this poll runs on exactly the box
   // whose dashboard has just come back.
   const providersBefore = await readUsableProviderIds();
+
+  if (cliLoginDriverFor(providerId)) {
+    const session = readCliLogin(sessionId);
+    if (!session) return NextResponse.json({ error: "Unknown session" }, { status: 404 });
+    if (session.status === "approved") {
+      invalidateModelOptions();
+      await forgetProviderVerified(providerId);
+      await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
+    }
+    const status = session.status === "starting" ? "pending" : session.status === "cancelled" ? "expired" : session.status;
+    return NextResponse.json({
+      session_id: session.id,
+      status,
+      error_message: session.error || undefined,
+      expires_at: new Date(session.expiresAt).toISOString(),
+    });
+  }
 
   try {
     const res = await dashboardFetch(`/api/providers/oauth/${providerId}/poll/${sessionId}`);

@@ -89,6 +89,18 @@ type OauthSignin =
     }
   | { stage: "failed"; providerId: string; message: string };
 
+/** One row of /setup-api/hermes/oauth. `flow: "external"` means the Hermes
+ *  dashboard will not run the login; `cliAvailable` says whether ClawBox can
+ *  drive the provider's own CLI login instead, and `cliFlow` how that reads. */
+interface OauthEntry {
+  loggedIn: boolean;
+  flow: string;
+  docsUrl?: string;
+  cliCommand?: string;
+  cliAvailable?: boolean;
+  cliFlow?: string;
+}
+
 /** Only ever open or render a dashboard-supplied URL if it is plain http(s) —
  *  anything else (javascript:, data:, a bare token) must not reach window.open
  *  or an href. */
@@ -398,7 +410,9 @@ export default function HermesProviderConfig({
   const [loginBusy, setLoginBusy] = useState(false);
 
   // Hermes native provider-OAuth status (anthropic PKCE, openai-codex device-code, …).
-  const [oauth, setOauth] = useState<Record<string, { loggedIn: boolean; flow: string; docsUrl?: string; cliCommand?: string }>>({});
+  const [oauth, setOauth] = useState<Record<string, OauthEntry>>({});
+  // "Sign in | API key" on a provider that offers both; the tab is per pick.
+  const [authTab, setAuthTab] = useState<"signin" | "key">("signin");
 
   // ClawBox AI has no model dropdown: its model is derived from the tier and
   // must stay a BARE id (a vendor-prefixed slug gets HTTP 400 "Model not
@@ -589,6 +603,7 @@ export default function HermesProviderConfig({
     setSelectedProvider(requested);
     // The remembered model belongs to whichever provider was selected before.
     setPicked("");
+    setAuthTab("signin");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providerSelectionRequest]);
 
@@ -597,11 +612,11 @@ export default function HermesProviderConfig({
       const res = await fetch("/setup-api/hermes/oauth", { cache: "no-store" });
       if (!res.ok) return;
       const d = (await res.json()) as {
-        providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string; cliCommand?: string }[];
+        providers?: ({ id: string } & OauthEntry)[];
       };
-      const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string; cliCommand?: string }> = {};
+      const map: Record<string, OauthEntry> = {};
       for (const p of d.providers ?? [])
-        map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl, cliCommand: p.cliCommand };
+        map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl, cliCommand: p.cliCommand, cliAvailable: p.cliAvailable, cliFlow: p.cliFlow };
       setOauth(map);
     } catch {
       /* OAuth affordances just won't show; non-fatal */
@@ -1082,6 +1097,30 @@ export default function HermesProviderConfig({
 
   const Title = embedded ? "h2" : "h1";
 
+  // The sign-in card's shape for the selected provider. An "external" flow
+  // (Hermes' dashboard will not run it) is still a sign-in when ClawBox can
+  // drive the provider's CLI login; only then does the button show.
+  const oauthEntry = selectedDef?.oauthId ? oauth[selectedDef.oauthId] : undefined;
+  const oauthExternal = oauthEntry?.flow === "external";
+  const oauthCanSignIn = Boolean(selectedDef?.oauthId) && (!oauthExternal || oauthEntry?.cliAvailable === true);
+  const showAuthTabs = Boolean(selectedDef?.keyProvider) && oauthCanSignIn && !oauthEntry?.loggedIn;
+  const apiKeyField = selectedDef?.keyProvider ? (
+    <div>
+      <label className={labelCls} htmlFor={`${uid}-key`}>
+        {t("hermesProvider.key.label", { provider: selectedDef.name })}
+      </label>
+      <input
+        id={`${uid}-key`}
+        type="password"
+        className={selectCls}
+        placeholder={t("hermesProvider.key.placeholder")}
+        value={apiKey}
+        autoComplete="off"
+        onChange={(e) => setApiKey(e.target.value)}
+      />
+    </div>
+  ) : null;
+
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
       <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
@@ -1264,10 +1303,38 @@ export default function HermesProviderConfig({
                 const st = oauth[oauthId];
                 const connected = st?.loggedIn;
                 const external = st?.flow === "external";
+                const cliDriven = external && st?.cliAvailable === true;
+                const effectiveFlow = external ? st?.cliFlow : st?.flow;
                 const flow = signin && signin.providerId === oauthId ? signin : null;
-                const showSignInButton = !connected && !external && (!flow || flow.stage === "failed");
+                const showSignInButton = !connected && oauthCanSignIn && (!flow || flow.stage === "failed");
+                const keyTab = showAuthTabs && authTab === "key";
                 return (
                   <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)]/50 p-3">
+                    {showAuthTabs && (
+                      <div
+                        role="tablist"
+                        aria-label={t("hermesProvider.oauth.signInWith", { provider: selectedDef.name })}
+                        className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] p-0.5"
+                      >
+                        {(["signin", "key"] as const).map((tab) => (
+                          <button
+                            key={tab}
+                            type="button"
+                            role="tab"
+                            aria-selected={authTab === tab}
+                            onClick={() => setAuthTab(tab)}
+                            className={`rounded-md px-3 py-1.5 text-sm font-semibold transition-colors ${
+                              authTab === tab
+                                ? "bg-[var(--bg-deep)] text-[var(--text-primary)] shadow-[inset_0_0_0_1px_var(--border-subtle)]"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                            }`}
+                          >
+                            {tab === "signin" ? t("hermesProvider.oauth.tabSignIn") : t("hermesProvider.oauth.tabApiKey")}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {keyTab ? apiKeyField : (<>
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-gray-200">
@@ -1277,7 +1344,9 @@ export default function HermesProviderConfig({
                           {connected
                             ? t("hermesProvider.oauth.connectedDesc")
                             : external
-                              ? t("hermesProvider.oauth.cliOnlyDesc")
+                              ? (cliDriven
+                                ? t("hermesProvider.oauth.attendedDesc", { provider: selectedDef.name })
+                                : t("hermesProvider.oauth.cliMissingDesc", { provider: selectedDef.name }))
                               : t("hermesProvider.oauth.availableDesc")}
                         </p>
                       </div>
@@ -1299,15 +1368,34 @@ export default function HermesProviderConfig({
                         </button>
                       )}
                     </div>
-                    {!connected && external && st?.cliCommand && (
-                      <div className="mt-3">
-                        <p className="text-xs text-[var(--text-muted)]">
-                          {t("hermesProvider.oauth.cliInstructions")}
-                        </p>
-                        <code className="mt-1.5 block rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-xs font-mono text-[var(--text-primary)] overflow-x-auto">
-                          {st.cliCommand}
-                        </code>
-                      </div>
+                    {!connected && external && !cliDriven && st?.docsUrl && (
+                      <a
+                        href={st.docsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-2 inline-block text-xs font-semibold text-[var(--coral-bright)] underline"
+                      >
+                        {t("hermesProvider.oauth.learnMore")}
+                      </a>
+                    )}
+                    {showSignInButton && !flow && (
+                      // What pressing the button sets off, before it is
+                      // pressed: the page that opens, and the code that comes
+                      // back — the two moments an owner is not warned about.
+                      <ol className="mt-3 space-y-1.5 text-xs text-[var(--text-secondary)]" data-testid="hermes-oauth-steps">
+                        {[
+                          t("hermesProvider.oauth.stepPress", { provider: selectedDef.name }),
+                          t("hermesProvider.oauth.stepApprove", { provider: selectedDef.name }),
+                          effectiveFlow === "device_code"
+                            ? t("hermesProvider.oauth.stepEnterCode")
+                            : t("hermesProvider.oauth.stepPasteCode", { provider: selectedDef.name }),
+                        ].map((step, index) => (
+                          <li key={index} className="flex gap-2">
+                            <span className="min-w-[20px] rounded border border-[var(--border-subtle)] text-center font-mono text-[10px] leading-4 text-[var(--coral-bright)]">{index + 1}</span>
+                            <span>{step}</span>
+                          </li>
+                        ))}
+                      </ol>
                     )}
                     {!connected && flow?.stage === "starting" && (
                       <p className="mt-3 text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
@@ -1410,9 +1498,6 @@ export default function HermesProviderConfig({
                     {!connected && flow?.stage === "failed" && (
                       <p role="alert" aria-live="polite" className="mt-2 text-xs text-red-400">{flow.message}</p>
                     )}
-                    {selectedDef.keyProvider && (
-                      <p className="text-[11px] text-[var(--text-muted)] mt-2">{t("hermesProvider.oauth.orPasteKey")}</p>
-                    )}
                     {!connected && !external && (
                       <p className="mt-2 text-[11px] text-[var(--text-muted)]">
                         {t("hermesProvider.oauth.advancedLabel")}{" "}
@@ -1425,6 +1510,7 @@ export default function HermesProviderConfig({
                         </button>
                       </p>
                     )}
+                    </>)}
                   </div>
                 );
               })()}
@@ -1496,22 +1582,7 @@ export default function HermesProviderConfig({
               </div>
               )}
 
-              {selectedDef?.keyProvider && (
-                <div>
-                  <label className={labelCls} htmlFor={`${uid}-key`}>
-                    {t("hermesProvider.key.label", { provider: selectedDef.name })}
-                  </label>
-                  <input
-                    id={`${uid}-key`}
-                    type="password"
-                    className={selectCls}
-                    placeholder={t("hermesProvider.key.placeholder")}
-                    value={apiKey}
-                    autoComplete="off"
-                    onChange={(e) => setApiKey(e.target.value)}
-                  />
-                </div>
-              )}
+              {!showAuthTabs && apiKeyField}
 
               <button
                 type="button"

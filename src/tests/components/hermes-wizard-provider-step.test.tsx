@@ -92,6 +92,8 @@ const summary = (overrides: Partial<ProviderStatusSummary> = {}): ProviderStatus
 });
 
 let statusBody: ProviderStatusSummary;
+let oauthProviders: Record<string, unknown>[] = [];
+let startCalls: Record<string, unknown>[] = [];
 let pairing: { provider: string; current: string; providers?: { id: string; authenticated: boolean; credentialPresent: boolean }[] };
 let clawaiState: { hasToken: boolean; tier: string; tierStored: string | null; active: boolean; model: string };
 
@@ -106,7 +108,14 @@ function stubFetch() {
       return { ok: true, json: async () => clawaiState } as Response;
     }
     if (url === "/setup-api/hermes/oauth") {
-      return { ok: true, json: async () => ({ providers: [] }) } as Response;
+      return { ok: true, json: async () => ({ providers: oauthProviders }) } as Response;
+    }
+    if (url === "/setup-api/hermes/oauth/start") {
+      startCalls.push(JSON.parse(String(init?.body ?? "{}")));
+      return {
+        ok: true,
+        json: async () => ({ session_id: "sess_abcdefgh", flow: "pkce", auth_url: "https://claude.ai/oauth/authorize?code=true&state=x" }),
+      } as Response;
     }
     if (url === "/setup-api/hermes/models" && method === "GET") {
       return { ok: true, json: async () => pairing } as Response;
@@ -126,6 +135,8 @@ beforeEach(() => {
   // A fresh box: Hermes has no provider/model pairing of its own yet.
   pairing = { provider: "", current: "" };
   clawaiState = { hasToken: false, tier: "flash", tierStored: null, active: false, model: "deepseek-v4-flash" };
+  oauthProviders = [];
+  startCalls = [];
   stubFetch();
 });
 
@@ -295,5 +306,68 @@ describe("the harness's own default provider is not the owner's choice", () => {
 
     await waitFor(() => expect(providerRows()).toEqual(["openrouter"]));
     expect(screen.getByRole("radio", { name: /OpenRouter/ })).toBeChecked();
+  });
+});
+
+describe("Anthropic — a provider Hermes' dashboard will not sign in itself", () => {
+  const anthropicExternal = (cliAvailable: boolean) => ({
+    id: "anthropic",
+    name: "Anthropic",
+    flow: "external",
+    loggedIn: false,
+    cliCommand: "hermes auth add anthropic",
+    cliAvailable,
+    cliFlow: "pkce",
+  });
+
+  async function openAnthropic() {
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    await screen.findByRole("tab", { name: "Sign in" }).catch(() => null);
+  }
+
+  it("offers Sign in | API key tabs, the steps, and a Sign in button — no terminal command", async () => {
+    oauthProviders = [anthropicExternal(true)];
+    await openAnthropic();
+
+    expect(screen.getByRole("tab", { name: "Sign in" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "API key" })).toBeInTheDocument();
+    expect(screen.getByTestId("hermes-oauth-steps").textContent).toMatch(/Paste the code Anthropic shows you/);
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByText("hermes auth add anthropic")).toBeNull();
+    expect(screen.queryByText(/Run this in the device terminal/)).toBeNull();
+    // The key field lives on its own tab now, not under the card.
+    expect(screen.queryByLabelText(/Anthropic API key/i)).toBeNull();
+  });
+
+  it("the API key tab shows the key field in the card", async () => {
+    oauthProviders = [anthropicExternal(true)];
+    await openAnthropic();
+
+    fireEvent.click(screen.getByRole("tab", { name: "API key" }));
+    expect(await screen.findByLabelText(/Anthropic API key/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+  });
+
+  it("pressing Sign in starts the box-driven login through the same route as every other sign-in", async () => {
+    oauthProviders = [anthropicExternal(true)];
+    await openAnthropic();
+    vi.stubGlobal("open", vi.fn());
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await screen.findByPlaceholderText(/Paste the code from Anthropic/i);
+    expect(startCalls).toEqual([{ providerId: "anthropic" }]);
+  });
+
+  it("says plainly when the provider's own tool is not on the box, instead of printing a command", async () => {
+    oauthProviders = [{ ...anthropicExternal(false), id: "copilot-acp", name: "GitHub Copilot", cliFlow: "device_code", cliCommand: "copilot login", docsUrl: "https://docs.github.com/en/copilot" }];
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+    fireEvent.click(await screen.findByRole("radio", { name: /GitHub Copilot/ }));
+
+    expect(await screen.findByText(/command-line tool, which is not installed on this box yet/)).toBeInTheDocument();
+    expect(screen.queryByText("copilot login")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Learn more" })).toHaveAttribute("href", "https://docs.github.com/en/copilot");
   });
 });

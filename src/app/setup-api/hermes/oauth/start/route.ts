@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
+import { cliLoginDriverFor, startCliLogin } from "@/lib/hermes-cli-login";
 import { dashboardUnreachable, isValidProviderId, ownerGate, readJsonBody, relayJson } from "../shared";
 
 // Start a Hermes provider-OAuth session on behalf of the wizard. The dashboard
@@ -32,6 +33,28 @@ export async function POST(request: Request) {
   }
   if (!isValidProviderId(body.providerId)) {
     return NextResponse.json({ error: "Invalid provider id" }, { status: 400 });
+  }
+
+  // Providers the dashboard marks "external" sign in through Hermes' own
+  // attended CLI login; ClawBox drives that and answers in the dashboard's
+  // session shape, so the panel runs one state machine for both.
+  if (cliLoginDriverFor(body.providerId)) {
+    const session = await startCliLogin(body.providerId);
+    if (session.status !== "pending") {
+      return NextResponse.json(
+        { error: session.error || "Could not start sign-in", code: "cli_login_failed" },
+        { status: 502 },
+      );
+    }
+    return NextResponse.json({
+      session_id: session.id,
+      flow: session.flow,
+      auth_url: session.authUrl,
+      user_code: session.userCode,
+      verification_url: session.verificationUrl,
+      expires_in: Math.max(1, Math.round((session.expiresAt - Date.now()) / 1000)),
+      poll_interval: 3,
+    });
   }
 
   try {

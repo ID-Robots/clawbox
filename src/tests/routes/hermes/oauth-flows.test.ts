@@ -18,6 +18,17 @@ vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(),
 }));
 
+// The CLI-driven branch (Anthropic, Copilot) has its own suite; here every
+// provider is one the dashboard runs itself.
+vi.mock("@/lib/hermes-cli-login", () => ({
+  cliLoginDriverFor: () => null,
+  cliLoginAvailable: async () => false,
+  startCliLogin: vi.fn(),
+  submitCliLoginCode: vi.fn(),
+  readCliLogin: vi.fn(),
+  cancelCliLogin: () => false,
+}));
+
 vi.mock("@/lib/hermes-dashboard-auth", () => ({
   dashboardFetch: vi.fn(),
 }));
@@ -246,6 +257,7 @@ describe("hermes provider-OAuth relay routes", () => {
           flow: "pkce",
           loggedIn: true,
           docsUrl: "https://docs.example.com/anthropic",
+          cliAvailable: false,
         },
         {
           id: "copilot-acp",
@@ -253,6 +265,7 @@ describe("hermes provider-OAuth relay routes", () => {
           flow: "external",
           loggedIn: false,
           cliCommand: "hermes auth login copilot",
+          cliAvailable: false,
         },
       ]);
     });
