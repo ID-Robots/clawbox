@@ -158,7 +158,10 @@ describe("polling", () => {
     expect(login).toBe("gh auth login --hostname github.com --with-token");
     expect(calls).toContain("gh config set -h github.com user yalexx");
     expect(calls).toContain("gh config set git_protocol https");
-    expect(calls).toContain(`git config --global credential.https://github.com.helper ${lib.GIT_CREDENTIAL_HELPER}`);
+    // --replace-all then --add: a key gh setup-git already made multi-valued
+    // must not fail the login with "cannot overwrite multiple values".
+    expect(calls).toContain("git config --global --replace-all credential.https://github.com.helper ");
+    expect(calls).toContain(`git config --global --add credential.https://github.com.helper ${lib.GIT_CREDENTIAL_HELPER}`);
     expect(lib.GIT_CREDENTIAL_HELPER).toBe("!gh auth git-credential");
     expect(lib.GH_LOGIN_COMMAND).not.toContain("--git-protocol");
   });

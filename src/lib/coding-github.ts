@@ -204,7 +204,14 @@ export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
   const steps: Array<[string, string[]]> = [];
   if (account) steps.push(["gh", ["config", "set", "-h", "github.com", "user", account]]);
   steps.push(["gh", ["config", "set", "git_protocol", "https"]]);
-  steps.push(["git", ["config", "--global", "credential.https://github.com.helper", GIT_CREDENTIAL_HELPER]]);
+  //    Written as `gh auth setup-git` writes it: an empty entry that resets
+  //    any generic helper (credential.helper=store) for github.com, then gh.
+  //    --replace-all, because a box where gh setup-git already ran holds
+  //    exactly those two values, and a plain `git config` refuses to overwrite
+  //    a multi-valued key ("cannot overwrite multiple values"), failing a
+  //    login that had in fact succeeded.
+  steps.push(["git", ["config", "--global", "--replace-all", "credential.https://github.com.helper", ""]]);
+  steps.push(["git", ["config", "--global", "--add", "credential.https://github.com.helper", GIT_CREDENTIAL_HELPER]]);
   for (const [bin, args] of steps) {
     const step = await run(bin, args);
     if (step.code !== 0) {
@@ -384,11 +391,13 @@ function noFinding(r: ChildResult, what: string, reach: "local" | "network"): Ba
  * The account name out of `gh auth status`.
  *
  * gh writes this to STDERR, not stdout, and has done across versions — so
- * both are searched rather than trusting one. The line reads:
+ * both are searched rather than trusting one. The wording changed in gh 2.40:
  *   ✓ Logged in to github.com as yalexx (/home/clawbox/.config/gh/hosts.yml)
+ *   ✓ Logged in to github.com account yalexx (/home/nexus0/.config/gh/hosts.yml)
+ * Matching only the first read every newer gh as "not connected".
  */
 export function parseLogin(output: string): string | null {
-  const m = /Logged in to \S+ as (\S+)/.exec(output);
+  const m = /Logged in to \S+ (?:as|account) (\S+)/.exec(output);
   return m ? m[1] : null;
 }
 
