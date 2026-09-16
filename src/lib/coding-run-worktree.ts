@@ -40,22 +40,30 @@ import fs from "fs";
 import path from "path";
 import { failureDetail, type ChildResult } from "./child-run";
 import { excludeWorktrees, gitIn, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
 
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
 
 /**
- * Who the box commits as.
+ * Who the box commits as, in THIS project.
  *
  * Needed on every call here that can CREATE a commit — the empty first commit
  * and the merge home. The environment these calls run in is built from
  * nothing (see `gitIn`), so git finds no `user.email` and refuses with
  * "Committer identity unknown": the merge then failed, the worktree was kept
  * with git's own four-line advice as the reason, and the run's work stayed off
- * the project's branch. The same identity `commitRunWork` already uses.
+ * the project's branch.
+ *
+ * It used to be a constant — the placeholder address that belongs to nobody —
+ * and `commitRunWork` used the same one. It is now RESOLVED per project
+ * (coding-git-identity.ts), because on a project wired to the Vercel GitHub
+ * integration that placeholder fails the deployment check and the box's own
+ * bookkeeping commits blocked the pull requests it opened. Still the same
+ * identity `commitRunWork` uses, by the same resolver.
  */
-const AS_BOX = ["-c", "user.name=ClawBox Coding Agent", "-c", "user.email=coding-agent@clawbox.local"];
+const asBox = (dir: string): Promise<string[]> => codingGitIdentityArgs(dir);
 
 /** Why a run works in the project folder itself rather than in a worktree of its own. */
 export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "failed";
@@ -150,7 +158,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   // does and for the same reason — a fork needs something to fork from.
   const head = await gitIn(dir, ["rev-parse", "--verify", "HEAD"]);
   if (!ok(head)) {
-    const seeded = await gitIn(dir, [...AS_BOX, "commit", "--allow-empty", "-m", "Initial commit"]);
+    const seeded = await gitIn(dir, [...(await asBox(dir)), "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, reason: "failed", detail: failureDetail(seeded, "Making the first commit") };
   }
   const current = await gitIn(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -278,7 +286,7 @@ export function mergeRunBranch(input: {
     const dirty = await gitIn(dir, ["status", "--porcelain", "--untracked-files=normal"]);
     if (!ok(dirty)) return { ok: false, reason: "failed", detail: failureDetail(dirty, "Reading the project before the merge") };
     if (out(dirty)) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
-    const merged = await gitIn(dir, [...AS_BOX, "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
+    const merged = await gitIn(dir, [...(await asBox(dir)), "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
     if (ok(merged)) {
       // The merge commit, for the record and for the card's "the work is now
       // in <base>, as <sha>". Best-effort: a rev-parse that will not answer

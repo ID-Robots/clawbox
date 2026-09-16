@@ -35,6 +35,11 @@ import fsp from "fs/promises";
 import path from "path";
 import { taskTitle } from "@/lib/task-title";
 import {
+  type CodingGitIdentity,
+  identityArgs,
+  resolveCodingGitIdentity,
+} from "@/lib/coding-git-identity";
+import {
   type ChildResult,
   failureDetail,
   inconclusive,
@@ -49,10 +54,17 @@ const MAX_MESSAGE_CHARS = 900;
 /** Git should never take this long on a project folder. */
 const GIT_TIMEOUT_MS = 30_000;
 
-/** Identity for commits the device makes on the owner's behalf. Set per-repo,
- *  never globally — the box may have its own identity for other work. */
-const COMMIT_NAME = "ClawBox Coding Agent";
-const COMMIT_EMAIL = "coding-agent@clawbox.local";
+/**
+ * Identity for commits the device makes on the owner's behalf. Set per-repo,
+ * never globally — the box may have its own identity for other work.
+ *
+ * WHO that is, is no longer a constant: `resolveCodingGitIdentity` answers it
+ * per project (the folder's own git config, then the owner's setting, then the
+ * placeholder). The placeholder e-mail belongs to nobody, and on a project
+ * wired to the Vercel GitHub integration a commit authored by it fails the
+ * deployment check — which is how the agent's own bookkeeping commits came to
+ * block the pull requests it opened.
+ */
 
 export type GitOutcome =
   | { committed: true; sha: string; initialized: boolean }
@@ -152,15 +164,20 @@ async function insideSomeRepo(dir: string): Promise<Probe> {
 /**
  * Give the folder a repository of its own, with an identity so commits work on
  * a box that has no global git config — this one had none.
+ *
+ * The identity is the RESOLVED one, passed in rather than looked up here: it is
+ * resolved once per settle and this is the first of two places that needs it,
+ * and resolving it after `git init` would read the local config this function
+ * is about to write.
  */
-async function initRepo(dir: string): Promise<string | null> {
+async function initRepo(dir: string, identity: CodingGitIdentity): Promise<string | null> {
   const init = await git(dir, ["init", "--quiet"]);
   // Never `init.stderr` alone: a killed `git init` writes none, and the caller
   // renders `detail ?? reason`, so an empty string reached the owner as a
   // failure with nothing in it.
   if (init.code !== 0) return failureDetail(init, "Creating a git repository for the folder");
-  await git(dir, ["config", "user.name", COMMIT_NAME]);
-  await git(dir, ["config", "user.email", COMMIT_EMAIL]);
+  await git(dir, ["config", "user.name", identity.name]);
+  await git(dir, ["config", "user.email", identity.email]);
   return null;
 }
 
@@ -215,6 +232,13 @@ export async function commitRunWork(input: {
 }): Promise<GitOutcome> {
   const dir = path.resolve(input.directory);
 
+  // Resolved AT MOST ONCE per settle, and only when a commit is actually going
+  // to be made: `initRepo` and the commit below both need it, most settles need
+  // neither (the folder is already a repository and nothing changed), and the
+  // lookup costs two git processes on a Jetson.
+  let identity: CodingGitIdentity | null = null;
+  const whoami = async (): Promise<CodingGitIdentity> => (identity ??= await resolveCodingGitIdentity(dir));
+
   const probe = await git(dir, ["--version"]);
   // `code === null` was read here as "git is not installed". It is not: a
   // failed spawn and a killed child close identically, and even a failed spawn
@@ -259,7 +283,7 @@ export async function commitRunWork(input: {
         return { committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." };
       }
     }
-    const err = await initRepo(dir);
+    const err = await initRepo(dir, await whoami());
     if (err) return { committed: false, reason: "git_failed", detail: err };
     initialized = true;
   }
@@ -276,8 +300,7 @@ export async function commitRunWork(input: {
 
   const message = buildCommitMessage(input);
   const commit = await git(dir, [
-    "-c", `user.name=${COMMIT_NAME}`,
-    "-c", `user.email=${COMMIT_EMAIL}`,
+    ...identityArgs(await whoami()),
     "commit", "--no-verify", "-m", message,
   ]);
   if (commit.code !== 0) return { committed: false, reason: "git_failed", detail: failureDetail(commit, "Committing the run's changes") };

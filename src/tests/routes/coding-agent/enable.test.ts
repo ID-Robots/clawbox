@@ -189,6 +189,40 @@ describe("the body", () => {
     expect((await empty.json()).error as string).toContain("{ realBrowser: boolean }");
   });
 
+  it("takes both halves of the commit author, clears them, and refuses what git could not author", async () => {
+    // The setters are deliberately REAL here: what is under test is that the
+    // owner's identity reaches data/config.json under the keys the resolver
+    // reads, and that a refusal comes back as a 400 in the owner's words
+    // rather than a 500.
+    const saved = await POST(request({
+      cookie: ownerCookie(),
+      body: { gitAuthorName: "Ada Lovelace", gitAuthorEmail: "ada@example.com" },
+    }));
+    expect(saved.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_git_name", "Ada Lovelace");
+    expect(configSet).toHaveBeenCalledWith("coding_agent_git_email", "ada@example.com");
+
+    // `null` is the request that CLEARS one, not an empty body.
+    const cleared = await POST(request({
+      cookie: ownerCookie(),
+      body: { gitAuthorName: null, gitAuthorEmail: null },
+    }));
+    expect(cleared.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_git_name", undefined);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_git_email", undefined);
+
+    // An address that is not one would be stored and then quietly ignored by
+    // the resolver — a setting that reads as saved and does nothing.
+    const bad = await POST(request({ cookie: ownerCookie(), body: { gitAuthorEmail: "nobody" } }));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).kind).toBe("invalid");
+
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    const message = (await empty.json()).error as string;
+    expect(message).toContain("{ gitAuthorName: string | null }");
+    expect(message).toContain("{ gitAuthorEmail: string | null }");
+  });
+
   it("takes the review-loop settings, and names them in the refusal too", async () => {
     const rounds = await POST(request({ cookie: ownerCookie(), body: { reviewRounds: 5 } }));
     expect(rounds.status).toBe(200);

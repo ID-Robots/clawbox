@@ -102,6 +102,11 @@ const BRAND_ONLY = new Set([
   // store's names ARE shell variable names — capitals, digits, underscores —
   // and a translated one would be a variable no service ever reads.
   "VERCEL_TOKEN",
+  // A sample e-mail address, shown as the commit-author placeholder. `example.com`
+  // is the reserved documentation domain (RFC 2606) and the local part is not a
+  // word to translate — a localised sample would look like a real address that
+  // is not one.
+  "you@example.com",
 ]);
 
 function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {

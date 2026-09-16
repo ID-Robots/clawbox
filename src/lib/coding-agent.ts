@@ -219,6 +219,13 @@ import {
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
 import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import {
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  MAX_GIT_IDENTITY_CHARS,
+  normalizeCodingGitEmail,
+  normalizeCodingGitName,
+} from "@/lib/coding-git-identity";
+import {
   buildDeployFeedback,
   decideDeployment,
   isTransient,
@@ -620,6 +627,17 @@ export const CODING_VERCEL_ENABLED_CONFIG_KEY = "coding_vercel_enabled";
  */
 export const CODING_AGENT_ALLOW_RULES_CONFIG_KEY = "coding_agent_allow_rules";
 
+/**
+ * The commit identity the box authors the owner's work as — both halves
+ * optional, and re-exported here so the settings page, the reset list and the
+ * status payload all name the same two keys as the resolver that reads them
+ * (src/lib/coding-git-identity.ts).
+ */
+export {
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+} from "@/lib/coding-git-identity";
+
 /** Every key the reset clears. The switch is last: it is the consent, and a
  *  half-cleared box that is still switched on would be the one state where the
  *  wizard shows over a live delegated shell. */
@@ -638,6 +656,11 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
+  // The commit identity is a SETTING — the owner chose who the box signs their
+  // work as — so "start over" puts it back to the project's own git config and
+  // the placeholder underneath it.
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
   // The CONSENT for handing a run the owner's stored secrets, so "start over"
   // withdraws it. The SECRETS themselves are deliberately not cleared — they
   // are credentials the owner pasted, and the same reasoning applies as to the
@@ -1824,6 +1847,16 @@ export interface CodingAgentStatus {
   /** May a run be handed the owner's stored secrets? OFF when absent — it is a
    *  consent, not a preference (src/lib/project-secrets.ts). */
   injectSecrets: boolean;
+  /**
+   * Who the box authors its commits as when the PROJECT has no git identity of
+   * its own. Null for either half means "not set" — the resolver then falls
+   * through to the placeholder, which is what every box did before this
+   * setting existed (src/lib/coding-git-identity.ts).
+   */
+  gitAuthorName: string | null;
+  gitAuthorEmail: string | null;
+  /** How long either half may be, so the fields can say so without guessing. */
+  maxGitAuthorChars: number;
   harnessCommand: string;
   maxTaskChars: number;
   /** Which account pays for a run the caller does not name one for. */
@@ -2085,6 +2118,50 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
   const { directory: resolved } = await resolveWorkingDirectory({ directory, asDefault: true });
   await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
   return resolved;
+}
+
+/**
+ * Set (or clear, with null/"") the name the box authors the owner's commits as.
+ *
+ * Validated here for the same reason `setDefaultDirectory` is: there is ONE
+ * answer to "is this usable", and it is the resolver's own — a value the
+ * settings page accepted but `resolveCodingGitIdentity` would then refuse is a
+ * setting that reads as saved and does nothing.
+ */
+export async function setCodingGitAuthorName(name: string | null): Promise<string | null> {
+  if (name === null || name.trim() === "") {
+    await configSet(CODING_AGENT_GIT_NAME_CONFIG_KEY, undefined);
+    return null;
+  }
+  const value = normalizeCodingGitName(name);
+  if (!value) {
+    throw new CodingAgentError(
+      "invalid",
+      `Give a name of at most ${MAX_GIT_IDENTITY_CHARS} characters, without angle brackets or line breaks.`,
+    );
+  }
+  await configSet(CODING_AGENT_GIT_NAME_CONFIG_KEY, value);
+  return value;
+}
+
+/**
+ * Set (or clear) the address the box authors the owner's commits as.
+ *
+ * This is the half that matters to a deployment check: Vercel's GitHub
+ * integration refuses a deployment whose git author has no access to the
+ * project, so the address has to belong to an account that does.
+ */
+export async function setCodingGitAuthorEmail(email: string | null): Promise<string | null> {
+  if (email === null || email.trim() === "") {
+    await configSet(CODING_AGENT_GIT_EMAIL_CONFIG_KEY, undefined);
+    return null;
+  }
+  const value = normalizeCodingGitEmail(email);
+  if (!value) {
+    throw new CodingAgentError("invalid", "Give an e-mail address, e.g. you@example.com.");
+  }
+  await configSet(CODING_AGENT_GIT_EMAIL_CONFIG_KEY, value);
+  return value;
 }
 
 function isEffort(value: unknown): value is CodingEffort {
@@ -3266,6 +3343,12 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // through `getInjectSecrets`, which would open the file a second time on a
     // route the app polls. `=== true` is the same reading that getter makes.
     injectSecrets: config[SECRET_INJECT_CONFIG_KEY] === true,
+    // Normalized on the way out as well as on the way in: a value stored before
+    // the validation existed must not be shown back as if the device would use
+    // it, because the resolver would refuse exactly the same value.
+    gitAuthorName: normalizeCodingGitName(config[CODING_AGENT_GIT_NAME_CONFIG_KEY]),
+    gitAuthorEmail: normalizeCodingGitEmail(config[CODING_AGENT_GIT_EMAIL_CONFIG_KEY]),
+    maxGitAuthorChars: MAX_GIT_IDENTITY_CHARS,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     provider,

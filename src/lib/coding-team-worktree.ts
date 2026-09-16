@@ -23,6 +23,7 @@
 import path from "path";
 import fs from "fs";
 import { runChild, failureDetail, type ChildResult } from "./child-run";
+import { codingGitIdentityArgs } from "./coding-git-identity";
 
 const CALL_TIMEOUT_MS = 60_000;
 export const WORKTREES_DIR = path.join(".clawbox", "worktrees");
@@ -48,6 +49,20 @@ export function gitIn(dir: string, args: string[]): Promise<ChildResult> {
 const git = gitIn;
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
+
+/**
+ * Who the box commits as, in THIS project — the project's own git identity,
+ * then the owner's setting, then the placeholder (coding-git-identity.ts).
+ *
+ * Passed on every call below that CREATES a commit, which is what the
+ * environment `gitIn` builds requires: it carries nothing of the server's, so
+ * a repository with no identity of its own answers "Committer identity
+ * unknown" and the commit never happens. The placeholder that used to be
+ * spelled out here also fails the Vercel deployment check on a project wired
+ * to its GitHub integration, which is the reason this is resolved rather than
+ * written down.
+ */
+const asBox = (dir: string): Promise<string[]> => codingGitIdentityArgs(dir);
 
 /**
  * One lock per repository: workers settle in any order, and two merges (or a
@@ -98,7 +113,7 @@ async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: t
   if (!ok(inside)) return { ok: false, detail: failureDetail(inside, "Reading the git repository", "Make the folder a git repository first.") };
   const head = await git(dir, ["rev-parse", "--verify", "HEAD"]);
   if (!ok(head)) {
-    const seeded = await git(dir, ["commit", "--allow-empty", "-m", "Initial commit"]);
+    const seeded = await git(dir, [...(await asBox(dir)), "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, detail: failureDetail(seeded, "Making the first commit") };
   }
   const current = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -207,6 +222,9 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
   return withDirLock(dir, async () => {
     const ahead = await git(dir, ["rev-list", "--count", `HEAD..${branch}`]);
     if (ok(ahead) && out(ahead) === "0") return { ok: true, merged: false };
+    // Resolved ONCE, after the early return: both commits below want it, and
+    // a branch that added nothing needs neither.
+    const as = await asBox(dir);
     // Whatever landed in the team's checkout uncommitted while the workers
     // were out — the favicons the box draws at a run's start above all —
     // goes on the team branch first: a merge refuses to overwrite an
@@ -219,10 +237,13 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
     if (out(stray)) {
       const added = await git(dir, ["add", "-A"]);
       if (!ok(added)) return { ok: false, conflict: false, detail: failureDetail(added, "Staging the team checkout's files before the merge") };
-      const kept = await git(dir, ["-c", "user.name=ClawBox Coding Agent", "-c", "user.email=coding-agent@clawbox.local", "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
+      const kept = await git(dir, [...as, "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
       if (!ok(kept)) return { ok: false, conflict: false, detail: failureDetail(kept, "Committing the team checkout's files before the merge") };
     }
-    const merged = await git(dir, ["merge", "--no-ff", "--no-edit", "-m", message, branch]);
+    // `--no-ff` always writes a merge COMMIT, so this needs an identity for the
+    // same reason the preservation commit above does — and for the same reason
+    // the run worktrees' merge home has always passed one.
+    const merged = await git(dir, [...as, "merge", "--no-ff", "--no-edit", "-m", message, branch]);
     if (ok(merged)) return { ok: true, merged: true };
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await git(dir, ["merge", "--abort"]);
