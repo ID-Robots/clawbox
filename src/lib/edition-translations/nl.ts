@@ -539,6 +539,8 @@ export const nl: Record<string, string> = {
   "codingAgent.chatNow": "Nu",
   "codingAgent.chatMore": "+{n} meer",
   "codingAgent.chatBusy": "bezig",
+  "codingAgent.chatDismiss": "Deze kaart verbergen",
+  "codingAgent.chatRestore": "Codeerrun opnieuw tonen",
   "codingAgent.noticeOpen": "Codeeragent openen",
   "codingAgent.noticeDismiss": "Sluiten",
   "codingAgent.switchLabel": "De assistent programmeerwerk laten delegeren",

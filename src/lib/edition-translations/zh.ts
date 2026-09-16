@@ -550,6 +550,8 @@ export const zh: Record<string, string> = {
   "codingAgent.chatNow": "当前",
   "codingAgent.chatMore": "还有{n}项",
   "codingAgent.chatBusy": "工作中",
+  "codingAgent.chatDismiss": "隐藏此卡片",
+  "codingAgent.chatRestore": "重新显示编程运行",
   "codingAgent.noticeOpen": "打开编程助手",
   "codingAgent.noticeDismiss": "忽略",
   "codingAgent.switchLabel": "允许助手委派编程工作",

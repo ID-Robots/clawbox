@@ -991,6 +991,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // the conversation that started it lives. A pinned bar above the messages
   // was tried and rejected by the owner: it covered the chat rather than
   // being part of it.
+  //
+  // But a card is put away when the OWNER says so. A run lasts many minutes
+  // and its card is the last thing in the transcript, so it sat under every
+  // new message for the whole of that time. The × on a card adds its run id
+  // here; a dismissed run's card is simply not rendered, and one small round
+  // 🤖 chip at the bottom-right of the transcript (see the transcript's end)
+  // brings every dismissed card back — in its original place, because the
+  // list below is filtered, never re-ordered. Keyed by run id like
+  // `expandedLong` is keyed by message, and kept here rather than in the card
+  // for the same reason the card's own expanded flag is NOT here: the state
+  // has to outlive the card, which unmounts when it is dismissed. Cleared
+  // when the chat closes, which is when the hook drops its runs too.
+  const [dismissedCodingRuns, setDismissedCodingRuns] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    if (!isOpen) setDismissedCodingRuns(prev => (prev.size === 0 ? prev : new Set()))
+  }, [isOpen])
+  const dismissCodingRun = useCallback((id: string) => {
+    setDismissedCodingRuns(prev => { const next = new Set(prev); next.add(id); return next })
+  }, [])
+  const restoreCodingRuns = useCallback(() => setDismissedCodingRuns(new Set()), [])
+  // The cards on screen, and whether the restore chip has anything to restore
+  // — measured against the runs the hook still holds, so a stale id from a
+  // run the hook let go cannot leave a chip that restores nothing.
+  const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id))
+  const hiddenCodingRunCount = codingRuns.length - shownCodingRuns.length
   const codingAgentCard = (run: CodingAgentActivity) => (
     <CodingAgentActivityPill
       key={run.id}
@@ -1025,6 +1050,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         now: t("codingAgent.chatNow"),
         more: t("codingAgent.chatMore"),
         busy: t("codingAgent.chatBusy"),
+        // The header's ×.
+        dismiss: t("codingAgent.chatDismiss"),
         // One word per kind of step the card can draw as a chip — the
         // owner's language for what the harness names by tool.
         steps: {
@@ -1050,6 +1077,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
       onPreview={(src, alt) => setPreview({ src, alt })}
+      // Put the card away; the 🤖 chip at the end of the transcript brings
+      // it back. See `dismissedCodingRuns` above.
+      onDismiss={() => dismissCodingRun(run.id)}
     />
   )
   // The questions the agent is currently parked on, newest last.
@@ -6427,7 +6457,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             fed by the device's run record. They stay after the run ends and
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
-            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
+            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts.
+            The one way a card leaves before the chat closes is the owner's
+            own × on it — `dismissedCodingRuns` — and the 🤖 chip at the end
+            of the transcript brings it back where it was. */}
         {/* MAIN TAB ONLY. A run record carries no session key — the hook adopts
             runs by START TIME, not by conversation — so a card drawn in every
             tab claimed the run belonged to whichever chat happened to be open,
@@ -6435,7 +6468,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             and not `codingRuns`. `activeTabKey === null` is the predicate the
             strip itself already uses for "main is selected" (the main session's
             key is stored as null), so this is the same test, not a new one. */}
-        {activeTabKey === null && codingRuns.map(codingAgentCard)}
+        {activeTabKey === null && shownCodingRuns.map(codingAgentCard)}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one
@@ -6590,6 +6623,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </div>
           </div>
         ))}
+
+        {/* The way back for a dismissed coding-run card: ONE small round 🤖,
+            however many cards are put away, and a tap brings all of them back
+            in their places. It is the LAST thing in the transcript and sticks
+            to the scrollport's bottom-right, so it floats above the composer
+            wherever the owner has scrolled to — and because it is in the
+            flow, not absolutely placed, it takes its own row under the newest
+            message rather than covering it. 42px: a thumb target on a phone.
+            Main tab only, like the cards it stands in for. */}
+        {activeTabKey === null && hiddenCodingRunCount > 0 && (
+          <div
+            data-testid="coding-agent-restore-row"
+            style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}
+          >
+            <button
+              type="button"
+              data-testid="coding-agent-restore"
+              onClick={restoreCodingRuns}
+              title={t("codingAgent.chatRestore")}
+              aria-label={t("codingAgent.chatRestore")}
+              style={{
+                pointerEvents: 'auto',
+                width: 42, height: 42, borderRadius: '50%',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                padding: 0, fontSize: 20, lineHeight: 1, cursor: 'pointer',
+                background: 'rgba(13,17,23,0.92)',
+                border: '1px solid rgba(252,211,77,0.45)',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.45)',
+                color: '#fcd34d',
+              }}
+            >
+              <span aria-hidden="true">🤖</span>
+            </button>
+          </div>
+        )}
 
         <div ref={messagesEndRef} />
       </div>

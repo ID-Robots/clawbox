@@ -541,6 +541,8 @@ export const ja: Record<string, string> = {
   "codingAgent.chatNow": "現在",
   "codingAgent.chatMore": "他{n}件",
   "codingAgent.chatBusy": "作業中",
+  "codingAgent.chatDismiss": "このカードを隠す",
+  "codingAgent.chatRestore": "コーディング実行を再表示",
   "codingAgent.noticeOpen": "コーディングエージェントを開く",
   "codingAgent.noticeDismiss": "閉じる",
   "codingAgent.switchLabel": "アシスタントにコーディング作業の委任を許可する",
