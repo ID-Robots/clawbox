@@ -526,6 +526,8 @@ export const bg: Record<string, string> = {
   "codingAgent.chatNow": "Сега",
   "codingAgent.chatMore": "+{n} още",
   "codingAgent.chatBusy": "работи",
+  "codingAgent.chatDismiss": "Скрий тази карта",
+  "codingAgent.chatRestore": "Покажи изпълнението отново",
   "codingAgent.noticeOpen": "Отвори кодиращия агент",
   "codingAgent.noticeDismiss": "Скрий",
   "codingAgent.switchLabel": "Позволи на асистента да делегира програмиране",

@@ -27,6 +27,12 @@ import { isPrPending, type PrState } from "@/lib/coding-pr-state";
  * attached to their message — so the badge stays too, and changes tone to
  * report the outcome.
  *
+ * Stays, that is, until the OWNER puts it away: the card carries a × and the
+ * chat keeps the dismissed run ids (ChatPopup's `dismissedCodingRuns`), with
+ * one small 🤖 chip at the end of the transcript that brings every dismissed
+ * card back in its place. This hook knows nothing of that — a dismissed run
+ * is still a run it holds and polls; only the card is not drawn.
+ *
  * WHAT IT ADOPTS, AND WHAT IT LEAVES ALONE
  *
  * Only runs that belong to THIS conversation: one that is in flight right now,

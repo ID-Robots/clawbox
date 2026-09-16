@@ -44,6 +44,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.chatNow": "Now",
   "codingAgent.chatMore": "+{n} more",
   "codingAgent.chatBusy": "working",
+  // The × on the chat card, and the one small round 🤖 chip at the bottom of
+  // the transcript that brings every put-away card back where it was. Count-
+  // neutral on purpose: one chip stands in for however many cards.
+  "codingAgent.chatDismiss": "Hide this card",
+  "codingAgent.chatRestore": "Show the coding run again",
 
   // The desktop card a finished run raises, top-right with the others.
   "codingAgent.noticeOpen": "Open the coding agent",

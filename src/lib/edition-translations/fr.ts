@@ -539,6 +539,8 @@ export const fr: Record<string, string> = {
   "codingAgent.chatNow": "Actuellement",
   "codingAgent.chatMore": "+{n} autres",
   "codingAgent.chatBusy": "en cours",
+  "codingAgent.chatDismiss": "Masquer cette carte",
+  "codingAgent.chatRestore": "Réafficher l'exécution de code",
   "codingAgent.noticeOpen": "Ouvrir l'agent de code",
   "codingAgent.noticeDismiss": "Ignorer",
   "codingAgent.switchLabel": "Autoriser l'assistant à déléguer du travail de programmation",

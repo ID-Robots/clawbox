@@ -59,6 +59,7 @@ const LABELS = {
   now: en["codingAgent.chatNow"],
   more: en["codingAgent.chatMore"],
   busy: en["codingAgent.chatBusy"],
+  dismiss: en["codingAgent.chatDismiss"],
   steps: {
     screenshot: en["codingAgent.chatScreenshot"],
     lookingAtPage: en["codingAgent.chatLookingAtPage"],
@@ -433,6 +434,82 @@ describe("the card's View button", () => {
     );
     fireEvent.click(screen.getByTestId("coding-agent-activity-view"));
     expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * The owner's ask: a run lasts many minutes and its card is the last thing in
+ * the transcript, so it sat under every new message the whole time. The × on
+ * the header row puts the card away; the CHAT owns what is dismissed (its
+ * `dismissedCodingRuns`, tested in chat-coding-card-dismiss.test.tsx), so the
+ * card only asks.
+ */
+describe("the card's × (dismiss)", () => {
+  const base = {
+    id: "run-k3x9q2ab", projectId: "timer", task: "x",
+    startedAt: NOW - 30_000, completedAt: null as number | null,
+    status: "running" as const, source: "agent" as const,
+    subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+    tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
+    progress: [], screenshots: [], todos: [],
+    transcriptPath: null, sessionId: null, directory: null,
+  };
+
+  it("asks the chat to put the card away, and does not expand the card on the way", () => {
+    const onDismiss = vi.fn();
+    render(<CodingAgentActivityPill run={base} labels={LABELS} openLabel={OPEN} onOpen={vi.fn()} onDismiss={onDismiss} />);
+    const close = screen.getByTestId("coding-agent-activity-dismiss");
+    // Named for a screen reader: an icon-only button beside two others.
+    expect(close).toHaveAttribute("aria-label", LABELS.dismiss);
+    expect(close).toHaveAttribute("title", LABELS.dismiss);
+    fireEvent.click(close);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    // The click stopped at the button — the card is the toggle, and putting
+    // it away is not a request to open it first.
+    expect(header()).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("coding-agent-activity-details")).not.toBeInTheDocument();
+  });
+
+  it("does not collapse a card that was open, either — the chat unmounts it, the card changes nothing itself", () => {
+    const onDismiss = vi.fn();
+    render(<CodingAgentActivityPill run={base} labels={LABELS} openLabel={OPEN} onDismiss={onDismiss} />);
+    fireEvent.click(header());
+    expect(header()).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByTestId("coding-agent-activity-dismiss"));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    expect(header()).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("is there on a finished card too — the record can be put away like the live one", () => {
+    const onDismiss = vi.fn();
+    render(
+      <CodingAgentActivityPill run={{ ...base, status: "completed", completedAt: NOW }} labels={LABELS} openLabel={OPEN} onDismiss={onDismiss} />,
+    );
+    fireEvent.click(screen.getByTestId("coding-agent-activity-dismiss"));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("sits in the header row beside the chevron and View, and leaves both working", () => {
+    const onOpen = vi.fn();
+    const onDismiss = vi.fn();
+    render(<CodingAgentActivityPill run={base} labels={LABELS} openLabel={OPEN} onOpen={onOpen} onDismiss={onDismiss} />);
+    const close = screen.getByTestId("coding-agent-activity-dismiss");
+    const view = screen.getByTestId("coding-agent-activity-view");
+    // Same row: the three share one parent, in the order chevron · View · ×.
+    expect(close.parentElement).toBe(view.parentElement);
+    expect(close.parentElement).toBe(header().parentElement);
+    expect(view.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(view);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.click(header());
+    expect(header()).toHaveAttribute("aria-expanded", "true");
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it("is not drawn at all when nothing would answer it", () => {
+    render(<CodingAgentActivityPill run={base} labels={LABELS} openLabel={OPEN} onOpen={vi.fn()} />);
+    expect(screen.queryByTestId("coding-agent-activity-dismiss")).not.toBeInTheDocument();
   });
 });
 

@@ -21,6 +21,16 @@ import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
  * the box take 9-15 seconds — a badge that vanished with the run was gone
  * before the owner had finished reading the message above it.
  *
+ * It stays unless the OWNER puts it away. A run lasts many minutes and its
+ * card is the last thing in the transcript, so it sat under every new message
+ * for the whole of that time. The × in the header row hides the card; the
+ * chat then draws one small round 🤖 chip at the bottom-right of the
+ * transcript that brings it back, in its original place. The card does not
+ * own that state: ChatPopup keeps the dismissed run ids (a Set, like its
+ * `expandedLong`) and simply does not render a dismissed run's card, so a
+ * restored card is the same card in the same position, not a copy appended
+ * at the end.
+ *
  * The elapsed time ticks while the run is in flight and freezes at the total
  * once it is not: a moving second is the cheapest proof a multi-minute run is
  * alive, and a frozen one is the record of how long it took.
@@ -103,6 +113,8 @@ export interface CodingAgentCardLabels extends Record<CodingRunStatus, string> {
   more?: string;
   /** The three moving dots' accessible name — "working". */
   busy?: string;
+  /** The header's × — "Hide this card". Falls back to English. */
+  dismiss?: string;
 }
 
 /** Plan items drawn before the list folds into "+N more". */
@@ -198,7 +210,7 @@ function StepChip({ step, label, detail, onClick, title }: {
 }
 
 export default function CodingAgentActivityPill(
-  { run, labels, openLabel, onOpen, onPreview }: {
+  { run, labels, openLabel, onOpen, onPreview, onDismiss }: {
     run: CodingAgentActivity;
     /**
      * One per status, plus the owner-started variant of "running", plus the
@@ -213,6 +225,11 @@ export default function CodingAgentActivityPill(
      * second lightbox. `alt` is the picture's accessible name.
      */
     onPreview?: (src: string, alt: string) => void;
+    /**
+     * Put the card away. The chat owns the dismissed set (see the note at the
+     * top), so the card only asks; with no handler there is no × at all.
+     */
+    onDismiss?: () => void;
   },
 ) {
   const live = run.status === "running";
@@ -407,6 +424,37 @@ export default function CodingAgentActivityPill(
             }}
           >
             {openLabel}
+          </button>
+        ) : null}
+        {onDismiss ? (
+          // ×: hide the card. It stops the click like the View button does —
+          // putting a card away is not a request to expand it first. A 28px
+          // box with the glyph centred: big enough to hit on a phone without
+          // making the header row taller than its text.
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDismiss(); }}
+            title={labels.dismiss ?? "Hide this card"}
+            aria-label={labels.dismiss ?? "Hide this card"}
+            data-testid="coding-agent-activity-dismiss"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 28,
+              height: 28,
+              margin: "-6px -6px -6px 0",
+              padding: 0,
+              border: 0,
+              borderRadius: 8,
+              background: "transparent",
+              color: "rgba(255,255,255,0.45)",
+              cursor: "pointer",
+              font: "inherit",
+              flexShrink: 0,
+            }}
+          >
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>close</span>
           </button>
         ) : null}
       </div>
