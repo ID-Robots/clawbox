@@ -322,8 +322,9 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  await openChatPopup(page);
-  await expect(page.getByTestId("chat-popup")).toBeVisible();
+  // 640px is a phone-sized viewport, so the page lands in the chat on its own
+  // (src/lib/mobile-chat-first.ts) — pressing the crab now would close it.
+  await expect(page.getByTestId("chat-popup")).toHaveCSS("pointer-events", "auto");
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
   // Push the popup into the bottom-right corner of a viewport that is barely
