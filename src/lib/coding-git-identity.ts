@@ -41,7 +41,7 @@
  * step 1, because `git config` does it before we ever see the answer.
  */
 
-import { runChild } from "./child-run";
+import { failureDetail, runChild } from "./child-run";
 import { get as configGet } from "./config-store";
 
 /** The pair git needs for a commit: `Name <email>`. */
@@ -58,6 +58,22 @@ export type CodingGitIdentitySource = "git" | "config" | "placeholder";
 export interface ResolvedCodingGitIdentity extends CodingGitIdentity {
   source: CodingGitIdentitySource;
 }
+
+/**
+ * The answer, or the admission that the lookup never produced one.
+ *
+ * A FAULT IS NOT AN ABSENCE. `git config --get` exits 1 when the key is not
+ * set, and that is a finding the fallback is for; a killed git, a git that
+ * would not start, a folder that is not there all exit differently and say
+ * nothing about whether the project has an identity. Reading the second as the
+ * first would author the commit as the owner's setting — or as the placeholder
+ * this whole change exists to stop using — on the strength of a transient
+ * fault, and quietly put the wrong name in the project's history. Every caller
+ * here already has a channel for "git could not answer", so it is reported.
+ */
+export type CodingGitIdentityLookup =
+  | { ok: true; identity: ResolvedCodingGitIdentity }
+  | { ok: false; detail: string };
 
 /** config.json keys of the owner's own commit identity. Both optional; absent
  *  means "fall through to the placeholder". */
@@ -115,6 +131,12 @@ function hasUnsafeIdentChar(value: string): boolean {
  */
 const EMAIL_SHAPE = /^[^\s<>@]+@[^\s<>@]+$/;
 
+/** What the settings page is told when a value would not survive to a commit.
+ *  Shared with the route so the door and the library refuse in one voice. */
+export const CODING_GIT_NAME_REFUSAL =
+  `Give a name of at most ${MAX_GIT_IDENTITY_CHARS} characters, without angle brackets or line breaks.`;
+export const CODING_GIT_EMAIL_REFUSAL = "Give an e-mail address, e.g. you@example.com.";
+
 /** The owner's name, trimmed, or null when it is absent, blank or unusable. */
 export function normalizeCodingGitName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -145,6 +167,16 @@ export function identityArgs(identity: CodingGitIdentity): string[] {
   return ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`];
 }
 
+/** One `git config --get`: the value, "not set", or a look git could not make. */
+type GitConfigProbe =
+  | { known: true; value: string | null }
+  | { known: false; detail: string };
+
+/** The same three answers for the PAIR. */
+type GitIdentityProbe =
+  | { known: true; identity: CodingGitIdentity | null }
+  | { known: false; detail: string };
+
 /**
  * One `git -C <dir> config --get <key>`, with the coding agent's own
  * environment.
@@ -159,7 +191,7 @@ export function identityArgs(identity: CodingGitIdentity): string[] {
  * (coding-git.ts), so the resolver cannot read an identity from a file the
  * committing process would ignore.
  */
-async function gitConfigValue(dir: string, key: string): Promise<string | null> {
+async function gitConfigValue(dir: string, key: string): Promise<GitConfigProbe> {
   const r = await runChild("git", ["-C", dir, "config", "--get", key], {
     timeoutMs: GIT_CONFIG_TIMEOUT_MS,
     env: {
@@ -171,22 +203,31 @@ async function gitConfigValue(dir: string, key: string): Promise<string | null> 
       LANG: "C",
     },
   });
-  // Exit 1 is "not set", which is an ANSWER. Every other failure — a folder
-  // that is not there, a killed git, a git that would not start — is not, and
-  // both read the same here: this source did not supply an identity, so the
-  // next one is asked. Nothing is guessed from a fault.
-  return r.code === 0 ? r.stdout : null;
+  if (r.code === 0) return { known: true, value: r.stdout };
+  // Exit 1, and ONLY exit 1, is git's own "there is no such key" — a finding
+  // the fallback below exists for. Everything else is git failing to look:
+  // 128 for a folder that is not there, a null code for a child that was
+  // killed or never started. Measured: `git -C <missing> config --get
+  // user.name` exits 128, `git -C <plain folder> config --get user.name`
+  // exits 1.
+  if (r.code === 1 && !r.timedOut && !r.signal && !r.startFailed) return { known: true, value: null };
+  return { known: false, detail: failureDetail(r, `Reading ${key} from the project's git config`) };
 }
 
-/** The project's own identity, when git resolves BOTH halves of it. */
-async function gitConfiguredIdentity(dir: string): Promise<CodingGitIdentity | null> {
+/**
+ * The project's own identity, when git resolves BOTH halves of it — or the
+ * admission that git could not be asked.
+ */
+async function gitConfiguredIdentity(dir: string): Promise<GitIdentityProbe> {
   const [name, email] = await Promise.all([
     gitConfigValue(dir, "user.name"),
     gitConfigValue(dir, "user.email"),
   ]);
-  const cleanName = normalizeCodingGitName(name);
-  const cleanEmail = normalizeCodingGitEmail(email);
-  return cleanName && cleanEmail ? { name: cleanName, email: cleanEmail } : null;
+  if (!name.known) return name;
+  if (!email.known) return email;
+  const cleanName = normalizeCodingGitName(name.value);
+  const cleanEmail = normalizeCodingGitEmail(email.value);
+  return { known: true, identity: cleanName && cleanEmail ? { name: cleanName, email: cleanEmail } : null };
 }
 
 /** What the owner typed on the Coding Agent settings page, when they filled in
@@ -205,21 +246,26 @@ export async function configuredCodingGitIdentity(): Promise<CodingGitIdentity |
 /**
  * Who a commit made in `projectDir` should be authored as.
  *
- * Never throws and never leaves a caller without an identity: the placeholder
- * is always there underneath, so a commit that used to be made is still made.
+ * Never throws. `ok: false` is not "there is no identity" — the placeholder is
+ * always there underneath for that — it is "git could not be asked", and the
+ * caller reports it rather than committing under a name it guessed.
  */
-export async function resolveCodingGitIdentity(projectDir: string): Promise<ResolvedCodingGitIdentity> {
+export async function resolveCodingGitIdentity(projectDir: string): Promise<CodingGitIdentityLookup> {
   if (typeof projectDir === "string" && projectDir.trim() !== "") {
     const fromGit = await gitConfiguredIdentity(projectDir);
-    if (fromGit) return { ...fromGit, source: "git" };
+    if (!fromGit.known) return { ok: false, detail: fromGit.detail };
+    if (fromGit.identity) return { ok: true, identity: { ...fromGit.identity, source: "git" } };
   }
   const fromConfig = await configuredCodingGitIdentity();
-  if (fromConfig) return { ...fromConfig, source: "config" };
-  return { ...CODING_GIT_PLACEHOLDER, source: "placeholder" };
+  if (fromConfig) return { ok: true, identity: { ...fromConfig, source: "config" } };
+  return { ok: true, identity: { ...CODING_GIT_PLACEHOLDER, source: "placeholder" } };
 }
 
 /** The resolved identity as the argv prefix, in one call — what the commit
  *  sites actually want. */
-export async function codingGitIdentityArgs(projectDir: string): Promise<string[]> {
-  return identityArgs(await resolveCodingGitIdentity(projectDir));
+export async function codingGitIdentityArgs(
+  projectDir: string,
+): Promise<{ ok: true; args: string[] } | { ok: false; detail: string }> {
+  const found = await resolveCodingGitIdentity(projectDir);
+  return found.ok ? { ok: true, args: identityArgs(found.identity) } : found;
 }

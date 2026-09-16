@@ -53,7 +53,7 @@ vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
   reloadMcpServers: reloadMcp,
 }));
 
-import { get as configGet, set as configSet } from "@/lib/config-store";
+import { get as configGet, set as configSet, setMany as configSetMany } from "@/lib/config-store";
 
 const SESSION_SECRET = "a".repeat(64);
 const STATUS = { enabled: true, ready: false, readiness: { ready: false, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: false, problems: ["ClawBox AI is not connected."] }, running: 0, harnessCommand: "claude-ds", maxTaskChars: 4000 };
@@ -190,17 +190,19 @@ describe("the body", () => {
   });
 
   it("takes both halves of the commit author, clears them, and refuses what git could not author", async () => {
-    // The setters are deliberately REAL here: what is under test is that the
+    // The setter is deliberately REAL here: what is under test is that the
     // owner's identity reaches data/config.json under the keys the resolver
-    // reads, and that a refusal comes back as a 400 in the owner's words
-    // rather than a 500.
+    // reads, in ONE write, and that a refusal comes back as a 400 in the
+    // owner's words rather than a 500.
     const saved = await POST(request({
       cookie: ownerCookie(),
       body: { gitAuthorName: "Ada Lovelace", gitAuthorEmail: "ada@example.com" },
     }));
     expect(saved.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("coding_agent_git_name", "Ada Lovelace");
-    expect(configSet).toHaveBeenCalledWith("coding_agent_git_email", "ada@example.com");
+    expect(configSetMany).toHaveBeenCalledWith({
+      coding_agent_git_name: "Ada Lovelace",
+      coding_agent_git_email: "ada@example.com",
+    });
 
     // `null` is the request that CLEARS one, not an empty body.
     const cleared = await POST(request({
@@ -208,14 +210,28 @@ describe("the body", () => {
       body: { gitAuthorName: null, gitAuthorEmail: null },
     }));
     expect(cleared.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("coding_agent_git_name", undefined);
-    expect(configSet).toHaveBeenCalledWith("coding_agent_git_email", undefined);
+    expect(configSetMany).toHaveBeenLastCalledWith({
+      coding_agent_git_name: undefined,
+      coding_agent_git_email: undefined,
+    });
 
     // An address that is not one would be stored and then quietly ignored by
     // the resolver — a setting that reads as saved and does nothing.
     const bad = await POST(request({ cookie: ownerCookie(), body: { gitAuthorEmail: "nobody" } }));
     expect(bad.status).toBe(400);
     expect((await bad.json()).kind).toBe("invalid");
+
+    // And a good name beside that bad address writes NOTHING. It used to store
+    // the name and then answer 400, leaving half an identity behind.
+    vi.mocked(configSetMany).mockClear();
+    vi.mocked(configSet).mockClear();
+    const half = await POST(request({
+      cookie: ownerCookie(),
+      body: { gitAuthorName: "Ada Lovelace", gitAuthorEmail: "nobody" },
+    }));
+    expect(half.status).toBe(400);
+    expect(configSetMany).not.toHaveBeenCalled();
+    expect(configSet).not.toHaveBeenCalled();
 
     const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
     const message = (await empty.json()).error as string;

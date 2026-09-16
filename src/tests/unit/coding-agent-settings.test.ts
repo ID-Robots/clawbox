@@ -20,12 +20,16 @@ import pathMod from "path";
 const configGet = vi.hoisted(() => vi.fn());
 const configGetAll = vi.hoisted(() => vi.fn());
 const configSet = vi.hoisted(() => vi.fn());
+const configSetMany = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: configGet,
   // The status reads the whole file once rather than one key at a time.
   getAll: configGetAll,
   set: configSet,
+  // The commit author writes both halves in one batch, so a half-written
+  // identity is not a state the file can be left in.
+  setMany: configSetMany,
 }));
 
 import {
@@ -43,6 +47,7 @@ beforeEach(() => {
   configGet.mockReset().mockResolvedValue(undefined);
   configGetAll.mockReset().mockResolvedValue({});
   configSet.mockReset().mockResolvedValue(undefined);
+  configSetMany.mockReset().mockResolvedValue(undefined);
 });
 
 describe("effort", () => {
@@ -569,30 +574,48 @@ describe("the commit author the box signs the owner's work as", () => {
   // check refuses a commit whose author cannot deploy the project, which is
   // what the placeholder address always was.
 
-  it("stores each half, trimmed, and answers what was stored", async () => {
+  it("stores both halves, trimmed, in ONE write", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect(await lib.setCodingGitAuthorName("  Ada Lovelace  ")).toBe("Ada Lovelace");
-    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_GIT_NAME_CONFIG_KEY, "Ada Lovelace");
-    expect(await lib.setCodingGitAuthorEmail(" ada@example.com ")).toBe("ada@example.com");
-    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_GIT_EMAIL_CONFIG_KEY, "ada@example.com");
+    expect(await lib.setCodingGitAuthor({ name: "  Ada Lovelace  ", email: " ada@example.com " }))
+      .toEqual({ name: "Ada Lovelace", email: "ada@example.com" });
+    expect(configSetMany).toHaveBeenCalledTimes(1);
+    expect(configSetMany).toHaveBeenCalledWith({
+      [lib.CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Ada Lovelace",
+      [lib.CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "ada@example.com",
+    });
   });
 
-  it("clears either half with null or a blank field", async () => {
+  it("clears either half with null or a blank field, and leaves an unsupplied one alone", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect(await lib.setCodingGitAuthorName(null)).toBeNull();
-    expect(configSet).toHaveBeenLastCalledWith(lib.CODING_AGENT_GIT_NAME_CONFIG_KEY, undefined);
-    expect(await lib.setCodingGitAuthorEmail("   ")).toBeNull();
-    expect(configSet).toHaveBeenLastCalledWith(lib.CODING_AGENT_GIT_EMAIL_CONFIG_KEY, undefined);
+    expect(await lib.setCodingGitAuthor({ name: null, email: "   " })).toEqual({ name: null, email: null });
+    expect(configSetMany).toHaveBeenLastCalledWith({
+      [lib.CODING_AGENT_GIT_NAME_CONFIG_KEY]: undefined,
+      [lib.CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: undefined,
+    });
+    // A body about one half must not touch the other: the key it did not
+    // mention is absent from the batch, not written as undefined.
+    await lib.setCodingGitAuthor({ email: "ada@example.com" });
+    expect(configSetMany).toHaveBeenLastCalledWith({
+      [lib.CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "ada@example.com",
+    });
   });
 
-  it("refuses a value git could not author, rather than storing it", async () => {
+  it("validates EVERY supplied half before it writes any of it", async () => {
     // `Name <email>` is a FORMAT: an angle bracket or a line break in either
     // half is a commit header that says something other than what was typed,
     // and an address with no `@` is not one a deployment check can match.
+    //
+    // The name is checked before the e-mail is written and vice versa: a good
+    // name beside a bad address used to store the name and then refuse the
+    // request, leaving the owner with half an identity — which the resolver
+    // ignores, so the page reported a setting that was not in force.
     const lib = await import("@/lib/coding-agent");
-    await expect(lib.setCodingGitAuthorName("Ada <Lovelace>")).rejects.toBeInstanceOf(lib.CodingAgentError);
-    await expect(lib.setCodingGitAuthorName("Ada\nLovelace")).rejects.toBeInstanceOf(lib.CodingAgentError);
-    await expect(lib.setCodingGitAuthorEmail("ada example.com")).rejects.toBeInstanceOf(lib.CodingAgentError);
+    await expect(lib.setCodingGitAuthor({ name: "Ada <Lovelace>" })).rejects.toBeInstanceOf(lib.CodingAgentError);
+    await expect(lib.setCodingGitAuthor({ name: "Ada\nLovelace" })).rejects.toBeInstanceOf(lib.CodingAgentError);
+    await expect(lib.setCodingGitAuthor({ email: "ada example.com" })).rejects.toBeInstanceOf(lib.CodingAgentError);
+    await expect(lib.setCodingGitAuthor({ name: "Ada Lovelace", email: "nobody" }))
+      .rejects.toBeInstanceOf(lib.CodingAgentError);
+    expect(configSetMany).not.toHaveBeenCalled();
     expect(configSet).not.toHaveBeenCalled();
   });
 

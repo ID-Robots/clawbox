@@ -12,8 +12,7 @@ import {
   MAX_MAX_PARALLEL_RUNS,
   MIN_MAX_PARALLEL_RUNS,
   setCodingAgentEnabled,
-  setCodingGitAuthorEmail,
-  setCodingGitAuthorName,
+  setCodingGitAuthor,
   setCodingProvider,
   setDefaultDirectory,
   setEffort,
@@ -296,16 +295,21 @@ export async function POST(request: Request) {
       const saved = await setDefaultDirectory(fields.defaultDirectory as string | null);
       console.error(`[coding-agent] default folder ${saved ? "set" : "cleared"} by the owner`);
     }
-    if (hasGitAuthorName) {
-      const saved = await setCodingGitAuthorName(fields.gitAuthorName as string | null);
-      // The VALUE is the owner's own name; only whether it is set is logged.
-      console.error(`[coding-agent] commit author name ${saved ? "set" : "cleared"} by the owner`);
-    }
-    if (hasGitAuthorEmail) {
-      const saved = await setCodingGitAuthorEmail(fields.gitAuthorEmail as string | null);
-      // Never the address itself: it is the owner's e-mail, and this log line
-      // goes to the box's journal.
-      console.error(`[coding-agent] commit author e-mail ${saved ? "set" : "cleared"} by the owner`);
+    if (hasGitAuthorName || hasGitAuthorEmail) {
+      // ONE call for both halves. Two setters in a row stored the name and
+      // then answered 400 for a bad address in the same body, leaving half an
+      // identity behind — and half an identity is the state that reads as
+      // configured and is not. The setter validates everything it was given
+      // before it writes any of it.
+      const saved = await setCodingGitAuthor({
+        ...(hasGitAuthorName ? { name: fields.gitAuthorName as string | null } : {}),
+        ...(hasGitAuthorEmail ? { email: fields.gitAuthorEmail as string | null } : {}),
+      });
+      // Never the values themselves — they are the owner's own name and
+      // e-mail, and this line goes to the box's journal. Only whether each
+      // supplied half ended up set.
+      if (hasGitAuthorName) console.error(`[coding-agent] commit author name ${saved.name ? "set" : "cleared"} by the owner`);
+      if (hasGitAuthorEmail) console.error(`[coding-agent] commit author e-mail ${saved.email ? "set" : "cleared"} by the owner`);
     }
     if (hasEffort) {
       const saved = await setEffort(fields.effort as string);

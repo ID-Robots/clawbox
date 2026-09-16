@@ -61,8 +61,13 @@ const out = (r: ChildResult) => r.stdout.trim();
  * spelled out here also fails the Vercel deployment check on a project wired
  * to its GitHub integration, which is the reason this is resolved rather than
  * written down.
+ *
+ * A lookup git could not MAKE is reported rather than fallen back from: the
+ * fallbacks answer "this project has no identity", not "git was killed while
+ * being asked", and only the first is a reason to commit as somebody else.
  */
-const asBox = (dir: string): Promise<string[]> => codingGitIdentityArgs(dir);
+const asBox = (dir: string): Promise<{ ok: true; args: string[] } | { ok: false; detail: string }> =>
+  codingGitIdentityArgs(dir);
 
 /**
  * One lock per repository: workers settle in any order, and two merges (or a
@@ -113,7 +118,9 @@ async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: t
   if (!ok(inside)) return { ok: false, detail: failureDetail(inside, "Reading the git repository", "Make the folder a git repository first.") };
   const head = await git(dir, ["rev-parse", "--verify", "HEAD"]);
   if (!ok(head)) {
-    const seeded = await git(dir, [...(await asBox(dir)), "commit", "--allow-empty", "-m", "Initial commit"]);
+    const as = await asBox(dir);
+    if (!as.ok) return { ok: false, detail: as.detail };
+    const seeded = await git(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, detail: failureDetail(seeded, "Making the first commit") };
   }
   const current = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -225,6 +232,7 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
     // Resolved ONCE, after the early return: both commits below want it, and
     // a branch that added nothing needs neither.
     const as = await asBox(dir);
+    if (!as.ok) return { ok: false, conflict: false, detail: as.detail };
     // Whatever landed in the team's checkout uncommitted while the workers
     // were out — the favicons the box draws at a run's start above all —
     // goes on the team branch first: a merge refuses to overwrite an
@@ -237,13 +245,13 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
     if (out(stray)) {
       const added = await git(dir, ["add", "-A"]);
       if (!ok(added)) return { ok: false, conflict: false, detail: failureDetail(added, "Staging the team checkout's files before the merge") };
-      const kept = await git(dir, [...as, "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
+      const kept = await git(dir, [...as.args, "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
       if (!ok(kept)) return { ok: false, conflict: false, detail: failureDetail(kept, "Committing the team checkout's files before the merge") };
     }
     // `--no-ff` always writes a merge COMMIT, so this needs an identity for the
     // same reason the preservation commit above does — and for the same reason
     // the run worktrees' merge home has always passed one.
-    const merged = await git(dir, [...as, "merge", "--no-ff", "--no-edit", "-m", message, branch]);
+    const merged = await git(dir, [...as.args, "merge", "--no-ff", "--no-edit", "-m", message, branch]);
     if (ok(merged)) return { ok: true, merged: true };
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await git(dir, ["merge", "--abort"]);

@@ -62,8 +62,13 @@ const out = (r: ChildResult) => r.stdout.trim();
  * integration that placeholder fails the deployment check and the box's own
  * bookkeeping commits blocked the pull requests it opened. Still the same
  * identity `commitRunWork` uses, by the same resolver.
+ *
+ * A lookup git could not MAKE is reported, never papered over: the fallbacks
+ * are for a project that HAS no identity, and using one because git was killed
+ * mid-question would put a name nobody chose on the owner's branch.
  */
-const asBox = (dir: string): Promise<string[]> => codingGitIdentityArgs(dir);
+const asBox = (dir: string): Promise<{ ok: true; args: string[] } | { ok: false; detail: string }> =>
+  codingGitIdentityArgs(dir);
 
 /** Why a run works in the project folder itself rather than in a worktree of its own. */
 export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "failed";
@@ -158,7 +163,9 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   // does and for the same reason — a fork needs something to fork from.
   const head = await gitIn(dir, ["rev-parse", "--verify", "HEAD"]);
   if (!ok(head)) {
-    const seeded = await gitIn(dir, [...(await asBox(dir)), "commit", "--allow-empty", "-m", "Initial commit"]);
+    const as = await asBox(dir);
+    if (!as.ok) return { ok: false, reason: "failed", detail: as.detail };
+    const seeded = await gitIn(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, reason: "failed", detail: failureDetail(seeded, "Making the first commit") };
   }
   const current = await gitIn(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -286,7 +293,9 @@ export function mergeRunBranch(input: {
     const dirty = await gitIn(dir, ["status", "--porcelain", "--untracked-files=normal"]);
     if (!ok(dirty)) return { ok: false, reason: "failed", detail: failureDetail(dirty, "Reading the project before the merge") };
     if (out(dirty)) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
-    const merged = await gitIn(dir, [...(await asBox(dir)), "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
+    const as = await asBox(dir);
+    if (!as.ok) return { ok: false, reason: "failed", detail: as.detail };
+    const merged = await gitIn(dir, [...as.args, "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
     if (ok(merged)) {
       // The merge commit, for the record and for the card's "the work is now
       // in <base>, as <sha>". Best-effort: a rev-parse that will not answer

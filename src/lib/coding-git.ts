@@ -236,8 +236,20 @@ export async function commitRunWork(input: {
   // to be made: `initRepo` and the commit below both need it, most settles need
   // neither (the folder is already a repository and nothing changed), and the
   // lookup costs two git processes on a Jetson.
+  //
+  // A lookup git could not MAKE stops the commit, the way every other
+  // inconclusive probe in this file does. Falling through to the owner's
+  // setting — or to the placeholder — on a transient fault would put a name
+  // nobody chose in the project's history, which is the defect this resolver
+  // exists to end rather than to relocate.
   let identity: CodingGitIdentity | null = null;
-  const whoami = async (): Promise<CodingGitIdentity> => (identity ??= await resolveCodingGitIdentity(dir));
+  const whoami = async (): Promise<{ ok: true; identity: CodingGitIdentity } | { ok: false; outcome: GitOutcome }> => {
+    if (identity) return { ok: true, identity };
+    const found = await resolveCodingGitIdentity(dir);
+    if (!found.ok) return { ok: false, outcome: { committed: false, reason: "git_failed", detail: found.detail } };
+    identity = found.identity;
+    return { ok: true, identity };
+  };
 
   const probe = await git(dir, ["--version"]);
   // `code === null` was read here as "git is not installed". It is not: a
@@ -283,7 +295,9 @@ export async function commitRunWork(input: {
         return { committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." };
       }
     }
-    const err = await initRepo(dir, await whoami());
+    const who = await whoami();
+    if (!who.ok) return who.outcome;
+    const err = await initRepo(dir, who.identity);
     if (err) return { committed: false, reason: "git_failed", detail: err };
     initialized = true;
   }
@@ -298,9 +312,11 @@ export async function commitRunWork(input: {
   const staged = await git(dir, ["diff", "--cached", "--name-only"]);
   if (staged.code === 0 && !staged.stdout) return { committed: false, reason: "no_changes" };
 
+  const author = await whoami();
+  if (!author.ok) return author.outcome;
   const message = buildCommitMessage(input);
   const commit = await git(dir, [
-    ...identityArgs(await whoami()),
+    ...identityArgs(author.identity),
     "commit", "--no-verify", "-m", message,
   ]);
   if (commit.code !== 0) return { committed: false, reason: "git_failed", detail: failureDetail(commit, "Committing the run's changes") };
