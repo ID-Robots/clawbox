@@ -42,19 +42,22 @@ const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
  */
 const ghHoldEarly = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 /**
- * While set, a `git` invocation whose argv begins with this string fails
- * instead of running — the only way to see what an import reports when one
- * step of setting a new repository up goes wrong. Every other git call is the
- * real thing.
+ * `git` invocations whose argv begins with one of these strings fail instead of
+ * running — the only way to see what an import reports when a step of setting a
+ * new repository up goes wrong. Every other git call is the real thing, and the
+ * stderr names the step, so a test can tell WHICH failure was reported.
  */
-const gitFails = vi.hoisted(() => ({ current: null as string | null }));
+const gitFails = vi.hoisted(() => ({ current: [] as string[] }));
 vi.mock("@/lib/child-run", async () => {
   const actual = await vi.importActual<typeof import("@/lib/child-run")>("@/lib/child-run");
   return {
     ...actual,
     runChild: async (bin: string, args: string[], opts: Parameters<typeof actual.runChild>[2]) => {
-      if (bin === "git" && gitFails.current && args.join(" ").startsWith(gitFails.current)) {
-        return { code: 1, stdout: "", stderr: "error: could not lock config file .git/config", signal: null, timedOut: false, startFailed: false, startError: null };
+      if (bin === "git") {
+        const step = gitFails.current.find((prefix) => args.join(" ").startsWith(prefix));
+        if (step) {
+          return { code: 1, stdout: "", stderr: `git refused: ${step}`, signal: null, timedOut: false, startFailed: false, startError: null };
+        }
       }
       if (bin !== "gh") return actual.runChild(bin, args, opts);
       ghCalls.push(args);
@@ -107,7 +110,7 @@ beforeEach(async () => {
   fs.mkdirSync(projects, { recursive: true });
   process.env.HOME = home;
   process.env.CLAWBOX_ROOT = path.join(home, "clawbox");
-  gitFails.current = null;
+  gitFails.current = [];
   ghAnswers.clear();
   ghCalls.length = 0;
   ghHold.current = null;
@@ -211,7 +214,13 @@ describe("importFolder", () => {
       errors.push(args.map((a) => String(a)).join(" "));
     });
     try {
-      gitFails.current = "config user.email";
+      // BOTH steps are failed, deliberately. Failing only the `config` proves
+      // nothing portable: whether the commit then fails depends on the machine.
+      // A runner with an identity in /etc/gitconfig commits happily — the
+      // import's own git calls, unlike the resolver's, do not set
+      // GIT_CONFIG_NOSYSTEM — and on a box with none it fails. What is under
+      // test is which of two failures gets reported, so both are made certain.
+      gitFails.current = ["config user.email", "commit"];
       const src = makeSource("unlucky-site");
       const out = await lib.importFolder({ source: src, projectsRoot: projects });
       // The import still stands: the folder is the owner's and it arrived.
@@ -220,10 +229,10 @@ describe("importFolder", () => {
       // (the settle passes the identity on every commit), so nothing is torn
       // down for it.
       expect(fs.existsSync(path.join(projects, "unlucky-site", ".git"))).toBe(true);
-      // What reached the owner is what git said about the step that actually
-      // broke, not about the commit it took down with it.
-      expect(errors.join("\n")).toMatch(/could not lock config file/i);
-      expect(errors.join("\n")).not.toMatch(/identity unknown|auto-detect/i);
+      // What reached the owner names the identity write — the step that broke
+      // first — and not the commit it took down with it.
+      expect(errors.join("\n")).toMatch(/config user\.email/);
+      expect(errors.join("\n")).not.toMatch(/git refused: commit/);
     } finally {
       logged.mockRestore();
     }
