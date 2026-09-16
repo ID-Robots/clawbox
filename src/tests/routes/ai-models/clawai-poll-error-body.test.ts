@@ -159,6 +159,27 @@ describe("the device-code finaliser never stores a raw response body", () => {
     expect(sessionError()).toContain("reached its token limit");
   });
 
+  it("keeps the RAW body in the journal while the owner gets the sentence", async () => {
+    // The two readers want different things. Sparing the owner the braces must
+    // not spare the operator the evidence: a body whose shape the humaniser
+    // does not recognise reduces to "", and logging that would have left
+    // `Token save failed 502` and nothing else on a box nobody can reach.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const body = JSON.stringify({ code: 500, trace: ["step-9"] });
+    mockConfigure.mockResolvedValue(new Response(
+      body,
+      { status: 502, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+
+    expect(sessionError()).toBe("Failed to save ClawBox AI token.");
+    const said = logged.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(said).toContain("Token save failed");
+    expect(said).toContain(body);
+    logged.mockRestore();
+  });
+
   it("leaves a successful configure alone", async () => {
     mockConfigure.mockResolvedValue(new Response(
       JSON.stringify({ success: true }),

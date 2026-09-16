@@ -61,17 +61,24 @@ function formatUserFacingError(message: string) {
 }
 
 /**
- * The SENTENCE a failed response carries, never the response.
+ * BOTH halves of a failed response, because they have different readers.
  *
- * Returns `""` rather than the raw body when nothing readable is in it — the
- * three callers all have a fallback of their own, and every one of them is a
- * better thing to show an owner than a serialized body. This route put
+ * `sentence` is for the owner: the message out of the body, or `""` when there
+ * is not one. The three callers all have a fallback of their own, and every one
+ * of them is a better thing to show than a serialized body — this route put
  * `{"error":"Credential migration failed. …"}` on the setup wizard, braces and
- * all, by treating a body as a message; `humanizeApiError` is the shared rule
- * that stops it here and at the two hops after this one.
+ * all, by treating a body as a message.
+ *
+ * `raw` is for the operator, and it is the reason this returns a pair rather
+ * than the sentence alone. The log line is the only window into why a sign-in
+ * failed on a box nobody can reach, and a body whose shape `humanizeApiError`
+ * does not recognise reduces to `""` — which would have left `Token save
+ * failed 502` and nothing else in the journal. The wizard gets the sentence;
+ * the journal keeps what actually arrived.
  */
-async function readErrorBody(response: Response): Promise<string> {
-  return humanizeApiError(await response.text().catch(() => ""), "");
+async function readErrorBody(response: Response): Promise<{ raw: string; sentence: string }> {
+  const raw = await response.text().catch(() => "");
+  return { raw, sentence: humanizeApiError(raw, "") };
 }
 
 // Run the configure pipeline server-side AFTER acknowledging the poll
@@ -147,8 +154,10 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
       // rollback message is a perfectly good sentence, and it was shown
       // wrapped in the object it travelled in.
       const configureBody = await readErrorBody(configureResponse);
-      const userFacing = formatUserFacingError(configureBody || "Failed to save ClawBox AI token.");
-      console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.slice(0, 200));
+      const userFacing = formatUserFacingError(configureBody.sentence || "Failed to save ClawBox AI token.");
+      // The RAW body in the journal, deliberately: the owner is spared the
+      // braces, the operator diagnosing this box is not spared the evidence.
+      console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.raw.slice(0, 200));
       await writeClawAiSession({ ...session, status: "error", error: userFacing });
       return;
     }
@@ -237,7 +246,7 @@ export async function POST() {
   // instead of stalling on the device-code page.
   const terminal = TERMINAL_PORTAL_ERRORS.find((e) => e.httpStatus === upstreamRes.status);
   if (terminal) {
-    const errCode = (await readErrorBody(upstreamRes)).trim().toLowerCase();
+    const errCode = (await readErrorBody(upstreamRes)).sentence.trim().toLowerCase();
     if (errCode === terminal.code) {
       await writeClawAiSession({ ...session, status: "error", error: terminal.message });
       return NextResponse.json({ status: "error", error: terminal.message }, { status: terminal.httpStatus });
@@ -251,11 +260,11 @@ export async function POST() {
   if (!upstreamRes.ok) {
     const errText = await readErrorBody(upstreamRes);
     if (upstreamRes.status === 410 || upstreamRes.status === 400) {
-      const userFacing = formatUserFacingError(errText || "ClawBox AI session is no longer valid.");
+      const userFacing = formatUserFacingError(errText.sentence || "ClawBox AI session is no longer valid.");
       await writeClawAiSession({ ...session, status: "error", error: userFacing });
       return NextResponse.json({ status: "error", error: userFacing }, { status: 410 });
     }
-    console.warn("[clawai/poll] Upstream poll failed", upstreamRes.status, errText.slice(0, 200));
+    console.warn("[clawai/poll] Upstream poll failed", upstreamRes.status, errText.raw.slice(0, 200));
     // 5xx — don't burn the session; let the UI retry.
     return NextResponse.json({ status: "pending" });
   }

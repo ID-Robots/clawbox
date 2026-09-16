@@ -1724,20 +1724,6 @@ function commandOutput(err: unknown): string {
 }
 
 /**
- * Run the core's own repair, and RECORD whether it worked.
- *
- * Still non-fatal, and that is load-bearing: doctor exiting non-zero because
- * the gateway holds its state directory is the gateway proving it is alive
- * (install.sh:step_gateway_legacy_state_recovery, measured 2026-09-06), so the
- * restart + positive port probe that follows remains the verdict, not the exit
- * code — which is why neither caller branches on this, and it returns nothing.
- * What changed is that the exit code is no longer DISCARDED: a doctor that
- * could not finish is the single most useful fact about an update that then
- * finds no gateway, and swallowing it silently is what left a customer box
- * dark for 25 hours with "Applying system fixups — completed" on screen
- * (TASK-737).
- */
-/**
  * `openclawChildEnv()` plus this device's claim on the gateway's lifecycle.
  *
  * WRAPPED HERE rather than folded into `openclawChildEnv`, and the distinction
@@ -1755,6 +1741,20 @@ function doctorChildEnv(): NodeJS.ProcessEnv {
   return withExternalGatewaySupervisor(openclawChildEnv());
 }
 
+/**
+ * Run the core's own repair, and RECORD whether it worked.
+ *
+ * Still non-fatal, and that is load-bearing: doctor exiting non-zero because
+ * the gateway holds its state directory is the gateway proving it is alive
+ * (install.sh:step_gateway_legacy_state_recovery, measured 2026-09-06), so the
+ * restart + positive port probe that follows remains the verdict, not the exit
+ * code — which is why neither caller branches on this, and it returns nothing.
+ * What changed is that the exit code is no longer DISCARDED: a doctor that
+ * could not finish is the single most useful fact about an update that then
+ * finds no gateway, and swallowing it silently is what left a customer box
+ * dark for 25 hours with "Applying system fixups — completed" on screen
+ * (TASK-737).
+ */
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
