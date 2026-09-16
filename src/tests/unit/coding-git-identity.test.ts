@@ -42,6 +42,7 @@ import {
   MAX_GIT_IDENTITY_CHARS,
   normalizeCodingGitEmail,
   normalizeCodingGitName,
+  PROJECT_IMPORT_PLACEHOLDER,
   resolveCodingGitIdentity,
 } from "@/lib/coding-git-identity";
 import { commitRunWork } from "@/lib/coding-git";
@@ -216,6 +217,39 @@ describe("resolving the commit identity", () => {
     // this one is carved out of.
     const real = repo({ name: "Ada Lovelace", email: "ada@example.com" });
     expect((await identityOf(real)).source).toBe("git");
+  });
+
+  it("does not let the box's IMPORT mark in .git/config outvote the owner either", async () => {
+    // The second door into the same defect. `ensureRepository`
+    // (project-import.ts) gives an imported folder a repository of its own and
+    // used to stamp `ClawBox <clawbox@localhost>` into it. That address is not
+    // the placeholder, so the rule above did not catch it: every folder the
+    // owner imported came back as "a project with an identity of its own",
+    // outranked the setting, and went on committing as an address no GitHub
+    // account owns — failing the very Vercel check this resolver exists to pass.
+    const imported = repo({ ...PROJECT_IMPORT_PLACEHOLDER });
+    expect((await identityOf(imported)).source).toBe("placeholder");
+
+    stored[CODING_AGENT_GIT_NAME_CONFIG_KEY] = "Box Owner";
+    stored[CODING_AGENT_GIT_EMAIL_CONFIG_KEY] = "owner@example.com";
+    expect(await identityOf(imported)).toEqual({
+      name: "Box Owner",
+      email: "owner@example.com",
+      source: "config",
+    });
+  });
+
+  it("knows the box's own mark whatever case git stored it in", async () => {
+    // The domain half of an address is case-insensitive by definition and git
+    // stores what it was given, so an owner who retyped the box's address — or
+    // a config edited by hand — must not read as a deliberate choice.
+    stored[CODING_AGENT_GIT_NAME_CONFIG_KEY] = "Box Owner";
+    stored[CODING_AGENT_GIT_EMAIL_CONFIG_KEY] = "owner@example.com";
+    for (const email of ["ClawBox@Localhost", "Coding-Agent@ClawBox.Local"]) {
+      expect((await identityOf(repo({ name: "ClawBox", email }))).source).toBe("config");
+    }
+    // Not so greedy that it swallows a real address at the same domain.
+    expect((await identityOf(repo({ name: "Ada", email: "ada@clawbox.local" }))).source).toBe("git");
   });
 
   it("commits as the owner in a folder the box had already stamped", async () => {

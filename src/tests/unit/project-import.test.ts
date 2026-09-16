@@ -11,6 +11,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import {
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_GIT_PLACEHOLDER,
+} from "@/lib/coding-git-identity";
 
 // Starts real git processes: the 5 s default is not enough on a loaded runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -36,11 +41,27 @@ const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
  * boot that starts under alice and lands under bob answers as bob.
  */
 const ghHoldEarly = vi.hoisted(() => ({ current: null as Promise<void> | null }));
+/**
+ * `git` invocations whose argv CONTAINS one of these strings fail instead of
+ * running — the only way to see what an import reports when a step of setting a
+ * new repository up goes wrong. Every other git call is the real thing, and the
+ * stderr names the step, so a test can tell WHICH failure was reported.
+ *
+ * Contains rather than starts-with: a commit carries `-c user.name=…` overrides
+ * ahead of the subcommand, so its argv does not begin with `commit`.
+ */
+const gitFails = vi.hoisted(() => ({ current: [] as string[] }));
 vi.mock("@/lib/child-run", async () => {
   const actual = await vi.importActual<typeof import("@/lib/child-run")>("@/lib/child-run");
   return {
     ...actual,
     runChild: async (bin: string, args: string[], opts: Parameters<typeof actual.runChild>[2]) => {
+      if (bin === "git") {
+        const step = gitFails.current.find((needle) => args.join(" ").includes(needle));
+        if (step) {
+          return { code: 1, stdout: "", stderr: `git refused: ${step}`, signal: null, timedOut: false, startFailed: false, startError: null };
+        }
+      }
       if (bin !== "gh") return actual.runChild(bin, args, opts);
       ghCalls.push(args);
       if (ghHoldEarly.current && args.join(" ").startsWith("api user/repos")) await ghHoldEarly.current;
@@ -69,6 +90,20 @@ function git(dir: string, ...args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
 }
 
+/**
+ * Write the owner's data/config.json — the real one the real config store
+ * reads, under this test's own CLAWBOX_ROOT.
+ *
+ * NOT a mock of `@/lib/config-store`: that module captures `CONFIG_ROOT` at
+ * import time, and a mock factory spreading the original snapshots it once for
+ * the whole file. Every later test would then measure its fences against an
+ * earlier test's temp directory — which is how mocking it here first let a
+ * source inside the ClawBox checkout be imported.
+ */
+function storeConfig(values: Record<string, unknown>): void {
+  fs.writeFileSync(path.join(home, "clawbox", "data", "config.json"), JSON.stringify(values));
+}
+
 beforeEach(async () => {
   restore = saveEnv("HOME", "CLAWBOX_ROOT");
   base = fs.mkdtempSync(path.join(os.tmpdir(), "project-import-"));
@@ -78,6 +113,7 @@ beforeEach(async () => {
   fs.mkdirSync(projects, { recursive: true });
   process.env.HOME = home;
   process.env.CLAWBOX_ROOT = path.join(home, "clawbox");
+  gitFails.current = [];
   ghAnswers.clear();
   ghCalls.length = 0;
   ghHold.current = null;
@@ -131,6 +167,101 @@ describe("importFolder", () => {
     expect(git(path.join(projects, "old-site"), "log", "--oneline")).toMatch(/Imported from /);
     // The source is exactly as it was.
     expect(fs.existsSync(path.join(src, "node_modules", "left-pad", "index.js"))).toBe(true);
+  });
+
+  it("authors the first commit as the owner, never as an address nobody owns", async () => {
+    // THE DEFECT THIS PINS. This function stamped `ClawBox <clawbox@localhost>`
+    // into the new repository's own config. The coding agent's identity
+    // resolver reads a project's `.git/config` FIRST — by design, because a
+    // repository the owner commits to by hand carries the identity they want —
+    // so the box's own mark outranked the Commit author setting for the life of
+    // the project, and every commit the agent made in an imported folder was
+    // authored by an address no GitHub account owns and failed the Vercel
+    // deployment check.
+    storeConfig({
+      [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",
+      [CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "owner@example.com",
+    });
+    const src = makeSource("fresh-site");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "fresh-site");
+    expect(git(dir, "log", "-1", "--format=%an <%ae>")).toBe("Box Owner <owner@example.com>");
+    // And the mark left behind is the owner's too, so the resolver reads back
+    // an identity they chose rather than one the box invented for them.
+    expect(git(dir, "config", "user.email")).toBe("owner@example.com");
+    expect(git(dir, "config", "user.name")).toBe("Box Owner");
+  });
+
+  it("still gives a repository an identity when nothing at all is configured", async () => {
+    // The floor, unchanged: a box nobody has told anything must still be able
+    // to make that first commit rather than fail with "Committer identity
+    // unknown". The placeholder is recognised as the box's own mark elsewhere,
+    // so it never outvotes a setting the owner fills in later.
+    const src = makeSource("bare-site");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "bare-site");
+    expect(git(dir, "log", "--oneline")).toMatch(/Imported from /);
+    expect(git(dir, "config", "user.email")).toBe(CODING_GIT_PLACEHOLDER.email);
+  });
+
+  it("authors the first commit as the owner even when the identity cannot be written", async () => {
+    // git does not stop at a failed `git config`. It resolves the missing half
+    // from the global or system configuration and commits as whoever THAT is —
+    // so a project's very first commit would carry a name nobody chose, which
+    // is the whole defect this change exists to end. The `-c` overrides on the
+    // commit are what make it the owner's whether the write landed or not.
+    storeConfig({
+      [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",
+      [CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "owner@example.com",
+    });
+    gitFails.current = ["config user.email"];
+    const src = makeSource("half-configured");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "half-configured");
+    expect(git(dir, "log", "-1", "--format=%an <%ae>")).toBe("Box Owner <owner@example.com>");
+  });
+
+  it("keeps both setup failures, naming the one that broke first", async () => {
+    // The two `git config` results used to be discarded. If writing the
+    // identity failed, the commit right after it failed with git's own
+    // "Committer identity unknown" — and the owner was told "Recording the
+    // first commit" for a fault that happened two steps earlier, pointing them
+    // at the one step that was fine.
+    const errors: string[] = [];
+    const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((a) => String(a)).join(" "));
+    });
+    try {
+      // BOTH steps are failed, deliberately. Failing only the `config` proves
+      // nothing portable: whether the commit then fails depends on the machine.
+      // A runner with an identity in /etc/gitconfig commits happily — the
+      // import's own git calls, unlike the resolver's, do not set
+      // GIT_CONFIG_NOSYSTEM — and on a box with none it fails. What is under
+      // test is which of two failures gets reported, so both are made certain.
+      gitFails.current = ["config user.email", "commit"];
+      const src = makeSource("unlucky-site");
+      const out = await lib.importFolder({ source: src, projectsRoot: projects });
+      // The import still stands: the folder is the owner's and it arrived.
+      expect(out).toMatchObject({ ok: true, initialized: true });
+      // And the repository is still there — a failed `config` is recoverable
+      // (the settle passes the identity on every commit), so nothing is torn
+      // down for it.
+      expect(fs.existsSync(path.join(projects, "unlucky-site", ".git"))).toBe(true);
+      const said = errors.join("\n");
+      // BOTH are kept, and the step that broke FIRST is named first: a failed
+      // identity write is usually the cause of the failed commit, so naming
+      // only the commit points the owner at the one step that was fine, and
+      // naming only the config would hide a commit that broke for its own
+      // reasons.
+      expect(said).toMatch(/config user\.email/);
+      expect(said).toMatch(/git refused: commit/);
+      expect(said.indexOf("config user.email")).toBeLessThan(said.indexOf("git refused: commit"));
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("keeps a folder's own history rather than starting one", async () => {
