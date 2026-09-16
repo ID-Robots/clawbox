@@ -16,6 +16,11 @@ describe("reading the connection", () => {
     expect(parseLogin(real)).toBe("yalexx");
   });
 
+  it("reads the account from gh 2.40+ status output", () => {
+    const real = "github.com\n  ✓ Logged in to github.com account yalexx (/home/nexus0/.config/gh/hosts.yml)\n  - Active account: true";
+    expect(parseLogin(real)).toBe("yalexx");
+  });
+
   it("reports nobody when gh is not logged in", () => {
     expect(parseLogin("You are not logged into any GitHub hosts. Run gh auth login to authenticate.")).toBeNull();
     expect(parseLogin("")).toBeNull();

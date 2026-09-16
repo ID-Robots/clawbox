@@ -384,11 +384,13 @@ function noFinding(r: ChildResult, what: string, reach: "local" | "network"): Ba
  * The account name out of `gh auth status`.
  *
  * gh writes this to STDERR, not stdout, and has done across versions — so
- * both are searched rather than trusting one. The line reads:
+ * both are searched rather than trusting one. The wording changed in gh 2.40:
  *   ✓ Logged in to github.com as yalexx (/home/clawbox/.config/gh/hosts.yml)
+ *   ✓ Logged in to github.com account yalexx (/home/nexus0/.config/gh/hosts.yml)
+ * Matching only the first read every newer gh as "not connected".
  */
 export function parseLogin(output: string): string | null {
-  const m = /Logged in to \S+ as (\S+)/.exec(output);
+  const m = /Logged in to \S+ (?:as|account) (\S+)/.exec(output);
   return m ? m[1] : null;
 }
 
