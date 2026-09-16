@@ -77,7 +77,16 @@ function stubFetch({ saveOk = true }: { saveOk?: boolean } = {}) {
         : { ok: false, status: 502, json: async () => ({ error: "hermes config failed" }) } as Response;
     }
     if (url === "/setup-api/hermes/models") {
-      return { ok: true, json: async () => ({ provider: "openrouter" }) } as Response;
+      // A box whose OpenRouter key is in place: the wizard opens on that row
+      // only because the harness holds a credential for it.
+      return {
+        ok: true,
+        json: async () => ({
+          provider: "openrouter",
+          current: "vendor/model-a",
+          providers: [{ id: "openrouter", authenticated: true, credentialPresent: true }],
+        }),
+      } as Response;
     }
 
     return { ok: true, json: async () => ({}) } as Response;

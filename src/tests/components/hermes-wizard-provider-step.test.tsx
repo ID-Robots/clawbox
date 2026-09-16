@@ -92,7 +92,7 @@ const summary = (overrides: Partial<ProviderStatusSummary> = {}): ProviderStatus
 });
 
 let statusBody: ProviderStatusSummary;
-let pairing: { provider: string; current: string };
+let pairing: { provider: string; current: string; providers?: { id: string; authenticated: boolean; credentialPresent: boolean }[] };
 let clawaiState: { hasToken: boolean; tier: string; tierStored: string | null; active: boolean; model: string };
 
 function stubFetch() {
@@ -253,5 +253,35 @@ describe("connecting ClawBox AI on the wizard — the same progress overlay as O
     expect(screen.queryByText("Setting up ClawBox AI")).toBeNull();
     expect(screen.getByText("Device code expired")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Get device code/i })).toBeInTheDocument();
+  });
+});
+
+describe("the harness's own default provider is not the owner's choice", () => {
+  it("keeps ClawBox AI selected when Hermes names OpenRouter with no key behind it", async () => {
+    // A fresh Hermes install answers `model.provider = openrouter` before
+    // anyone has configured anything — the wizard used to open on that row.
+    pairing = {
+      provider: "openrouter",
+      current: "",
+      providers: [{ id: "openrouter", authenticated: false, credentialPresent: false }],
+    };
+    render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);
+
+    await screen.findByRole("button", { name: /Get device code/i });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(providerRows()).toEqual(["clawai"]);
+    expect(screen.getByRole("radio", { name: /ClawBox AI/ })).toBeChecked();
+  });
+
+  it("still opens on a provider the owner has actually connected", async () => {
+    pairing = {
+      provider: "openrouter",
+      current: "openrouter/auto",
+      providers: [{ id: "openrouter", authenticated: true, credentialPresent: true }],
+    };
+    render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);
+
+    await waitFor(() => expect(providerRows()).toEqual(["openrouter"]));
+    expect(screen.getByRole("radio", { name: /OpenRouter/ })).toBeChecked();
   });
 });

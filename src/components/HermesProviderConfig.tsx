@@ -437,14 +437,24 @@ export default function HermesProviderConfig({
    * another vendor to look at it, `scope.current` stops describing what the box
    * is running, which is the one thing the hero must never get wrong.
    */
-  const fetchDevicePairing = useCallback(async (): Promise<{ provider: string; model: string } | null> => {
+  const fetchDevicePairing = useCallback(async (): Promise<{ provider: string; model: string; credentialed: boolean } | null> => {
     try {
       const res = await fetch("/setup-api/hermes/models", { cache: "no-store" });
       if (!res.ok) return null;
-      const data = (await res.json()) as { provider?: unknown; current?: unknown };
+      const data = (await res.json()) as {
+        provider?: unknown;
+        current?: unknown;
+        providers?: { id?: unknown; credentialPresent?: unknown; authenticated?: unknown }[];
+      };
+      const provider = typeof data.provider === "string" ? data.provider : "";
+      const row = Array.isArray(data.providers) ? data.providers.find((p) => p?.id === provider) : undefined;
       return {
-        provider: typeof data.provider === "string" ? data.provider : "",
+        provider,
         model: typeof data.current === "string" ? data.current : "",
+        // Whether the harness holds a credential for that provider. Hermes'
+        // built-in default is OpenRouter, so on a box nobody has configured
+        // the pairing still names it — with nothing behind it.
+        credentialed: row?.credentialPresent === true || row?.authenticated === true,
       };
     } catch {
       // Null, never a blank pairing. Callers keep the last good answer instead
@@ -474,12 +484,19 @@ export default function HermesProviderConfig({
       if (userPickedProviderRef.current) return;
       if (data?.active) {
         setSelectedProvider(CLAWAI_PROVIDER);
-      } else if (pairing?.provider && HERMES_PANEL_PROVIDERS.some((p) => p.id === pairing.provider)) {
+      } else if (
+        pairing?.provider
+        && HERMES_PANEL_PROVIDERS.some((p) => p.id === pairing.provider)
+        // Settings shows what the harness is set to, credential or not. The
+        // wizard opens on ClawBox AI unless the pairing is one the owner has
+        // actually connected — the harness's factory default is not a choice.
+        && (embedded || pairing.credentialed)
+      ) {
         setSelectedProvider(pairing.provider);
       }
     })();
     return () => { alive = false; };
-  }, [fetchClawai, fetchDevicePairing]);
+  }, [fetchClawai, fetchDevicePairing, embedded]);
 
   // The hero's model has to keep up with the same signal its provider does, or
   // choosing a new default would swap the vendor name above a model id that
