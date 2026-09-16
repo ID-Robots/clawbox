@@ -464,7 +464,7 @@ describe("in the setup wizard (not embedded)", () => {
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
   }, 10_000);
 
-  it("does NOT auto-advance in Settings — there is nowhere to go", async () => {
+  it("does NOT auto-advance in Settings — there is nowhere to go", { timeout: 10_000 }, async () => {
     const onNext = vi.fn();
     // Settings embeds the same panel; a connect there must not navigate.
     render(<HermesProviderConfig embedded testId="hermes-settings" onNext={onNext} />);
@@ -476,8 +476,13 @@ describe("in the setup wizard (not embedded)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Save model & provider" }));
 
-    await new Promise((r) => setTimeout(r, 1200));
-    expect(onNext).not.toHaveBeenCalled();
+    // Settings shows the same progress overlay the wizard does…
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    // …then returns to the panel instead of navigating anywhere.
+    await waitFor(() => expect(screen.queryByText("Connected!")).toBeNull(), { timeout: 2_500 });
     expect(screen.queryByText(/Setting up/)).toBeNull();
+    expect(onNext).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Save model & provider" })).toBeInTheDocument();
   });
 });

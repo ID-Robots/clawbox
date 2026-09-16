@@ -172,12 +172,13 @@ export default function HermesProviderConfig({
   // away — the same shape as the OpenClaw step. Settings always shows every
   // row (this panel is the connection strip there).
   const [showMoreProviders, setShowMoreProviders] = useState(false);
-  // Wizard-only progress overlay, the same one the OpenClaw step shows: every
-  // connect on the wizard (device-code handoff, OAuth sign-in, API key, Save)
-  // runs behind it, holds it for at least WIZARD_MIN_CONFIGURING_MS so the
-  // rows are seen to light up, then shows the DONE beat and advances. Before
-  // this the ClawBox AI handoff surfaced as one muted line and every other
-  // connect jumped straight to a tick — nothing read as "connecting".
+  // Progress overlay, the same one the OpenClaw step shows: every connect
+  // (device-code handoff, OAuth sign-in, API key, Save) runs behind it, holds
+  // it for at least WIZARD_MIN_CONFIGURING_MS so the rows are seen to light
+  // up, then shows the DONE beat. The wizard then advances; Settings drops the
+  // overlay and re-reads the strip. Before this the ClawBox AI handoff
+  // surfaced as one muted line and every other connect jumped straight to a
+  // tick — nothing read as "connecting".
   const [configuring, setConfiguring] = useState<{
     provider: string;
     startedAt: number;
@@ -221,37 +222,43 @@ export default function HermesProviderConfig({
   const onNextRef = useRef(onNext);
   useEffect(() => { onNextRef.current = onNext; }, [onNext]);
 
-  /** Wizard only: put the overlay up for `provider` (no-op if already up). */
+  /** Put the overlay up for `provider` (no-op if already up). */
   const beginConfiguring = useCallback((provider: string) => {
-    if (embedded) return;
     setConfiguring((current) => current ?? { provider, startedAt: Date.now(), phase: 0, completed: false });
-  }, [embedded]);
+  }, []);
   const abortConfiguring = useCallback(() => setConfiguring(null), []);
-  /** The step is done: mark it, and make sure the overlay is up to carry the
-   *  DONE beat and the advance. Settings only records the flag. */
+  /** The connect landed: mark it, and make sure the overlay is up to carry the
+   *  DONE beat — then the wizard advances, Settings returns to the panel. */
   const finishWizardStep = useCallback((provider: string) => {
     setConfigured(true);
     beginConfiguring(provider);
   }, [beginConfiguring]);
 
-  // Once the step is done, let the overlay run out its minimum, then tick the
-  // last row. Re-armed on every phase tick, but the deadline is absolute.
+  // Once the connect landed, let the overlay run out its minimum, then tick
+  // the last row. Re-armed on every phase tick, but the deadline is absolute.
   useEffect(() => {
-    if (!configured || embedded || !configuring || configuring.completed) return;
+    if (!configured || !configuring || configuring.completed) return;
     const wait = Math.max(0, WIZARD_MIN_CONFIGURING_MS - (Date.now() - configuring.startedAt));
     const timer = setTimeout(() => {
       setConfiguring((current) => (current ? { ...current, phase: LAST_CONFIGURING_PHASE, completed: true } : current));
     }, wait);
     return () => clearTimeout(timer);
-  }, [configured, embedded, configuring]);
+  }, [configured, configuring]);
 
   useEffect(() => {
-    // Settings embeds this panel with nowhere to advance to; only the wizard
-    // passes an onNext. While the overlay is still running the advance waits
-    // for its DONE beat.
-    if (!configured || embedded) return;
+    // After the DONE beat: the wizard advances (only it passes an onNext);
+    // Settings has nowhere to go, so it drops the overlay, arms itself for the
+    // next connect and asks the strip to re-read — the row a sign-in just
+    // connected still read "Not connected" until the next poll.
+    if (!configured) return;
     if (configuring && !configuring.completed) return;
     const timer = setTimeout(() => {
+      if (embedded) {
+        setConfiguring(null);
+        setConfigured(false);
+        notifyProvidersChanged();
+        return;
+      }
       if (advancedRef.current) return;
       advancedRef.current = true;
       onNextRef.current?.();
@@ -1425,8 +1432,13 @@ export default function HermesProviderConfig({
                   wizard hides it: connecting a provider auto-pins that
                   provider's recommended default (commitWizardDefault on OAuth,
                   saveModelProvider on a key), so first-boot never asks the owner
-                  to choose a model. Shown only when embedded in Settings. */}
-              {embedded && (
+                  to choose a model. Shown only when embedded in Settings, and
+                  only once the provider has a credential: without one the
+                  harness lists no models, so the control was a disabled box
+                  reading "No credentials for this provider yet" — a picker
+                  that cannot pick. The key field below is the step that
+                  matters; the dropdown appears when a save has landed. */}
+              {embedded && scope?.authenticated !== false && (
               <div>
                 <label className={labelCls} htmlFor={`${uid}-model`}>{t("hermesProvider.model.label")}</label>
                 <select

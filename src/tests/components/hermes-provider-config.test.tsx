@@ -164,7 +164,7 @@ describe("HermesProviderConfig auto-advance", () => {
     fireEvent.click(await saveButton());
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toBeInTheDocument();
+      expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
     });
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(onNext).not.toHaveBeenCalled();
