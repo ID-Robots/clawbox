@@ -47,7 +47,7 @@ import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { isInside, isProtectedFilePath } from "@/lib/file-guard";
 import { CLAWBOX_MANIFEST_FILE } from "@/lib/clawbox-manifest";
 import { githubStatus } from "@/lib/coding-github";
-import { resolveCodingGitIdentity } from "@/lib/coding-git-identity";
+import { identityArgs, resolveCodingGitIdentity } from "@/lib/coding-git-identity";
 
 /** A folder name the project folder will take, from a repository or folder name. */
 export function importFolderName(raw: string): string {
@@ -525,25 +525,36 @@ async function ensureRepository(directory: string, from: string): Promise<{ init
   const named = await run("git", ["config", "user.name", who.identity.name], { cwd: directory });
   const mailed = await run("git", ["config", "user.email", who.identity.email], { cwd: directory });
   // NEITHER RESULT IS DISCARDED. A `git config` that failed is not on its own
-  // fatal — the box may have a global identity, and the settle passes
-  // `-c user.name`/`-c user.email` on every commit it makes, so a project whose
-  // config could not be written still commits correctly afterwards. But it is
-  // the usual CAUSE of the commit below failing with git's own "Committer
-  // identity unknown", and reporting that as "Recording the first commit" names
-  // the wrong step for a fault that happened two steps earlier — the owner then
-  // looks at the commit, which was fine.
+  // fatal, but it is not nothing either, and it used to vanish.
   //
   // The repository is NOT torn down for it. The folder has already arrived and
   // is the owner's; deleting its `.git` to punish a failed `config` would turn a
   // state the settle recovers from into a destroyed one.
   const unconfigured = named.code !== 0 ? named : mailed.code !== 0 ? mailed : null;
   await run("git", ["add", "-A"], { cwd: directory });
-  const commit = await run("git", ["commit", "--quiet", "--allow-empty", "-m", `Imported from ${from}`], { cwd: directory });
-  if (commit.code !== 0) {
-    return unconfigured
-      ? { initialized: true, detail: failureDetail(unconfigured, "Recording the commit identity for the new repository") }
-      : { initialized: true, detail: failureDetail(commit, "Recording the first commit") };
-  }
+  // THE IDENTITY IS PASSED TO THE COMMIT AS WELL AS WRITTEN TO THE CONFIG, and
+  // the two are not the same guarantee. Writing it is for the commits the OWNER
+  // makes in this folder later; passing it is for THIS one. When a `git config`
+  // fails, git does not stop — it resolves the missing half from the global or
+  // system configuration and authors the commit as whoever that is, so a
+  // project's very first commit would carry a name nobody chose. That is the
+  // defect this whole change exists to end, and `-c` is the form every other
+  // commit site on this device already uses because it cannot miss.
+  const commit = await run("git", [
+    ...identityArgs(who.identity),
+    "commit", "--quiet", "--allow-empty", "-m", `Imported from ${from}`,
+  ], { cwd: directory });
+  // BOTH failures are kept, earlier first. A failed `config` is usually the
+  // CAUSE of a failed commit, so reporting only the commit names the wrong step
+  // — and reporting only the config would hide a commit that broke for its own
+  // reasons. A failed `config` is reported even when the commit SUCCEEDS: that
+  // commit carried its own identity and is fine, but the folder the owner
+  // commits in by hand afterwards still has none.
+  const faults = [
+    unconfigured && failureDetail(unconfigured, "Recording the commit identity for the new repository"),
+    commit.code !== 0 && failureDetail(commit, "Recording the first commit"),
+  ].filter((detail): detail is string => typeof detail === "string" && detail !== "");
+  if (faults.length > 0) return { initialized: true, detail: faults.join("; ") };
   return { initialized: true, detail: null };
 }
 

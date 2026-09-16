@@ -42,10 +42,13 @@ const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
  */
 const ghHoldEarly = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 /**
- * `git` invocations whose argv begins with one of these strings fail instead of
+ * `git` invocations whose argv CONTAINS one of these strings fail instead of
  * running — the only way to see what an import reports when a step of setting a
  * new repository up goes wrong. Every other git call is the real thing, and the
  * stderr names the step, so a test can tell WHICH failure was reported.
+ *
+ * Contains rather than starts-with: a commit carries `-c user.name=…` overrides
+ * ahead of the subcommand, so its argv does not begin with `commit`.
  */
 const gitFails = vi.hoisted(() => ({ current: [] as string[] }));
 vi.mock("@/lib/child-run", async () => {
@@ -54,7 +57,7 @@ vi.mock("@/lib/child-run", async () => {
     ...actual,
     runChild: async (bin: string, args: string[], opts: Parameters<typeof actual.runChild>[2]) => {
       if (bin === "git") {
-        const step = gitFails.current.find((prefix) => args.join(" ").startsWith(prefix));
+        const step = gitFails.current.find((needle) => args.join(" ").includes(needle));
         if (step) {
           return { code: 1, stdout: "", stderr: `git refused: ${step}`, signal: null, timedOut: false, startFailed: false, startError: null };
         }
@@ -203,7 +206,25 @@ describe("importFolder", () => {
     expect(git(dir, "config", "user.email")).toBe(CODING_GIT_PLACEHOLDER.email);
   });
 
-  it("blames the identity write, not the commit, when that is what failed", async () => {
+  it("authors the first commit as the owner even when the identity cannot be written", async () => {
+    // git does not stop at a failed `git config`. It resolves the missing half
+    // from the global or system configuration and commits as whoever THAT is —
+    // so a project's very first commit would carry a name nobody chose, which
+    // is the whole defect this change exists to end. The `-c` overrides on the
+    // commit are what make it the owner's whether the write landed or not.
+    storeConfig({
+      [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",
+      [CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "owner@example.com",
+    });
+    gitFails.current = ["config user.email"];
+    const src = makeSource("half-configured");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "half-configured");
+    expect(git(dir, "log", "-1", "--format=%an <%ae>")).toBe("Box Owner <owner@example.com>");
+  });
+
+  it("keeps both setup failures, naming the one that broke first", async () => {
     // The two `git config` results used to be discarded. If writing the
     // identity failed, the commit right after it failed with git's own
     // "Committer identity unknown" — and the owner was told "Recording the
@@ -229,10 +250,15 @@ describe("importFolder", () => {
       // (the settle passes the identity on every commit), so nothing is torn
       // down for it.
       expect(fs.existsSync(path.join(projects, "unlucky-site", ".git"))).toBe(true);
-      // What reached the owner names the identity write — the step that broke
-      // first — and not the commit it took down with it.
-      expect(errors.join("\n")).toMatch(/config user\.email/);
-      expect(errors.join("\n")).not.toMatch(/git refused: commit/);
+      const said = errors.join("\n");
+      // BOTH are kept, and the step that broke FIRST is named first: a failed
+      // identity write is usually the cause of the failed commit, so naming
+      // only the commit points the owner at the one step that was fine, and
+      // naming only the config would hide a commit that broke for its own
+      // reasons.
+      expect(said).toMatch(/config user\.email/);
+      expect(said).toMatch(/git refused: commit/);
+      expect(said.indexOf("config user.email")).toBeLessThan(said.indexOf("git refused: commit"));
     } finally {
       logged.mockRestore();
     }
