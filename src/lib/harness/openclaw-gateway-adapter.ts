@@ -8,7 +8,9 @@ import {
   splitAssistantMedia,
   splitUserAttachments,
   extractAudioAttachments,
+  extractFileAttachments,
   boundedAudio,
+  boundedFiles,
 } from "@/lib/chat-media";
 import {
   asHarnessError,
@@ -179,9 +181,14 @@ export function projectGatewayHistory(
     }
     // Replayed history carries the same MEDIA: lines the live turn did, so
     // a reopened chat shows its pictures rather than a bare caption.
-    const { text, images, audio: directiveAudio } = splitAssistantMedia(raw);
+    const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(raw);
     const audio = boundedAudio(extractAudioAttachments(m), directiveAudio);
-    if (!text && images.length === 0 && audio.length === 0) continue;
+    // Files the agent attached structurally (attachment parts, mediaUrl[s])
+    // and by directive, so a reopened chat keeps its download cards.
+    const structured = extractFileAttachments(m);
+    const images = [...new Set([...directiveImages, ...structured.images])];
+    const files = boundedFiles(directiveFiles, structured.files);
+    if (!text && images.length === 0 && audio.length === 0 && files.length === 0) continue;
     // Replayed history repeats the live path's two-message shape: the
     // spoken reply is stored as its own message carrying the same text.
     // Folded into the preceding bubble so a reopened chat shows one answer
@@ -191,6 +198,7 @@ export function projectGatewayHistory(
       text.length > 0 &&
       audio.length > 0 &&
       images.length === 0 &&
+      files.length === 0 &&
       previous &&
       previous.role === "assistant" &&
       previous.text === text &&
@@ -199,7 +207,7 @@ export function projectGatewayHistory(
       previous.audio = audio;
       continue;
     }
-    chatMsgs.push({ role: "assistant", text, timestamp, images, audio });
+    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}) });
   }
   // Current OpenClaw merges TTS supplement records into chat.history, but
   // older supported gateways do not. The session-gated device route reads

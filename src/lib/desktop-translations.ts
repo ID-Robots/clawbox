@@ -238,6 +238,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.downloadImage": "Download image",
     "chat.downloadAudio": "Download audio",
     "chat.audioReply": "Audio reply",
+    "chat.downloadFile": "Download file",
+    "chat.fileFromAssistant": "File from the assistant",
     "chat.speakingReply": "Speaking the reply… {seconds}s",
     "chat.spokenByCloud": "Spoken by the cloud voice",
     "chat.tapToHearReply": "Your browser did not start it — press play.",

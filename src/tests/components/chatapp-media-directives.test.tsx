@@ -297,4 +297,33 @@ describe("ChatApp lifts MEDIA: directives", () => {
       expect.stringContaining(encodeURIComponent(IMAGE_PATH)),
     );
   });
+
+  it("shows a download card for a file the agent sent, by directive or attachment", async () => {
+    render(<ChatApp />);
+    await waitFor(() => expect(document.body.textContent).toContain(HISTORY_CAPTION));
+    const ws = await socket();
+
+    const pdf = "/home/clawbox/.openclaw/workspace/out/quarterly report.pdf";
+    const zip = "/home/clawbox/.openclaw/media/outbound/bundle.zip";
+    await act(async () => {
+      ws.pushChat("final", {
+        role: "assistant",
+        content: [
+          { type: "text", text: `Your report.\n\nMEDIA:${pdf}` },
+          { type: "attachment", attachment: { url: zip, kind: "document", mimeType: "application/zip" } },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(document.querySelectorAll('[data-testid="chat-file-card"]').length).toBe(2));
+    expect(document.body.textContent).not.toContain(pdf);
+    expect(document.body.textContent).toContain("quarterly report.pdf");
+    expect(document.body.textContent).toContain("bundle.zip");
+    const links = Array.from(document.querySelectorAll('[data-testid="chat-file-card"] a'));
+    const href = new URL(links[0].getAttribute("href") ?? "", "http://localhost");
+    expect(href.searchParams.get("path")).toBe(pdf);
+    expect(href.searchParams.get("download")).toBe("1");
+    expect(links[0].getAttribute("download")).toBe("quarterly report.pdf");
+  });
 });

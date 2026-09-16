@@ -15,6 +15,7 @@ import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
+import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
@@ -34,7 +35,9 @@ import {
   splitMediaDirectives,
   splitAssistantMedia,
   extractAudioAttachments,
+  extractFileAttachments,
   boundedAudio,
+  boundedFiles,
   mediaFileName,
   isImageMedia,
   mediaUrl,
@@ -315,11 +318,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     // than dropped: the transcript this surface replays carries all four, so
     // discarding them here would make the live bubble and the reloaded one
     // disagree the moment anything renders them.
-    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider'>,
+    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files'>,
   ) => {
     setMessages(prev => {
       const last = prev[prev.length - 1]
-      if (text.length > 0 && audio.length > 0 && images.length === 0
+      if (text.length > 0 && audio.length > 0 && images.length === 0 && !(extra?.files?.length)
           && last && last.role === 'assistant' && last.text === text) {
         const merged = boundedAudio(last.audio ?? [], audio)
         if (last.audio?.length === merged.length
@@ -540,8 +543,12 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // spoken reply as a structured attachment part (lib/chat-media.ts),
             // and storing the caption alone is what put an absolute media path
             // in the transcript. Both shapes are read; neither is guaranteed.
-            const { text, images, audio: directiveAudio } = splitAssistantMedia(raw)
+            const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(raw)
             const audio = boundedAudio(extractAudioAttachments(msg), directiveAudio)
+            // Every other file the agent sent becomes a download card.
+            const structuredFiles = extractFileAttachments(msg)
+            const images = [...new Set([...directiveImages, ...structuredFiles.images])]
+            const files = boundedFiles(directiveFiles, structuredFiles.files)
             // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
             // from the rendered transcript — the former are markers users
             // shouldn't see, the latter is just a server-side ack that the
@@ -554,7 +561,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // A picture or a clip with no caption is a real reply, not an ack:
             // asking `!text` alone would have thrown it away and refetched
             // history instead.
-            const isAckOnly = (!text && images.length === 0 && audio.length === 0)
+            const isAckOnly = (!text && images.length === 0 && audio.length === 0 && files.length === 0)
               || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
             // Same suppression as the history path, so the bubble cannot
             // appear in real time either — only the append is skipped, the
@@ -565,7 +572,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // Appended through the SHARED renderer, so this bubble and the one
             // an adapter turn resolves with cannot drift.
             if (!isAckOnly && !isInterSessionEnvelope(raw, msg)) {
-              appendAssistantReply(text, images, audio)
+              appendAssistantReply(text, images, audio, files.length ? { files } : undefined)
             }
             applyStreaming('')
             clearToolCalls()
@@ -612,7 +619,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // the reply had begun leaves a value that no longer looks like a
             // sentinel and would be appended verbatim. The same question the
             // bubble asks, and the same one the popup's two branches now ask.
-            if ((keptMedia.text.trim() || keptMedia.images.length > 0 || keptMedia.audio.length > 0)
+            if ((keptMedia.text.trim() || keptMedia.images.length > 0 || keptMedia.audio.length > 0 || keptMedia.files.length > 0)
                 && !isSentinel(streamingEmailRefsText(keptMedia.text))) {
               setMessages(msgs => [...msgs, {
                 role: 'assistant',
@@ -620,6 +627,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                 timestamp: Date.now(),
                 images: keptMedia.images,
                 audio: boundedAudio(keptMedia.audio),
+                ...(keptMedia.files.length ? { files: boundedFiles(keptMedia.files) } : {}),
               }])
             }
             clearToolCalls()
@@ -1201,6 +1209,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           const bodyText = emailRefs ? emailRefs.text : msg.text
           const images = msg.images ?? []
           const audio = msg.audio ?? []
+          const files = msg.files ?? []
           return (
           <div key={i} style={{
             display: 'flex',
@@ -1239,6 +1248,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                 </div>
               )}
               {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
+              {files.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
+                  {files.map(src => <ChatFileCard key={src} src={src} />)}
+                </div>
+              )}
               {audio.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
                   {/* The same player the mascot chat draws, from the same
