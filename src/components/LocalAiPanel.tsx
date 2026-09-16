@@ -6,6 +6,7 @@ import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
 import { readInstallStream } from "@/lib/install-stream";
+import { isConfigBusyPayload } from "@/lib/config-conflict";
 import { ConfirmDialog } from "@/components/clawkeep-ui";
 import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
@@ -169,6 +170,27 @@ const usable = (entry: LocalModelEntry) => entry.installed && entry.enabled !== 
 
 export default function LocalAiPanel({ active, edition }: { active: boolean; edition: string | null }) {
   const { t, locale } = useT();
+  /**
+   * What the red banner is allowed to say about a refused change.
+   *
+   * The banner paints the server's `error` verbatim, which is how "The
+   * OpenClaw CLI is not available on this edition." once reached a Hermes
+   * owner (see the local-only route's UNSUPPORTED block). The config-mutation
+   * conflict is the same shape and reads worse — it tells the owner to re-run
+   * a command they have never typed — so it is claimed here and answered in
+   * the box's own language.
+   *
+   * Matched on the PAYLOAD, not only on the status: `isConfigBusyPayload`
+   * knows the code a current route sends AND the CLI's own wording, so a
+   * conflict still reaches this in its raw form — from a server mid-upgrade,
+   * or from a sibling route that relays it — and is translated rather than
+   * painted. Every other failure keeps the sentence the server chose for it.
+   */
+  const failureText = useCallback((data: unknown): string => {
+    if (isConfigBusyPayload(data)) return t("localModels.error.configBusy");
+    const message = (data as { error?: unknown } | null)?.error;
+    return typeof message === "string" && message ? message : t("localModels.error.changeFailed");
+  }, [t]);
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
   const [roles, setRoles] = useState<Roles>({});
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
@@ -348,7 +370,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       const res = await action.run();
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(typeof data?.error === "string" ? data.error : t("localModels.error.changeFailed"));
+        setError(failureText(data));
         return;
       }
       if (action.streams) {
@@ -396,7 +418,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       void refresh();
       void refreshRoles();
     }
-  }, [applySnapshot, locale, refresh, refreshRoles, t]);
+  }, [applySnapshot, failureText, locale, refresh, refreshRoles, t]);
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
@@ -410,13 +432,13 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       // the gateway restart behind it was not — the one sentence explaining why
       // the switch has not taken effect yet, and it was being dropped.
       if (typeof data?.warning === "string" && data.warning) setNotice(data.warning);
-      if (!res.ok) setError(typeof data?.error === "string" ? data.error : t("localModels.error.changeFailed"));
+      if (!res.ok) setError(failureText(data));
       setLocalOnly(res.ok ? next : !next);
     } catch {
       setError(t("localModels.error.unreachable"));
       setLocalOnly(!next);
     }
-  }, [t]);
+  }, [failureText, t]);
 
   // A card finished an install or a removal: the inventory above it is stale
   // the moment that happens, and so are the roles read from the tts/stt/provider

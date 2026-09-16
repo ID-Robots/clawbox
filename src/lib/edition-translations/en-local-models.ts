@@ -79,6 +79,10 @@ export const localModelsEn: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Could not change that model.",
+  // The box lost a race with its own config writer. Nothing is broken and
+  // there is nothing to repair — so the banner names the state and the wait,
+  // never the config file and never a command to re-run.
+  "localModels.error.configBusy": "The box was saving its settings, so the switch did not finish. Try again in a moment.",
   "localModels.error.unreachable": "Could not reach the box to change that model.",
   "localModels.notice.voiceFallback": "Kokoro could not be made the primary voice, so the default voice stays.",
   "localModels.notice.voiceReleased": "Kokoro was the voice this box spoke with; the default voice speaks now.",

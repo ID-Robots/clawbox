@@ -330,6 +330,68 @@ describe("LocalAiPanel", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  // The banner paints the server's `error` verbatim, which is how "The OpenClaw
+  // CLI is not available on this edition." once reached a Hermes owner. The
+  // config-mutation conflict is the same shape and reads worse: it tells the
+  // owner to re-run a command they have never typed, about a file they do not
+  // know exists. It must not reach this banner in EITHER shape.
+  describe("a local-only flip that lost the config race", () => {
+    /** What the CLI says, verbatim, when it words the refusal for a human. */
+    const CLI_SENTENCE =
+      "The config file changed while this command was writing (config changed since last load), "
+      + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
+    const BUSY_COPY = "The box was saving its settings, so the switch did not finish. Try again in a moment.";
+
+    /** Refuse the local-only flip with `body`, and read the banner. */
+    async function flipAndReadBanner(body: unknown, status: number) {
+      const json = (payload: unknown, code: number) =>
+        new Response(JSON.stringify(payload), { status: code, headers: { "content-type": "application/json" } });
+      stubFetch({
+        llmDefault: false,
+        post: (url) => (url === "/setup-api/local-ai/exclusive" ? json(body, status) : undefined),
+      });
+      renderPanel();
+      // The provider loads its catalogue from a dynamic import in an effect,
+      // and the banner's text is resolved ONCE, into state, at click time. So
+      // the click has to happen after the copy is live or `t()` would answer
+      // with the raw key and the assertion would be about the wrong thing.
+      // The intro is the panel's first translated string.
+      await screen.findByText(/AI that runs on this box/);
+      const sw = await screen.findByTestId("local-ai-local-only");
+      await waitFor(() => expect(sw).toBeEnabled());
+      fireEvent.click(sw);
+      return screen.findByRole("alert");
+    }
+
+    it("says it in the box's own words when the route sends the code", async () => {
+      // The route's own English rides along for non-UI readers; the panel must
+      // render the CATALOGUE entry, so the sentence is translated on a box that
+      // is not in English. Asserted by sending the CLI's sentence as `error`:
+      // if the panel relayed the body, the banner would carry it.
+      const alert = await flipAndReadBanner({ error: CLI_SENTENCE, code: "config_busy" }, 409);
+
+      expect(alert).toHaveTextContent(BUSY_COPY);
+      expect(alert.textContent).not.toMatch(/config file|last load|Re-run/i);
+    });
+
+    it("says it even when the answer carries no code at all", async () => {
+      // A server mid-upgrade, or a sibling route that still relays the raw
+      // message. The panel recognises the CLI's own wording, so the hole is
+      // closed on this surface no matter which side of the fix answered.
+      const alert = await flipAndReadBanner({ error: CLI_SENTENCE }, 500);
+
+      expect(alert).toHaveTextContent(BUSY_COPY);
+      expect(alert.textContent).not.toMatch(/config file|last load|Re-run/i);
+    });
+
+    it("still relays a refusal that is not the race", async () => {
+      const alert = await flipAndReadBanner({ error: "The local model is not ready yet." }, 409);
+
+      expect(alert).toHaveTextContent("The local model is not ready yet.");
+      expect(alert.textContent).not.toContain(BUSY_COPY);
+    });
+  });
+
   it("holds still for owners who asked for reduced motion: the skeleton and the busy icon animate motion-safe only", async () => {
     // Assigned from inside the fetch stub, so TS cannot see it change: a no-op
     // start rather than `null`, which it would narrow to and refuse to call.
