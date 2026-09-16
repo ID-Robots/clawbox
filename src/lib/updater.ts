@@ -17,6 +17,10 @@ import {
   LEGACY_EXEC_APPROVALS_RE,
   legacyExecApprovalsBlocker,
 } from "./openclaw-doctor-blocker";
+import {
+  DOCTOR_SERVICE_OWNERSHIP_RE,
+  withExternalGatewaySupervisor,
+} from "./openclaw-doctor-ownership";
 import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
 import { runHermesCli } from "./hermes-cli";
 import { waitForPortOpen } from "./port-probe";
@@ -1733,6 +1737,24 @@ function commandOutput(err: unknown): string {
  * dark for 25 hours with "Applying system fixups — completed" on screen
  * (TASK-737).
  */
+/**
+ * `openclawChildEnv()` plus this device's claim on the gateway's lifecycle.
+ *
+ * WRAPPED HERE rather than folded into `openclawChildEnv`, and the distinction
+ * is not cosmetic. `OPENCLAW_SUPERVISOR_MODE=external` also disables the core's
+ * self-update and refuses every `openclaw gateway` mutation — irrelevant to
+ * `doctor --fix`, which mutates no service, and a trap for the next command
+ * that reaches for the shared helper. `config validate` and the `config set`
+ * batches keep the plain environment they have always had.
+ *
+ * Both callers of the function below already run inside `withGatewayQuiesced`,
+ * so the unit is stopped and started by ClawBox around them. The declaration is
+ * what stops the core from refusing anyway — see `@/lib/openclaw-doctor-ownership`.
+ */
+function doctorChildEnv(): NodeJS.ProcessEnv {
+  return withExternalGatewaySupervisor(openclawChildEnv());
+}
+
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
@@ -1740,7 +1762,7 @@ async function runOpenclawDoctorFix(): Promise<void> {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout: DOCTOR_FIX_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
-      env: openclawChildEnv(),
+      env: doctorChildEnv(),
     });
   } catch (err) {
     // WHICH failure this was, and what the owner can do about it (TASK-754).
@@ -1758,6 +1780,22 @@ async function runOpenclawDoctorFix(): Promise<void> {
         + `Legacy exec approvals exist at ${blocker}, and the core refuses every config and session `
         + `migration while that file is there. ClawBox never moves one that holds approvals of yours: `
         + `review it, move it aside by hand, and restart the gateway.`);
+      return;
+    }
+    // The refusal that made this warning fire on EVERY beta update of a box
+    // whose gateway is the ClawBox system unit: doctor would not start because
+    // it could not confirm who owns that unit, so no update ever applied a
+    // doctor migration. `doctorChildEnv()` answers that question now, which
+    // means reaching this branch is an older core that has no such setting —
+    // and the useful sentence is the one naming the device update, not the
+    // core's own "stop it through its service owner", which this updater had
+    // already done.
+    if (DOCTOR_SERVICE_OWNERSHIP_RE.test(said)) {
+      warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` migrated nothing. `
+        + `This device's OpenClaw could not confirm that ClawBox manages the gateway service, so it `
+        + `refused to start even with the gateway stopped. Config and session migrations are still `
+        + `pending; install the latest device update, which ships an OpenClaw that accepts ClawBox as `
+        + `the gateway's owner.`);
       return;
     }
     warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClawaiTier } from "@/lib/clawbox-ai-tiers";
+import { humanizeApiError } from "@/lib/api-error-message";
 
 // ClawBox AI device-authorisation state machine (RFC 8628 style), lifted out of
 // AIModelsStep so the OpenClaw wizard and the Hermes provider panel run the
@@ -89,7 +90,10 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      const data = await response.json().catch(() => ({})) as { status?: string; error?: string };
+      // `unknown` on `error`, deliberately: the poll route relays a failure
+      // raised four hops upstream, and the type here was never a guarantee
+      // about what is in the field — only about what this file expected.
+      const data = await response.json().catch(() => ({})) as { status?: string; error?: unknown };
 
       if (data.status === "complete") {
         stop();
@@ -113,7 +117,7 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         stop();
         cbRef.current.onBusyChange?.(false);
         setDeviceCode(null);
-        cbRef.current.onError(data.error || "ClawBox AI authorisation failed");
+        cbRef.current.onError(humanizeApiError(data.error, "ClawBox AI authorisation failed"));
         return;
       }
       // Pending (or a transient upstream blip): schedule the next tick.
@@ -147,8 +151,8 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
       });
       if (controller.signal.aborted) return;
       if (!response.ok) {
-        const data = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(typeof data.error === "string" ? data.error : "Failed to start ClawBox AI authorisation");
+        const data = await response.json().catch(() => ({})) as { error?: unknown };
+        throw new Error(humanizeApiError(data.error, "Failed to start ClawBox AI authorisation"));
       }
       const data = await response.json() as { user_code?: string; verification_url?: string; interval?: number };
       if (!data.user_code || !data.verification_url) {

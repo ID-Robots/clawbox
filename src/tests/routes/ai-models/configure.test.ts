@@ -2863,6 +2863,123 @@ describe("POST /setup-api/ai-models/configure", () => {
       );
     });
 
+    it("names the ownership refusal instead of advising the command it blocks", async () => {
+      // The refusal a real box met: with the gateway running as the ClawBox
+      // SYSTEM unit, the core could not confirm who owns it and `doctor --fix`
+      // never entered maintenance — so EVERY subscription sign-in on that box
+      // rolled back. ClawBox now declares itself the supervisor, which leaves
+      // an older core as the only way here, and "run `openclaw doctor --fix`
+      // from the Terminal" is advice for the command that just refused: the
+      // owner had already stopped the unit and it changed nothing.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("blocked-by-service-ownership");
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/could not confirm that ClawBox manages the gateway service/i);
+      expect(body.error).toMatch(/install the latest device update/i);
+      // The advice that could not work is gone from this arm too.
+      expect(body.error).not.toMatch(/run 'openclaw doctor --fix' from the Terminal/i);
+      expect(body.error).not.toMatch(/stop it through its service owner/i);
+      // Fail closed, exactly as before: a migration that did not happen still
+      // leaves a legacy store an OpenClaw 2 gateway refuses to hydrate, so the
+      // file this route wrote does not stay behind.
+      expect(mockFs.rename).toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
+    it("keeps the legacy store on a pre-SQLite box when doctor refuses on ownership", async () => {
+      // The other half of "fail closed only when it must": on a generation
+      // whose auth store IS this file, an ownership refusal migrated nothing
+      // and nothing needed migrating. Rolling the sign-in back there would
+      // throw away a credential that was already in the right place.
+      //
+      // A REAL date-version, because that is what the generation check parses:
+      // an unparseable one is an unknown generation, which fails closed by
+      // design and would make this case pass for the wrong reason.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("blocked-by-service-ownership");
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+
+      // The rollback itself is the behaviour under test, not the status: the
+      // v1/v2 judgement decides whether the file this route wrote is archived,
+      // and on v1 it must stay exactly where it is.
+      expect(mockFs.rename).not.toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
+    it("leaves an ABSENT doctor mock inert, which dozens of suites depend on", async () => {
+      // The inertness these outcomes are RETURNED for. `undefined` is not in
+      // the type — it is what an omitted member answers under the hand-written
+      // factories that replace this module across the suite — and treating it
+      // as a refusal turned every one of their ordinary saves into a 502.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(undefined as never);
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+
+      expect(res.status).toBe(200);
+      expect(mockFs.rename).not.toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
+    it("fails closed on an outcome it has never heard of", async () => {
+      // The other side of that exemption, and the reason it is spelt
+      // `!== undefined && !== "completed"` rather than a list of the blocked
+      // names: an outcome added to the union later is not proof the migration
+      // ran, so it rolls back by default instead of answering 200. The generic
+      // sentence is the right one — this branch cannot describe a cause it does
+      // not know.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("blocked-by-something-new" as never);
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/Credential migration failed/);
+      expect(mockFs.rename).toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
     it("still sends every OTHER doctor failure to the generic advice", async () => {
       // The half that must not move: a doctor that failed for any other reason
       // is a state the owner can act on with the command, and this arm is what

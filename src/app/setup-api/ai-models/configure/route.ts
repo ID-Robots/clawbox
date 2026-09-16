@@ -10,6 +10,7 @@ import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
   runOpenclawDoctorFix,
+  type OpenclawDoctorFixOutcome,
   findOpenclawBin,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -2836,14 +2837,30 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // rollback below is unchanged. What changes is the sentence: telling the
       // owner to "run `openclaw doctor --fix` from the Terminal" is advice for
       // the command that is blocked, and he can do nothing with it.
-      let doctorBlockedByApprovals = false;
+      let doctorBlockedBy: OpenclawDoctorFixOutcome | null = null;
       try {
-        if (await runOpenclawDoctorFix() === "blocked-by-legacy-exec-approvals") {
-          doctorBlockedByApprovals = true;
+        // TWO rules at once, and they pull in opposite directions.
+        //
+        // Fail closed on anything that is not a completed doctor, named
+        // outcomes or not: a value this branch has never heard of is not proof
+        // that the migration ran, and a legacy auth-profiles.json left behind
+        // is what stops an OpenClaw 2 gateway from starting. A future outcome
+        // added to the union therefore rolls back by default and gets the
+        // generic sentence, rather than silently answering 200.
+        //
+        // But `undefined` is EXEMPT, and deliberately. `undefined` is not in
+        // the type: it is what an omitted member answers under the hand-written
+        // factories that dozens of suites replace `@/lib/openclaw-config` with,
+        // and treating it as a refusal turns every one of their ordinary saves
+        // into this 502. That inertness is the whole reason these outcomes are
+        // returned rather than thrown, and it is load-bearing for the suite.
+        const outcome: OpenclawDoctorFixOutcome | undefined = await runOpenclawDoctorFix();
+        if (outcome !== undefined && outcome !== "completed") {
+          doctorBlockedBy = outcome;
           // Into the SAME failure path, deliberately: the v1/v2 decision below
           // is what says whether the legacy file may stay, and a second copy of
           // that judgement here is how the two would come to disagree.
-          throw new Error("openclaw doctor --fix is blocked by a legacy exec approvals file");
+          throw new Error(`openclaw doctor --fix is ${outcome}`);
         }
       } catch (doctorErr) {
         const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
@@ -2878,11 +2895,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
               // by design (TASK-737), and for that box a restart changes
               // nothing. Leading with "restart and retry" alone would send
               // exactly those owners round a loop.
-              error: doctorBlockedByApprovals
+              error: doctorBlockedBy === "blocked-by-legacy-exec-approvals"
                 ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
                   + " was rolled back. Restart the device and sign in again: the gateway moves that file aside on"
                   + " its next start unless it holds approvals of yours. If the sign-in is refused again, the"
                   + " gateway boot log names the file to move aside by hand."
+                // The third outcome, and the one this box's owner met: doctor
+                // refused to start because it could not confirm who owns the
+                // gateway service. ClawBox now tells it, so reaching this
+                // sentence means the declaration did not arrive — an older
+                // core that has no such setting. A device update is the fix,
+                // and it is the one thing the Terminal advice never said.
+                : doctorBlockedBy === "blocked-by-service-ownership"
+                ? "Credential migration could not start: this device's OpenClaw could not confirm that ClawBox"
+                  + " manages the gateway service, so the subscription sign-in was rolled back. Restart the device"
+                  + " and sign in again. If it is refused again, install the latest device update — older OpenClaw"
+                  + " versions cannot be told that ClawBox owns the gateway."
                 : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
             },
             { status: 502 },

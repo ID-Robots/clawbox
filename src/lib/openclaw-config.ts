@@ -18,6 +18,10 @@ import { isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
+import {
+  DOCTOR_SERVICE_OWNERSHIP_RE,
+  withExternalGatewaySupervisor,
+} from "@/lib/openclaw-doctor-ownership";
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 
@@ -2725,7 +2729,10 @@ export function gatewayIsAbsent(): boolean {
  * `undefined`, which is not this outcome, which is the behaviour they have now.
  * EVERY OTHER failure still throws, untouched.
  */
-export type OpenclawDoctorFixOutcome = "completed" | "blocked-by-legacy-exec-approvals";
+export type OpenclawDoctorFixOutcome =
+  | "completed"
+  | "blocked-by-legacy-exec-approvals"
+  | "blocked-by-service-ownership";
 
 export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
   if (gatewayIsAbsent()) return "completed";
@@ -2737,13 +2744,31 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
     /* older sudoers or already stopped — doctor itself reports real trouble */
   }
   try {
-    await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+    // The stop above is necessary and was never sufficient: the core refused
+    // over the service's OWNERSHIP, which a stopped unit does not change. This
+    // environment is the other half — see `@/lib/openclaw-doctor-ownership`.
+    // It goes last in `spawnOpenclaw`'s merge, so an inherited supervisor mode
+    // cannot put the refusal back.
+    await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], {
+      timeoutMs: 180_000,
+      env: withExternalGatewaySupervisor(),
+    });
   } catch (err) {
     // `spawnOpenclaw` rejects with `stderr.trim()` when there is any, which is
     // where the core prints this. A timeout or a spawn error carries neither
     // the sentence nor a verdict and is rethrown.
     if (err instanceof Error && LEGACY_EXEC_APPROVALS_RE.test(err.message)) {
       return "blocked-by-legacy-exec-approvals";
+    }
+    // A box that STILL refuses on ownership after the declaration above is one
+    // the environment did not reach — an older core, or a wrapper that strips
+    // it. Reported rather than thrown for the same reason the approvals
+    // outcome is: the caller's rollback judgement is unchanged (doctor
+    // migrated nothing either way), but "run `openclaw doctor --fix` from the
+    // Terminal" is advice for the command that just refused, and this box's
+    // owner has already been sent round that loop once.
+    if (err instanceof Error && DOCTOR_SERVICE_OWNERSHIP_RE.test(err.message)) {
+      return "blocked-by-service-ownership";
     }
     throw err;
   }
