@@ -367,9 +367,52 @@ describe("install-x64.sh shared-host preflight", () => {
     const functionStart = SOURCE.indexOf("step_systemd_services() {");
     const firstUnitPath = SOURCE.indexOf('  local gateway_unit="/etc/systemd/system/$GATEWAY_SERVICE"', functionStart);
     const validation = SOURCE.indexOf("  validate_reserved_port_env", functionStart);
-    expect(SOURCE).toContain("  systemd_services start_gateway start_ui");
+    expect(SOURCE).toContain("  systemd_services root_step_contract start_gateway start_ui");
     expect(validation).toBeGreaterThan(functionStart);
     expect(validation).toBeLessThan(firstUnitPath);
+  });
+
+  it("installs the root-step contract the web app calls, and grants only the launcher", () => {
+    // The app pins these paths and the unit name (src/lib/root-step-runner.ts,
+    // src/lib/chpasswd.ts, src/lib/root-step-journal.ts). Without them the
+    // wizard's Security step writes data/.chpasswd-input and starts
+    // clawbox-root-update@chpasswd.service — a unit that does not exist, which
+    // is how setup could never leave the Security step on an x64 host.
+    expect(SOURCE).toContain('ROOT_STEP_DIR="/usr/local/libexec/clawbox"');
+    expect(SOURCE).toContain('ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"');
+    expect(SOURCE).toContain(
+      'install -o root -g root -m 0755 "$src/clawbox-x64-run-root-step.sh" "$ROOT_STEP_DIR/clawbox-run-root-step.sh"',
+    );
+    expect(SOURCE).toContain(
+      'install -o root -g root -m 0755 "$src/clawbox-x64-root-step.sh" "$ROOT_STEP_DIR/clawbox-root-step.sh"',
+    );
+    expect(SOURCE).toContain('"/etc/systemd/system/clawbox-root-update@.service"');
+    expect(SOURCE).toContain("ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i");
+    // One root-owned entrypoint for root steps — never a unit-name wildcard.
+    expect(SOURCE).toMatch(/NOPASSWD: \/usr\/local\/libexec\/clawbox\/clawbox-run-root-step\.sh/);
+    expect(SOURCE).toContain("  systemd_services root_step_contract start_gateway start_ui");
+  });
+
+  it("ships a launcher and dispatcher that keep root off the install user's tree", () => {
+    const dir = path.resolve(process.cwd(), "scripts/x64-migration");
+    const launcher = readFileSync(path.join(dir, "clawbox-x64-run-root-step.sh"), "utf8");
+    const dispatcher = readFileSync(path.join(dir, "clawbox-x64-root-step.sh"), "utf8");
+
+    // The launcher takes a STEP, never a unit name, and validates it.
+    expect(launcher).toContain("WEB_ROOT_STEPS=");
+    expect(launcher).toContain("clawbox-run-root-step: step not permitted from the web server");
+    expect(launcher).toContain('service="clawbox-root-update@${step}.service"');
+
+    // The dispatcher validates again on the root side, implements chpasswd
+    // itself and execs a root-owned copy of the installer — never
+    // $PROJECT_DIR/install-x64.sh, which the install user owns (the appliance's
+    // TASK-445 / TASK-733 boundary).
+    expect(dispatcher).toContain("run_chpasswd");
+    expect(dispatcher).toContain("/usr/sbin/chpasswd");
+    expect(dispatcher).toContain('exec /usr/bin/bash "$ROOT_INSTALLER" --step "$step"');
+    expect(dispatcher).not.toContain('exec /usr/bin/bash "$PROJECT_DIR/install-x64.sh"');
+    // The wizard asks for these on every install and x64 has neither.
+    expect(dispatcher).toContain("is a no-op on the x64 install");
   });
 
   it("rejects reserved .env port keys without exposing their values", () => {
