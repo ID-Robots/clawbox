@@ -1,8 +1,15 @@
 export const dynamic = "force-dynamic";
 
+// Poll stays on the middleware gate (edition + session cookie), not the owner
+// gate the mutating routes use: it changes nothing, and to read a status the
+// caller must already hold a session id it cannot guess — minted by the
+// dashboard for the logins it runs, or here for the CLI-driven ones — and
+// answers only id, status, a scrubbed reason and an expiry. The one side
+// effect, the post-connect refresh on "approved", is idempotent.
+
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
-import { cliLoginDriverFor, readCliLogin } from "@/lib/hermes-cli-login";
+import { readCliLogin } from "@/lib/hermes-cli-login";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { dashboardUnreachable, hermesGate, isValidProviderId, isValidSessionId, relayJson } from "../shared";
@@ -65,20 +72,28 @@ export async function GET(request: Request) {
   // whose dashboard has just come back.
   const providersBefore = await readUsableProviderIds();
 
-  if (cliLoginDriverFor(providerId)) {
-    const session = readCliLogin(sessionId);
-    if (!session) return NextResponse.json({ error: "Unknown session" }, { status: 404 });
-    if (session.status === "approved") {
+  // A session minted here is a CLI login; anything else is the dashboard's.
+  // Answered in the panel's vocabulary: `pending | approved | error | expired`
+  // — "failed" is not a word its poll loop stops on.
+  const cliSession = readCliLogin(sessionId);
+  if (cliSession) {
+    if (cliSession.status === "approved") {
       invalidateModelOptions();
       await forgetProviderVerified(providerId);
       await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
     }
-    const status = session.status === "starting" ? "pending" : session.status === "cancelled" ? "expired" : session.status;
+    const status = cliSession.status === "starting" || cliSession.status === "pending"
+      ? "pending"
+      : cliSession.status === "approved"
+        ? "approved"
+        : cliSession.status === "failed"
+          ? "error"
+          : "expired";
     return NextResponse.json({
-      session_id: session.id,
+      session_id: cliSession.id,
       status,
-      error_message: session.error || undefined,
-      expires_at: new Date(session.expiresAt).toISOString(),
+      error_message: cliSession.error || undefined,
+      expires_at: new Date(cliSession.expiresAt).toISOString(),
     });
   }
 

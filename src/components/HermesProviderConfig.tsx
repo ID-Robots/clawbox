@@ -150,6 +150,8 @@ const AUTO_ADVANCE_DELAY_MS = 1000;
 const WIZARD_MIN_CONFIGURING_MS = 2500;
 /** How long the "Connected!" beat shows before the wizard advances. */
 const CONFIGURING_DONE_DWELL_MS = 900;
+/** A connect that has not landed by then gives the form back. */
+const CONFIGURING_WATCHDOG_MS = 120_000;
 const LAST_CONFIGURING_PHASE = GENERIC_CONFIGURING_STEP_KEYS.length - 1;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
@@ -301,9 +303,17 @@ export default function HermesProviderConfig({
   //
   // Held in a ref as well so unmount cleanup can abandon the dashboard-side
   // session without the cleanup effect re-running on every state change.
-  const [signin, setSignin] = useState<OauthSignin | null>(null);
+  // Mirrored SYNCHRONOUSLY with every write, not from a passive effect: the
+  // "Start over" click reads it inside the event handler, and an effect that
+  // has not flushed yet (a loaded CI runner, a slow tablet) let the handler
+  // see the previous stage and skip the cancel the dashboard was owed.
   const signinRef = useRef<OauthSignin | null>(null);
-  useEffect(() => { signinRef.current = signin; }, [signin]);
+  const [signinState, setSigninState] = useState<OauthSignin | null>(null);
+  const signin = signinState;
+  const setSignin = useCallback((next: OauthSignin | null) => {
+    signinRef.current = next;
+    setSigninState(next);
+  }, []);
   const [oauthCode, setOauthCode] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
@@ -388,6 +398,8 @@ export default function HermesProviderConfig({
    */
   const choose = useCallback((id: string) => {
     pickProvider(id);
+    // A pick folds the list back to the chosen row, as the OpenClaw step does.
+    setShowMoreProviders(false);
     const row = statusById.get(id);
     if (row?.state === "connected" && !row.isDefault) void setDefault(id);
   }, [pickProvider, statusById, setDefault]);
@@ -687,8 +699,9 @@ export default function HermesProviderConfig({
     notifyChatHeader();
     // First-boot: connecting a provider completes the step. Auto-set its
     // recommended default and advance — no model-picking or Save click required.
-    if (!embedded) void commitWizardDefault(providerId);
-  }, [loadOauth, refreshModels, notifyChatHeader, embedded, commitWizardDefault]);
+    if (embedded) finishWizardStep(providerId);
+    else void commitWizardDefault(providerId);
+  }, [loadOauth, refreshModels, notifyChatHeader, embedded, commitWizardDefault, finishWizardStep]);
 
   async function startOauth(providerId: string) {
     resetSignin();
@@ -702,9 +715,22 @@ export default function HermesProviderConfig({
       });
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
-        throw new Error(typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
+        // The box's own failure codes get the panel's words; the scrubbed
+        // reason, when there is one, rides along as detail.
+        const reason = typeof data.error === "string" && data.error ? data.error : "";
+        const headline = data.code === "cli_missing"
+          ? t("hermesProvider.oauth.cliMissingDesc", { provider: hermesProviderLabel(providerId) })
+          : data.code === "cli_login_failed"
+            ? t("hermesProvider.oauth.startFailed")
+            : "";
+        throw new Error(headline ? (reason ? `${headline} ${reason}` : headline) : reason || `HTTP ${res.status}`);
       }
       const sessionId = typeof data.session_id === "string" ? data.session_id : "";
+      if (data.status === "approved") {
+        // A tool that was already signed in: nothing to open, nothing to paste.
+        onOauthConnected(providerId);
+        return;
+      }
       if (gen !== signinGenRef.current) {
         // Abandoned mid-start: give the session back instead of leaking it.
         if (sessionId) cancelOauthSession(sessionId);
@@ -761,9 +787,11 @@ export default function HermesProviderConfig({
         const msg =
           typeof data.message === "string" && data.message
             ? data.message
-            : typeof data.error === "string" && data.error
-              ? data.error
-              : `HTTP ${res.status}`;
+            : data.code === "code_rejected"
+              ? t("hermesProvider.oauth.codeRejected")
+              : typeof data.error === "string" && data.error
+                ? data.error
+                : `HTTP ${res.status}`;
         throw new Error(msg);
       }
       onOauthConnected(s.providerId);
@@ -894,6 +922,24 @@ export default function HermesProviderConfig({
     },
   });
 
+  // The overlay hides every control, so it must never be the whole screen for
+  // good: a configure that wedges (a `hermes config set` that hangs — the
+  // failure the config cache was written around) used to leave the form
+  // usable behind one muted line. A watchdog drops the overlay with an honest
+  // message, and the owner can cancel earlier by hand.
+  const cancelConfiguring = useCallback(() => {
+    abortConfiguring();
+    login.stop();
+    login.reset();
+    setClawaiStatus({ kind: "err", msg: t("hermesProvider.oauth.expired") });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [abortConfiguring, t]);
+  useEffect(() => {
+    if (!configuring || configured) return;
+    const timer = setTimeout(cancelConfiguring, CONFIGURING_WATCHDOG_MS);
+    return () => clearTimeout(timer);
+  }, [configuring, configured, cancelConfiguring]);
+
   // Advance the overlay rows on the same schedule as the OpenClaw step. The
   // last row is only ticked by the poll's terminal `complete`, never by time.
   const configuringRunning = configuring !== null && !configuring.completed;
@@ -947,6 +993,16 @@ export default function HermesProviderConfig({
    * field can show them inline.
    */
   async function applyClawaiToken(token: string): Promise<void> {
+    beginConfiguring(CLAWAI_PROVIDER);
+    try {
+      await applyClawaiTokenInner(token);
+    } catch (err) {
+      abortConfiguring();
+      throw err;
+    }
+  }
+
+  async function applyClawaiTokenInner(token: string): Promise<void> {
     const res = await fetch("/setup-api/hermes/clawai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1133,6 +1189,8 @@ export default function HermesProviderConfig({
             detail={null}
             progressPercent={null}
             completed={configuring.completed}
+            onCancel={configuring.completed ? undefined : cancelConfiguring}
+            cancelLabel={t("hermesProvider.oauth.startOver")}
             t={t}
           />
         )}
@@ -1524,8 +1582,9 @@ export default function HermesProviderConfig({
                   reading "No credentials for this provider yet" — a picker
                   that cannot pick. The key field below is the step that
                   matters; the dropdown appears when a save has landed. */}
-              {embedded && scope?.authenticated !== false && (
+              {embedded && (
               <div>
+                {scope?.authenticated !== false && (<>
                 <label className={labelCls} htmlFor={`${uid}-model`}>{t("hermesProvider.model.label")}</label>
                 <select
                   id={`${uid}-model`}
@@ -1546,6 +1605,7 @@ export default function HermesProviderConfig({
                     </option>
                   ))}
                 </select>
+                </>)}
                 {scope?.warning && (
                   <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">{scope.warning}</p>
                 )}

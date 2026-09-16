@@ -89,8 +89,6 @@ export const nl: Record<string, string> = {
   "hermesProvider.intro":
     "Dit apparaat draait op Hermes. Verbind providers en kies de standaard — status, aanmelden en wisselen gebeuren allemaal hier.",
   "hermesProvider.hero.nativeSwitch": "schakelt native via Hermes",
-  "hermesProvider.continue": "Doorgaan",
-  "hermesProvider.connected.affirmation": "Verbonden",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ modellen met één API-sleutel",
@@ -115,7 +113,6 @@ export const nl: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Inloggen met {provider}",
   "hermesProvider.oauth.connectedDesc": "Verbonden. OAuth-inloggegevens zijn actief.",
-  "hermesProvider.oauth.cliOnlyDesc": "Bij deze provider log je in via de Hermes CLI.",
   "hermesProvider.oauth.attendedDesc": "Gebruikt je {provider}-abonnement. De box opent de aanmeldpagina, jij keurt die goed.",
   "hermesProvider.oauth.cliMissingDesc": "{provider} meldt zich aan via een eigen opdrachtregeltool, die nog niet op deze box is geïnstalleerd.",
   "hermesProvider.oauth.tabSignIn": "Aanmelden",
@@ -129,7 +126,6 @@ export const nl: Record<string, string> = {
   "hermesProvider.oauth.connectedBadge": "Verbonden",
   "hermesProvider.oauth.signIn": "Inloggen",
   "hermesProvider.oauth.tryAgain": "Opnieuw proberen",
-  "hermesProvider.oauth.cliInstructions": "Voer dit uit in de terminal van het apparaat en open dit paneel daarna opnieuw:",
   "hermesProvider.oauth.starting": "Inloggen met {provider} starten...",
   "hermesProvider.oauth.pkceInstructions":
     "Er is een tabblad geopend om in te loggen bij {provider}. Keur de toegang daar goed, kopieer de code die je te zien krijgt en plak deze hier.",
@@ -144,7 +140,6 @@ export const nl: Record<string, string> = {
   "hermesProvider.oauth.copied": "Gekopieerd",
   "hermesProvider.oauth.openVerificationPage": "Verificatiepagina openen",
   "hermesProvider.oauth.waitingApproval": "Wachten op goedkeuring...",
-  "hermesProvider.oauth.orPasteKey": "…of plak hieronder in plaats daarvan een API-sleutel.",
   "hermesProvider.oauth.advancedLabel": "Geavanceerd:",
   "hermesProvider.oauth.dashboardLink": "Hermes-dashboard (alleen via LAN)",
 
@@ -158,7 +153,6 @@ export const nl: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Standaardmodel",
   "hermesProvider.model.loading": "Laden…",
-  "hermesProvider.model.noCredentials": "Nog geen inloggegevens voor deze provider",
   "hermesProvider.model.noModels": "Geen modellen beschikbaar",
   "hermesProvider.model.savedElsewherePrefix": "Dit apparaat gebruikt op dit moment",
   "hermesProvider.model.savedElsewhereSuffix": ". Als je opslaat, schakelt het over naar {provider}.",

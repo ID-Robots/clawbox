@@ -63,6 +63,12 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const catalogue = (anthropicFlow: string) => new Response(JSON.stringify({ providers: [
+  { id: "anthropic", name: "Anthropic", flow: anthropicFlow, status: { logged_in: false } },
+  { id: "copilot-acp", name: "GitHub Copilot", flow: "external", status: { logged_in: false } },
+  { id: "openai-codex", name: "OpenAI", flow: "device_code", status: { logged_in: true } },
+] }), { status: 200, headers: { "content-type": "application/json" } });
+
 const pending = {
   id: SESSION_ID, providerId: "anthropic", flow: "pkce", status: "pending",
   authUrl: "https://claude.ai/oauth/authorize?code=true&state=s", userCode: "", verificationUrl: "", error: "",
@@ -70,7 +76,8 @@ const pending = {
 };
 
 describe("start", () => {
-  it("drives the CLI login and answers the dashboard's pkce shape — the dashboard is not asked", async () => {
+  it("drives the CLI login when the dashboard's catalogue says external, answering the dashboard's pkce shape", async () => {
+    dashboardFetch.mockResolvedValue(catalogue("external"));
     cli.startCliLogin.mockResolvedValue(pending);
     const res = await startPOST(req("start", "POST", { providerId: "anthropic" }));
     const body = await res.json();
@@ -78,10 +85,39 @@ describe("start", () => {
     expect(body).toMatchObject({ session_id: SESSION_ID, flow: "pkce", auth_url: pending.authUrl });
     expect(body.expires_in).toBeGreaterThan(500);
     expect(cli.startCliLogin).toHaveBeenCalledWith("anthropic");
-    expect(dashboardFetch).not.toHaveBeenCalled();
+    // The catalogue was read; the dashboard's own start was never asked.
+    expect(dashboardFetch).not.toHaveBeenCalledWith("/api/providers/oauth/anthropic/start", expect.anything());
+  });
+
+  it("leaves the login to the dashboard on a Hermes build that still runs it itself (flow pkce)", async () => {
+    dashboardFetch.mockImplementation(async (path: string) => path === "/api/providers/oauth"
+      ? catalogue("pkce")
+      : new Response(JSON.stringify({ session_id: "dash", flow: "pkce", auth_url: "https://claude.ai/oauth/authorize?x" }), { status: 200, headers: { "content-type": "application/json" } }));
+    const res = await startPOST(req("start", "POST", { providerId: "anthropic" }));
+    expect(res.status).toBe(200);
+    expect(cli.startCliLogin).not.toHaveBeenCalled();
+    expect(dashboardFetch).toHaveBeenCalledWith("/api/providers/oauth/anthropic/start", expect.anything());
+  });
+
+  it("answers approved at once when the tool was already signed in — no link, no code", async () => {
+    dashboardFetch.mockResolvedValue(catalogue("external"));
+    cli.startCliLogin.mockResolvedValue({ ...pending, status: "approved", authUrl: "" });
+    const res = await startPOST(req("start", "POST", { providerId: "anthropic" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ session_id: SESSION_ID, flow: "pkce", status: "approved" });
+  });
+
+  it("answers 409 cli_missing, not a failure, when the tool is not on the box", async () => {
+    dashboardFetch.mockResolvedValue(catalogue("external"));
+    cli.cliLoginAvailable.mockResolvedValueOnce(false);
+    const res = await startPOST(req("start", "POST", { providerId: "anthropic" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("cli_missing");
+    expect(cli.startCliLogin).not.toHaveBeenCalled();
   });
 
   it("answers 502 with the scrubbed reason when the CLI printed no link", async () => {
+    dashboardFetch.mockResolvedValue(catalogue("external"));
     cli.startCliLogin.mockResolvedValue({ ...pending, status: "failed", error: "The sign-in tool printed no link." });
     const res = await startPOST(req("start", "POST", { providerId: "anthropic" }));
     expect(res.status).toBe(502);
@@ -98,6 +134,8 @@ describe("start", () => {
 });
 
 describe("submit", () => {
+  beforeEach(() => cli.readCliLogin.mockReturnValue(pending));
+
   it("hands the code to the CLI and reports approved with the post-connect refreshes", async () => {
     cli.submitCliLoginCode.mockResolvedValue({ ...pending, status: "approved" });
     const res = await submitPOST(req("submit", "POST", { providerId: "anthropic", sessionId: SESSION_ID, code: "abc#def" }));
@@ -114,17 +152,26 @@ describe("submit", () => {
     cli.submitCliLoginCode.mockResolvedValue({ ...pending, status: "failed", error: "invalid_grant" });
     const res = await submitPOST(req("submit", "POST", { providerId: "anthropic", sessionId: SESSION_ID, code: "bad#x" }));
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ ok: false, status: "failed", message: "invalid_grant" });
+    expect(await res.json()).toEqual({ ok: false, status: "failed", message: "invalid_grant", code: "code_rejected" });
   });
 
-  it("404s an unknown session", async () => {
-    cli.submitCliLoginCode.mockResolvedValue(null);
+  it("relays a session it did not mint to the dashboard", async () => {
+    cli.readCliLogin.mockReturnValue(null);
+    dashboardFetch.mockResolvedValue(new Response(JSON.stringify({ ok: true, status: "approved" }), { status: 200, headers: { "content-type": "application/json" } }));
     const res = await submitPOST(req("submit", "POST", { providerId: "anthropic", sessionId: SESSION_ID, code: "abc#def" }));
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect(cli.submitCliLoginCode).not.toHaveBeenCalled();
+    expect(dashboardFetch).toHaveBeenCalledWith("/api/providers/oauth/anthropic/submit", expect.anything());
   });
 });
 
 describe("poll", () => {
+  it("says error — the panel's terminal word — for a login that failed, with the reason", async () => {
+    cli.readCliLogin.mockReturnValue({ ...pending, providerId: "copilot-acp", flow: "device_code", status: "failed", error: "GitHub refused" });
+    const res = await pollGET(new Request(`http://localhost/setup-api/hermes/oauth/poll?providerId=copilot-acp&sessionId=${SESSION_ID}`));
+    expect(await res.json()).toMatchObject({ status: "error", error_message: "GitHub refused" });
+  });
+
   it("reads the CLI session and maps starting → pending, cancelled → expired", async () => {
     cli.readCliLogin.mockReturnValueOnce({ ...pending, providerId: "copilot-acp", flow: "device_code", status: "starting" });
     let res = await pollGET(new Request(`http://localhost/setup-api/hermes/oauth/poll?providerId=copilot-acp&sessionId=${SESSION_ID}`));

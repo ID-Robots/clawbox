@@ -4,7 +4,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
-import AIProviderIcon from "./AIProviderIcon";
 import { notifyProvidersChanged } from "@/lib/ui-events";
 import { isClawboxAiImageModelId } from "@/lib/clawbox-ai-models";
 import HermesProviderConfig from "./HermesProviderConfig";
@@ -30,7 +29,7 @@ import { chatgptReferenceProvider } from "@/lib/chatgpt-subscription";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
 import { HeaderDropdown, type HeaderDropdownOption } from "./HeaderDropdown";
 import { ButtonSpinner } from "./ButtonSpinner";
-import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS } from "./ConfiguringOverlay";
+import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, GENERIC_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ProviderRadioRow from "./ProviderRadioRow";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
@@ -311,16 +310,7 @@ export default function AIModelsStep({
     },
     [allowedProviders, defaultProviderId],
   );
-  const genericSteps = useMemo(
-    () => [
-      t("ai.credentialsVerified"),
-      t("ai.updatingConfig"),
-      t("ai.restartingGateway"),
-      t("ai.warmingUp"),
-      t("ai.almostReady"),
-    ],
-    [t],
-  );
+  const genericSteps = useMemo(() => GENERIC_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
   const ollamaInstallSteps = useMemo(
     () => [
       "Preparing Ollama",

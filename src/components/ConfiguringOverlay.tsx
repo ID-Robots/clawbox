@@ -41,7 +41,7 @@ export function ConfiguringOverlay({
   phase,
   detail,
   progressPercent,
-  completed,
+  completed, onCancel, cancelLabel,
   t,
 }: {
   provider: string;
@@ -52,6 +52,9 @@ export function ConfiguringOverlay({
   detail: string | null;
   progressPercent: number | null;
   completed: boolean;
+  /** A way out while the connect is still running; omitted once it is done. */
+  onCancel?: () => void;
+  cancelLabel?: string;
   t: (key: string, params?: Record<string, string | number>) => string;
 }) {
   const [dots, setDots] = useState("");
@@ -69,7 +72,9 @@ export function ConfiguringOverlay({
   }, []);
 
   return (
-    <div ref={overlayRef} tabIndex={-1} className="flex flex-col items-center gap-6 px-2 pt-2 pb-6 outline-none">
+    <div ref={overlayRef} tabIndex={-1} className="flex flex-col items-center gap-6 px-2 pt-2 pb-6 outline-none"
+      role="status"
+      aria-live="polite">
       <style>{`
         @keyframes aimodels-check-draw { to { stroke-dashoffset: 0 } }
         @keyframes aimodels-fade-in { from { opacity: 0; transform: translateY(var(--lift)) } to { opacity: 1; transform: translateY(0) } }
@@ -181,6 +186,15 @@ export function ConfiguringOverlay({
             ? t("ai.pleaseDontCloseLocal")
             : t("ai.pleaseDontClose")}
         </p>
+      )}
+      {onCancel && cancelLabel && (
+        <button
+          type="button"
+          onClick={onCancel}
+          className="mt-4 text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
+        >
+          {cancelLabel}
+        </button>
       )}
     </div>
   );

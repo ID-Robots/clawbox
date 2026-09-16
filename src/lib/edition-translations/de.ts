@@ -88,8 +88,6 @@ export const de: Record<string, string> = {
   "hermesProvider.intro":
     "Dieses Gerät läuft mit Hermes. Verbinden Sie Anbieter und wählen Sie den Standard — Status, Anmeldung und Wechsel finden alle hier statt.",
   "hermesProvider.hero.nativeSwitch": "wechselt nativ über Hermes",
-  "hermesProvider.continue": "Weiter",
-  "hermesProvider.connected.affirmation": "Verbunden",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ Modelle mit einem API-Schlüssel",
@@ -114,7 +112,6 @@ export const de: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Mit {provider} anmelden",
   "hermesProvider.oauth.connectedDesc": "Verbunden. OAuth-Zugangsdaten sind aktiv.",
-  "hermesProvider.oauth.cliOnlyDesc": "Bei diesem Anbieter erfolgt die Anmeldung über die Hermes CLI.",
   "hermesProvider.oauth.attendedDesc": "Nutzt dein {provider}-Abo. Die Box öffnet die Anmeldeseite, du bestätigst sie.",
   "hermesProvider.oauth.cliMissingDesc": "{provider} meldet sich über ein eigenes Kommandozeilen-Tool an, das auf dieser Box noch nicht installiert ist.",
   "hermesProvider.oauth.tabSignIn": "Anmelden",
@@ -128,7 +125,6 @@ export const de: Record<string, string> = {
   "hermesProvider.oauth.connectedBadge": "Verbunden",
   "hermesProvider.oauth.signIn": "Anmelden",
   "hermesProvider.oauth.tryAgain": "Erneut versuchen",
-  "hermesProvider.oauth.cliInstructions": "Führen Sie dies im Terminal des Geräts aus und öffnen Sie diesen Bereich danach erneut:",
   "hermesProvider.oauth.starting": "Anmeldung mit {provider} wird gestartet...",
   "hermesProvider.oauth.pkceInstructions":
     "Ein Anmelde-Tab von {provider} wurde geöffnet. Erlauben Sie dort den Zugriff, kopieren Sie den angezeigten Code und fügen Sie ihn hier ein.",
@@ -143,7 +139,6 @@ export const de: Record<string, string> = {
   "hermesProvider.oauth.copied": "Kopiert",
   "hermesProvider.oauth.openVerificationPage": "Bestätigungsseite öffnen",
   "hermesProvider.oauth.waitingApproval": "Warte auf Bestätigung...",
-  "hermesProvider.oauth.orPasteKey": "…oder fügen Sie stattdessen unten einen API-Schlüssel ein.",
   "hermesProvider.oauth.advancedLabel": "Erweitert:",
   "hermesProvider.oauth.dashboardLink": "Hermes-Dashboard (nur im LAN)",
 
@@ -157,7 +152,6 @@ export const de: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Standardmodell",
   "hermesProvider.model.loading": "Wird geladen…",
-  "hermesProvider.model.noCredentials": "Für diesen Anbieter liegen noch keine Zugangsdaten vor",
   "hermesProvider.model.noModels": "Keine Modelle verfügbar",
   "hermesProvider.model.savedElsewherePrefix": "Dieses Gerät verwendet derzeit",
   "hermesProvider.model.savedElsewhereSuffix": ". Beim Speichern wechselt es zu {provider}.",

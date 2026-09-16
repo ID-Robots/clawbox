@@ -72,7 +72,7 @@ let loginCallbacks: {
 vi.mock("@/hooks/useClawaiDeviceLogin", () => ({
   useClawaiDeviceLogin: (options: typeof loginCallbacks) => {
     loginCallbacks = options;
-    return { deviceCode: null, verificationUrl: null, polling: false, start: vi.fn(), reset: vi.fn() };
+    return { deviceCode: null, verificationUrl: null, polling: false, start: vi.fn(), stop: vi.fn(), reset: vi.fn() };
   },
 }));
 
@@ -263,6 +263,18 @@ describe("connecting ClawBox AI on the wizard — the same progress overlay as O
     await screen.findByText("Connected!", {}, { timeout: 4_000 });
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
   }, 10_000);
+
+  it("gives the form back when the owner cancels a connect that is taking too long", async () => {
+    render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);
+    await screen.findByRole("button", { name: /Get device code/i });
+    act(() => loginCallbacks.onConfiguring?.());
+    expect(screen.getByText("Setting up ClawBox AI")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start over" }));
+
+    expect(screen.queryByText("Setting up ClawBox AI")).toBeNull();
+    expect(screen.getByRole("button", { name: /Get device code/i })).toBeInTheDocument();
+  });
 
   it("drops the overlay and shows the error when the handoff fails", async () => {
     render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);

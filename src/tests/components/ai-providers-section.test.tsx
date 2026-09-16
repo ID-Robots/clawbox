@@ -464,6 +464,23 @@ describe("in the setup wizard (not embedded)", () => {
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
   }, 10_000);
 
+  it("runs an OAuth sign-in in Settings behind the overlay too, and stays put", { timeout: 10_000 }, async () => {
+    vi.stubGlobal("open", vi.fn());
+    const onNext = vi.fn();
+    render(<HermesProviderConfig embedded testId="hermes-settings" onNext={onNext} />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    const codeInput = await screen.findByPlaceholderText(/Paste the code/i);
+    fireEvent.change(codeInput, { target: { value: "auth-code-abc123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit code" }));
+
+    expect(await screen.findByText("Setting up Anthropic")).toBeInTheDocument();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(screen.queryByText("Connected!")).toBeNull(), { timeout: 2_500 });
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("does NOT auto-advance in Settings — there is nowhere to go", { timeout: 10_000 }, async () => {
     const onNext = vi.fn();
     // Settings embeds the same panel; a connect there must not navigate.

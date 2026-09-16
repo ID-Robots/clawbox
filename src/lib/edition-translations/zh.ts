@@ -100,8 +100,6 @@ export const zh: Record<string, string> = {
   "hermesProvider.intro":
     "本设备运行在 Hermes 上。连接提供商并选择默认项——状态、登录与切换都在这里完成。",
   "hermesProvider.hero.nativeSwitch": "通过 Hermes 原生切换",
-  "hermesProvider.continue": "继续",
-  "hermesProvider.connected.affirmation": "已连接",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "一个 API 密钥，300+ 个模型",
@@ -126,7 +124,6 @@ export const zh: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "使用 {provider} 登录",
   "hermesProvider.oauth.connectedDesc": "已连接。OAuth 凭据有效。",
-  "hermesProvider.oauth.cliOnlyDesc": "此服务商需通过 Hermes CLI 登录。",
   "hermesProvider.oauth.attendedDesc": "使用你的 {provider} 订阅。设备会打开登录页面，由你确认。",
   "hermesProvider.oauth.cliMissingDesc": "{provider} 通过其自带的命令行工具登录，该工具尚未安装在此设备上。",
   "hermesProvider.oauth.tabSignIn": "登录",
@@ -140,7 +137,6 @@ export const zh: Record<string, string> = {
   "hermesProvider.oauth.connectedBadge": "已连接",
   "hermesProvider.oauth.signIn": "登录",
   "hermesProvider.oauth.tryAgain": "重试",
-  "hermesProvider.oauth.cliInstructions": "请在设备终端中运行以下命令，然后重新打开此面板：",
   "hermesProvider.oauth.starting": "正在启动 {provider} 登录...",
   "hermesProvider.oauth.pkceInstructions":
     "已打开 {provider} 的登录标签页。请在该页面完成授权，复制页面上显示的授权码并粘贴到这里。",
@@ -155,7 +151,6 @@ export const zh: Record<string, string> = {
   "hermesProvider.oauth.copied": "已复制",
   "hermesProvider.oauth.openVerificationPage": "打开验证页面",
   "hermesProvider.oauth.waitingApproval": "等待授权...",
-  "hermesProvider.oauth.orPasteKey": "…或改为在下方粘贴 API 密钥。",
   "hermesProvider.oauth.advancedLabel": "高级：",
   "hermesProvider.oauth.dashboardLink": "Hermes 控制台（仅限 LAN）",
 
@@ -169,7 +164,6 @@ export const zh: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "默认模型",
   "hermesProvider.model.loading": "加载中…",
-  "hermesProvider.model.noCredentials": "尚未为此服务商配置凭据",
   "hermesProvider.model.noModels": "没有可用的模型",
   "hermesProvider.model.savedElsewherePrefix": "此设备当前使用的是",
   "hermesProvider.model.savedElsewhereSuffix": "。保存后会切换到 {provider}。",

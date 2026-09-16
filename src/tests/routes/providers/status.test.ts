@@ -13,7 +13,7 @@ vi.mock("@/lib/hermes-model-options", () => ({
 vi.mock("@/lib/clawbox-ai-portal-tier", () => ({ clawaiTokenRejectedByPortal: vi.fn() }));
 // The harness's own copy of the ClawBox AI key (`providers.clawai.api_key`);
 // empty unless a test says otherwise.
-vi.mock("@/lib/hermes-config-cache", () => ({ hermesConfigGet: vi.fn(async () => ""), invalidateHermesConfigCache: vi.fn() }));
+vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: vi.fn(async () => ({ code: 1, stdout: "", stderr: "Config key not set: providers.clawai.api_key" })) }));
 
 let GET: () => Promise<Response>;
 let getActiveHarness: Mock;
@@ -23,7 +23,7 @@ let getConfigValue: Mock;
 let getModelOptions: Mock;
 let probeStillOwed: Mock;
 let clawaiTokenRejectedByPortal: Mock;
-let hermesConfigGet: Mock;
+let runHermesCli: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -39,8 +39,8 @@ beforeEach(async () => {
   ({ clawaiTokenRejectedByPortal } = (await import("@/lib/clawbox-ai-portal-tier")) as unknown as {
     clawaiTokenRejectedByPortal: Mock;
   });
-  ({ hermesConfigGet } = (await import("@/lib/hermes-config-cache")) as unknown as { hermesConfigGet: Mock });
-  hermesConfigGet.mockResolvedValue("");
+  ({ runHermesCli } = (await import("@/lib/hermes-cli")) as unknown as { runHermesCli: Mock });
+  runHermesCli.mockResolvedValue({ code: 1, stdout: "", stderr: "Config key not set: providers.clawai.api_key" });
   getConfigValue.mockResolvedValue(null);
   hasClawaiToken.mockResolvedValue(false);
   // Nobody has asked the portal yet: the cold answer, and beta's behaviour.
@@ -152,7 +152,7 @@ describe("GET /setup-api/providers/status — Hermes", () => {
       current: { provider: "clawai", model: "deepseek-v4-flash" },
     }));
     hasClawaiToken.mockResolvedValue(false);
-    hermesConfigGet.mockImplementation(async (key: string) => (key === "providers.clawai.api_key" ? "claw_" + "k".repeat(40) : ""));
+    runHermesCli.mockResolvedValue({ code: 0, stdout: "claw_" + "k".repeat(40) + "\n", stderr: "" });
     const body = await (await GET()).json();
 
     expect(rowFor(body, "clawai")!.state).toBe("connected");

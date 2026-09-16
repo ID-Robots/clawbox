@@ -36,7 +36,7 @@ import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
 import path from "path";
 import { HERMES_BIN } from "@/lib/harness";
-import { setHermesEnvValues } from "@/lib/hermes-env";
+import { readHermesEnv, setHermesEnvValues } from "@/lib/hermes-env";
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
 /** Where the installer puts the clawbox user's global npm CLIs (`NPM_PREFIX`). */
@@ -74,7 +74,11 @@ const DRIVERS: Readonly<Record<string, CliLoginDriver>> = {
     // `webbrowser.open` can hang on some display stacks.
     args: ["auth", "add", "anthropic", "--no-browser"],
     flow: "pkce",
-    url: /https:\/\/claude\.ai\/oauth\/authorize\?[^\s]+/,
+    // Verbatim from `hermes auth add anthropic --no-browser` on a box (Hermes
+    // v0.21.1, 2026.9.7): a boxed banner, then the URL alone on its own line
+    // indented two spaces, then "Authorization code: " read from stdin. The
+    // fixture in the unit test is that capture.
+    url: /https:\/\/claude\.ai\/oauth\/authorize\?[^\s│]+/,
     codePrompt: /Authorization code:/,
   },
   "copilot-acp": {
@@ -85,7 +89,13 @@ const DRIVERS: Readonly<Record<string, CliLoginDriver>> = {
     args: ["login", "--device-code"],
     flow: "device_code",
     prepare: async (resolvedBin) => {
-      await setHermesEnvValues({ [HERMES_COPILOT_COMMAND_ENV]: resolvedBin });
+      // Hermes' own setting (`hermes_cli/env_loader.py` lists it; its setup
+      // flow names it when the CLI is elsewhere). Written once — a rewrite of
+      // the harness's .env on every press would be a write for nothing.
+      const current = await readHermesEnv().catch(() => ({} as Record<string, string>));
+      if (current[HERMES_COPILOT_COMMAND_ENV] !== resolvedBin) {
+        await setHermesEnvValues({ [HERMES_COPILOT_COMMAND_ENV]: resolvedBin });
+      }
     },
     url: /https:\/\/github\.com\/login\/device[^\s]*/,
     userCode: /\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/,
@@ -268,7 +278,8 @@ function childEnv(): NodeJS.ProcessEnv {
 }
 
 function onOutput(session: LiveSession, chunk: string): void {
-  if (session.buffer.length < OUTPUT_CAP) session.buffer += chunk.slice(0, OUTPUT_CAP - session.buffer.length);
+  // Keep the TAIL: the line `scrubReason` wants is the last one printed.
+  session.buffer = (session.buffer + chunk).slice(-OUTPUT_CAP);
   const driver = DRIVERS[session.providerId];
   if (!session.authUrl) {
     const link = session.buffer.match(driver.url)?.[0];
@@ -352,7 +363,11 @@ export async function startCliLogin(providerId: string): Promise<CliLoginSession
   };
   sessions.set(session.id, session);
   try {
-    const bin = (await resolveCliLoginBin(providerId)) ?? driver.bin();
+    const bin = await resolveCliLoginBin(providerId);
+    if (!bin) {
+      finish(session, "failed", "The sign-in tool is not installed on this box.");
+      return publicView(session);
+    }
     if (driver.prepare) {
       try {
         await driver.prepare(bin);

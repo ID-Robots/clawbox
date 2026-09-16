@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
-import { cliLoginDriverFor, submitCliLoginCode } from "@/lib/hermes-cli-login";
+import { readCliLogin, submitCliLoginCode } from "@/lib/hermes-cli-login";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
@@ -51,7 +51,9 @@ export async function POST(request: Request) {
   // provider that just connected and no change can be seen.
   const providersBefore = await readUsableProviderIds();
 
-  if (cliLoginDriverFor(body.providerId)) {
+  // The session id says whose login this is: one minted here is a CLI login,
+  // anything else belongs to the dashboard.
+  if (readCliLogin(body.sessionId)) {
     const session = await submitCliLoginCode(body.sessionId, code);
     if (!session) return NextResponse.json({ error: "Unknown session" }, { status: 404 });
     if (session.status === "approved") {
@@ -61,7 +63,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, status: "approved" });
     }
     return NextResponse.json(
-      { ok: false, status: session.status, message: session.error || "Code was not accepted" },
+      { ok: false, status: session.status, message: session.error || undefined, code: "code_rejected" },
       { status: 400 },
     );
   }

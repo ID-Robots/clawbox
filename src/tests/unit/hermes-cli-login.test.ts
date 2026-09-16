@@ -11,7 +11,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 vi.mock("@/lib/harness", () => ({ HERMES_BIN: "/opt/fake/hermes", getActiveHarness: vi.fn() }));
-vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn(async () => {}) }));
+vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn(async () => {}), readHermesEnv: vi.fn(async () => ({})) }));
+// The fake Hermes binary and a Copilot CLI in the npm prefix "exist"; nothing else does.
+vi.mock("fs/promises", () => ({
+  default: {
+    access: vi.fn(async (p: string) => {
+      if (p === "/opt/fake/hermes" || /\/\.npm-global\/bin\/copilot$/.test(p)) return;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
+  },
+}));
 
 type Fake = EventEmitter & {
   stdout: PassThrough;
@@ -69,11 +78,19 @@ afterEach(() => {
   lib._setSpawnForTests(null);
 });
 
+// Verbatim from `hermes auth add anthropic --no-browser` on a box (Hermes
+// v0.21.1), challenge and state redacted.
 const ANTHROPIC_BANNER = [
   "",
   "Authorize Hermes with your Claude Pro/Max subscription.",
   "",
+  "╭─ Claude Pro/Max Authorization ────────────────────╮",
+  "│                                                   │",
+  "│  Open this link in your browser:                  │",
+  "╰───────────────────────────────────────────────────╯",
+  "",
   "  https://claude.ai/oauth/authorize?code=true&client_id=abc&state=xyz",
+  "",
   "",
   "After authorizing, you'll see a code. Paste it below.",
   "",
@@ -175,9 +192,9 @@ describe("GitHub Copilot — GitHub's device flow, read off the CLI", () => {
   it("answers the link and the code, then approved once the CLI exits 0 on its own", async () => {
     const started = lib.startCliLogin("copilot-acp");
     const child = await waitForChild();
-    // Not installed in this test environment: the bare name is what gets
-    // spawned, and the device flow is forced — the box has no browser.
-    expect(spawnArgs[0].bin).toBe("copilot");
+    // Found in the npm prefix, where the installer puts it; the device flow
+    // is forced — the box has no browser.
+    expect(spawnArgs[0].bin).toMatch(/\/\.npm-global\/bin\/copilot$/);
     expect(spawnArgs[0].args).toEqual(["login", "--device-code"]);
     expect(spawnArgs[0].env.PATH).toContain(".npm-global/bin");
     // Verbatim from GitHub Copilot CLI 1.0.85 on a box.
@@ -201,8 +218,24 @@ describe("what the panel may drive", () => {
     expect(lib.cliLoginDriverFor("openai-codex")).toBeNull();
   });
 
-  it("reports a driver unavailable when its executable is not on the box", async () => {
-    expect(await lib.cliLoginAvailable("copilot-acp")).toBe(false);
-    expect(await lib.cliLoginAvailable("anthropic")).toBe(false);
+  it("reports what is on the box, looking in the npm prefix the web server's PATH does not know", async () => {
+    expect(await lib.cliLoginAvailable("copilot-acp")).toBe(true);
+    expect(await lib.cliLoginAvailable("anthropic")).toBe(true);
+    expect(await lib.cliLoginAvailable("qwen-oauth")).toBe(false);
+  });
+
+  it("writes Hermes' own Copilot command pin once, not on every press", async () => {
+    const env = await import("@/lib/hermes-env");
+    vi.mocked(env.readHermesEnv).mockResolvedValueOnce({}).mockResolvedValue({ HERMES_COPILOT_ACP_COMMAND: `${process.env.HOME}/.npm-global/bin/copilot` });
+    const first = lib.startCliLogin("copilot-acp");
+    const child = await waitForChild();
+    child.stdout.write("To authenticate, visit https://github.com/login/device and enter code AAAA-1111\n");
+    await first;
+    expect(env.setHermesEnvValues).toHaveBeenCalledTimes(1);
+    lib.cancelCliLogin((await first).id);
+    const second = lib.startCliLogin("copilot-acp");
+    (await waitForChild(1)).stdout.write("To authenticate, visit https://github.com/login/device and enter code BBBB-2222\n");
+    await second;
+    expect(env.setHermesEnvValues).toHaveBeenCalledTimes(1);
   });
 });

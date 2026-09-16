@@ -9853,7 +9853,10 @@ step_ai_tools_install() {
   # without it the provider panel can only say the tool is missing.
   if as_clawbox_login "command -v copilot" &>/dev/null; then
     echo "  Copilot CLI already installed"
-  elif as_clawbox_login "npm i -g @github/copilot --prefix $NPM_PREFIX"; then
+  elif as_clawbox_login "npm i -g @github/copilot --prefix $NPM_PREFIX" \
+    && as_clawbox_login "command -v copilot" &>/dev/null; then
+    # Checked by presence, not by npm's exit code: the provider panel gates
+    # the Copilot sign-in on this very binary being there.
     echo "  Copilot CLI installed"
   else
     echo "  WARN: Copilot CLI install failed; skipping (optional, continuing)"

@@ -89,8 +89,6 @@ export const fr: Record<string, string> = {
   "hermesProvider.intro":
     "Cet appareil fonctionne avec Hermes. Connectez des fournisseurs et choisissez celui par défaut — état, connexion et changement se font tous ici.",
   "hermesProvider.hero.nativeSwitch": "bascule nativement via Hermes",
-  "hermesProvider.continue": "Continuer",
-  "hermesProvider.connected.affirmation": "Connecté",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "Plus de 300 modèles avec une seule clé API",
@@ -115,7 +113,6 @@ export const fr: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Se connecter avec {provider}",
   "hermesProvider.oauth.connectedDesc": "Connecté. Identifiants OAuth actifs.",
-  "hermesProvider.oauth.cliOnlyDesc": "La connexion à ce fournisseur se fait via Hermes CLI.",
   "hermesProvider.oauth.attendedDesc": "Utilise votre abonnement {provider}. La box ouvre la page de connexion, vous l'approuvez.",
   "hermesProvider.oauth.cliMissingDesc": "{provider} se connecte via son propre outil en ligne de commande, qui n'est pas encore installé sur cette box.",
   "hermesProvider.oauth.tabSignIn": "Se connecter",
@@ -129,7 +126,6 @@ export const fr: Record<string, string> = {
   "hermesProvider.oauth.connectedBadge": "Connecté",
   "hermesProvider.oauth.signIn": "Se connecter",
   "hermesProvider.oauth.tryAgain": "Réessayer",
-  "hermesProvider.oauth.cliInstructions": "Exécutez ceci dans le terminal de l'appareil, puis rouvrez ce panneau :",
   "hermesProvider.oauth.starting": "Démarrage de la connexion avec {provider}...",
   "hermesProvider.oauth.pkceInstructions":
     "Un onglet de connexion à {provider} s'est ouvert. Autorisez l'accès, copiez le code affiché et collez-le ici.",
@@ -144,7 +140,6 @@ export const fr: Record<string, string> = {
   "hermesProvider.oauth.copied": "Copié",
   "hermesProvider.oauth.openVerificationPage": "Ouvrir la page de vérification",
   "hermesProvider.oauth.waitingApproval": "En attente d'autorisation...",
-  "hermesProvider.oauth.orPasteKey": "…ou collez plutôt une clé API ci-dessous.",
   "hermesProvider.oauth.advancedLabel": "Avancé :",
   "hermesProvider.oauth.dashboardLink": "Tableau de bord Hermes (LAN uniquement)",
 
@@ -158,7 +153,6 @@ export const fr: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Modèle par défaut",
   "hermesProvider.model.loading": "Chargement…",
-  "hermesProvider.model.noCredentials": "Aucun identifiant enregistré pour ce fournisseur",
   "hermesProvider.model.noModels": "Aucun modèle disponible",
   "hermesProvider.model.savedElsewherePrefix": "Cet appareil utilise actuellement",
   "hermesProvider.model.savedElsewhereSuffix": ". L'enregistrement le fera passer à {provider}.",

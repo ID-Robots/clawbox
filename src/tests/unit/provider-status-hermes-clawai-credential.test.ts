@@ -16,7 +16,7 @@ vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/clawbox-ai-portal-tier", () => ({ clawaiTokenRejectedByPortal: vi.fn(() => false) }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn(async () => ({})) }));
 vi.mock("@/lib/hermes-model-options", () => ({ getModelOptions: vi.fn(), probeStillOwed: vi.fn(async () => false) }));
-vi.mock("@/lib/hermes-config-cache", () => ({ hermesConfigGet: vi.fn(), invalidateHermesConfigCache: vi.fn() }));
+vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: vi.fn() }));
 vi.mock("@/lib/plugin-repair", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/plugin-repair")>()),
   readPluginRepairs: vi.fn(async () => ({})),
@@ -38,17 +38,18 @@ const catalogue = (clawaiAuthenticated: boolean, currentProvider = "openrouter")
 
 let readProviderStatus: typeof import("@/lib/provider-status").readProviderStatus;
 let hasClawaiToken: Mock;
-let hermesConfigGet: Mock;
+let runHermesCli: Mock;
 let getModelOptions: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
   ((await import("@/lib/harness")) as unknown as { getActiveHarness: Mock }).getActiveHarness.mockResolvedValue("hermes");
   ({ hasClawaiToken } = (await import("@/lib/harness/credentials")) as unknown as { hasClawaiToken: Mock });
-  ({ hermesConfigGet } = (await import("@/lib/hermes-config-cache")) as unknown as { hermesConfigGet: Mock });
+  ({ runHermesCli } = (await import("@/lib/hermes-cli")) as unknown as { runHermesCli: Mock });
   ({ getModelOptions } = (await import("@/lib/hermes-model-options")) as unknown as { getModelOptions: Mock });
   hasClawaiToken.mockResolvedValue(false);
-  hermesConfigGet.mockResolvedValue("");
+  // `hermes config get` on an unset key: non-zero, "Config key not set".
+  runHermesCli.mockResolvedValue({ code: 1, stdout: "", stderr: "Config key not set: providers.clawai.api_key" });
   getModelOptions.mockResolvedValue(catalogue(true));
   ({ readProviderStatus } = await import("@/lib/provider-status"));
 });
@@ -81,9 +82,15 @@ describe("ClawBox AI on Hermes is connected only when a credential exists", () =
   });
 
   it("is connected on a key in the harness's own providers.clawai block (a migrated box)", async () => {
-    hermesConfigGet.mockImplementation(async (key: string) => (key === "providers.clawai.api_key" ? "claw_" + "x".repeat(40) : ""));
+    runHermesCli.mockResolvedValue({ code: 0, stdout: "claw_" + "x".repeat(40) + "\n", stderr: "" });
     expect(await clawaiState()).toBe("connected");
-    expect(hermesConfigGet).toHaveBeenCalledWith("providers.clawai.api_key");
+    expect(runHermesCli).toHaveBeenCalledWith(["config", "get", "providers.clawai.api_key"], expect.anything());
+  });
+
+  it("is UNKNOWN, never needs-sign-in, when the harness could not be asked (a timed-out read)", async () => {
+    getModelOptions.mockResolvedValue(catalogue(true, "clawai"));
+    runHermesCli.mockResolvedValue({ code: null, stdout: "", stderr: "hermes config get timed out" });
+    expect(await clawaiState()).toBe("unknown");
   });
 
   it("still reports the other rows from the harness's flag", async () => {

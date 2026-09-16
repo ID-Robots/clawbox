@@ -14,8 +14,6 @@ export const providerEn: Record<string, string> = {
   "hermesProvider.intro":
     "This device runs on Hermes. Connect providers and pick the default — status, sign-in and switching all live here.",
   "hermesProvider.hero.nativeSwitch": "switches natively through Hermes",
-  "hermesProvider.continue": "Continue",
-  "hermesProvider.connected.affirmation": "Connected",
 
   // === Provider rows ===
   // The registry (hermes-providers.ts) is shared with server routes and cannot
@@ -43,7 +41,6 @@ export const providerEn: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Sign in with {provider}",
   "hermesProvider.oauth.connectedDesc": "Connected. OAuth credentials active.",
-  "hermesProvider.oauth.cliOnlyDesc": "This provider signs in through the Hermes CLI.",
   "hermesProvider.oauth.attendedDesc": "Uses your {provider} subscription. The box opens the sign-in page for you to approve.",
   "hermesProvider.oauth.cliMissingDesc": "{provider} signs in through its own command-line tool, which is not installed on this box yet.",
   "hermesProvider.oauth.tabSignIn": "Sign in",
@@ -57,7 +54,6 @@ export const providerEn: Record<string, string> = {
   "hermesProvider.oauth.connectedBadge": "Connected",
   "hermesProvider.oauth.signIn": "Sign in",
   "hermesProvider.oauth.tryAgain": "Try again",
-  "hermesProvider.oauth.cliInstructions": "Run this in the device terminal, then reopen this panel:",
   "hermesProvider.oauth.starting": "Starting sign-in with {provider}...",
   "hermesProvider.oauth.pkceInstructions":
     "A {provider} sign-in tab has opened. Approve access there, copy the code it shows, and paste it here.",
@@ -72,7 +68,6 @@ export const providerEn: Record<string, string> = {
   "hermesProvider.oauth.copied": "Copied",
   "hermesProvider.oauth.openVerificationPage": "Open the verification page",
   "hermesProvider.oauth.waitingApproval": "Waiting for approval...",
-  "hermesProvider.oauth.orPasteKey": "…or paste an API key below instead.",
   "hermesProvider.oauth.advancedLabel": "Advanced:",
   "hermesProvider.oauth.dashboardLink": "Hermes dashboard (LAN only)",
 
@@ -87,7 +82,6 @@ export const providerEn: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Default model",
   "hermesProvider.model.loading": "Loading…",
-  "hermesProvider.model.noCredentials": "No credentials for this provider yet",
   "hermesProvider.model.noModels": "No models available",
   // Interleaved with a <span> for the provider label, hence the split.
   "hermesProvider.model.savedElsewherePrefix": "This device is currently using",

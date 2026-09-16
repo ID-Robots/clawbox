@@ -85,8 +85,6 @@ export const sv: Record<string, string> = {
   "hermesProvider.intro":
     "Den här enheten körs på Hermes. Anslut leverantörer och välj standardvalet — status, inloggning och byte sker allt här.",
   "hermesProvider.hero.nativeSwitch": "växlar nativt via Hermes",
-  "hermesProvider.continue": "Fortsätt",
-  "hermesProvider.connected.affirmation": "Ansluten",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ modeller bakom en enda API-nyckel",
@@ -111,7 +109,6 @@ export const sv: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Logga in med {provider}",
   "hermesProvider.oauth.connectedDesc": "Ansluten. OAuth-uppgifterna är aktiva.",
-  "hermesProvider.oauth.cliOnlyDesc": "Inloggning hos den här leverantören sker via Hermes CLI.",
   "hermesProvider.oauth.attendedDesc": "Använder din {provider}-prenumeration. Boxen öppnar inloggningssidan, du godkänner den.",
   "hermesProvider.oauth.cliMissingDesc": "{provider} loggar in via ett eget kommandoradsverktyg som ännu inte är installerat på den här boxen.",
   "hermesProvider.oauth.tabSignIn": "Logga in",
@@ -125,7 +122,6 @@ export const sv: Record<string, string> = {
   "hermesProvider.oauth.connectedBadge": "Ansluten",
   "hermesProvider.oauth.signIn": "Logga in",
   "hermesProvider.oauth.tryAgain": "Försök igen",
-  "hermesProvider.oauth.cliInstructions": "Kör det här i enhetens terminal och öppna sedan den här panelen igen:",
   "hermesProvider.oauth.starting": "Startar inloggning med {provider}...",
   "hermesProvider.oauth.pkceInstructions":
     "En inloggningsflik för {provider} har öppnats. Godkänn åtkomsten där, kopiera koden som visas och klistra in den här.",
@@ -140,7 +136,6 @@ export const sv: Record<string, string> = {
   "hermesProvider.oauth.copied": "Kopierat",
   "hermesProvider.oauth.openVerificationPage": "Öppna verifieringssidan",
   "hermesProvider.oauth.waitingApproval": "Väntar på godkännande...",
-  "hermesProvider.oauth.orPasteKey": "…eller klistra in en API-nyckel nedan i stället.",
   "hermesProvider.oauth.advancedLabel": "Avancerat:",
   "hermesProvider.oauth.dashboardLink": "Hermes kontrollpanel (endast LAN)",
 
@@ -154,7 +149,6 @@ export const sv: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Standardmodell",
   "hermesProvider.model.loading": "Laddar…",
-  "hermesProvider.model.noCredentials": "Inga inloggningsuppgifter för den här leverantören än",
   "hermesProvider.model.noModels": "Inga modeller tillgängliga",
   "hermesProvider.model.savedElsewherePrefix": "Den här enheten använder just nu",
   "hermesProvider.model.savedElsewhereSuffix": ". Om du sparar byter du till {provider}.",
