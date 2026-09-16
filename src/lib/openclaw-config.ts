@@ -24,6 +24,7 @@ import {
 } from "@/lib/openclaw-doctor-ownership";
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
+import { isConfigMutationConflict } from "@/lib/config-conflict";
 
 const exec = promisify(execFile);
 
@@ -111,8 +112,10 @@ export interface OpenclawConfigSetOptions {
  * multiple `config set` calls back-to-back, or a `config set` races with the
  * gateway touching `meta.lastTouchedAt` during a reload, one of the writes
  * can fail with `ConfigMutationConflictError: config changed since last
- * load`. The mutation itself is safe to retry — the next attempt re-reads
- * the fresh hash and converges.
+ * load` — or with the same refusal worded for a human, which names no class at
+ * all. Both spellings are matched by {@link isConfigMutationConflict}. The
+ * mutation itself is safe to retry — the next attempt re-reads the fresh hash
+ * and converges.
  *
  * This helper retries *only* on that specific error (other failures bubble
  * up immediately) with a short linear backoff, so callers don't need to
@@ -140,12 +143,19 @@ export async function runOpenclawConfigSet(
 }
 
 /**
- * Retry `attempt` while it fails with `ConfigMutationConflictError`.
+ * Retry `attempt` while it fails with OpenClaw's config-mutation conflict.
  *
  * Shared by {@link runOpenclawConfigSet} and {@link runOpenclawConfigSetBatch}
  * so both forms of the write survive the same race. Any other failure is
  * rethrown on the first try — a schema rejection does not become valid by
  * being repeated.
+ *
+ * The conflict is recognised by {@link isConfigMutationConflict}, not by the
+ * `ConfigMutationConflictError` class name this used to grep for. The CLI also
+ * words that refusal for a human ("The config file changed while this command
+ * was writing…"), and that spelling carries no class name — so the retry did
+ * not fire for it, a race the next attempt would have settled was reported as a
+ * hard failure, and the CLI's sentence was what the owner read.
  *
  * Retrying is all this does. A rethrown timeout is then settled by the config
  * on disk, one level up in {@link runConfigSetVerified}, because a SIGKILL is
@@ -169,13 +179,12 @@ async function withConfigMutationRetry(
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      const isConflict = /ConfigMutationConflictError/i.test(lastError.message);
-      if (!isConflict || attempt === maxAttempts) {
+      if (!isConfigMutationConflict(lastError) || attempt === maxAttempts) {
         throw lastError;
       }
       const delayMs = baseBackoffMs * attempt;
       console.warn(
-        `[openclaw-config] ConfigMutationConflictError on attempt ${attempt}/${maxAttempts}; retrying after ${delayMs}ms`,
+        `[openclaw-config] config mutation conflict on attempt ${attempt}/${maxAttempts}; retrying after ${delayMs}ms`,
       );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }

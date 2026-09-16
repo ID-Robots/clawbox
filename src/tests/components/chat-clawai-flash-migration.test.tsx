@@ -238,3 +238,94 @@ describe("a failed automatic Flash migration", () => {
     ]);
   });
 });
+
+// The bug this suite's last describe exists for, as the owner met it: a box set
+// up minutes ago, Telegram skipped, the desktop painting for the first time —
+// and the chat panel's first bubble is OpenClaw's config writer refusing a
+// write nobody asked for, in the words it would use in a terminal.
+describe("a migration that lost the config-mutation race", () => {
+  /** What the CLI said, verbatim, in the red bubble on the real box. */
+  const CLI_SENTENCE =
+    "The config file changed while this command was writing (config changed since last load), "
+    + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
+  const BUSY_COPY = translations.en["chat.modelSwitchBusy"];
+
+  /** The route's answer once it knows the conflict by name. */
+  const busyBody = {
+    ok: false,
+    status: 409,
+    json: async () => ({
+      error: "The box was saving its settings at the same moment, so nothing was changed. Try again in a moment.",
+      code: "config_busy",
+    }),
+  };
+
+  it("retries once, and says nothing at all when the retry lands", async () => {
+    let posts = 0;
+    const calls = installFetch({
+      modelPostResponder: async () => {
+        posts += 1;
+        return posts === 1 ? busyBody : { ok: true, json: async () => modelState(FLASH_MODEL) };
+      },
+    });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => { expect(modelWrites(calls)).toHaveLength(2); });
+
+    // A second POST, because only a fresh request re-reads the config — and
+    // then silence, because a collision the box settled by itself is not news.
+    expect(modelWrites(calls)).toEqual([
+      { model: FLASH_MODEL, automatic: true },
+      { model: FLASH_MODEL, automatic: true },
+    ]);
+    expect(document.body.textContent).not.toContain(BUSY_COPY);
+    expect(document.body.textContent).not.toMatch(/config file|last load|Re-run/i);
+  });
+
+  it("says one short translated sentence when the retry loses too", async () => {
+    const calls = installFetch({ modelPostResponder: async () => busyBody });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => { expect(document.body.textContent).toContain(BUSY_COPY); });
+    await settle(calls);
+
+    // Exactly two attempts — one retry, not a loop against a busy config.
+    expect(modelWrites(calls)).toHaveLength(2);
+    expect(occurrences(BUSY_COPY)).toBe(1);
+    expect(document.body.textContent).not.toMatch(/config file|last load|Re-run|openclaw/i);
+  });
+
+  it("translates the CLI's sentence even from a server that sends no code", async () => {
+    // Half a rolling update, or a box that has not taken the server fix yet:
+    // the raw refusal still arrives in `error`, and it still must not be the
+    // first thing the owner reads.
+    const calls = installFetch({
+      modelPostResponder: async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: CLI_SENTENCE }),
+      }),
+    });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => { expect(document.body.textContent).toContain(BUSY_COPY); });
+    await settle(calls);
+
+    expect(document.body.textContent).not.toContain(CLI_SENTENCE);
+    expect(document.body.textContent).not.toMatch(/Re-run the same command/i);
+  });
+
+  it("still relays a failure that is not the conflict", async () => {
+    // The guard is narrow on purpose: an error the owner can act on keeps its
+    // own words rather than being softened into "try again in a moment".
+    const calls = installFetch({
+      modelPostResponder: async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: "Selected AI provider is not configured" }),
+      }),
+    });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await settle(calls);
+
+    expect(occurrences("Selected AI provider is not configured")).toBe(1);
+    expect(document.body.textContent).not.toContain(BUSY_COPY);
+  });
+});

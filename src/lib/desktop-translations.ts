@@ -209,6 +209,11 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.emailBatch.draftUnconfirmed": "Sent or not — the box could not tell. Check your Sent folder before sending it again.",
     "chat.emailBatch.requestFailed": "The approval could not be delivered. Nothing was sent; the messages are still in Settings → Email.",
     "chat.emailBatch.resultNone": "Nothing was sent — the approval did not get through. The messages are still in Settings → Email.",
+    // What the chat says when a model switch lost a race with another write to
+    // this box's settings — and lost it twice, the retry included. It names the
+    // state, not the file and not a command: the owner has nothing to repair,
+    // only a moment to wait.
+    "chat.modelSwitchBusy": "The box was saving its settings, so the chat model did not change. Try again in a moment.",
     "chat.approval.title": "Waiting for your approval",
     "chat.approval.summary": "The assistant is asking to do this. Nothing happens until you answer.",
     "chat.approval.allowOnce": "Allow once",

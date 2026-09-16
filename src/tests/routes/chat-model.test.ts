@@ -1551,6 +1551,45 @@ describe("/setup-api/chat/model", () => {
       expect(response.status).toBe(200);
       expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
     });
+
+    it("answers the retryable code when the append lost the config race", async () => {
+      // The same passing collision as the primary write, one step earlier. The
+      // 502 below it says "Re-save it in Settings", which is the wrong remedy
+      // here — the provider is fine, another writer simply held the config —
+      // and a 502 gives the client nothing to retry on.
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(
+        "The config file changed while this command was writing (config changed since last load), "
+        + "so nothing was changed. Re-run the same command to pick up the new file and try again.",
+      ));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await pick("google/gemini-3-pro");
+      const body = await response.json();
+      errorSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      expect(JSON.stringify(body)).not.toMatch(/config file|last load|Re-run|Re-save/i);
+    });
+
+    it("keeps the re-save remedy for a failure that is not the race", async () => {
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("EACCES: permission denied"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await pick("google/gemini-3-pro");
+      const body = await response.json();
+      errorSpy.mockRestore();
+
+      expect(response.status).toBe(502);
+      expect(body.code).toBeUndefined();
+      expect(body.error).toMatch(/Re-save it in Settings/);
+    });
   });
 
   describe("the anthropic plugin around the primary write", () => {
@@ -2095,6 +2134,71 @@ describe("/setup-api/chat/model", () => {
       expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
       expect(body.error).toMatch(/OpenAI Codex does not list gpt-5.5/);
       expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a switch that lost the config-mutation race", () => {
+    // The first screen after setup, reproduced. The desktop paints, the chat
+    // opens and normalizes the ClawBox AI alias through this route, while the
+    // ClawBox AI connect is still restarting the gateway and the timezone
+    // adopter is writing the browser's zone. One `openclaw config set` loses
+    // the content-hash check and the CLI words its refusal for a terminal —
+    // which is what the owner read, in a red bubble, before touching anything.
+    const HUMANIZED_CONFLICT =
+      "The config file changed while this command was writing (config changed since last load), "
+      + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
+
+    async function switchToFlash(): Promise<Response> {
+      return POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek/deepseek-v4-flash", automatic: true }),
+      }));
+    }
+
+    it("answers a retryable code, and never the CLI's own sentence", async () => {
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(HUMANIZED_CONFLICT));
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const response = await switchToFlash();
+      const body = await response.json();
+      warnSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      // The whole point: not one word of the CLI's refusal leaves the server.
+      expect(JSON.stringify(body)).not.toMatch(/config file|last load|Re-run|openclaw/i);
+      expect(body.error).toMatch(/saving its settings/i);
+      // Nothing was written, so nothing has to be applied.
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("answers the same for the class-named spelling of the conflict", async () => {
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(
+        new Error("ConfigMutationConflictError: config changed since last load"),
+      );
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const response = await switchToFlash();
+      const body = await response.json();
+      warnSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      expect(JSON.stringify(body)).not.toMatch(/ConfigMutationConflictError/);
+    });
+
+    it("leaves every other failure reporting itself as before", async () => {
+      // The conflict branch must not swallow a real failure into "try again in
+      // a moment": a switch that can never succeed has to say so.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error("EACCES: permission denied"));
+
+      const response = await switchToFlash();
+      const body = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(body.code).toBeUndefined();
+      expect(body.error).toBe("EACCES: permission denied");
     });
   });
 });

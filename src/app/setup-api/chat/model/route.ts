@@ -17,6 +17,11 @@ import {
   setProviderPlugins,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
+import {
+  CONFIG_BUSY_ERROR_CODE,
+  CONFIG_BUSY_MESSAGE,
+  isConfigMutationConflict,
+} from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
@@ -1167,6 +1172,19 @@ export async function POST(request: Request) {
                 ]);
               } catch (err) {
                 console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
+                // A collision here is the same passing state as the one the
+                // outer catch answers, and "Re-save it in Settings" is the
+                // wrong remedy for it — the provider is fine, another writer
+                // simply held the config. Answering the conflict by name is
+                // also what gives the client its one retry; the 502 below
+                // cannot be retried, because every other failure it covers
+                // would still be there a second later.
+                if (isConfigMutationConflict(err)) {
+                  return NextResponse.json(
+                    { error: CONFIG_BUSY_MESSAGE, code: CONFIG_BUSY_ERROR_CODE },
+                    { status: 409, headers: { "Cache-Control": "no-store" } },
+                  );
+                }
                 return NextResponse.json(
                   {
                     error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
@@ -1492,6 +1510,24 @@ export async function POST(request: Request) {
       { status: gatewayWarning ? 502 : 200, headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
+    // A config-mutation conflict is the box racing ITSELF, not a failed switch:
+    // the desktop's very first render opens the chat, which normalizes the
+    // ClawBox AI alias through this route, while the ClawBox AI connect is
+    // still restarting the gateway and the timezone adopter is writing the
+    // browser's zone. One `openclaw config set` loses, and the CLI words its
+    // refusal for a terminal — "Re-run the same command to pick up the new
+    // file and try again". `runOpenclawConfigSetBatch` has already retried
+    // that four times against a freshly loaded file by the time it reaches
+    // here, so this is the collision that outlived the retries: a transient
+    // state to name, never a command to hand the owner. The CLI's sentence
+    // stops at this line, and the code is what the client translates.
+    if (isConfigMutationConflict(err)) {
+      console.warn("[chat/model] the config was being written elsewhere; the model was not switched");
+      return NextResponse.json(
+        { error: CONFIG_BUSY_MESSAGE, code: CONFIG_BUSY_ERROR_CODE },
+        { status: 409, headers: { "Cache-Control": "no-store" } },
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to switch chat model" },
       { status: 500 },
