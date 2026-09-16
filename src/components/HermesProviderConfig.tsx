@@ -106,6 +106,13 @@ interface Props {
   onNext?: () => void;
   testId?: string;
   /**
+   * The wizard's own heading and intro ("Connect AI Provider" / "Select your
+   * AI provider…"), so step 4 reads the same on both editions. Settings leaves
+   * them unset and keeps this panel's own title.
+   */
+  title?: string;
+  description?: string;
+  /**
    * Select this provider's row, so a deep-link into Settings lands on the panel
    * that configures it rather than merely on the section.
    */
@@ -147,18 +154,26 @@ export default function HermesProviderConfig({
   embedded,
   onNext,
   testId,
+  title,
+  description,
   requestedProviderId,
   providerSelectionRequest = 0,
 }: Props) {
   const { t } = useT();
   const uid = useId();
+  // Wizard only: the list opens on the one recommended card, the rest a tap
+  // away — the same shape as the OpenClaw step. Settings always shows every
+  // row (this panel is the connection strip there).
+  const [showMoreProviders, setShowMoreProviders] = useState(false);
 
   // Seeded from the DEVICE's configured provider by the mount effect below;
   // "openrouter" is only the pre-resolution placeholder. Under REQ 1's scoping
   // an unseeded panel is actively misleading — it would present OpenRouter's
   // scoped list, with OpenRouter's recommended default preselected, for a
   // device running something else, one Save click away from switching it.
-  const [selectedProvider, setSelectedProvider] = useState<string>("openrouter");
+  // In the wizard the recommended card is the one that opens selected, exactly
+  // like the OpenClaw step; the device seed below still wins once it answers.
+  const [selectedProvider, setSelectedProvider] = useState<string>(embedded ? "openrouter" : CLAWAI_PROVIDER);
   // Set as soon as the user touches a radio. The async device reads below must
   // never yank the selection out from under a click that already happened.
   const userPickedProviderRef = useRef(false);
@@ -313,6 +328,9 @@ export default function HermesProviderConfig({
   }, [pickProvider, statusById, setDefault]);
 
   const isClawaiSelected = selectedProvider === CLAWAI_PROVIDER;
+  // Collapsed = only the selected row is on screen, behind it "Show more
+  // providers…". Never in Settings, where every row's state must stay visible.
+  const listCollapsed = !embedded && !showMoreProviders;
 
   // ClawBox AI — a managed provider that still runs THROUGH Hermes.
   const [clawai, setClawai] = useState<ClawaiState | null>(null);
@@ -1015,14 +1033,17 @@ export default function HermesProviderConfig({
         )}
         {/* Embedded in Settings the window already owns the page's h1; one
             document with two of them claims two titles. */}
-        <Title className="text-xl sm:text-2xl font-bold font-display mb-1">{t("hermesProvider.title")}</Title>
+        <Title className="text-xl sm:text-2xl font-bold font-display mb-1">{title ?? t("hermesProvider.title")}</Title>
         <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
-          {t("hermesProvider.intro")}
+          {description ?? t("hermesProvider.intro")}
         </p>
 
         {/* THE HERO — what is answering right now. Absent until the box has a
-            default at all, which is the honest state during first-run setup. */}
-        {defaultRow && (
+            default at all, which is the honest state during first-run setup.
+            Settings only: the wizard step is the OpenClaw shape — one
+            recommended card, no default hero (the default model is a Settings
+            → Providers concern after setup). */}
+        {embedded && defaultRow && (
           <ProviderDefaultHero
             row={defaultRow}
             model={heroModel}
@@ -1043,6 +1064,7 @@ export default function HermesProviderConfig({
           className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden"
         >
           {/* Identical to the OpenClaw wizard's row — same component, not a lookalike. */}
+          {(!listCollapsed || isClawaiSelected) && (
           <ClawboxAiProviderRow
             radioName="hermes-ai-provider"
             selected={isClawaiSelected}
@@ -1055,7 +1077,8 @@ export default function HermesProviderConfig({
             ) : null}
             statusSlot={rowStatus(CLAWAI_PROVIDER)}
           />
-          {HERMES_PANEL_PROVIDERS.map((provider) => {
+          )}
+          {HERMES_PANEL_PROVIDERS.filter((provider) => !listCollapsed || provider.id === selectedProvider).map((provider) => {
             const descriptionKey = PROVIDER_DESCRIPTION_KEYS[provider.id];
             return (
               <ProviderRadioRow
@@ -1071,6 +1094,19 @@ export default function HermesProviderConfig({
               />
             );
           })}
+          {listCollapsed && (
+            <button
+              type="button"
+              onClick={() => setShowMoreProviders(true)}
+              aria-expanded={false}
+              // Same control as the OpenClaw step's: no border-top of its own,
+              // the row above already draws the divider.
+              className="flex w-full min-h-[48px] items-center gap-2 px-4 py-3 text-[length:var(--t-4)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] transition-colors"
+            >
+              <span className="material-symbols-rounded shrink-0" aria-hidden="true" style={{ fontSize: 18 }}>expand_more</span>
+              {t("ai.showMore")}
+            </button>
+          )}
         </div>
 
         {summary?.degraded && (
@@ -1443,9 +1479,9 @@ export default function HermesProviderConfig({
           <button
             type="button"
             onClick={() => onNext?.()}
-            className="mt-7 w-full rounded-xl bg-[var(--surface-card)] text-[var(--text-primary)] font-semibold py-3 hover:opacity-90 transition-opacity"
+            className="mt-7 w-full min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] transition-colors"
           >
-            {t("hermesProvider.continue")}
+            {t("ai.skipUseLocalOnly")}
           </button>
         )}
       </div>

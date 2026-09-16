@@ -19,9 +19,12 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
 // Hermes' (hermesProvider.*) and the connection vocabulary is the edition-
 // neutral one the removed strip already had translated (settings.providers.*).
 vi.mock("@/lib/i18n", async () => {
+  const { translations } = await import("@/lib/translations");
   const { providerEn } = await import("@/lib/edition-translations/en-provider");
   const { desktopTranslations } = await import("@/lib/desktop-translations");
-  const table: Record<string, string> = { ...desktopTranslations.en, ...providerEn };
+  // The wizard shell strings ("Show more providers…", the local-only skip) live
+  // in the base table; the provider panel's own strings in the other two.
+  const table: Record<string, string> = { ...translations.en, ...desktopTranslations.en, ...providerEn };
   return {
     I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
     useT: () => ({
@@ -392,11 +395,17 @@ describe("staying live", () => {
   });
 });
 
+/** The wizard opens on ClawBox AI alone; the other providers sit behind one tap. */
+async function expandWizardProviders() {
+  fireEvent.click(await screen.findByRole("button", { name: /Show more providers/i }));
+}
+
 describe("in the setup wizard (not embedded)", () => {
   // The wizard passes an onNext and NO `embedded`; Settings passes `embedded`
   // and no onNext. That one prop is the whole surface distinction.
   it("hides the default-model dropdown that Settings shows for the same provider", async () => {
     const { unmount } = render(<HermesProviderConfig testId="hermes-wizard" onNext={vi.fn()} />);
+    await expandWizardProviders();
     fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
     // Give the row's scoped controls a beat to render.
     await new Promise((r) => setTimeout(r, 50));
@@ -418,6 +427,7 @@ describe("in the setup wizard (not embedded)", () => {
     const onNext = vi.fn();
     render(<HermesProviderConfig testId="hermes-wizard" onNext={onNext} />);
 
+    await expandWizardProviders();
     fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
 
@@ -438,6 +448,7 @@ describe("in the setup wizard (not embedded)", () => {
     const onNext = vi.fn();
     render(<HermesProviderConfig testId="hermes-wizard" onNext={onNext} />);
 
+    await expandWizardProviders();
     fireEvent.click(await screen.findByRole("radio", { name: /OpenRouter/ }));
     fireEvent.change(
       await screen.findByLabelText(/OpenRouter API key/i),

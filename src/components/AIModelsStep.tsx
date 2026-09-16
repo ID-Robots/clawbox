@@ -2204,6 +2204,10 @@ export default function AIModelsStep({
       embedded={embedded}
       onNext={onNext}
       testId={testId}
+      // The wizard's heading and intro, so step 4 reads alike on both editions;
+      // Settings passes nothing and keeps the panel's own title.
+      title={embedded ? undefined : resolvedTitle}
+      description={embedded ? undefined : resolvedDescription}
       requestedProviderId={requestedProviderId}
       providerSelectionRequest={providerSelectionRequest}
     />;
