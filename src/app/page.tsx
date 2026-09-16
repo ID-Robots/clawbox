@@ -57,6 +57,7 @@ import {
 } from "@/lib/builtin-wallpapers";
 import { TOAST_EVENT } from "@/components/ToastHost";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
+import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
 import {
   layoutIcons,
   layoutsEqual,
@@ -877,6 +878,15 @@ function ChromeDesktopInner() {
       window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
       window.removeEventListener(NEW_APP_EVENT, handler);
     };
+  }, []);
+
+  // Chat-first on a phone and in the installed home-screen app: the page lands
+  // in the chat, with the desktop one tap behind it (the chat's Desktop button,
+  // the Android back gesture). Once per page load, so closing the chat to reach
+  // the desktop sticks until the next launch. The desktop on a big screen with
+  // a mouse is unchanged — see src/lib/mobile-chat-first.ts.
+  useEffect(() => {
+    if (shouldOpenChatFirst(readChatFirstEnvironment(window))) setChatOpen(true);
   }, []);
 
   // ─── Mascot visibility ───
@@ -1701,6 +1711,10 @@ function ChromeDesktopInner() {
       // Close things in priority order
       if (launcherOpen) { setLauncherOpen(false); return; }
       if (trayOpen) { setTrayOpen(false); return; }
+      // On a phone the chat is full-screen and above every window, so it is
+      // the top thing Back can close — and closing it is how the phone gets
+      // from the chat it opened in to the desktop behind it.
+      if (isMobile && chatOpen) { setChatOpen(false); return; }
 
       // Close topmost non-minimized window
       const visible = openWindows.filter(w => !w.minimized);
@@ -1713,7 +1727,7 @@ function ChromeDesktopInner() {
 
     window.addEventListener("popstate", handleBack);
     return () => window.removeEventListener("popstate", handleBack);
-  }, [launcherOpen, trayOpen, openWindows, closeWindow]);
+  }, [launcherOpen, trayOpen, openWindows, closeWindow, isMobile, chatOpen]);
 
   // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
   const openAppRef = useRef(openApp);

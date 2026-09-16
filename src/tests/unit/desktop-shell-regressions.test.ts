@@ -53,6 +53,21 @@ describe("the docked chat's layout", () => {
   });
 });
 
+describe("chat-first on a phone", () => {
+  it("opens the chat once on load where src/lib/mobile-chat-first.ts says the page lands in it", () => {
+    expect(src).toMatch(/import \{ readChatFirstEnvironment, shouldOpenChatFirst \} from "@\/lib\/mobile-chat-first";/);
+    expect(src).toMatch(/useEffect\(\(\) => \{\s*if \(shouldOpenChatFirst\(readChatFirstEnvironment\(window\)\)\) setChatOpen\(true\);\s*\}, \[\]\);/);
+  });
+
+  it("lets Android's Back take a phone from the chat to the desktop", () => {
+    const handler = src.match(/const handleBack = [\s\S]*?window\.addEventListener\("popstate", handleBack\);/)?.[0] ?? "";
+    expect(handler).toMatch(/if \(isMobile && chatOpen\) \{ setChatOpen\(false\); return; \}/);
+    // Before any window: on a phone the chat is drawn above all of them.
+    expect(handler.indexOf("isMobile && chatOpen")).toBeLessThan(handler.indexOf("closeWindow(top.id)"));
+    expect(src).toMatch(/\}, \[launcherOpen, trayOpen, openWindows, closeWindow, isMobile, chatOpen\]\);/);
+  });
+});
+
 describe("the owner-notice ring", () => {
   it("judges an entry's age on the box's own clock, from the response's Date header", () => {
     expect(src).toMatch(/const serverNow = Date\.parse\(res\.headers\.get\("date"\) \?\? ""\);/);

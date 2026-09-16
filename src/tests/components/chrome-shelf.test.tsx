@@ -242,9 +242,23 @@ describe("the phone bar", () => {
     expect(screen.getByTestId("shelf-app-settings")).toBeInTheDocument();
   });
 
+  it("draws the chat button on a portrait phone too — the way back to the chat from the desktop", () => {
+    // A phone lands in the chat (src/lib/mobile-chat-first.ts); once the owner
+    // has gone to the desktop, this crab is how they get back to it.
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 844, configurable: true });
+    const onChatClick = vi.fn();
+    render(<ChromeShelf {...baseProps} apps={[makeApp("settings", "Settings")]} showChatButton onChatClick={onChatClick} />);
+
+    const chat = screen.getByTestId("shelf-chat-button");
+    expect(screen.getByTestId("shelf-mobile-apps")).not.toContainElement(chat);
+    fireEvent.click(chat);
+    expect(onChatClick).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the chat button in the tray, out of the scrolling app row, in the desktop bar's order", () => {
     // A phone in landscape (or a small tablet): narrower than 768 and wider
-    // than it is tall — the one phone bar that draws the crab at all. It sat
+    // than it is tall — the phone bar that also draws the clock. It sat
     // in the app row for a moment, after every open app: with a handful open
     // the row overflows, and the one button that opens the assistant scrolled
     // out of sight with them.

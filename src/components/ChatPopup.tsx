@@ -5603,6 +5603,81 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
 
+  // The microphone. Compact (36px, in the composer's button row) on a big
+  // screen; LARGE on a phone — a 72px round button beside the text box, bottom
+  // right where the thumb already is, because on a phone voice is often the
+  // whole interaction (the owner talks to the box while driving) and a 36px
+  // icon among four others is a target you have to look at to hit. Same
+  // handlers, same disabled rule and the same test ids either way; only the
+  // size and the recording state's weight differ — the large one turns solid
+  // red with a stop square and a pulsing ring, readable at a glance.
+  const renderVoiceButton = (large: boolean) => {
+    if (voice.state === 'recording') {
+      return (
+        <button
+          onClick={stopRecording}
+          title={t("chat.voice.stop")}
+          aria-label={t("chat.voice.stop")}
+          data-testid="voice-stop"
+          data-size={large ? 'large' : 'compact'}
+          className={large ? 'chat-voice-large chat-voice-large--recording' : undefined}
+          style={large ? undefined : {
+            width: 36, height: 36, borderRadius: 10, border: 'none',
+            background: 'rgba(239,68,68,0.25)', color: '#ef4444',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: large ? 38 : 20 }}>{large ? 'stop' : 'stop_circle'}</span>
+        </button>
+      )
+    }
+    const disabled = status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'
+    // On an origin the browser will not open a microphone on, the button says
+    // WHY on hover and to a screen reader, instead of naming an action it
+    // cannot perform. It stays clickable so the same reason lands in the
+    // status row for anyone who tries.
+    const label = captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")
+    const icon = voice.state === 'transcribing' ? 'hourglass_top' : 'mic'
+    if (large) {
+      return (
+        <button
+          onClick={startRecording}
+          disabled={disabled}
+          title={label}
+          aria-label={label}
+          data-testid="voice-record"
+          data-size="large"
+          className={voice.state === 'transcribing' ? 'chat-voice-large chat-voice-large--busy' : 'chat-voice-large'}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 38 }}>{icon}</span>
+        </button>
+      )
+    }
+    return (
+      <button
+        onClick={startRecording}
+        disabled={disabled}
+        title={label}
+        aria-label={label}
+        data-testid="voice-record"
+        data-size="compact"
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: 'rgba(255,255,255,0.06)',
+          color: voice.state === 'transcribing' ? '#f97316' : 'rgba(255,255,255,0.4)',
+          cursor: status === 'connected' && voice.state === 'idle' ? 'pointer' : 'default',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'all 0.15s',
+        }}
+        onMouseEnter={(e) => { if (status === 'connected' && voice.state === 'idle') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; if (voice.state !== 'transcribing') e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 20 }}>{icon}</span>
+      </button>
+    )
+  }
+
   return (
     <div
       data-testid="chat-popup"
@@ -5617,7 +5692,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         ...(panelMode
           ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 16 }
           : mobile
-            ? { width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0 }
+            ? {
+                width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0,
+                // Full-screen on a phone, the installed app included: the header
+                // must clear the status bar / notch and the composer — with the
+                // big microphone in it — the gesture bar, or the one control a
+                // driver reaches for sits under the system's own.
+                paddingTop: 'env(safe-area-inset-top, 0px)',
+                paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+                boxSizing: 'border-box',
+              }
             : {
                 width: size.w,
                 minWidth: MIN_CHAT_WIDTH,
@@ -5953,6 +6037,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        {mobile ? (
+          // On a phone the chat is where the page LANDS (src/lib/mobile-chat-first.ts),
+          // so closing it is not dismissing a popup but going to the desktop
+          // behind it — said in words, on a finger-sized target, rather than
+          // as a small X that reads as "quit".
+          <button
+            data-testid="chat-popup-close"
+            onClick={onClose}
+            aria-label={t("chat.showDesktop")}
+            title={t("chat.showDesktop")}
+            style={{
+              background: 'rgba(255,255,255,0.06)', border: 'none', color: 'rgba(255,255,255,0.75)',
+              cursor: 'pointer', minHeight: 36, padding: '0 10px', borderRadius: 10,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              fontSize: 12.5, fontFamily: 'inherit', flexShrink: 0,
+            }}
+          >
+            <span aria-hidden className="material-symbols-rounded" style={{ fontSize: 18 }}>apps</span>
+            <span>{t("chat.desktop")}</span>
+          </button>
+        ) : (
         <button
           data-testid="chat-popup-close"
           onPointerDown={stopHeaderDrag}
@@ -5970,6 +6075,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             <path d="M18 6L6 18M6 6l12 12" />
           </svg>
         </button>
+        )}
       </div>
 
       {/* Messages area — sits under the header bar in the flow, so it needs
@@ -6682,6 +6788,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
+        {/* On a phone the microphone leaves the button row and stands beside
+            the text box at thumb size — see renderVoiceButton. */}
+        <div style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 10 } : { display: 'contents' }}>
         <textarea
           ref={inputRef}
           value={input}
@@ -6706,6 +6815,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
             resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
             fontFamily: 'inherit',
+            ...(mobile ? { flex: 1, minWidth: 0 } : {}),
           }}
           onInput={(e) => {
             const el = e.currentTarget
@@ -6713,6 +6823,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
+        {caps.canTranscribe && mobile && renderVoiceButton(true)}
+        </div>
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
             rule and a flex-basis — see the block there. */}
@@ -6744,50 +6856,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             — the route itself is edition-neutral, so what actually decides is
             whether this device holds a ClawBox AI credential. Offering the
             button without one would promise something that cannot work. */}
-        {caps.canTranscribe && (
-          voice.state === 'recording' ? (
-            <button
-              onClick={stopRecording}
-              title={t("chat.voice.stop")}
-              aria-label={t("chat.voice.stop")}
-              data-testid="voice-stop"
-              style={{
-                width: 36, height: 36, borderRadius: 10, border: 'none',
-                background: 'rgba(239,68,68,0.25)', color: '#ef4444',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0,
-              }}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>stop_circle</span>
-            </button>
-          ) : (
-            <button
-              onClick={startRecording}
-              disabled={status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'}
-              // On an origin the browser will not open a microphone on, the
-              // button says WHY on hover and to a screen reader, instead of
-              // naming an action it cannot perform. It stays clickable so the
-              // same reason lands in the status row for anyone who tries.
-              title={captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")}
-              aria-label={captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")}
-              data-testid="voice-record"
-              style={{
-                width: 36, height: 36, borderRadius: 10, border: 'none',
-                background: 'rgba(255,255,255,0.06)',
-                color: voice.state === 'transcribing' ? '#f97316' : 'rgba(255,255,255,0.4)',
-                cursor: status === 'connected' && voice.state === 'idle' ? 'pointer' : 'default',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, transition: 'all 0.15s',
-              }}
-              onMouseEnter={(e) => { if (status === 'connected' && voice.state === 'idle') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; if (voice.state !== 'transcribing') e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
-                {voice.state === 'transcribing' ? 'hourglass_top' : 'mic'}
-              </span>
-            </button>
-          )
-        )}
+        {caps.canTranscribe && !mobile && renderVoiceButton(false)}
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}

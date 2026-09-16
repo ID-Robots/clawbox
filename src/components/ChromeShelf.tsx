@@ -90,8 +90,9 @@ export default function ChromeShelf({
   const openedAt = useRef(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
-  // Phone portrait: hide chat crab + ClawKeep shield to fit launcher / clock /
-  // fullscreen / power. Tablet portrait and phone landscape keep the full bar.
+  // Phone portrait: hide the ClawKeep shield and the clock to fit the bar.
+  // The chat crab STAYS — a phone lands in the chat and this is its way back
+  // from the desktop. Tablet portrait and phone landscape keep the full bar.
   const [isPortraitPhone, setIsPortraitPhone] = useState(false);
 
   useEffect(() => {
@@ -375,7 +376,7 @@ export default function ChromeShelf({
                 overflows, and the one button that opens the assistant would
                 scroll out of sight with them. */}
             <div className="flex-none flex items-center gap-1">
-              {showChatButton && !isPortraitPhone && (
+              {showChatButton && (
                 <button
                   onClick={onChatClick}
                   data-testid="shelf-chat-button"

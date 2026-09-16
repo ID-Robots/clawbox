@@ -391,6 +391,42 @@ h6 {
  * and a readable pill row no longer fit on one line, the pills take a line of
  * their own — see .chat-header-pills' flex-basis, which is what decides when
  * that happens. */
+/* The phone chat's microphone: 72px, round, beside the text box. Solid orange
+ * at rest, solid red with a pulsing ring while it records, so the state reads
+ * at a glance from arm's length. See renderVoiceButton in ChatPopup.tsx. */
+.chat-voice-large {
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
+  border-radius: 9999px;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+  background: linear-gradient(145deg, #fb923c, #ea580c);
+  box-shadow: 0 6px 18px rgba(234, 88, 12, 0.35);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.12s ease, background 0.15s ease, opacity 0.15s ease;
+}
+.chat-voice-large:active:not(:disabled) { transform: scale(0.94); }
+.chat-voice-large:focus-visible { outline: 3px solid rgba(255, 255, 255, 0.8); outline-offset: 3px; }
+.chat-voice-large:disabled { cursor: default; opacity: 0.45; box-shadow: none; }
+.chat-voice-large--busy:disabled { opacity: 0.85; color: #fed7aa; background: rgba(249, 115, 22, 0.28); }
+.chat-voice-large--recording {
+  background: #ef4444;
+  box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .chat-voice-large--recording { animation: chat-voice-ring 1.4s ease-out infinite; }
+}
+@keyframes chat-voice-ring {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+  100% { box-shadow: 0 0 0 18px rgba(239, 68, 68, 0); }
+}
+
 .chat-composer-row {
   display: flex;
   align-items: center;
