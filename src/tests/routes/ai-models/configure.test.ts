@@ -2929,12 +2929,11 @@ describe("POST /setup-api/ai-models/configure", () => {
       );
     });
 
-    it("treats an outcome it does not recognise as a completed doctor", async () => {
-      // The inertness these outcomes are RETURNED for, pinned as a test so the
-      // next reader does not tidy the comparison into `!== "completed"`. Dozens
-      // of suites replace this module with a hand-written factory, and an
-      // omitted `runOpenclawDoctorFix` answers `undefined` — under the negated
-      // form every one of their ordinary saves became this 502 rollback.
+    it("leaves an ABSENT doctor mock inert, which dozens of suites depend on", async () => {
+      // The inertness these outcomes are RETURNED for. `undefined` is not in
+      // the type — it is what an omitted member answers under the hand-written
+      // factories that replace this module across the suite — and treating it
+      // as a refusal turned every one of their ordinary saves into a 502.
       vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(undefined as never);
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -2948,6 +2947,34 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(res.status).toBe(200);
       expect(mockFs.rename).not.toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
+    it("fails closed on an outcome it has never heard of", async () => {
+      // The other side of that exemption, and the reason it is spelt
+      // `!== undefined && !== "completed"` rather than a list of the blocked
+      // names: an outcome added to the union later is not proof the migration
+      // ran, so it rolls back by default instead of answering 200. The generic
+      // sentence is the right one — this branch cannot describe a cause it does
+      // not know.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("blocked-by-something-new" as never);
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/Credential migration failed/);
+      expect(mockFs.rename).toHaveBeenCalledWith(
         expect.stringMatching(/auth-profiles\.json$/),
         expect.stringMatching(/auth-profiles\.json\.failed-/),
       );

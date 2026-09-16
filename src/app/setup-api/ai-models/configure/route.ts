@@ -2839,14 +2839,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // the command that is blocked, and he can do nothing with it.
       let doctorBlockedBy: OpenclawDoctorFixOutcome | null = null;
       try {
-        // Compared against the BLOCKED values, never `!== "completed"`. Fifty-
-        // nine suites replace `@/lib/openclaw-config` with a hand-written
-        // factory, and an omitted `runOpenclawDoctorFix` answers `undefined`,
-        // which is not "completed" either — so the negated form turns every one
-        // of those suites' ordinary saves into this rollback. That inertness is
-        // the whole reason these outcomes are returned rather than thrown.
-        const outcome = await runOpenclawDoctorFix();
-        if (outcome === "blocked-by-legacy-exec-approvals" || outcome === "blocked-by-service-ownership") {
+        // TWO rules at once, and they pull in opposite directions.
+        //
+        // Fail closed on anything that is not a completed doctor, named
+        // outcomes or not: a value this branch has never heard of is not proof
+        // that the migration ran, and a legacy auth-profiles.json left behind
+        // is what stops an OpenClaw 2 gateway from starting. A future outcome
+        // added to the union therefore rolls back by default and gets the
+        // generic sentence, rather than silently answering 200.
+        //
+        // But `undefined` is EXEMPT, and deliberately. `undefined` is not in
+        // the type: it is what an omitted member answers under the hand-written
+        // factories that dozens of suites replace `@/lib/openclaw-config` with,
+        // and treating it as a refusal turns every one of their ordinary saves
+        // into this 502. That inertness is the whole reason these outcomes are
+        // returned rather than thrown, and it is load-bearing for the suite.
+        const outcome: OpenclawDoctorFixOutcome | undefined = await runOpenclawDoctorFix();
+        if (outcome !== undefined && outcome !== "completed") {
           doctorBlockedBy = outcome;
           // Into the SAME failure path, deliberately: the v1/v2 decision below
           // is what says whether the legacy file may stay, and a second copy of
