@@ -11,6 +11,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import {
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_GIT_PLACEHOLDER,
+} from "@/lib/coding-git-identity";
 
 // Starts real git processes: the 5 s default is not enough on a loaded runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -67,6 +72,20 @@ let restore: () => void;
 
 function git(dir: string, ...args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
+}
+
+/**
+ * Write the owner's data/config.json — the real one the real config store
+ * reads, under this test's own CLAWBOX_ROOT.
+ *
+ * NOT a mock of `@/lib/config-store`: that module captures `CONFIG_ROOT` at
+ * import time, and a mock factory spreading the original snapshots it once for
+ * the whole file. Every later test would then measure its fences against an
+ * earlier test's temp directory — which is how mocking it here first let a
+ * source inside the ClawBox checkout be imported.
+ */
+function storeConfig(values: Record<string, unknown>): void {
+  fs.writeFileSync(path.join(home, "clawbox", "data", "config.json"), JSON.stringify(values));
 }
 
 beforeEach(async () => {
@@ -131,6 +150,43 @@ describe("importFolder", () => {
     expect(git(path.join(projects, "old-site"), "log", "--oneline")).toMatch(/Imported from /);
     // The source is exactly as it was.
     expect(fs.existsSync(path.join(src, "node_modules", "left-pad", "index.js"))).toBe(true);
+  });
+
+  it("authors the first commit as the owner, never as an address nobody owns", async () => {
+    // THE DEFECT THIS PINS. This function stamped `ClawBox <clawbox@localhost>`
+    // into the new repository's own config. The coding agent's identity
+    // resolver reads a project's `.git/config` FIRST — by design, because a
+    // repository the owner commits to by hand carries the identity they want —
+    // so the box's own mark outranked the Commit author setting for the life of
+    // the project, and every commit the agent made in an imported folder was
+    // authored by an address no GitHub account owns and failed the Vercel
+    // deployment check.
+    storeConfig({
+      [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",
+      [CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "owner@example.com",
+    });
+    const src = makeSource("fresh-site");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "fresh-site");
+    expect(git(dir, "log", "-1", "--format=%an <%ae>")).toBe("Box Owner <owner@example.com>");
+    // And the mark left behind is the owner's too, so the resolver reads back
+    // an identity they chose rather than one the box invented for them.
+    expect(git(dir, "config", "user.email")).toBe("owner@example.com");
+    expect(git(dir, "config", "user.name")).toBe("Box Owner");
+  });
+
+  it("still gives a repository an identity when nothing at all is configured", async () => {
+    // The floor, unchanged: a box nobody has told anything must still be able
+    // to make that first commit rather than fail with "Committer identity
+    // unknown". The placeholder is recognised as the box's own mark elsewhere,
+    // so it never outvotes a setting the owner fills in later.
+    const src = makeSource("bare-site");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "bare-site");
+    expect(git(dir, "log", "--oneline")).toMatch(/Imported from /);
+    expect(git(dir, "config", "user.email")).toBe(CODING_GIT_PLACEHOLDER.email);
   });
 
   it("keeps a folder's own history rather than starting one", async () => {

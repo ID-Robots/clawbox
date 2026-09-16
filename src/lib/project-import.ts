@@ -47,6 +47,7 @@ import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { isInside, isProtectedFilePath } from "@/lib/file-guard";
 import { CLAWBOX_MANIFEST_FILE } from "@/lib/clawbox-manifest";
 import { githubStatus } from "@/lib/coding-github";
+import { resolveCodingGitIdentity } from "@/lib/coding-git-identity";
 
 /** A folder name the project folder will take, from a repository or folder name. */
 export function importFolderName(raw: string): string {
@@ -84,9 +85,6 @@ const CLONE_TIMEOUT_MS = 10 * 60_000;
 const REPOS_PER_PAGE = 100;
 /** Pages read: the owner picks from a list, and three hundred rows is a list nobody scrolls. */
 const REPOS_MAX_PAGES = 3;
-
-const COMMIT_NAME = "ClawBox";
-const COMMIT_EMAIL = "clawbox@localhost";
 
 function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<ChildResult> {
   return runChild(bin, args, {
@@ -498,14 +496,34 @@ async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: 
  * Give an imported folder a repository of its own when it has none, with one
  * commit that says where it came from — a project is listed by its history,
  * and a run's first commit should not be "everything".
+ *
+ * WHO that commit is by is RESOLVED, not a constant. This function used to
+ * stamp `ClawBox <clawbox@localhost>` into the new repository's own config, and
+ * that address outlived the import: the coding agent's identity resolver reads
+ * a project's `.git/config` FIRST, by design, so an address the box wrote here
+ * came back as "the project's own identity" and outranked the Commit author
+ * setting the owner had filled in. Every commit in an imported project was then
+ * authored by an address that belongs to nobody, and failed the Vercel
+ * deployment check — the exact fault the resolver exists to prevent, reached
+ * through the one door it did not watch.
  */
 async function ensureRepository(directory: string, from: string): Promise<{ initialized: boolean; detail: string | null }> {
   const dotGit = await fs.promises.stat(path.join(directory, ".git")).catch(() => null);
   if (dotGit?.isDirectory()) return { initialized: false, detail: null };
+  // Resolved BEFORE `git init`, for the reason `initRepo` gives: afterwards the
+  // only identity in scope is the one this function is about to write, and the
+  // answer would be its own input.
+  const who = await resolveCodingGitIdentity(directory);
+  // A lookup git could not MAKE is not a finding of "no identity". Stamping a
+  // guessed name into a repository's permanent config is the defect being
+  // fixed, not a fallback from it — so the repository is left unmade. The
+  // import itself still stands: the caller logs this, the folder arrives, and
+  // the settle makes the repository on the first run, resolving again then.
+  if (!who.ok) return { initialized: false, detail: who.detail };
   const init = await run("git", ["init", "--quiet"], { cwd: directory });
   if (init.code !== 0) return { initialized: false, detail: failureDetail(init, "Creating a git repository for the folder") };
-  await run("git", ["config", "user.name", COMMIT_NAME], { cwd: directory });
-  await run("git", ["config", "user.email", COMMIT_EMAIL], { cwd: directory });
+  await run("git", ["config", "user.name", who.identity.name], { cwd: directory });
+  await run("git", ["config", "user.email", who.identity.email], { cwd: directory });
   await run("git", ["add", "-A"], { cwd: directory });
   const commit = await run("git", ["commit", "--quiet", "--allow-empty", "-m", `Imported from ${from}`], { cwd: directory });
   if (commit.code !== 0) return { initialized: true, detail: failureDetail(commit, "Recording the first commit") };

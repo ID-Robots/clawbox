@@ -90,6 +90,52 @@ export const CODING_GIT_PLACEHOLDER: CodingGitIdentity = Object.freeze({
   email: "coding-agent@clawbox.local",
 });
 
+/**
+ * The OTHER mark the box used to leave in a repository it created itself.
+ *
+ * `ensureRepository` (project-import.ts) gives an imported folder a repository
+ * of its own and used to stamp THIS pair into its `.git/config`, so the
+ * "Imported from …" commit could be made on a box with no git identity at all.
+ * It no longer writes it — an import now records the resolved identity, like
+ * `initRepo` does — but every folder imported before that change still carries
+ * it, and those are folders the owner goes on to work in.
+ *
+ * Kept here for exactly that reason: it is not a value to write, it is a value
+ * to RECOGNISE. See `isBoxWrittenIdentityEmail`.
+ */
+export const PROJECT_IMPORT_PLACEHOLDER: CodingGitIdentity = Object.freeze({
+  name: "ClawBox",
+  email: "clawbox@localhost",
+});
+
+/**
+ * Every address this box has ever written into a repository's own config on
+ * its own initiative — as opposed to one the owner chose.
+ *
+ * Both belong to nobody, and neither can pass a Vercel deployment check. The
+ * distinction they encode is the whole point of the fallback chain: a value
+ * the BOX put in `.git/config` must not be read back as "the project's own
+ * identity" and outrank the setting the owner filled in to replace it.
+ */
+const BOX_WRITTEN_EMAILS: readonly string[] = Object.freeze([
+  CODING_GIT_PLACEHOLDER.email,
+  PROJECT_IMPORT_PLACEHOLDER.email,
+]);
+
+/**
+ * Whether an address is one the box wrote itself.
+ *
+ * Case-insensitively: the domain half of an address is case-insensitive by
+ * definition, git stores whatever was typed, and an owner who retyped the
+ * address as `ClawBox@localhost` would otherwise be told it is their own
+ * deliberate choice. Nobody TYPES either of these — the box wrote them — so
+ * there is no real identity this can swallow by accident.
+ */
+export function isBoxWrittenIdentityEmail(email: string): boolean {
+  const seen = email.trim().toLowerCase();
+  return BOX_WRITTEN_EMAILS.some((own) => own.toLowerCase() === seen);
+}
+
 /** Reading two config keys should never take this long. */
 const GIT_CONFIG_TIMEOUT_MS = 10_000;
 
@@ -230,19 +276,21 @@ async function gitConfiguredIdentity(dir: string): Promise<GitIdentityProbe> {
   if (!cleanName || !cleanEmail) return { known: true, identity: null };
   // THE BOX'S OWN MARK IS NOT THE PROJECT'S CHOICE.
   //
-  // `initRepo` writes the resolved identity into a folder it had to `git init`
-  // itself, so every project this device created before the owner had anywhere
-  // to state an identity carries the placeholder in its `.git/config`. Read
-  // back as "the project's own identity" that outranks the setting — and the
-  // owner could fill in the settings page, watch it save, and go on getting
-  // `coding-agent@clawbox.local` on every commit in exactly the projects this
-  // resolver exists to unblock. Nobody types that address; the box wrote it,
-  // and the box does not get to outvote the owner with it.
+  // Two code paths on this device `git init` a folder and write an identity
+  // into it: `initRepo` when the settle has to make a repository, and
+  // `ensureRepository` when a folder is imported. Every project either of them
+  // created before the owner had anywhere to state an identity carries a
+  // box-written address in its `.git/config`. Read back as "the project's own
+  // identity" that outranks the setting — and the owner could fill in the
+  // settings page, watch it save, and go on getting an address that belongs to
+  // nobody on every commit in exactly the projects this resolver exists to
+  // unblock. Nobody types those addresses; the box wrote them, and the box does
+  // not get to outvote the owner with them.
   //
   // Matched on the ADDRESS alone: it is the half a deployment check reads and
   // the half that is distinctive, and a folder carrying it under some other
   // name is still a folder the box stamped.
-  if (cleanEmail === CODING_GIT_PLACEHOLDER.email) return { known: true, identity: null };
+  if (isBoxWrittenIdentityEmail(cleanEmail)) return { known: true, identity: null };
   return { known: true, identity: { name: cleanName, email: cleanEmail } };
 }
 
