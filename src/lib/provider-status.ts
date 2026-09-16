@@ -26,6 +26,7 @@ import {
   hermesProviderLabel,
 } from "@/lib/hermes-providers";
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
+import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import {
   pluginHasSettingsRow,
   readPluginRepairs,
@@ -297,7 +298,17 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
 
   // Asked once, outside the loop: it reads config and the config store, and the
   // answer is the same for every row that consults it.
-  const clawaiLinked = await hasClawaiToken();
+  const [clawaiLinked, clawaiKeyInHarness] = await Promise.all([
+    hasClawaiToken(),
+    (async () => {
+      try {
+        const key = await hermesConfigGet(`providers.${CLAWAI_PROVIDER}.api_key`);
+        return Boolean(key && key.trim());
+      } catch {
+        return false;
+      }
+    })(),
+  ]);
   const clawaiRefused = clawaiTokenRefused();
 
   // Did the live dashboard actually answer? `stale` is set on every fallback
@@ -343,8 +354,16 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
     // answered. Reporting "Unknown" over a box that has plainly never linked
     // ClawBox AI (its own state a mid-setup owner is looking straight at) is
     // the confusing lie this reserves for a genuine probe failure.
+    // Hermes answers `authenticated: true` for ANY user-defined provider whose
+    // block has a base_url — it never checks for a key. `providers.clawai` is
+    // exactly such a block, and it outlives the credential: a box whose token
+    // was removed kept reading "ClawBox AI: Connected" while `hasToken` was
+    // false one route over. So for our own row the credential is the answer —
+    // ours in the store or the harness's in `providers.clawai.api_key` — and
+    // Hermes' flag only decides between "disconnected" and "unknown" while
+    // the probe has not answered.
     const credentialed = id === CLAWAI_PROVIDER
-      ? (reported ?? (clawaiLinked ? true : (probeAnswered ? false : null)))
+      ? (clawaiLinked || clawaiKeyInHarness ? true : (probeAnswered || reported !== null ? false : null))
       : reported;
     return {
       id,
