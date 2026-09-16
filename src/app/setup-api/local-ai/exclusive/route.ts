@@ -20,6 +20,7 @@ import {
   runOpenclawConfigSetBatch,
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
+import { CONFIG_BUSY_ERROR_CODE, isConfigMutationConflict } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
@@ -599,6 +600,29 @@ export async function POST(request: Request) {
       ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
     });
   } catch (err) {
+    // The race this file's own header warns about, answered instead of
+    // relayed. `setConfigBatch` is ungated on purpose, so a
+    // ConfigMutationConflictError mid-toggle reaches this catch — and the
+    // catch-all below paints whatever it is given verbatim into the panel's
+    // red banner, which is exactly how "The OpenClaw CLI is not available on
+    // this edition." once reached a Hermes owner (see UNSUPPORTED above). The
+    // conflict's own wording is worse: it is an instruction to re-run a
+    // command the owner has never typed, about a file they do not know exists.
+    //
+    // The sentence says the switch did not FINISH rather than that nothing
+    // changed. The model writes are one atomic batch, but the restore path has
+    // a second batch after the first has already landed, so "nothing was
+    // changed" is not a claim this catch can make for every route through it.
+    if (isConfigMutationConflict(err)) {
+      console.warn("[local-only] the config was being written elsewhere; the toggle did not land");
+      return NextResponse.json(
+        {
+          error: "The box was saving its settings at the same moment, so the switch did not finish. Try again in a moment.",
+          code: CONFIG_BUSY_ERROR_CODE,
+        },
+        { status: 409 },
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to toggle local-only mode" },
       { status: 500 },

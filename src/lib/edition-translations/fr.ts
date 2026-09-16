@@ -428,6 +428,7 @@ export const fr: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Impossible de modifier ce modèle.",
+  "localModels.error.configBusy": "La box enregistrait ses réglages, le basculement n'est donc pas allé au bout. Réessayez dans un instant.",
   "localModels.error.unreachable": "Impossible de joindre la box pour modifier ce modèle.",
   "localModels.notice.voiceFallback": "Kokoro n'a pas pu devenir la voix principale ; la voix par défaut est conservée.",
   "localModels.notice.voiceReleased": "Kokoro était la voix de ce boîtier ; la voix par défaut parle désormais.",

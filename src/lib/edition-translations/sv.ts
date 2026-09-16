@@ -424,6 +424,7 @@ export const sv: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Det gick inte att ändra den modellen.",
+  "localModels.error.configBusy": "Boxen sparade sina inställningar, så växlingen slutfördes inte. Försök igen om en stund.",
   "localModels.error.unreachable": "Det gick inte att nå boxen för att ändra den modellen.",
   "localModels.notice.voiceFallback": "Kokoro kunde inte bli huvudröst, så standardrösten behålls.",
   "localModels.notice.voiceReleased": "Kokoro var lådans röst; nu talar standardrösten.",

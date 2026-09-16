@@ -263,12 +263,60 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
   it("leaves Local-only on, the plugin untouched and the gateway alone when the batch is refused", async () => {
     // Atomic: a refused batch changed nothing — no primary back, no flag
     // flipped — so there is nothing to restore and nothing to restart.
+    //
+    // 409, not 500: the config-mutation conflict is a passing collision with
+    // another writer, and the panel is given the code it needs to say so in
+    // the owner's language instead of painting the CLI's sentence.
     vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error("ConfigMutationConflictError: config changed"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const response = await turnOff();
+    warnSpy.mockRestore();
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(409);
     expect(setMany).not.toHaveBeenCalled();
     expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  describe("a toggle that lost the config-mutation race", () => {
+    // The race this route's own header warns about ("a bare `openclaw config
+    // set` here can fail with ConfigMutationConflictError mid-toggle"), all
+    // the way out to what the owner reads. The catch-all used to hand the
+    // panel whatever it was given, and the panel paints `error` verbatim into
+    // a red banner — the same way "The OpenClaw CLI is not available on this
+    // edition." once reached a Hermes owner.
+    const HUMANIZED_CONFLICT =
+      "The config file changed while this command was writing (config changed since last load), "
+      + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
+
+    it("answers a retryable code, and never the CLI's own sentence", async () => {
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(HUMANIZED_CONFLICT));
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const response = await turnOff();
+      const body = await response.json();
+      warnSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      expect(JSON.stringify(body)).not.toMatch(/config file|last load|Re-run|openclaw/i);
+      // Says the switch did not FINISH. The restore path writes a second batch
+      // after the first has landed, so this catch cannot promise that nothing
+      // changed.
+      expect(body.error).toMatch(/did not finish/i);
+    });
+
+    it("leaves every other failure reporting itself as before", async () => {
+      // The branch is narrow on purpose: a refusal the owner can act on keeps
+      // its own words and its own 500.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+      const response = await turnOff();
+      const body = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(body.code).toBeUndefined();
+      expect(body.error).toBe(UNKNOWN_MODEL);
+    });
   });
 });

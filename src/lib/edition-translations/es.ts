@@ -423,6 +423,7 @@ export const es: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "No se pudo cambiar ese modelo.",
+  "localModels.error.configBusy": "La caja estaba guardando su configuración, así que el cambio no se completó. Inténtalo de nuevo en un momento.",
   "localModels.error.unreachable": "No se pudo contactar con la caja para cambiar ese modelo.",
   "localModels.notice.voiceFallback": "Kokoro no pudo convertirse en la voz principal, así que se mantiene la voz predeterminada.",
   "localModels.notice.voiceReleased": "Kokoro era la voz de esta caja; ahora habla la voz predeterminada.",
