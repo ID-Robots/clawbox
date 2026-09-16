@@ -9848,6 +9848,17 @@ step_ai_tools_install() {
     echo "  WARN: Gemini CLI install failed; skipping (optional, continuing)"
   fi
 
+  # GitHub Copilot CLI (optional): the Copilot provider on the Hermes edition
+  # signs in and runs through this tool (`copilot login`, `copilot --acp`);
+  # without it the provider panel can only say the tool is missing.
+  if as_clawbox_login "command -v copilot" &>/dev/null; then
+    echo "  Copilot CLI already installed"
+  elif as_clawbox_login "npm i -g @github/copilot --prefix $NPM_PREFIX"; then
+    echo "  Copilot CLI installed"
+  else
+    echo "  WARN: Copilot CLI install failed; skipping (optional, continuing)"
+  fi
+
   # The claude-ds wrapper is deliberately NOT installed here. step_coding_harness
   # owns it, and this step early-returns in test mode — which is exactly the
   # environment e2e-install proves the delivery path in.

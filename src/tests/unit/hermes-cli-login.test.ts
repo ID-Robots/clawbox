@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 vi.mock("@/lib/harness", () => ({ HERMES_BIN: "/opt/fake/hermes", getActiveHarness: vi.fn() }));
+vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn(async () => {}) }));
 
 type Fake = EventEmitter & {
   stdout: PassThrough;
@@ -39,7 +40,14 @@ function fakeChild(): Fake {
 
 let lib: typeof import("@/lib/hermes-cli-login");
 let children: Fake[];
-let spawnArgs: { bin: string; args: readonly string[]; env: NodeJS.ProcessEnv }[];
+let spawnArgs: { bin: string; args: readonly string[]; env: NodeJS.ProcessEnv; detached: boolean }[];
+
+/** The spawn is a few awaits away (binary lookup, the Hermes pin). */
+async function waitForChild(index = 0): Promise<Fake> {
+  for (let i = 0; i < 200 && children.length <= index; i++) await new Promise((r) => setTimeout(r, 10));
+  if (children.length <= index) throw new Error("the login was never spawned");
+  return children[index];
+}
 
 beforeEach(async () => {
   vi.resetModules();
@@ -51,7 +59,7 @@ beforeEach(async () => {
     child.spawnfile = bin;
     child.spawnargs = [...args];
     children.push(child);
-    spawnArgs.push({ bin, args, env: opts.env });
+    spawnArgs.push({ bin, args, env: opts.env, detached: opts.detached });
     return child as unknown as import("child_process").ChildProcess;
   });
 });
@@ -73,8 +81,7 @@ const ANTHROPIC_BANNER = [
 
 async function startAnthropic() {
   const started = lib.startCliLogin("anthropic");
-  await new Promise((r) => setTimeout(r, 20));
-  const child = children[0];
+  const child = await waitForChild();
   child.stdout.write(ANTHROPIC_BANNER);
   child.stdout.write("Authorization code: ");
   return { session: await started, child };
@@ -86,6 +93,8 @@ describe("Anthropic — Hermes' own attended login, driven for the panel", () =>
     expect(spawnArgs[0].bin).toBe("/opt/fake/hermes");
     expect(spawnArgs[0].args).toEqual(["auth", "add", "anthropic", "--no-browser"]);
     expect(spawnArgs[0].env.DISPLAY).toBeUndefined();
+    // Its own process group, so a cancel can take the launcher's children too.
+    expect(spawnArgs[0].detached).toBe(true);
     expect(session.flow).toBe("pkce");
     expect(session.status).toBe("pending");
     expect(session.authUrl).toBe("https://claude.ai/oauth/authorize?code=true&client_id=abc&state=xyz");
@@ -134,8 +143,7 @@ describe("Anthropic — Hermes' own attended login, driven for the panel", () =>
   it("starting again cancels the previous attempt for the same provider", async () => {
     const first = await startAnthropic();
     const second = lib.startCliLogin("anthropic");
-    await new Promise((r) => setTimeout(r, 20));
-    children[1].stdout.write(ANTHROPIC_BANNER + "Authorization code: ");
+    (await waitForChild(1)).stdout.write(ANTHROPIC_BANNER + "Authorization code: ");
     await second;
     expect(first.child.kill).toHaveBeenCalled();
     expect(lib.readCliLogin(first.session.id)?.status).toBe("cancelled");
@@ -144,19 +152,36 @@ describe("Anthropic — Hermes' own attended login, driven for the panel", () =>
   it("cancel kills the CLI and the poll reads cancelled", async () => {
     const { session, child } = await startAnthropic();
     expect(lib.cancelCliLogin(session.id)).toBe(true);
-    expect(child.kill).toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(lib.readCliLogin(session.id)?.status).toBe("cancelled");
+  });
+
+  it("escalates to SIGKILL when the CLI ignores SIGTERM — a cancelled login must not keep polling", async () => {
+    const { session, child } = await startAnthropic();
+    vi.useFakeTimers();
+    try {
+      child.kill = vi.fn(() => true); // ignores every signal: exitCode/signalCode stay null
+      lib.cancelCliLogin(session.id);
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      await vi.advanceTimersByTimeAsync(3_100);
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
 describe("GitHub Copilot — GitHub's device flow, read off the CLI", () => {
   it("answers the link and the code, then approved once the CLI exits 0 on its own", async () => {
     const started = lib.startCliLogin("copilot-acp");
-    await new Promise((r) => setTimeout(r, 20));
-    const child = children[0];
+    const child = await waitForChild();
+    // Not installed in this test environment: the bare name is what gets
+    // spawned, and the device flow is forced — the box has no browser.
     expect(spawnArgs[0].bin).toBe("copilot");
-    child.stdout.write("GitHub Copilot CLI 1.2.3\nFirst copy your one-time code: 9F2K-QZ7B\n");
-    child.stdout.write("Then open https://github.com/login/device in your browser and enter it.\nWaiting…\n");
+    expect(spawnArgs[0].args).toEqual(["login", "--device-code"]);
+    expect(spawnArgs[0].env.PATH).toContain(".npm-global/bin");
+    // Verbatim from GitHub Copilot CLI 1.0.85 on a box.
+    child.stdout.write("To authenticate, visit https://github.com/login/device and enter code 9F2K-QZ7B\nWaiting for authorization...\n");
     const session = await started;
     expect(session.flow).toBe("device_code");
     expect(session.status).toBe("pending");

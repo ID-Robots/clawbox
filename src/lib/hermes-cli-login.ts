@@ -36,6 +36,16 @@ import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
 import path from "path";
 import { HERMES_BIN } from "@/lib/harness";
+import { setHermesEnvValues } from "@/lib/hermes-env";
+
+const HOME_DIR = process.env.HOME || "/home/clawbox";
+/** Where the installer puts the clawbox user's global npm CLIs (`NPM_PREFIX`). */
+const NPM_GLOBAL_BIN = path.join(HOME_DIR, ".npm-global", "bin");
+/** The Hermes setting that pins the Copilot CLI for its ACP provider. Hermes'
+ *  dashboard runs with a PATH that does not include the npm prefix, so
+ *  without the pin it reports Copilot as not installed — and its login as
+ *  not done — on a box where it is both. */
+export const HERMES_COPILOT_COMMAND_ENV = "HERMES_COPILOT_ACP_COMMAND";
 
 export type CliLoginFlow = "pkce" | "device_code";
 export type CliLoginStatus = "starting" | "pending" | "approved" | "failed" | "expired" | "cancelled";
@@ -43,6 +53,10 @@ export type CliLoginStatus = "starting" | "pending" | "approved" | "failed" | "e
 interface CliLoginDriver {
   /** The executable: an absolute path, or a bare name looked up on PATH. */
   bin: () => string;
+  /** Extra places to look for a bare `bin` before PATH. */
+  binDirs?: readonly string[];
+  /** Runs once the tool is found, before the login is spawned. */
+  prepare?: (resolvedBin: string) => Promise<void>;
   args: readonly string[];
   flow: CliLoginFlow;
   /** The link the owner has to open. */
@@ -65,8 +79,14 @@ const DRIVERS: Readonly<Record<string, CliLoginDriver>> = {
   },
   "copilot-acp": {
     bin: () => "copilot",
-    args: ["login"],
+    binDirs: [NPM_GLOBAL_BIN, "/usr/local/bin"],
+    // `--device-code`: the box is headless, and the CLI's default web flow
+    // needs a loopback browser this process does not have.
+    args: ["login", "--device-code"],
     flow: "device_code",
+    prepare: async (resolvedBin) => {
+      await setHermesEnvValues({ [HERMES_COPILOT_COMMAND_ENV]: resolvedBin });
+    },
     url: /https:\/\/github\.com\/login\/device[^\s]*/,
     userCode: /\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/,
   },
@@ -76,23 +96,31 @@ export function cliLoginDriverFor(providerId: string): CliLoginFlow | null {
   return DRIVERS[providerId]?.flow ?? null;
 }
 
-/** Is the driver's executable on this box? A bare name is looked up on PATH. */
-export async function cliLoginAvailable(providerId: string): Promise<boolean> {
+/** The driver's executable on this box, or null. A bare name is looked up in
+ *  the driver's own dirs first, then on PATH — the web server's PATH is
+ *  systemd's, which knows nothing of the npm prefix. */
+export async function resolveCliLoginBin(providerId: string): Promise<string | null> {
   const driver = DRIVERS[providerId];
-  if (!driver) return false;
+  if (!driver) return null;
   const bin = driver.bin();
-  const candidates = path.isAbsolute(bin)
-    ? [bin]
-    : (process.env.PATH ?? "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, bin));
+  const dirs = path.isAbsolute(bin)
+    ? []
+    : [...(driver.binDirs ?? []), ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean)];
+  const candidates = path.isAbsolute(bin) ? [bin] : dirs.map((dir) => path.join(dir, bin));
   for (const candidate of candidates) {
     try {
       await fs.access(candidate, fsConstants.X_OK);
-      return true;
+      return candidate;
     } catch {
       /* next */
     }
   }
-  return false;
+  return null;
+}
+
+/** Is the driver's executable on this box? */
+export async function cliLoginAvailable(providerId: string): Promise<boolean> {
+  return (await resolveCliLoginBin(providerId)) !== null;
 }
 
 export interface CliLoginSession {
@@ -124,15 +152,41 @@ const LINK_WAIT_MS = 20_000;
 /** How long the CLI gets to exchange a submitted code. */
 const EXCHANGE_WAIT_MS = 60_000;
 const OUTPUT_CAP = 64 * 1024;
+/** After SIGTERM, how long a login gets to exit before SIGKILL. */
+const KILL_GRACE_MS = 3_000;
 
 const sessions = new Map<string, LiveSession>();
 
-export type SpawnLike = (bin: string, args: readonly string[], opts: { env: NodeJS.ProcessEnv }) => ChildProcess;
-let spawnImpl: SpawnLike = (bin, args, opts) => spawn(bin, [...args], { ...opts, stdio: ["pipe", "pipe", "pipe"] });
+export type SpawnLike = (
+  bin: string,
+  args: readonly string[],
+  opts: { env: NodeJS.ProcessEnv; detached: boolean },
+) => ChildProcess;
+const realSpawn: SpawnLike = (bin, args, opts) => spawn(bin, [...args], { ...opts, stdio: ["pipe", "pipe", "pipe"] });
+let spawnImpl: SpawnLike = realSpawn;
 
 /** Test seam only. */
 export function _setSpawnForTests(impl: SpawnLike | null): void {
-  spawnImpl = impl ?? ((bin, args, opts) => spawn(bin, [...args], { ...opts, stdio: ["pipe", "pipe", "pipe"] }));
+  spawnImpl = impl ?? realSpawn;
+}
+
+/**
+ * Stop a login and everything it started. The npm-installed `copilot` is a
+ * launcher that spawns the real binary, so killing our child alone left the
+ * grandchild polling GitHub after a cancel (seen on a box). Each login is
+ * spawned in its own process group, and the group is what gets the signal.
+ */
+function signalLogin(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /** Test seam only: forget every session (kills live children). */
@@ -173,11 +227,13 @@ function finish(session: LiveSession, status: CliLoginStatus, error: string): vo
   session.timer = null;
   const child = session.child;
   if (child && child.exitCode === null && child.signalCode === null) {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      /* already gone */
-    }
+    signalLogin(child, "SIGTERM");
+    // A login nobody is looking at must not keep running: escalate if the
+    // group has not gone in its grace period.
+    const hardKill = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) signalLogin(child, "SIGKILL");
+    }, KILL_GRACE_MS);
+    hardKill.unref?.();
   }
 }
 
@@ -198,7 +254,13 @@ function gc(): void {
 function childEnv(): NodeJS.ProcessEnv {
   // No DISPLAY: the login must never try to open a browser on the box's own
   // screen. No inherited TERM tricks either — plain output parses.
-  const env: NodeJS.ProcessEnv = { ...process.env, TERM: "dumb", NO_COLOR: "1", PYTHONUNBUFFERED: "1" };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: [NPM_GLOBAL_BIN, path.join(HOME_DIR, ".local", "bin"), process.env.PATH ?? ""].filter(Boolean).join(path.delimiter),
+    TERM: "dumb",
+    NO_COLOR: "1",
+    PYTHONUNBUFFERED: "1",
+  };
   delete env.DISPLAY;
   delete env.WAYLAND_DISPLAY;
   delete env.BROWSER;
@@ -290,7 +352,16 @@ export async function startCliLogin(providerId: string): Promise<CliLoginSession
   };
   sessions.set(session.id, session);
   try {
-    const child = spawnImpl(driver.bin(), driver.args, { env: childEnv() });
+    const bin = (await resolveCliLoginBin(providerId)) ?? driver.bin();
+    if (driver.prepare) {
+      try {
+        await driver.prepare(bin);
+      } catch {
+        // The pin is a courtesy to the harness's status read; the login
+        // itself does not depend on it.
+      }
+    }
+    const child = spawnImpl(bin, driver.args, { env: childEnv(), detached: true });
     session.child = child;
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
