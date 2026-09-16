@@ -6,6 +6,7 @@ import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import AIProviderIcon from "./AIProviderIcon";
 import { notifyProvidersChanged } from "@/lib/ui-events";
+import { humanizeApiError } from "@/lib/api-error-message";
 import { isClawboxAiImageModelId } from "@/lib/clawbox-ai-models";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
@@ -970,7 +971,11 @@ export default function AIModelsStep({
     const data = await res.json().catch(() => ({}));
     const key = typeof data.code === "string" ? TRANSLATED_ERROR_CODES[data.code] : undefined;
     if (key) return t(key);
-    return typeof data.error === "string" ? data.error : fallback;
+    // The whole body, not `data.error`: `humanizeApiError` reads the sentence
+    // out of whichever field carries it and answers `fallback` when none does,
+    // so a shape this component has not met renders as the fallback rather
+    // than as its own JSON.
+    return humanizeApiError(data, fallback);
   }, [TRANSLATED_ERROR_CODES, t]);
 
   // Ollama hook
@@ -1234,7 +1239,7 @@ export default function AIModelsStep({
       if (data.success) {
         showSuccessAndContinue(data.warning);
       } else {
-        showError(data.error || "Failed to configure");
+        showError(humanizeApiError(data.error, "Failed to configure"));
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1505,7 +1510,7 @@ export default function AIModelsStep({
       if (saveData.success) {
         showSuccessAndContinue(saveData.warning);
       } else {
-        showError(saveData.error || "Failed to save token");
+        showError(humanizeApiError(saveData.error, "Failed to save token"));
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1569,7 +1574,7 @@ export default function AIModelsStep({
       // Unexpected response
       if (data.error) {
         stopPolling();
-        showError(data.error);
+        showError(humanizeApiError(data.error, "Sign-in did not complete"));
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1719,7 +1724,7 @@ export default function AIModelsStep({
       // complete the config through the same server-side handoff the
       // device-code flow uses. projectId (non-secret) is relayed for Google.
       if (tokenData.status !== "complete") {
-        return showError(tokenData.error || "Sign-in did not complete");
+        return showError(humanizeApiError(tokenData.error, "Sign-in did not complete"));
       }
       await saveOAuthToken({ oauthHandoff: true, projectId: tokenData.projectId });
     } catch (err) {

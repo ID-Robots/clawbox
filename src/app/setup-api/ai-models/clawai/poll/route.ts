@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configure/route";
 import { getActiveHarness } from "@/lib/harness";
+import { humanizeApiError } from "@/lib/api-error-message";
 import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
@@ -59,15 +60,18 @@ function formatUserFacingError(message: string) {
   return normalized || "ClawBox AI authorisation failed.";
 }
 
+/**
+ * The SENTENCE a failed response carries, never the response.
+ *
+ * Returns `""` rather than the raw body when nothing readable is in it — the
+ * three callers all have a fallback of their own, and every one of them is a
+ * better thing to show an owner than a serialized body. This route put
+ * `{"error":"Credential migration failed. …"}` on the setup wizard, braces and
+ * all, by treating a body as a message; `humanizeApiError` is the shared rule
+ * that stops it here and at the two hops after this one.
+ */
 async function readErrorBody(response: Response): Promise<string> {
-  const text = await response.text().catch(() => "");
-  if (!text) return "";
-  try {
-    const parsed = JSON.parse(text) as { error?: string; message?: string };
-    return parsed.error || parsed.message || text;
-  } catch {
-    return text;
-  }
+  return humanizeApiError(await response.text().catch(() => ""), "");
 }
 
 // Run the configure pipeline server-side AFTER acknowledging the poll
@@ -138,7 +142,11 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     }));
 
     if (!configureResponse.ok) {
-      const configureBody = await configureResponse.text().catch(() => "");
+      // `readErrorBody`, NOT `.text()`. This one line is how the configure
+      // route's JSON body reached the wizard verbatim: the sign-in's own
+      // rollback message is a perfectly good sentence, and it was shown
+      // wrapped in the object it travelled in.
+      const configureBody = await readErrorBody(configureResponse);
       const userFacing = formatUserFacingError(configureBody || "Failed to save ClawBox AI token.");
       console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.slice(0, 200));
       await writeClawAiSession({ ...session, status: "error", error: userFacing });

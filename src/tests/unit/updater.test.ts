@@ -3370,6 +3370,100 @@ describe("updater", () => {
       expect(doctor.every((o) => o.killSignal === undefined)).toBe(true);
     });
 
+    it("declares ClawBox the gateway's supervisor to the doctor child", async () => {
+      // The refusal that made `openclaw-doctor-fix-failed` fire on EVERY beta
+      // update of a box whose gateway is the ClawBox SYSTEM unit: doctor would
+      // not enter maintenance because it could not confirm who owns that unit,
+      // so no update ever applied a doctor migration. Both variables measured
+      // against OpenClaw 2026.9.3 on 2026-09-16.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: { stdout: "Doctor complete.", stderr: "" },
+        [VALIDATE]: { stdout: JSON.stringify({ valid: true, warnings: [] }), stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      await runContinuation();
+
+      type ChildEnv = Record<string, string | undefined>;
+      const envFor = (needle: string): ChildEnv[] => mockExecFile.mock.calls
+        .filter(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`.includes(needle))
+        .map(([, , options]) => (options as { env?: ChildEnv }).env ?? {});
+
+      const doctor = envFor(DOCTOR);
+      expect(doctor.length).toBeGreaterThan(0);
+      expect(doctor.every((e) => e.OPENCLAW_SUPERVISOR_MODE === "external")).toBe(true);
+      expect(doctor.every((e) => e.OPENCLAW_SERVICE_REPAIR_POLICY === "external")).toBe(true);
+      // It still gets the tree the plain child environment pins.
+      expect(doctor.every((e) => typeof e.OPENCLAW_CONFIG_PATH === "string")).toBe(true);
+    });
+
+    it("declares it to the doctor ONLY, never to the other core commands", async () => {
+      // `OPENCLAW_SUPERVISOR_MODE=external` also disables the core's own
+      // self-update and refuses every `openclaw gateway` mutation. Harmless for
+      // a doctor that mutates no service; a trap for the next command that
+      // reached for a shared helper — which is why this is a wrapper and not a
+      // line inside `openclawChildEnv`.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: { stdout: JSON.stringify({ valid: true, warnings: [] }), stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      await runContinuation();
+
+      type ChildEnv = Record<string, string | undefined>;
+      const validate: ChildEnv[] = mockExecFile.mock.calls
+        .filter(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`.includes(VALIDATE))
+        .map(([, , options]) => (options as { env?: ChildEnv }).env ?? {});
+
+      expect(validate.length).toBeGreaterThan(0);
+      expect(validate.every((e) => e.OPENCLAW_SUPERVISOR_MODE === undefined)).toBe(true);
+      expect(validate.every((e) => e.OPENCLAW_SERVICE_REPAIR_POLICY === undefined)).toBe(true);
+    });
+
+    it("names the device update when doctor still refuses over service ownership", async () => {
+      // An older core that has no such setting is the only way to reach this
+      // now. The core's own advice — "stop it through its service owner" — is
+      // for a thing this updater had ALREADY done inside `withGatewayQuiesced`,
+      // so repeating it sends the owner round the same loop the fix ends.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [DOCTOR]: Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+          stdout: "",
+          stderr: "Doctor could not enter maintenance. Error: Gateway service ownership or shutdown"
+            + " could not be verified. Run `openclaw gateway status --deep` and stop it through its"
+            + " service owner before retrying.\n",
+        }),
+        [VALIDATE]: validateRefusal,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      const doctorWarning = state.warnings?.find((w) => w.code === "openclaw-doctor-fix-failed");
+      expect(doctorWarning?.message).toContain("could not confirm that ClawBox manages the gateway service");
+      expect(doctorWarning?.message).toContain("install the latest device update");
+      expect(doctorWarning?.message).not.toContain("stop it through its service owner");
+      expect(doctorWarning?.message).not.toContain("Command failed:");
+    });
+
     it("still blames the journal when the core ACCEPTS the config", async () => {
       // The load-bearing half: doctor exiting non-zero is not by itself proof
       // of anything — it is what a doctor that lost a lock to a LIVE gateway
