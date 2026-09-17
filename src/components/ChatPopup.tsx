@@ -1153,31 +1153,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // our own: the harness owns the queue, its expiry and its first-answer-wins
   // resolution, and the next subscribe replays whatever is still open.
   const [approvals, setApprovals] = useState<ApprovalCard[]>([])
-  // The `ask_user` questions the agent is parked on, as the gateway reports
-  // them. Never a store of our own, for the reason the approvals above are
-  // not: the gateway owns the queue, the ids, the expiry and the
-  // first-answer-wins resolution, and `question.list` replays whatever is
-  // still open — which is why, unlike a Hermes clarify, one of these survives
-  // a reload.
-  const [questions, setQuestions] = useState<QuestionCard[]>([])
-  // The clock those cards judge their own window against. One timeout at the
-  // earliest expiry still ahead of it, never a ticker — an idle chat with a
-  // card on screen must not re-render once a second on a Jetson. The same
-  // shape as the approval clock below, and deliberately its own: a question's
-  // 15-minute default and an approval's two minutes are different deadlines,
-  // and one clock woken for either would re-render both sets.
-  const [questionNow, setQuestionNow] = useState(() => Date.now())
-  useEffect(() => {
-    const soonest = questions.reduce(
-      (min, card) => (card.status === 'pending' && card.expiresAtMs > questionNow
-        ? Math.min(min, card.expiresAtMs)
-        : min),
-      Number.POSITIVE_INFINITY,
-    )
-    if (!Number.isFinite(soonest)) return
-    const timer = window.setTimeout(() => setQuestionNow(Date.now()), Math.max(0, soonest - Date.now()))
-    return () => window.clearTimeout(timer)
-  }, [questions, questionNow])
   // The clock the cards judge their own window against.
   //
   // A pending approval's window closes on its own, and the card has to stop
@@ -1199,6 +1174,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const timer = window.setTimeout(() => setApprovalNow(Date.now()), Math.max(0, soonest - Date.now()))
     return () => window.clearTimeout(timer)
   }, [approvals, approvalNow])
+  // The `ask_user` questions the agent is parked on, as the gateway reports
+  // them. Never a store of our own, for the reason the approvals above are
+  // not: the gateway owns the queue, the ids, the expiry and the
+  // first-answer-wins resolution, and `question.list` replays whatever is
+  // still open — which is why, unlike a Hermes clarify, one of these survives
+  // a reload.
+  const [questions, setQuestions] = useState<QuestionCard[]>([])
+  // The clock those cards judge their own window against. One timeout at the
+  // earliest expiry still ahead of it, never a ticker — an idle chat with a
+  // card on screen must not re-render once a second on a Jetson. The same
+  // shape as the approval clock above, and deliberately its own: a question's
+  // 15-minute default and an approval's two minutes are different deadlines,
+  // and one clock woken for either would re-render both sets.
+  const [questionNow, setQuestionNow] = useState(() => Date.now())
+  useEffect(() => {
+    const soonest = questions.reduce(
+      (min, card) => (card.status === 'pending' && card.expiresAtMs > questionNow
+        ? Math.min(min, card.expiresAtMs)
+        : min),
+      Number.POSITIVE_INFINITY,
+    )
+    if (!Number.isFinite(soonest)) return
+    const timer = window.setTimeout(() => setQuestionNow(Date.now()), Math.max(0, soonest - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [questions, questionNow])
   /**
    * Which read of the approval queue is the current one.
    *

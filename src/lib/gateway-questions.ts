@@ -113,6 +113,34 @@ function asMs(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+/**
+ * The gateway's own question-id alphabet (`QuestionIdSchema`: snake_case,
+ * opening with a letter), REBUILT from the value rather than tested on it.
+ *
+ * A qid arrives off the wire and is then used as a property name — on the
+ * answers map here, on the card's draft, and on the map posted back to
+ * `question.resolve`. Testing the string and passing the original through
+ * leaves the caller's string in play, which is the house rule this codebase
+ * already keeps for every id that reaches a path (`safeAppId`,
+ * `safeProjectId`, `safeSkillName`) and what CodeQL rightly flags as remote
+ * property injection. `__proto__` is outside this alphabet by construction,
+ * and an id the gateway itself would refuse can answer nothing anyway.
+ */
+const QUESTION_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789_";
+
+function safeQuestionId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128) return "";
+  let rebuilt = "";
+  for (const character of trimmed) {
+    if (!QUESTION_ID_ALPHABET.includes(character)) return "";
+    rebuilt += character;
+  }
+  const first = rebuilt.charCodeAt(0);
+  return first >= 97 && first <= 122 ? rebuilt : "";
+}
+
 function asStatus(value: unknown): QuestionStatus | null {
   return value === "pending" || value === "answered" || value === "cancelled" || value === "expired"
     ? value
@@ -133,7 +161,7 @@ function readQuestion(raw: unknown): AskUserQuestion | null {
   const record = asRecord(raw);
   if (!record) return null;
   if (record.isSecret === true || asRecord(record.secretStore)) return null;
-  const questionId = asText(record.questionId);
+  const questionId = safeQuestionId(record.questionId);
   const question = asText(record.question);
   if (!questionId || !question) return null;
   const options: QuestionOption[] = [];
@@ -166,8 +194,9 @@ function readAnswers(raw: unknown): Record<string, string[]> | null {
   const answers = asRecord(record?.answers);
   if (!answers) return null;
   const out: Record<string, string[]> = {};
-  for (const [qid, values] of Object.entries(answers)) {
-    if (!Array.isArray(values)) continue;
+  for (const [rawId, values] of Object.entries(answers)) {
+    const qid = safeQuestionId(rawId);
+    if (!qid || !Array.isArray(values)) continue;
     const texts = values.filter((value): value is string => typeof value === "string");
     if (texts.length > 0) out[qid] = texts;
   }
@@ -442,7 +471,10 @@ export function buildQuestionAnswers(
 ): { answers: Record<string, string[]> } | null {
   const answers: Record<string, string[]> = {};
   for (const question of questions) {
-    const values = (draft[question.questionId] ?? [])
+    // `Object.hasOwn`, never a bare read: a qid is a name the model chose,
+    // and `constructor` is a perfectly legal one — a plain `draft[qid]` would
+    // hand back Object's own constructor for a question nobody has answered.
+    const values = (Object.hasOwn(draft, question.questionId) ? draft[question.questionId] : [])
       .map((value) => value.trim())
       .filter(Boolean);
     if (values.length === 0) return null;

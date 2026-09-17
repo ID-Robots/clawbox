@@ -128,6 +128,39 @@ describe("reading one question record", () => {
     expect(readQuestionCard(partial)).toBeNull();
   });
 
+  it("refuses a question id the gateway itself would not accept", () => {
+    // A qid becomes a property name — on the answers map, on the card's draft,
+    // and on the map posted back to `question.resolve` — so it is REBUILT from
+    // the gateway's own alphabet (`QuestionIdSchema`, snake_case opening with
+    // a letter) rather than tested and passed through. `__proto__` is outside
+    // it by construction, and an id the gateway would refuse can answer
+    // nothing anyway.
+    for (const bad of ["__proto__", "Deploy", "deploy-target", "deploy target", "9lives", ""]) {
+      expect(readQuestionCard(record({ questions: [question({ questionId: bad })] })), bad).toBeNull();
+    }
+  });
+
+  it("drops an answer filed under a name that is not a question id", () => {
+    const card = readQuestionCard(
+      record({
+        status: "answered",
+        answers: { answers: { __proto__: ["polluted"], deploy_target: ["Staging"] } },
+      }),
+    );
+    expect(card!.answers).toEqual({ deploy_target: ["Staging"] });
+    expect(Object.getPrototypeOf(card!.answers)).toBe(Object.prototype);
+  });
+
+  it("does not read Object's own members as an answer or a draft", () => {
+    // `constructor` IS a legal question id under the gateway's rule, so a bare
+    // `map[qid]` would hand back Object's own constructor for a question
+    // nobody has answered.
+    const questions = readQuestionCard(
+      record({ questions: [question({ questionId: "constructor" })] }),
+    )!.questions;
+    expect(buildQuestionAnswers(questions, {})).toBeNull();
+  });
+
   it("refuses what it cannot act on at all", () => {
     expect(readQuestionCard(null)).toBeNull();
     expect(readQuestionCard("ask_1")).toBeNull();

@@ -262,6 +262,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.askUser.send": "Send answer",
     "chat.askUser.sending": "Sending…",
     "chat.askUser.answered": "Answered: {answer}",
+    "chat.askUser.answeredUnknown": "Answered.",
     "chat.askUser.cancelled": "The assistant stopped waiting for an answer.",
     "chat.askUser.expired": "Nobody answered in time — the assistant carried on without one.",
     "chat.askUser.failed": "That answer did not reach the assistant.",

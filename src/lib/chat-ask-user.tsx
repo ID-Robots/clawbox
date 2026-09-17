@@ -72,8 +72,19 @@ const EMPTY_DRAFT = { picked: [] as string[], typed: "" };
  * multi-select one, where "these two plus something you did not offer" is a
  * sensible answer and the alternative is silently dropping what they typed.
  */
+/**
+ * What is held for one question — `Object.hasOwn` rather than a bare read.
+ *
+ * A qid is a name the model chose, and `constructor` is a legal one under the
+ * gateway's own id rule, so `draft[qid]` on an untouched question would hand
+ * back Object's own constructor instead of nothing.
+ */
+function draftFor(draft: Draft, qid: string) {
+  return Object.hasOwn(draft, qid) ? draft[qid] : EMPTY_DRAFT;
+}
+
 function valuesFor(question: AskUserQuestion, draft: Draft): string[] {
-  const entry = draft[question.questionId] ?? EMPTY_DRAFT;
+  const entry = draftFor(draft, question.questionId);
   const typed = entry.typed.trim();
   if (question.multiSelect) return typed ? [...entry.picked, typed] : entry.picked;
   if (typed) return [typed];
@@ -104,16 +115,16 @@ export function AskUserPrompt({ card, nowMs, onAnswer }: AskUserPromptProps) {
   const settled = status !== "pending" || lapsed;
 
   const setPicked = useCallback((qid: string, picked: string[]) => {
-    setDraft((prev) => ({ ...prev, [qid]: { ...(prev[qid] ?? EMPTY_DRAFT), picked } }));
+    setDraft((prev) => ({ ...prev, [qid]: { ...draftFor(prev, qid), picked } }));
   }, []);
 
   const setTyped = useCallback((qid: string, typed: string) => {
-    setDraft((prev) => ({ ...prev, [qid]: { ...(prev[qid] ?? EMPTY_DRAFT), typed } }));
+    setDraft((prev) => ({ ...prev, [qid]: { ...draftFor(prev, qid), typed } }));
   }, []);
 
   const togglePick = useCallback(
     (question: AskUserQuestion, label: string) => {
-      const entry = draft[question.questionId] ?? EMPTY_DRAFT;
+      const entry = draftFor(draft, question.questionId);
       if (!question.multiSelect) {
         setPicked(question.questionId, entry.picked[0] === label ? [] : [label]);
         return;
@@ -195,10 +206,13 @@ export function AskUserPrompt({ card, nowMs, onAnswer }: AskUserPromptProps) {
       {questions.map((question, index) => {
         const labelId = `${idPrefix}-q${index}`;
         const inputId = `${idPrefix}-a${index}`;
-        const entry = draft[question.questionId] ?? EMPTY_DRAFT;
+        const entry = draftFor(draft, question.questionId);
         // Markdown source must never become an accessible name — it is read
         // out character for character. See plainTextForLabel.
         const spoken = plainTextForLabel(question.question);
+        const recorded = describeQuestionAnswer(
+          answers && Object.hasOwn(answers, question.questionId) ? answers[question.questionId] : undefined,
+        );
 
         return (
           <div
@@ -234,7 +248,13 @@ export function AskUserPrompt({ card, nowMs, onAnswer }: AskUserPromptProps) {
                 style={{ color: MUTED_FG, fontSize: 12.5, wordBreak: "break-word" }}
               >
                 {status === "answered"
-                  ? t("chat.askUser.answered", { answer: describeQuestionAnswer(answers?.[question.questionId]) })
+                  // A recorded answer this could not read leaves the sentence
+                  // with a dangling colon, so the ending that says only THAT
+                  // it was answered is its own line rather than an empty
+                  // interpolation.
+                  ? (recorded
+                    ? t("chat.askUser.answered", { answer: recorded })
+                    : t("chat.askUser.answeredUnknown"))
                   : status === "cancelled"
                     ? t("chat.askUser.cancelled")
                     : t("chat.askUser.expired")}
