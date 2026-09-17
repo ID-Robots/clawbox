@@ -2361,17 +2361,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (forKey !== sessionKeyRef.current) return
             setApprovals(prev => approvalsAfterReplay(prev, replay))
           })
-          // And what the agent is already parked on. A question outlives this
-          // browser tab — `ask_user` waits fifteen minutes by default — so a
-          // reload, a reconnect after a gateway bounce, or simply opening the
-          // chat after the question was asked all land here and get the card
-          // back. `question.list` answers the PENDING set and nothing else,
-          // so this is also what takes down a card that was answered while
-          // this socket was away.
-          void loadPendingQuestions(wsRequest, boundKey, (pending, forKey) => {
-            if (forKey !== sessionKeyRef.current) return
-            setQuestions(prev => questionsAfterReplay(prev, pending))
-          })
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
           // socket. A skill change no longer does either, so it never raises
@@ -2449,6 +2438,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           } else {
             loadHistory()
           }
+          // And what the agent is already parked on — asked LAST, after the
+          // transcript read is under way. A question outlives this browser tab
+          // (`ask_user` waits fifteen minutes by default), so a reload, a
+          // reconnect after a gateway bounce, or simply opening the chat after
+          // the question was asked all land here and get the card back;
+          // `question.list` answers the PENDING set and nothing else, so this
+          // is also what takes a card down that was answered while this socket
+          // was away. Last, because the transcript is what the owner is
+          // waiting for and this frame must not sit in front of it — and
+          // because every frame added ahead of the history read shifts the
+          // interleaving of a turn that is already in flight.
+          void loadPendingQuestions(wsRequest, boundKey, (pending, forKey) => {
+            if (forKey !== sessionKeyRef.current) return
+            setQuestions(prev => questionsAfterReplay(prev, pending))
+          })
         },
         reject: (err: Error) => {
           if (!isCurrent()) return
