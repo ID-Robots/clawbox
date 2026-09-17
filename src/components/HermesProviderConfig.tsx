@@ -1117,10 +1117,14 @@ export default function HermesProviderConfig({
         <div className="mt-5 min-h-[240px]">
           {isClawaiSelected ? (
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
+              {/* `hasToken` is this panel's whole notion of "the box is signed
+                  in to an account"; without it `uiTier` is a default, and a
+                  default must not be printed as the owner's plan. */}
               <ClawboxAiPlanPicker
                 tier={uiTier}
                 onTierChange={changeUiTier}
                 disabled={applyingClawai || loginBusy}
+                planKnown={!!clawai?.hasToken}
               />
               {clawai?.hasToken ? (
                 <>

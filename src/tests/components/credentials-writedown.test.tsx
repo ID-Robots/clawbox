@@ -126,7 +126,9 @@ function fillForm(container: HTMLElement, { hotspot = true } = {}) {
       '[aria-controls="hotspot-secret-panel"]',
     );
     if (!discloser) throw new Error("hotspot secret disclosure missing");
-    fireEvent.click(discloser);
+    // The panel opens on arrival now — clicking the discloser here would shut
+    // it. Open it only if it is not already open.
+    if (!container.querySelector("#hotspot-password")) fireEvent.click(discloser);
     fireEvent.change(field(container, "#hotspot-password"), {
       target: { value: HOTSPOT_PASSWORD },
     });

@@ -87,6 +87,8 @@ function stubDevice(
     answered?: boolean;
     /** Holds the Improvement Program GET until it settles — a read that lands late. */
     holdImprovementRead?: Promise<void>;
+    /** Whether step 1 actually connected GitHub; skipping it is the default. */
+    githubConnected?: boolean;
     /**
      * The ClawBox AI account this box is on. The wizard's first step is behind
      * the paid-plan gate (owner's decision, 2026-09-14), so the default here is
@@ -111,7 +113,15 @@ function stubDevice(
         clawaiAccountTier: plan === "flash" || plan === "pro" ? plan : null,
       });
     }
-    if (url.startsWith("/setup-api/coding-agent/git")) return json({ installed: true, connected: false, login: null, loginCommand: "gh auth login" });
+    if (url.startsWith("/setup-api/coding-agent/git")) {
+      const connected = opts.githubConnected ?? false;
+      return json({
+        installed: true,
+        connected,
+        login: connected ? "octocat" : null,
+        loginCommand: "gh auth login",
+      });
+    }
     // The Improvement Program: read on mount for the daily cap and any answer
     // the box already holds, written once on the step's Next.
     if (url === "/setup-api/improvement-program") {
@@ -207,6 +217,33 @@ describe("the improvement step", () => {
     expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "false");
     // The daily cap the box enforces is the number the hint names.
     expect(screen.getByText(t("improvement.modeAutoHint", { n: 5 }))).toBeInTheDocument();
+  });
+
+  // Step 1 is SKIPPABLE, so the framing here may not describe a connection the
+  // owner does not have. Saying reports go out "using the account you just
+  // connected" to someone who pressed Skip names a credential that is not
+  // there and hides the one thing they would have to do about it.
+  it("does not name an account the owner skipped past", async () => {
+    stubDevice();
+    await reachImprovementStep();
+    const hint = screen.getByTestId("coding-agent-wizard-improvement-hint");
+    expect(hint).toHaveTextContent(translations.en["codingAgent.wizardImprovementHintNoGithub"]);
+    // It says where the account is connected instead of assuming one.
+    expect(hint).toHaveTextContent("needs a GitHub account connected in Settings");
+    expect(hint).not.toHaveTextContent("the account you just connected");
+  });
+
+  it("names the account the owner did connect", async () => {
+    stubDevice({ githubConnected: true });
+    await reachImprovementStep();
+    await waitFor(() =>
+      expect(screen.getByTestId("coding-agent-wizard-improvement-hint")).toHaveTextContent(
+        translations.en["codingAgent.wizardImprovementHint"],
+      ),
+    );
+    expect(
+      screen.getByTestId("coding-agent-wizard-improvement-hint"),
+    ).not.toHaveTextContent("needs a GitHub account connected in Settings");
     // Nothing is written by arriving here, and there is no Skip: Next with
     // Off chosen is the way to decline.
     expect(improvementWrites()).toEqual([]);

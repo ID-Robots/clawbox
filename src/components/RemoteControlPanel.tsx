@@ -340,17 +340,28 @@ export default function RemoteControlPanel() {
               </div>
             </div>
 
-            <label className="block text-[10px] uppercase tracking-widest font-semibold text-[var(--text-muted)] mb-2">
+            {/* The URL is READ, not typed: a one-line <input> clipped a
+                trycloudflare hostname mid-glyph — no ellipsis, no scrollbar,
+                nothing to say the rest existed — so an owner reading it off
+                the screen copied a URL that was never the whole one. Static
+                text wraps instead: `break-all` lets a hostname with no spaces
+                break at any character, `select-all` keeps the old input's
+                click-selects-everything, and the row aligns to the top so the
+                button stays put beside two or three lines of URL. */}
+            <div
+              id="tunnel-url-label"
+              className="block text-[10px] uppercase tracking-widest font-semibold text-[var(--text-muted)] mb-2"
+            >
               {t("remoteControl.tunnelUrlLabel")}
-            </label>
-            <div className="flex items-center gap-2 mb-3">
-              <input
-                readOnly
-                value={url!}
-                className="flex-1 bg-black/40 border border-white/[0.08] rounded-lg px-3 py-2.5 text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/40"
-                onFocus={e => e.currentTarget.select()}
-                aria-label={t("remoteControl.tunnelUrlLabel")}
-              />
+            </div>
+            <div className="flex items-start gap-2 mb-3">
+              <p
+                data-testid="remote-control-tunnel-url"
+                aria-labelledby="tunnel-url-label"
+                className="flex-1 min-w-0 my-0 bg-black/40 border border-white/[0.08] rounded-lg px-3 py-2.5 text-sm font-mono text-[var(--text-primary)] break-all select-all"
+              >
+                {url}
+              </p>
               <button
                 onClick={copyUrl}
                 className="shrink-0 px-3 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] rounded-lg text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-none cursor-pointer flex items-center gap-1.5 transition-colors"

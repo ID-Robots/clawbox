@@ -88,9 +88,11 @@ async function saveStep(onNext: () => void, hostname?: string) {
   }
   fireEvent.change(field(container, "#cred-password"), { target: { value: SYSTEM_PASSWORD } });
   fireEvent.change(field(container, "#cred-confirm"), { target: { value: SYSTEM_PASSWORD } });
+  // The hotspot secret panel now opens on arrival, so clicking its discloser
+  // would CLOSE it. Click only if something has closed it.
   const discloser = container.querySelector<HTMLButtonElement>('[aria-controls="hotspot-secret-panel"]');
   if (!discloser) throw new Error("hotspot secret disclosure missing");
-  fireEvent.click(discloser);
+  if (!container.querySelector("#hotspot-password")) fireEvent.click(discloser);
   fireEvent.change(field(container, "#hotspot-password"), { target: { value: HOTSPOT_PASSWORD } });
   fireEvent.change(field(container, "#hotspot-confirm"), { target: { value: HOTSPOT_PASSWORD } });
 

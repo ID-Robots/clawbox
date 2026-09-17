@@ -639,8 +639,13 @@ export const codingAgentEn: Record<string, string> = {
   // Asked right after GitHub because that is the credential a report goes
   // out on. The lists of what is sent and what never is are the card's own
   // keys (improvement.*); only the step's framing lives here.
+  // TWO hints, because the step before this one is skippable: naming "the
+  // account you just connected" to an owner who skipped GitHub describes a
+  // connection they do not have, so the unconnected wording says where the
+  // account is connected instead.
   "codingAgent.wizardImprovementTitle": "Help improve ClawBox",
   "codingAgent.wizardImprovementHint": "When something in ClawBox's own software goes wrong — a coding run that fails, an update step that will not finish, a page that errors — this box can send a short technical report to the developers as a public issue on GitHub, using the account you just connected. Choose what it should do; you can change this any time in the Coding Agent's settings.",
+  "codingAgent.wizardImprovementHintNoGithub": "When something in ClawBox's own software goes wrong — a coding run that fails, an update step that will not finish, a page that errors — this box can send a short technical report to the developers as a public issue on GitHub. Filing one needs a GitHub account connected in Settings; until then the box keeps your choice and sends nothing. Choose what it should do; you can change this any time in the Coding Agent's settings.",
 
   "codingAgent.wizardProjectTitle": "Project folder and effort",
   "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to pick one, or type an absolute path.",
@@ -657,7 +662,7 @@ export const codingAgentEn: Record<string, string> = {
   // Said plainly and up front: Ultracode is the best answer this box can give
   // and the most expensive one, and an owner who finds that out from a bill
   // was told too late.
-  "codingAgent.wizardEffortCost": "Ultracode gives the best results and consumes a lot of tokens — it thinks longer and can run several agents for one task. A Business plan is recommended if you use it often. Lower effort costs less and finishes sooner.",
+  "codingAgent.wizardEffortCost": "Ultracode gives the best results and consumes a lot of tokens — it thinks longer and can run several agents for one task. A Max plan is recommended if you use it often. Lower effort costs less and finishes sooner.",
   // ── Step 3: which browser a run checks its work in ──────────────────────
   // The step says what the owner will SEE, because that is the difference
   // between the two answers: pages opening on the device's own screen, or

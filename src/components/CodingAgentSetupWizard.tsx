@@ -634,8 +634,16 @@ export default function CodingAgentSetupWizard({
       {step === "improvement" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardImprovementTitle")}</h2>
-          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">
-            {t("codingAgent.wizardImprovementHint")}
+          {/* The step before this one is skippable, so the hint cannot promise
+              "the account you just connected" — to an owner who skipped GitHub
+              that names a connection they do not have. Unread state (github is
+              still null) reads as not connected on purpose: the wording that
+              points at Settings is true either way, the other one is not. */}
+          <p
+            className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]"
+            data-testid="coding-agent-wizard-improvement-hint"
+          >
+            {t(github?.connected ? "codingAgent.wizardImprovementHint" : "codingAgent.wizardImprovementHintNoGithub")}
           </p>
 
           {/* The two lists ARE the consent, in the settings card's own words:

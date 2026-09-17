@@ -36,6 +36,7 @@ describe("ClawBox AI plan copy is keyed and translated", () => {
     }),
     "ai.plan",
     "ai.planChange",
+    "ai.planFromAccount",
     "ai.planBlurb",
     "ai.planTier",
     "ai.planTierGroup",

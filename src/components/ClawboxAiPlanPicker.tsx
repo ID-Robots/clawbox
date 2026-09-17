@@ -21,12 +21,20 @@ interface ClawboxAiPlanPickerProps {
   onTierChange: (tier: ClawaiTier) => void;
   /** OpenClaw omits this, so `disabled={undefined}` emits no attribute. */
   disabled?: boolean;
+  /**
+   * Whether the box has actually been told what the account is on. False means
+   * "not connected / not answered yet", and the summary then says where the
+   * plan will come from instead of naming one. Defaults to true so a caller
+   * that genuinely knows the plan needs no ceremony.
+   */
+  planKnown?: boolean;
 }
 
 export default function ClawboxAiPlanPicker({
   tier,
   onTierChange,
   disabled,
+  planKnown = true,
 }: ClawboxAiPlanPickerProps) {
   // Every word on this card used to be an English literal, so a German or
   // Japanese box read its plan, its price period and its six feature bullets
@@ -66,8 +74,19 @@ export default function ClawboxAiPlanPicker({
           <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
             {tr("ai.plan", "Plan")}
           </span>
-          <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
-            {planName} · {priceLabel}
+          <span
+            data-testid="clawai-plan-summary"
+            className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]"
+          >
+            {/* A plan is NAMED only once the box has been told what the
+                account is on. Before that this line stated the seeded default
+                — "Pro plan · €9/month" — which reads as a fact about the
+                subscription and was the wrong one for every Max and every
+                Free owner. Opening the picker is still one tap away, and the
+                tiers inside are where a plan gets chosen. */}
+            {planKnown
+              ? `${planName} · ${priceLabel}`
+              : tr("ai.planFromAccount", "Plan is taken from your account")}
           </span>
         </span>
         <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
