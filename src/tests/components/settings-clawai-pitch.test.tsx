@@ -59,7 +59,7 @@ function jsonResponse(data: unknown) {
 }
 
 /** A box whose ClawBox AI link is `configured` or not; everything else quiet. */
-function serve(clawaiConfigured: boolean) {
+function serve(clawaiConfigured: boolean, edition: "openclaw" | "hermes" = "openclaw") {
   vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined) => {
     const url = String(input ?? "");
     if (url === "/setup-api/ai-models/status") {
@@ -75,6 +75,9 @@ function serve(clawaiConfigured: boolean) {
       });
     }
     if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
+    if (url.startsWith("/setup-api/harness/active")) return jsonResponse({ edition, active: edition });
+    if (url.startsWith("/setup-api/hermes/clawai")) return jsonResponse({ active: false, hasToken: false, model: null });
+    if (url.startsWith("/setup-api/hermes/")) return jsonResponse({});
     if (url === "/setup-api/providers/status") {
       return jsonResponse({ harness: "openclaw", defaultProvider: "clawai", degraded: false, providers: [] });
     }
@@ -135,6 +138,28 @@ describe("Settings → Providers: the ClawBox AI pitch on an unlinked box", () =
     // The Local AI tab, not a dead end: the panel that owns the on-device
     // engines is what opens.
     expect(await screen.findByTestId("local-ai-panel")).toBeInTheDocument();
+  });
+
+  // The Hermes edition answers this page with HermesProviderConfig, which
+  // draws its own ClawBox AI sign-in once the provider is selected. The offer
+  // counter is read there by an AIModelsStep that returns before it renders
+  // anything, so a card that fired it would start a device login with no card
+  // on screen to show the code.
+  it("puts a Hermes box in front of that edition's own ClawBox AI sign-in", async () => {
+    serve(false, "hermes");
+    render(<SettingsApp ui={defaultUi} />);
+    openProviders();
+
+    fireEvent.click(await screen.findByTestId("clawai-pitch-connect"));
+    // The ClawBox AI pane of that panel — the plan summary its sign-in card
+    // sits under — rather than a radio's checked state.
+    expect(await screen.findByTestId("clawai-plan-summary")).toBeInTheDocument();
+    // …and nothing was started behind the owner's back on the other edition's
+    // route, which has no card here to show its code.
+    expect(
+      (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .some(([input]) => String(input ?? "").startsWith("/setup-api/ai-models/clawai/start")),
+    ).toBe(false);
   });
 
   it("says nothing on a box that already holds a ClawBox AI credential", async () => {

@@ -4032,7 +4032,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 card's to pitch over. */}
             {aiProvider?.clawaiConfigured === false && (
               <ClawboxAiPitchCard
-                onConnect={() => setOpenClawAIOfferRequest((current) => current + 1)}
+                onConnect={() => {
+                  // Two panels answer this page, and only one of them acts on
+                  // the offer counter. On Hermes the pane below is
+                  // HermesProviderConfig, which draws its own ClawBox AI
+                  // sign-in once the provider is SELECTED — the offer counter
+                  // there is read by an AIModelsStep that returns before
+                  // rendering anything, so it would start a device login with
+                  // no card on screen to show the code.
+                  if (edition === "hermes") {
+                    setRequestedAiProviderId("clawai");
+                    setProviderSelectionRequest((current) => current + 1);
+                    return;
+                  }
+                  setOpenClawAIOfferRequest((current) => current + 1);
+                }}
                 onLocalAi={() => setSectionGated("localAi")}
               />
             )}
