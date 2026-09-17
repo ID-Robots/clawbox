@@ -73,4 +73,17 @@ describe("the plan summary claims nothing before the account is known", () => {
     expect(summary()).toHaveTextContent(translations.de["ai.planFromAccount"]);
     expect(summary()).not.toHaveTextContent(translations.en["ai.planFromAccount"]);
   });
+
+  it("wraps the neutral line instead of clipping it", () => {
+    // Caught by looking at it: the summary carried `truncate`, which is fine
+    // for a two-word plan name and not for a sentence. In the settings column
+    // German rendered "Der Tarif wird aus Ihrem Konto übernomm…" — the message
+    // that replaced a wrong claim, cut off mid-word. It must wrap.
+    pack.table = translations.de;
+    render(<ClawboxAiPlanPicker tier="flash" onTierChange={vi.fn()} planKnown={false} />);
+
+    const cls = summary().className;
+    expect(cls, "truncate hides the end of the longest locale").not.toContain("truncate");
+    expect(cls).toContain("break-words");
+  });
 });
