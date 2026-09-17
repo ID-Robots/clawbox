@@ -323,6 +323,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.tapToHearReply": "Your browser did not start it — press play.",
     "chat.audioPlay": "Play",
     "chat.audioPause": "Pause",
+    "chat.audioStop": "Stop",
     "chat.audioPosition": "Spoken reply position",
     "chat.audioPositionValue": "{elapsed} seconds of {total} seconds",
     "chat.audioUnavailable": "This recording is no longer available.",

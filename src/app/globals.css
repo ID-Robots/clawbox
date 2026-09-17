@@ -536,6 +536,17 @@ h6 {
   cursor: default;
 }
 
+/* Stop sits beside play while a reply speaks: the same target size, a quieter
+   ground, so the play/pause button stays the primary control. */
+.spoken-reply-stop {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.spoken-reply-stop:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .spoken-reply-wave {
   flex: 1;
   min-width: 0;
