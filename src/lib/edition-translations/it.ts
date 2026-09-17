@@ -690,6 +690,16 @@ export const it: Record<string, string> = {
   "codingAgent.harnessTestFailed": "Impossibile avviare il test dell'harness",
   "codingAgent.harnessTestNoFolder": "Scegli prima una cartella dei progetti.",
   "codingAgent.deniedHelp": "L'agente di codice può eseguire solo un insieme fisso di comandi nella propria cartella. È il limite di sicurezza che funziona, non un errore: l'esecuzione di solito trova un'altra strada.",
+  "codingAgent.inputsTitle": "File forniti a questa esecuzione",
+  "codingAgent.inputsHint": "I file consegnati a questa esecuzione sono in {folder}. Tutto ciò che metti in {shared} può essere letto da qualsiasi esecuzione su questo box.",
+  "codingAgent.inputsEmpty": "A questa esecuzione non è stato consegnato alcun file.",
+  "codingAgent.inputsRefusedTitle": "Non consegnati",
+  "codingAgent.inputsRefusedLocation": "non è in una cartella da cui questo box prende file",
+  "codingAgent.inputsRefusedMissing": "non c'è, o non è un file normale",
+  "codingAgent.inputsRefusedSize": "troppo grande, o troppi file per una sola esecuzione",
+  "codingAgent.inputsRefusedFailed": "non è stato possibile copiarlo",
+  "codingAgent.deniedInputs": "I file che un'esecuzione può leggere sono in {folder} e in {shared}. La cartella multimediale dell'assistente non è una di queste e nessuna regola può aprirla: chiedi all'assistente di consegnare il file all'avvio dell'esecuzione, oppure mettilo tu nella cartella condivisa.",
+  "codingAgent.rulesInputs": "Per dare a un'esecuzione un file su cui lavorare, mettilo in {shared} oppure chiedi all'assistente di consegnarlo all'avvio. La cartella multimediale dell'assistente contiene le credenziali di questo box accanto alle immagini e non può mai essere aperta da una regola.",
 
   // === Consentire la prossima volta un'azione rifiutata ===
   "codingAgent.allowNextTime": "Consenti la prossima volta",

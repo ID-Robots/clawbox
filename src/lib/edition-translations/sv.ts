@@ -675,6 +675,16 @@ export const sv: Record<string, string> = {
   "codingAgent.harnessTestFailed": "Kunde inte starta harnesstestet",
   "codingAgent.harnessTestNoFolder": "Välj en projektmapp först.",
   "codingAgent.deniedHelp": "Kodagenten får bara köra en fast uppsättning kommandon i sin egen mapp. Det är säkerhetsgränsen som fungerar, inte ett fel — körningen hittar oftast en annan väg.",
+  "codingAgent.inputsTitle": "Indata för den här körningen",
+  "codingAgent.inputsHint": "Filer som lämnats till den här körningen finns i {folder}. Allt du lägger i {shared} kan läsas av vilken körning som helst på den här boxen.",
+  "codingAgent.inputsEmpty": "Den här körningen fick inga filer.",
+  "codingAgent.inputsRefusedTitle": "Lämnades inte över",
+  "codingAgent.inputsRefusedLocation": "ligger inte i en mapp som boxen hämtar filer från",
+  "codingAgent.inputsRefusedMissing": "finns inte, eller är ingen vanlig fil",
+  "codingAgent.inputsRefusedSize": "för stor, eller för många filer för en körning",
+  "codingAgent.inputsRefusedFailed": "kunde inte kopieras",
+  "codingAgent.deniedInputs": "Filer som en körning får läsa ligger i {folder} och i {shared}. Assistentens egen mediemapp hör inte dit och ingen regel kan öppna den — be assistenten lämna över filen när den startar en körning, eller lägg filen i den delade mappen själv.",
+  "codingAgent.rulesInputs": "Vill du ge en körning en fil att arbeta med lägger du den i {shared}, eller ber assistenten lämna över den vid starten. Assistentens egen mediemapp innehåller boxens inloggningsuppgifter bredvid bilderna och kan aldrig öppnas med en regel.",
 
   // === Tillåt en nekad åtgärd nästa gång ===
   "codingAgent.allowNextTime": "Tillåt nästa gång",

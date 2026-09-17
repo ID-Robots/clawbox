@@ -680,6 +680,16 @@ export const ja: Record<string, string> = {
   "codingAgent.harnessTestFailed": "ハーネステストを開始できませんでした",
   "codingAgent.harnessTestNoFolder": "先にプロジェクトフォルダーを選んでください。",
   "codingAgent.deniedHelp": "コーディングエージェントは自分のフォルダー内で決められたコマンドしか実行できません。これは安全のための制限が働いた結果であり、不具合ではありません。多くの場合、実行は別の方法を見つけます。",
+  "codingAgent.inputsTitle": "この実行に渡されたファイル",
+  "codingAgent.inputsHint": "この実行に渡されたファイルは {folder} にあります。{shared} に置いたものは、このボックスのどの実行からも読み取れます。",
+  "codingAgent.inputsEmpty": "この実行にはファイルが渡されていません。",
+  "codingAgent.inputsRefusedTitle": "渡せなかったもの",
+  "codingAgent.inputsRefusedLocation": "このボックスがファイルを取り出すフォルダーの中にありません",
+  "codingAgent.inputsRefusedMissing": "存在しないか、通常のファイルではありません",
+  "codingAgent.inputsRefusedSize": "大きすぎるか、1 回の実行に対してファイルが多すぎます",
+  "codingAgent.inputsRefusedFailed": "コピーできませんでした",
+  "codingAgent.deniedInputs": "実行が読み取れるファイルは {folder} と {shared} にあります。アシスタント自身のメディアフォルダーはそこに含まれず、どの規則でも開けません。実行を開始するときにアシスタントにファイルを渡してもらうか、共有フォルダーにご自身で置いてください。",
+  "codingAgent.rulesInputs": "実行に作業用のファイルを渡すには、{shared} に置くか、実行開始時にアシスタントに渡してもらってください。アシスタント自身のメディアフォルダーには画像と並んでこのボックスの認証情報が入っているため、規則で開くことはできません。",
 
   // === 拒否されたアクションを次回から許可する ===
   "codingAgent.allowNextTime": "次回から許可",

@@ -133,6 +133,46 @@ describe("coding_agent_run", () => {
     );
   });
 
+  it("splits input_files into the list the device judges, and reports what actually arrived", async () => {
+    // The whole reason the parameter exists: the assistant writes its generated
+    // media inside a store no run may read, so a picture only MENTIONED in the
+    // task is one the run can never open.
+    apiPost.mockResolvedValue({
+      started: true,
+      run: {
+        ...RUN,
+        status: "running",
+        inputs: {
+          dir: "/home/clawbox/clawbox/data/coding-agent-inputs/run-k3x9q2ab",
+          files: [{ name: "a.png", bytes: 10 }],
+          refused: [{ name: "b.png", code: "outside_roots" }],
+        },
+      },
+    });
+    const out = await harness().call("coding_agent_run", {
+      task: "Use these pictures",
+      project_id: "site",
+      input_files: "/m/a.png, /elsewhere/b.png",
+    });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(apiPost).toHaveBeenCalledWith(
+      "/setup-api/coding-agent/run",
+      { task: "Use these pictures", projectId: "site", inputs: ["/m/a.png", "/elsewhere/b.png"] },
+      expect.objectContaining({ timeoutMs: 20_000 }),
+    );
+    expect(out.text).toContain("a.png");
+    expect(out.text).toContain("b.png (outside_roots)");
+  });
+
+  it("says nothing about inputs when the caller named none", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "x", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).not.toMatch(/given|hand over/i);
+  });
+
   it("hands a bare task to the device, whose default-folder fallback owns it", async () => {
     // No client-side "needs a place to work" guard any more: the route falls
     // back to the owner's stored default folder, and when none is stored it

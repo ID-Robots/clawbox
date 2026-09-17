@@ -678,6 +678,16 @@ export const de: Record<string, string> = {
   "codingAgent.harnessTestFailed": "Der Harness-Test konnte nicht gestartet werden",
   "codingAgent.harnessTestNoFolder": "Wählen Sie zuerst einen Projektordner.",
   "codingAgent.deniedHelp": "Der Coding-Agent darf nur einen festen Satz Befehle in seinem eigenen Ordner ausführen. Das ist die Schutzgrenze bei der Arbeit, kein Fehler — der Lauf findet meist einen anderen Weg.",
+  "codingAgent.inputsTitle": "Eingaben für diesen Lauf",
+  "codingAgent.inputsHint": "Dateien, die diesem Lauf mitgegeben wurden, liegen in {folder}. Alles, was Sie in {shared} ablegen, kann jeder Lauf auf dieser Box lesen.",
+  "codingAgent.inputsEmpty": "Diesem Lauf wurden keine Dateien mitgegeben.",
+  "codingAgent.inputsRefusedTitle": "Nicht übergeben",
+  "codingAgent.inputsRefusedLocation": "nicht in einem Ordner, aus dem diese Box Dateien holt",
+  "codingAgent.inputsRefusedMissing": "nicht vorhanden oder keine gewöhnliche Datei",
+  "codingAgent.inputsRefusedSize": "zu groß oder zu viele Dateien für einen Lauf",
+  "codingAgent.inputsRefusedFailed": "konnte nicht kopiert werden",
+  "codingAgent.deniedInputs": "Dateien, die ein Lauf lesen darf, liegen in {folder} und in {shared}. Der eigene Medienordner des Assistenten gehört nicht dazu, und keine Regel kann ihn öffnen — bitten Sie den Assistenten, die Datei beim Start des Laufs zu übergeben, oder legen Sie sie selbst in den gemeinsamen Ordner.",
+  "codingAgent.rulesInputs": "Um einem Lauf eine Datei mitzugeben, legen Sie sie in {shared} ab oder bitten Sie den Assistenten, sie beim Start zu übergeben. Im eigenen Medienordner des Assistenten liegen neben den Bildern die Zugangsdaten dieser Box; er lässt sich mit keiner Regel öffnen.",
 
   // === Eine verweigerte Aktion beim nächsten Mal erlauben ===
   "codingAgent.allowNextTime": "Beim nächsten Mal erlauben",

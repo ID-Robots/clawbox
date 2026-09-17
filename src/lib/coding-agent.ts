@@ -73,6 +73,20 @@ import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import {
+  type InputRefusalCode,
+  type RunInputFile,
+  MAX_RUN_INPUTS,
+  ensureInputsDirs,
+  isInputRefusalCode,
+  inputsRoot,
+  listRunInputs,
+  sharedInputsDir,
+  readInputPaths,
+  removeRunInputs,
+  runInputsDir,
+  stageRunInputs,
+} from "@/lib/coding-run-inputs";
+import {
   type CodingPauseMeter,
   type CodingPauseReason,
   type CodingRunStatus,
@@ -1053,6 +1067,23 @@ export const WORKFLOW_TOOL = "Workflow";
  */
 export const TMP_READ_RULE = "Read(//tmp/**)";
 
+/**
+ * The OTHER place outside its folder a run may read: the inputs tree, where the
+ * box stages the assets a run was handed (see @/lib/coding-run-inputs).
+ *
+ * Read only, and the whole tree rather than this run's folder alone: `shared/`
+ * is in it, which is the folder the owner is told to drop files into, and
+ * everything under it is there because somebody deliberately put it there. A
+ * write needs no rule — the folder is a public data subtree, so no deny rule
+ * covers it and `acceptEdits` takes care of the rest.
+ *
+ * A function and not a constant because DATA_DIR is resolved from the
+ * environment, and the suites that build argv point it at a temp folder.
+ */
+export function inputsReadRule(): string {
+  return `Read(/${inputsRoot()}/**)`;
+}
+
 export const READ_ONLY_TOOLS = `Read,Grep,Glob,${SUBAGENT_TOOL}`;
 
 export function toolsFor(subagents: boolean, effort?: CodingEffort): string {
@@ -1343,6 +1374,26 @@ export interface CodingRun {
    * time" offers in the same breath as saving a rule. See the comment there.
    */
   allowRules: string[];
+  /**
+   * The files this run was GIVEN to work from, and the folder they are in.
+   *
+   * `dir` is answered for every run whether or not anything was staged: it is
+   * what the run's page shows the owner as "inputs for this run", and a folder
+   * nobody can find is a folder nobody drops a file into. `files` is what the
+   * box actually copied there at start (see @/lib/coding-run-inputs); a run may
+   * add to the folder itself, which is why the page lists what is on DISK and
+   * this list is only the record of the hand-over.
+   *
+   * `refused` is what the box would NOT copy, by name and with the coded reason
+   * (a path outside the folders it may take files from, a file that is not
+   * there, one too large). On the record because a caller told only "some
+   * inputs were refused" cannot fix the one that was, and because a run that
+   * cannot find the picture it was promised must be able to say why.
+   *
+   * `null` on a record written before this existed — never read as "no inputs",
+   * only as "this build cannot say".
+   */
+  inputs: { dir: string; shared: string; files: RunInputFile[]; refused: { name: string; code: InputRefusalCode }[] } | null;
   /**
    * The NAMES of the owner's secrets this run was handed
    * (src/lib/project-secrets.ts) — never the values, which live in the child's
@@ -1926,6 +1977,18 @@ export interface StartRunInput {
   readOnly?: boolean;
   /** Internal: appended to the headless brief — the role the team gave this run. */
   extraBrief?: string | null;
+  /**
+   * Absolute paths of files this run is to be GIVEN — the pictures the
+   * assistant generated for the task, an attachment that arrived in chat.
+   *
+   * The box copies them into the run's own inputs folder before it spawns,
+   * because the assistant writes its media inside a credential store no run may
+   * read (see @/lib/coding-run-inputs for why a copy rather than a permission).
+   * Unvalidated here on purpose: `readInputPaths` bounds the list and
+   * `stageRunInputs` judges each path on its own, answering a coded refusal per
+   * entry — a bad path costs that one asset, never the task.
+   */
+  inputs?: unknown;
   /** Which account pays, when the caller wants something other than the owner's default. */
   provider?: unknown;
   /** Which model, for a provider that lets one be named. Validated together with `provider`. */
@@ -3577,6 +3640,38 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // Re-validated rather than trusted: this list is what a resume hands to the
     // CLI, and the floor it had to clear when the run started may have risen.
     allowRules: normalizeAllowRules(raw.allowRules, allowRuleHomeContext()),
+    // Only a hand-over this code could have written: the folder is drawn on the
+    // run's page and named to the harness, so half a record is no record at all
+    // — read as `null`, which the page renders as "this build cannot say"
+    // rather than as an empty inputs folder.
+    inputs: (() => {
+      const v = (raw as { inputs?: unknown }).inputs as { dir?: unknown; files?: unknown } | null | undefined;
+      if (!v || typeof v !== "object" || typeof v.dir !== "string" || !v.dir) return null;
+      const files = Array.isArray(v.files)
+        ? v.files
+          .filter((f): f is RunInputFile => !!f && typeof f === "object"
+            && typeof (f as RunInputFile).name === "string" && typeof (f as RunInputFile).bytes === "number")
+          .slice(0, MAX_RUN_INPUTS)
+          .map((f) => ({ name: f.name, bytes: f.bytes }))
+        : [];
+      // A code this build does not know is dropped with its row rather than
+      // passed on: the page words it from a fixed table, and an unknown code
+      // would draw a refusal with no reason beside it.
+      const refusedRaw = (v as { refused?: unknown }).refused;
+      const refused = Array.isArray(refusedRaw)
+        ? refusedRaw
+          .flatMap((r) => {
+            const e = r as { name?: unknown; code?: unknown } | null;
+            if (!e || typeof e !== "object" || typeof e.name !== "string" || !isInputRefusalCode(e.code)) return [];
+            return [{ name: e.name, code: e.code }];
+          })
+          .slice(0, MAX_RUN_INPUTS)
+        : [];
+      // The shared folder is NOT read back off the record: it is one folder on
+      // this box, and a stale path in an old file would send the owner to a
+      // folder nothing reads.
+      return { dir: v.dir, shared: sharedInputsDir(), files, refused };
+    })(),
     // A record from before the store existed has none. The names are re-filtered
     // rather than trusted: this list is rendered, and the file it comes from is
     // the one a restore or a hand edit can have touched.
@@ -4409,6 +4504,11 @@ function cloneRun(run: CodingRun): CodingRun {
     deniedActions: [...run.deniedActions],
     denials: run.denials.map((d) => ({ ...d })),
     allowRules: [...run.allowRules],
+    // Nested, so it needs its own copy: a route holding a clone must not be
+    // able to write the staged list the record keeps.
+    inputs: run.inputs
+      ? { dir: run.inputs.dir, shared: run.inputs.shared, files: run.inputs.files.map((f) => ({ ...f })), refused: run.inputs.refused.map((r) => ({ ...r })) }
+      : null,
     secretNames: [...run.secretNames],
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
     subagents: run.subagents.map((a) => ({ ...a })),
@@ -4480,7 +4580,7 @@ export function clearFinishedRuns(): number {
   for (const r of list) (heldOn(r) || isPrPending(r.pr) ? keep : dropped).push(r);
   const removed = dropped.length;
   if (removed === 0) return 0;
-  for (const r of dropped) removeArtifacts(r.id);
+  for (const r of dropped) { removeArtifacts(r.id); removeRunInputs(r.id); }
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
@@ -4798,6 +4898,13 @@ const HEADLESS_BRIEF_TEMPLATE = [
   "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
   "Verify efficiently: use browser_fill to set a form field by selector and browser_click on controls; never navigate a page one Tab or arrow key at a time — a whole step budget was once spent that way.",
   "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your own run record and any session files are not yours to inspect: reads there are refused, and every attempt costs a step. The one exception is your own evidence folder (CLAWBOX_RUN_ARTIFACTS_DIR), which lives under data/ and is yours to read and write. Work inside your project folder and your evidence folder only.",
+  // The failure this answers: the assistant generated four pictures for the
+  // task into its own media folder — inside the credential store every run is
+  // denied — and the run, refused by both Read and `cp`, drew them again. The
+  // box now copies what it was handed into CLAWBOX_RUN_INPUTS_DIR, so the run
+  // needs to know where that is and, just as much, that hunting for the
+  // original is a refusal it cannot argue with.
+  "Files you were GIVEN for this task — pictures, recordings, documents — are in the folder named by CLAWBOX_RUN_INPUTS_DIR, and you may read anything under it (its `shared` folder included). Copy what you need into your own folder from there. The assistant's own media folder is NOT readable by a run and never will be: if something you were promised is missing from your inputs folder, say so in your report rather than looking for it elsewhere.",
   // Bench task s-02 (2026-09-05): the run listed two sibling projects and
   // walked their .git internals looking for a file the task had misplaced.
   "The folders beside yours under the project root are the owner's other projects: never list, search or read them.",
@@ -5173,6 +5280,11 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
           CLAWBOX_ROOT: CONFIG_ROOT,
           CLAWBOX_MCP_PROFILE: "browser",
           CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
+          // Where the assets this run was handed were staged. Named the same
+          // way the evidence folder is, and for the same reason: the brief
+          // talks about it, so it has to be one string the run can read rather
+          // than a path it is expected to guess.
+          CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
           CLAWBOX_RUN_DIR: run.directory,
           ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
         },
@@ -5275,7 +5387,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // circularity — `fileDenyRules` below is built FROM this list — and does
     // not need to be: every deny rule it returns still outranks each allow.
     const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE, ...allowRules);
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -5408,7 +5520,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; provider?: CodingProvider; model?: string | null; secrets?: Record<string, string> } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; secrets?: Record<string, string> } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -5447,6 +5559,10 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
+  // The folder holding the files this run was GIVEN. A CLAWBOX_ name, which
+  // `setSecret` refuses, so the owner's secret store cannot repoint a run's
+  // inputs at something else — the same reason CLAWBOX_PREVIEW is one.
+  if (opts.inputsDir) env.CLAWBOX_RUN_INPUTS_DIR = opts.inputsDir;
   // How a run turns its own folder into a page the device browser can open.
   // Named here rather than written into the brief as a literal path so the
   // review pass and the brief cannot disagree about where the script is — and
@@ -6217,6 +6333,40 @@ export function folderListing(directory: string): string {
     .filter((n) => n !== "/" && n !== "")
     .sort((a, b) => a.localeCompare(b));
   return `this folder contains: ${names.join(", ")}`;
+}
+
+/**
+ * The one sentence a run is told about the files it was GIVEN.
+ *
+ * Read off DISK rather than off the record, so a file the owner dropped into
+ * the folder between the start and the spawn — or between two attempts at a
+ * deliverable, which respawn from the same record — is named too. The record's
+ * `refused` list is still where the refusals come from: they are a fact about
+ * the hand-over, not about what is in the folder now.
+ *
+ * Always says something. "Nothing was given" is the line that stops a run
+ * searching the disk for a picture the assistant only meant to generate, and
+ * naming the media folder as unreachable is what stops it trying `cp`.
+ */
+export function runInputsNote(run: Pick<CodingRun, "id" | "inputs">): string {
+  let files: RunInputFile[] = [];
+  try {
+    files = listRunInputs(run.id);
+  } catch {
+    files = run.inputs?.files ?? [];
+  }
+  const refused = run.inputs?.refused ?? [];
+  // SHORT on purpose. The standing facts — that the folder is readable, that
+  // the assistant's media tree is not — are in the brief, which every run gets;
+  // repeating them here would put four sentences of boilerplate in front of
+  // every task for the sake of the rare run that has inputs at all.
+  const parts: string[] = [files.length > 0
+    ? `given files, in ${runInputsDir(run.id)}: ${files.map((f) => f.name).join(", ")}`
+    : `no files were given to this run (${runInputsDir(run.id)} is where any would be)`];
+  if (refused.length > 0) {
+    parts.push(`the device could not hand over ${refused.map((r) => `${r.name} (${r.code})`).join(", ")}, so do not look for them elsewhere`);
+  }
+  return `${parts.join("; ")}.`;
 }
 
 /** One line of `--output-format stream-json`. */
@@ -8274,7 +8424,7 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
   return {
     bin: setprivPath,
     args: CAPABILITY_DROP_ARGS,
-    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id) }),
+    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id) }),
   };
 }
 
@@ -10128,7 +10278,7 @@ function spawnRun(
   // from a `close` handler and cannot read the disk (restoreRunSecrets).
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, provider: run.provider, model: run.requestedModel, secrets: runSecretEnv.get(run.id) });
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, secrets: runSecretEnv.get(run.id) });
   let child: ChildProcess;
   try {
     child = spawn(bin, argv, {
@@ -10244,9 +10394,15 @@ function spawnRun(
   // was seen writing there (run-qqj1io65: screenshots filed under the old
   // run, Write into its own folder refused). The env and --add-dir already
   // name the new folder; the session's memory needs telling too.
+  // What this run was HANDED, named in the same breath as the folder listing:
+  // the brief says inputs live in CLAWBOX_RUN_INPUTS_DIR, and a run told the
+  // file names up front opens them rather than globbing for them. Said even
+  // when nothing was staged, because "you were given nothing" is what stops a
+  // run hunting for a picture the assistant only meant to generate.
+  const inputsNote = runInputsNote(run);
   const firstTurn = stdinText ?? (resumeSessionId
-    ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder.]`
-    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)}]`);
+    ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder. ${inputsNote}]`
+    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)} ${inputsNote}]`);
   try {
     child.stdin?.on("error", () => {
       // EPIPE when the wrapper dies before reading the task; `exit` reports it.
@@ -10826,6 +10982,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
     });
+    // THE FILES THIS RUN WAS GIVEN, staged before anything else: the task
+    // context names the folder, so what is in it has to be true by the time the
+    // harness reads that line. Never fatal — an asset that could not be copied
+    // is reported to the run (and drawn on its page) rather than losing the
+    // task it was an input to.
+    await stageInputs(run, input.inputs);
     if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
     else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf, run.reviewRound));
     else if (run.vercelFixOf) pushProgress(run, RUNNER_STEP.deployFixTurn(run.vercelFixOf));
@@ -10959,6 +11121,47 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   } finally {
     releaseDirectory();
     releaseSlot();
+  }
+}
+
+/**
+ * Copy the assets this run was handed into a folder it may read, and record
+ * what landed there.
+ *
+ * The inputs FOLDER is made whatever the caller named, including nothing at
+ * all: it is what the owner is shown as "inputs for this run", and it is where
+ * they are told to put a file the run turns out to need. Only the copying is
+ * conditional.
+ *
+ * Never throws. An asset the box could not stage is a fact on the record (and
+ * a sentence in the run's own first turn), not a reason to refuse a task the
+ * rest of which is perfectly doable — the failure this whole thing exists to
+ * fix is a run that gave up over a file it could not reach.
+ */
+async function stageInputs(run: CodingRun, named: unknown): Promise<void> {
+  const dir = runInputsDir(run.id);
+  run.inputs = { dir, shared: sharedInputsDir(), files: [], refused: [] };
+  try {
+    ensureInputsDirs(run.id);
+  } catch {
+    // ensureInputsDirs already warns; a run with no inputs folder simply has
+    // nothing in it.
+  }
+  const paths = readInputPaths(named);
+  if (paths.length === 0) return;
+  try {
+    const result = await stageRunInputs(run.id, paths);
+    run.inputs = {
+      dir: result.dir,
+      shared: sharedInputsDir(),
+      files: result.staged,
+      // The NAME only: the record is drawn on a page and answered by a route,
+      // and the absolute path of a file the box refused to copy says more about
+      // the box's layout than the owner needs to read.
+      refused: result.refused.map((r) => ({ name: path.basename(r.path).slice(0, 100) || "?", code: r.code })),
+    };
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: could not stage its inputs:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -11137,8 +11340,9 @@ function newRunRecord(fields: {
   pipeline?: PipelineState | null;
 }): CodingRun {
   const now = Date.now();
+  const id = newRunId();
   return {
-    id: newRunId(),
+    id,
     task: fields.task,
     directory: fields.directory,
     projectId: fields.projectId,
@@ -11159,6 +11363,10 @@ function newRunRecord(fields: {
     deniedActions: [],
     denials: [],
     allowRules: [...fields.settings.allowRules],
+    // The folder is known the moment the id is; what lands in it is staged by
+    // `stageInputs` a few lines into startRun, once the caller's paths have
+    // been judged one by one.
+    inputs: { dir: runInputsDir(id), shared: sharedInputsDir(), files: [], refused: [] },
     // Filled at spawn by prepareRunSecrets, which is the only thing that knows
     // what this run's project resolved to.
     secretNames: [],
@@ -11233,6 +11441,7 @@ function insertRun(list: CodingRun[], run: CodingRun): void {
     const idx = findLastFinished(list);
     if (idx < 0) break;
     removeArtifacts(list[idx].id);
+    removeRunInputs(list[idx].id);
     list.splice(idx, 1);
   }
 }
@@ -11655,6 +11864,7 @@ export function deleteDraftRun(id: string): void {
     throw new CodingAgentError("invalid", "Only a draft can be deleted; finished runs are history.");
   }
   removeArtifacts(id);
+  removeRunInputs(id);
   list.splice(idx, 1);
   persist(true);
 }

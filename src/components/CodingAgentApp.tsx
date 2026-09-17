@@ -22,6 +22,7 @@ import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
+import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
 import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { type RunWorktreeView } from "./CodingRunWorktreeCard";
 import type { RunMessage } from "@/lib/coding-run-messages";
@@ -115,6 +116,10 @@ interface Run {
    *  and — when there is none — why. Absent on a record written before the
    *  field existed, which is why `deniedActions` is still read. */
   denials?: RunDenial[];
+  /** The files this run was GIVEN and the folder they are in. Absent on a
+   *  record written before the hand-over existed — and then nothing is drawn,
+   *  because "no inputs" and "this build cannot say" are different answers. */
+  inputs?: RunInputs | null;
   progress: string[];
   /** When each progress line happened, one for one with `progress`; absent on a record from before the field. */
   progressAt?: number[];
@@ -2949,10 +2954,18 @@ export default function CodingAgentApp() {
                 </dl>
               </div>
 
+              {/* The files this run was GIVEN, and the folder they are in —
+                  which is also where the owner puts one the run turns out to
+                  need. Above the refusals on purpose: the commonest refusal
+                  this feature answers is a read of a file that should have
+                  been handed over, and the answer is right here. */}
+              <CodingRunInputs inputs={run.inputs} />
+
               {/* What was refused, spelled out — and, where this box can
                   answer it, an "Allow next time" beside it. */}
               <CodingRunDenials
                 runId={run.id}
+                inputs={run.inputs}
                 denials={run.denials}
                 deniedActions={run.deniedActions}
                 resumable={run.status === "paused"}

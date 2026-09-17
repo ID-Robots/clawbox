@@ -251,3 +251,17 @@ describe("the deliverable", () => {
     expect(startRun.mock.calls[0][0].deliverable).toBeUndefined();
   });
 });
+
+describe("the files a run is given", () => {
+  it("hands the caller's paths to startRun untouched, so one reader decides what this box copies", async () => {
+    const paths = ["/home/clawbox/.openclaw/media/tool-image-generation/a.png", "/nowhere/b.png"];
+    const res = await POST(req({ auth: "bearer", body: { task: "Use these four pictures", projectId: "site", inputs: paths } }));
+    expect(res.status).toBe(202);
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ inputs: paths }));
+  });
+
+  it("sends nothing when the caller named nothing, so an absent list stays absent", async () => {
+    await POST(req({ body: { task: "Add a dark mode toggle", projectId: "site" } }));
+    expect(startRun.mock.calls[0][0].inputs).toBeUndefined();
+  });
+});
