@@ -290,3 +290,37 @@ describe("chat-reasoning", () => {
     });
   });
 });
+
+describe("Claude models that mandate thinking", () => {
+  // The gateway refuses `thinkingLevel: "off"` for them — seen on a box:
+  //   thinkingLevel "off" is not supported for anthropic/claude-fable-5-1
+  //   (use minimal|low|medium|adaptive|high|xhigh|max)
+  // and the chat's safe start value IS "off", so every fresh session hit it.
+  it("never offers or sends Off for Fable 5 / Mythos 5", () => {
+    for (const model of ["anthropic/claude-fable-5-1", "claude-fable-5", "anthropic/claude-mythos-5-1"]) {
+      const cfg = getProviderReasoningConfig("anthropic", model);
+      expect(cfg.levels).not.toContain("off");
+      expect(cfg.default).toBe("medium");
+      expect(resolveWireThinkingLevel("anthropic", "off", model)).toBe("medium");
+    }
+  });
+
+  it("leaves the other Claude models, and other providers, as they were", () => {
+    expect(getProviderReasoningConfig("anthropic", "anthropic/claude-opus-5").levels).toContain("off");
+    expect(getProviderReasoningConfig("openai", "openai/gpt-5.5").levels).toContain("off");
+    expect(resolveWireThinkingLevel("anthropic", "off", "anthropic/claude-opus-5")).toBe("off");
+  });
+
+  it("reads the level to fall back to out of the gateway's menu-style refusal", () => {
+    expect(parseUnsupportedThinkingLevelError(
+      'thinkingLevel "off" is not supported for anthropic/claude-fable-5-1 (use minimal|low|medium|adaptive|high|xhigh|max)',
+    )).toBe("medium");
+    expect(parseUnsupportedThinkingLevelError(
+      'thinkingLevel "off" is not supported for some/model (use adaptive|high)',
+    )).toBe("adaptive");
+    // The single-level form still reads as before.
+    expect(parseUnsupportedThinkingLevelError(
+      'thinkingLevel "high" is not supported for llamacpp/gemma4-e2b-it-q4_0 (use off)',
+    )).toBe("off");
+  });
+});

@@ -86,12 +86,30 @@ export const FALLBACK_REASONING_CONFIG: ProviderReasoningConfig = {
 
 // Keep the optional model argument for callers carrying the active pairing.
 // The legacy ClawBox AI aliases no longer need different reasoning defaults.
+// Claude models the gateway will not run without thinking: its contract
+// (`requiresClaudeMandatoryAdaptiveThinking` in the core) refuses
+// `thinkingLevel: "off"` for them — seen verbatim on a box:
+//   thinkingLevel "off" is not supported for anthropic/claude-fable-5-1
+//   (use minimal|low|medium|adaptive|high|xhigh|max)
+// Offering "off" for these was a control the gateway could only refuse, and
+// the chat's safe start value IS "off", so every fresh session hit it.
+const CLAUDE_MANDATORY_THINKING_RE = /claude-(fable|mythos)-5/i;
+const MANDATORY_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high"];
+
+function requiresMandatoryThinking(provider: string, model: string | null | undefined): boolean {
+  if (!model) return false;
+  const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+  return (provider === "anthropic" || model.startsWith("anthropic/")) && CLAUDE_MANDATORY_THINKING_RE.test(bare);
+}
+
 export function getProviderReasoningConfig(
   provider: string | null | undefined,
   model?: string | null,
 ): ProviderReasoningConfig {
-  void model;
   if (!provider) return FALLBACK_REASONING_CONFIG;
+  if (requiresMandatoryThinking(provider, model)) {
+    return { levels: MANDATORY_THINKING_LEVELS, default: "medium" };
+  }
   return REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG;
 }
 
@@ -140,10 +158,17 @@ export function parseUnsupportedThinkingLevelError(
 ): ThinkingLevel | null {
   if (typeof message !== "string") return null;
   if (!/thinkinglevel/i.test(message) || !/not supported/i.test(message)) return null;
-  const match = /\(\s*use\s+([a-z-]+)\s*\)/i.exec(message);
+  // One level ("use off") or the whole menu ("use minimal|low|medium|…"):
+  // the gateway words both. From a menu take the chat's own default when it
+  // is offered, otherwise the first level it names.
+  const match = /\(\s*use\s+([a-z|\s-]+?)\s*\)/i.exec(message);
   if (!match) return null;
-  const suggested = match[1].toLowerCase();
-  return isThinkingLevel(suggested) ? suggested : null;
+  const offered = match[1]
+    .split("|")
+    .map((level) => level.trim().toLowerCase())
+    .filter(isThinkingLevel);
+  if (offered.length === 0) return null;
+  return offered.includes("medium") ? "medium" : offered[0];
 }
 
 export const PERSIST_KEY_PREFIX = "clawbox:chat:thinkingLevel";
