@@ -4,7 +4,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 
 /**
  * Chat-first on a phone (src/lib/mobile-chat-first.ts): the page lands in the
- * chat with a thumb-sized microphone, the desktop is one labelled tap away and
+ * chat with an in-flow microphone, the desktop is one labelled tap away and
  * the shelf crab brings the chat back. A big screen with a mouse is unchanged.
  *
  * Screenshots go to the test's output folder, for a human to look at.
@@ -176,10 +176,91 @@ const chatOpen = (page: Page) => expect(page.getByTestId("chat-popup")).toHaveCS
 // A closed chat is not rendered at all (ChatPopup returns null while !isOpen).
 const chatClosed = (page: Page) => expect(page.getByTestId("chat-popup")).toHaveCount(0);
 
+for (const locale of ["bg", "de"]) {
+  for (const viewport of [{ width: 360, height: 800 }, { width: 390, height: 844 }, { width: 740, height: 360 }, { width: 390, height: 360 }]) {
+    test.describe(`composer ${locale} ${viewport.width}x${viewport.height}`, () => {
+      test.use({ viewport, hasTouch: true, isMobile: true });
+      test("keeps primary actions and long picker labels in separate, non-overlapping rows", async ({ page }, testInfo) => {
+        await installFakeGatewaySocket(page);
+        await installClawboxMocks(page, {
+          ...SETUP,
+          preferences: { ...SETUP.preferences, ui_language: locale },
+        });
+        const label = locale === "bg" ? "Персонализиран асистент за програмиране" : "Benutzerdefinierter Programmierassistent";
+        const modelLabel = locale === "bg" ? "Разширен модел за сложни задачи" : "Erweitertes Modell für komplexe Aufgaben";
+        await page.route("**/setup-api/chat/model", route => route.fulfill({
+          json: {
+            activeOptionId: "anthropic", activeModel: "anthropic/custom-long-model", activeSource: "primary",
+            options: [{ id: "anthropic", provider: "anthropic", label, model: "anthropic/custom-long-model", available: true, settingsSection: "ai", isLocal: false }],
+            primary: { available: true, model: "anthropic/custom-long-model", label },
+            local: { available: false, model: null, label: null },
+          },
+        }));
+        await page.route("**/setup-api/ai-models/catalog?**", route => route.fulfill({
+          json: { provider: "anthropic", defaultModelId: "custom-long-model", allowCustom: true, models: [
+            { id: "custom-long-model", label: modelLabel }, { id: "other", label: "Other" },
+          ] },
+        }));
+        await page.goto("/");
+        await chatOpen(page);
+        const composer = page.getByTestId("chat-composer");
+        const primary = composer.locator(".chat-composer-primary");
+        const pills = composer.locator(".header-dropdown-trigger");
+        await expect(pills).toHaveCount(3);
+        await expect(page.getByTestId("voice-record")).toBeEnabled();
+        await expect(pills.nth(1)).toContainText(modelLabel);
+
+        async function assertLayout() {
+          const geometry = await composer.evaluate(el => {
+            const primary = el.querySelector(".chat-composer-primary")!.getBoundingClientRect();
+            const buttons = [...el.querySelectorAll("button, textarea")].map(node => {
+              const r = node.getBoundingClientRect();
+              return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+            });
+            const pills = [...el.querySelectorAll(".header-dropdown-trigger")].map(node => node.getBoundingClientRect().y);
+            return { buttons, pills, primaryBottom: primary.bottom, scrollWidth: el.scrollWidth, width: el.clientWidth };
+          });
+          expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
+          for (const box of geometry.buttons) {
+            expect(box.x).toBeGreaterThanOrEqual(0);
+            expect(box.right).toBeLessThanOrEqual(viewport.width);
+            expect(box.bottom).toBeLessThanOrEqual(viewport.height);
+            expect(box.height).toBeGreaterThanOrEqual(36);
+          }
+          for (let i = 0; i < geometry.buttons.length; i++) {
+            for (const b of geometry.buttons.slice(i + 1)) {
+              const a = geometry.buttons[i];
+              expect(a.right <= b.x + 0.5 || b.right <= a.x + 0.5 || a.bottom <= b.y + 0.5 || b.bottom <= a.y + 0.5).toBe(true);
+            }
+          }
+          expect(Math.min(...geometry.pills)).toBeGreaterThanOrEqual(geometry.primaryBottom);
+          expect(Math.max(...geometry.pills) - Math.min(...geometry.pills)).toBeLessThan(1);
+        }
+        await assertLayout();
+        await page.screenshot({ path: testInfo.outputPath("composer-idle.png") });
+        await primary.locator("textarea").fill(locale === "bg" ? "Напиши кратък отговор" : "Schreibe eine kurze Antwort");
+        await expect(primary.getByTestId("chat-send")).toBeVisible();
+        await expect(page.getByTestId("voice-record")).toHaveCount(0);
+        await assertLayout();
+        await page.screenshot({ path: testInfo.outputPath("composer-typing.png") });
+        // Truncated values still open a full, usable picker inside the viewport.
+        await pills.nth(1).click();
+        const menu = page.getByRole("listbox");
+        await expect(menu).toBeVisible();
+        await expect(menu.getByText(modelLabel, { exact: true })).toBeVisible();
+        const menuBox = (await menu.boundingBox())!;
+        expect(menuBox.x).toBeGreaterThanOrEqual(0);
+        expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(viewport.width);
+        await page.keyboard.press("Escape");
+      });
+    });
+  }
+}
+
 test.describe("on a phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("lands in the chat with a large microphone, and moves to the desktop and back", async ({ page }, testInfo) => {
+  test("lands in the chat with a compact microphone, and moves to the desktop and back", async ({ page }, testInfo) => {
     await installFakeGatewaySocket(page);
     await installClawboxMocks(page, SETUP);
     await page.goto("/");
@@ -191,8 +272,8 @@ test.describe("on a phone", () => {
     await expect(record).toBeVisible();
     await expect(record).toBeEnabled();
     const box = await record.boundingBox();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(64);
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(64);
+    expect(box?.width).toBe(44);
+    expect(box?.height).toBe(44);
     // Inside the screen, in the lower part where a thumb reaches.
     expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390);
     expect(box?.y ?? 0).toBeGreaterThan(844 / 2);
@@ -207,9 +288,16 @@ test.describe("on a phone", () => {
     await expect(crab).toBeVisible();
     await crab.click();
     await chatOpen(page);
+    // Rotation past the desktop breakpoint must not strand the composer.
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(page.getByTestId("chat-send")).toBeInViewport();
+    await expect(page.getByTestId("voice-record")).toBeInViewport();
+    const composerBox = (await page.getByTestId("chat-composer").boundingBox())!;
+    expect(composerBox.y + composerBox.height).toBeLessThanOrEqual(390);
+    await page.screenshot({ path: testInfo.outputPath("phone-wide-landscape.png") });
   });
 
-  test("shows the recording state on the large button", async ({ page }, testInfo) => {
+  test("shows the recording state without enlarging the primary row", async ({ page }, testInfo) => {
     await page.addInitScript(() => {
       class FakeRecorder {
         static isTypeSupported() { return true; }
@@ -239,7 +327,7 @@ test.describe("on a phone", () => {
     await expect(stop).toBeVisible();
     await expect(stop).toHaveClass(/chat-voice-large--recording/);
     const box = await stop.boundingBox();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(64);
+    expect(box?.width).toBe(44);
     await page.screenshot({ path: testInfo.outputPath("phone-recording.png") });
   });
 });
