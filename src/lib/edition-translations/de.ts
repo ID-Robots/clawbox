@@ -1395,4 +1395,15 @@ export const de: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "Pausiert: die 5-Stunden-Spitze von ClawBox AI ist erreicht.",
   "codingAgent.pausedAllowanceEmbeddings": "Pausiert: das wöchentliche Kontingent von ClawBox AI für die Gedächtnis-Indexierung ist aufgebraucht.",
   "codingAgent.pausedAllowanceFreesUp": "Es wird um {time} frei.",
+
+  // === Einstellungen → Anbieter: das ClawBox-AI-Angebot auf einer nicht verbundenen Box ===
+  "settings.clawaiPitch.title": "Für das beste Erlebnis ClawBox AI verwenden",
+  "settings.clawaiPitch.body":
+    "Ein ClawBox-AI-Abo betreibt Chat, Stimme, Transkription und Gedächtnissuche mit Modellen, die weit größer sind, als auf diese Box passt, und richtet sie alle für Sie ein. Genau das nutzt die Box eines Abonnenten standardmäßig.",
+  "settings.clawaiPitch.connect": "ClawBox AI verbinden",
+  "settings.clawaiPitch.plans": "Tarife und Preise ansehen",
+  "settings.clawaiPitch.localTitle": "Möchten Sie lieber alles auf dieser Box behalten?",
+  "settings.clawaiPitch.localBody":
+    "ClawBox kann stattdessen eigene Modelle auf dem Gerät ausführen, sodass nichts es verlässt. Sie sind kleiner und langsamer als die in der Cloud, und Sie wählen und installieren sie selbst.",
+  "settings.clawaiPitch.localAction": "Lokale KI einrichten",
 };

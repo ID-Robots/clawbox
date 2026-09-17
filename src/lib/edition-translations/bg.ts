@@ -1382,4 +1382,15 @@ export const bg: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "На пауза: достигнат е 5-часовият пиков лимит на ClawBox AI.",
   "codingAgent.pausedAllowanceEmbeddings": "На пауза: седмичната квота на ClawBox AI за индексиране на паметта е изчерпана.",
   "codingAgent.pausedAllowanceFreesUp": "Освобождава се в {time}.",
+
+  // === Settings → Доставчици: офертата за ClawBox AI на несвързана кутия ===
+  "settings.clawaiPitch.title": "Използвайте ClawBox AI за най-доброто изживяване",
+  "settings.clawaiPitch.body":
+    "Абонаментът за ClawBox AI движи чата, гласа, транскрипцията и търсенето в паметта с модели, далеч по-големи от онези, които се побират на тази кутия, и настройва всичко вместо вас. Точно това ползва по подразбиране кутията на всеки абонат.",
+  "settings.clawaiPitch.connect": "Свържете ClawBox AI",
+  "settings.clawaiPitch.plans": "Вижте плановете и цените",
+  "settings.clawaiPitch.localTitle": "Предпочитате всичко да остане на тази кутия?",
+  "settings.clawaiPitch.localBody":
+    "Вместо това ClawBox може да пуска собствени модели на устройството, така че нищо не го напуска. Те са по-малки и по-бавни от облачните, а вие сами ги избирате и инсталирате.",
+  "settings.clawaiPitch.localAction": "Настройте локален AI",
 };

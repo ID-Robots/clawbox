@@ -1391,4 +1391,15 @@ export const es: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "En pausa: se ha alcanzado el pico de 5 horas de ClawBox AI.",
   "codingAgent.pausedAllowanceEmbeddings": "En pausa: se ha agotado la cuota semanal de ClawBox AI para la indexación de memoria.",
   "codingAgent.pausedAllowanceFreesUp": "Se libera a las {time}.",
+
+  // === Ajustes → Proveedores: la propuesta de ClawBox AI en una caja sin vincular ===
+  "settings.clawaiPitch.title": "Usa ClawBox AI para la mejor experiencia",
+  "settings.clawaiPitch.body":
+    "Una suscripción a ClawBox AI mueve el chat, la voz, la transcripción y la búsqueda en la memoria con modelos mucho más grandes de los que caben en esta caja, y los configura todos por ti. Es lo que usa por defecto la caja de quien está suscrito.",
+  "settings.clawaiPitch.connect": "Conectar ClawBox AI",
+  "settings.clawaiPitch.plans": "Ver planes y precios",
+  "settings.clawaiPitch.localTitle": "¿Prefieres que todo se quede en esta caja?",
+  "settings.clawaiPitch.localBody":
+    "ClawBox puede ejecutar sus propios modelos en el dispositivo, de modo que nada sale de él. Son más pequeños y lentos que los de la nube, y tú mismo eliges e instalas los que quieras.",
+  "settings.clawaiPitch.localAction": "Configurar la IA local",
 };

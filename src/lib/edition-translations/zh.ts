@@ -1406,4 +1406,13 @@ export const zh: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "已暂停：已达到 ClawBox AI 的 5 小时突发额度。",
   "codingAgent.pausedAllowanceEmbeddings": "已暂停：本周的 ClawBox AI 记忆索引额度已用完。",
   "codingAgent.pausedAllowanceFreesUp": "将于 {time} 释放。",
+
+  // === 设置 → 提供商：未关联设备上的 ClawBox AI 推介 ===
+  "settings.clawaiPitch.title": "使用 ClawBox AI 获得最佳体验",
+  "settings.clawaiPitch.body": "ClawBox AI 订阅会用远比这台设备所能容纳的更大的模型来运行聊天、语音、转写和记忆搜索，并替你把它们全部配置好。订阅用户的设备默认用的就是它。",
+  "settings.clawaiPitch.connect": "连接 ClawBox AI",
+  "settings.clawaiPitch.plans": "查看套餐与价格",
+  "settings.clawaiPitch.localTitle": "更想让一切都留在这台设备上？",
+  "settings.clawaiPitch.localBody": "ClawBox 也可以改在设备上运行自己的模型，数据不会离开它。它们比云端的更小更慢，由你自己挑选和安装。",
+  "settings.clawaiPitch.localAction": "设置本地 AI",
 };

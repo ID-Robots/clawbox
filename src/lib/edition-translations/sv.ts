@@ -1392,4 +1392,15 @@ export const sv: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "Pausad: 5-timmarsgränsen i ClawBox AI är nådd.",
   "codingAgent.pausedAllowanceEmbeddings": "Pausad: veckokvoten för minnesindexering i ClawBox AI är slut.",
   "codingAgent.pausedAllowanceFreesUp": "Den frigörs {time}.",
+
+  // === Inställningar → Leverantörer: ClawBox AI-erbjudandet på en olänkad box ===
+  "settings.clawaiPitch.title": "Använd ClawBox AI för den bästa upplevelsen",
+  "settings.clawaiPitch.body":
+    "En ClawBox AI-prenumeration kör chatten, rösten, transkriberingen och minnessökningen på modeller som är långt större än vad den här boxen rymmer, och ställer in dem alla åt dig. Det är vad en prenumerants box använder som standard.",
+  "settings.clawaiPitch.connect": "Anslut ClawBox AI",
+  "settings.clawaiPitch.plans": "Se abonnemang och priser",
+  "settings.clawaiPitch.localTitle": "Vill du hellre behålla allt på den här boxen?",
+  "settings.clawaiPitch.localBody":
+    "ClawBox kan i stället köra egna modeller på enheten, så att ingenting lämnar den. De är mindre och långsammare än de i molnet, och du väljer och installerar dem själv.",
+  "settings.clawaiPitch.localAction": "Ställ in lokal AI",
 };
