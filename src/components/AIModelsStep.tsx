@@ -721,6 +721,11 @@ export default function AIModelsStep({
   // portal-confirmed account as soon as an answer arrives. Local storage alone
   // is NOT the answer for a paired box — see TASK-468.
   const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => readStoredUiTier());
+  // Whether the box has been TOLD what the account is on. The seed above is a
+  // stored intent, not an answer: it printed as "Pro plan · €9/month" on a box
+  // whose own portal page said Max. Until the reconcile below hears from the
+  // portal the summary says where the plan comes from instead of naming one.
+  const [clawaiPlanKnown, setClawaiPlanKnown] = useState(false);
   // Set the moment the user touches the plan picker. The reconcile below must
   // never yank the card out from under a pick that already happened — on the
   // wizard this picker is someone CHOOSING a plan they do not have yet.
@@ -836,6 +841,9 @@ export default function AIModelsStep({
           // stored device tier cannot tell Free from "we never asked" — guessing
           // from it is how a Free user got shown a paid plan in the first place.
           if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
+          // The account is now known, whoever ends up deciding what the card
+          // shows — so this is set BEFORE the pick guard below, not after it.
+          setClawaiPlanKnown(true);
           // The tier guard sits at resolution time, not at fetch time: a pick
           // made while this request was in flight must win over its answer.
           if (userPickedTierRef.current) return;
@@ -2461,7 +2469,11 @@ export default function AIModelsStep({
             until the shared card can move with it. */}
         {selected?.id === "clawai" && (
           <div className="mt-3 rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
-            <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
+            <ClawboxAiPlanPicker
+              tier={clawaiTier}
+              onTierChange={persistClawaiTier}
+              planKnown={clawaiPlanKnown}
+            />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow

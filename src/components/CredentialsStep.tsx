@@ -132,9 +132,17 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   const [nameOpen, setNameOpen] = useState(false);
   const [hotspotNameOpen, setHotspotNameOpen] = useState(false);
   // The hotspot secret is the one disclosure here with no working default
-  // behind it, so the row that opens it states the outstanding requirement
-  // rather than merely hinting there is a field.
-  const [hotspotSecretOpen, setHotspotSecretOpen] = useState(false);
+  // behind it — and it is the only one whose fields the primary action waits
+  // for. Collapsed, that made Connect unavailable for a reason nothing on the
+  // screen was showing, so it OPENS ON ARRIVAL, while both fields are still
+  // empty. The owner may still collapse it; it is a disclosure, not a panel
+  // nailed open.
+  const [hotspotSecretOpen, setHotspotSecretOpen] = useState(true);
+  // …and if they collapsed it and then filled both system passwords, the
+  // hotspot secret is by then the ONLY thing left holding the button, so the
+  // panel comes back — once. The ref is what keeps that a single nudge rather
+  // than a disclosure that refuses to close.
+  const reopenedForSystemPassword = useRef(false);
   const [status, setStatus] = useState<{
     // "info" is the saved-but-not-fully-applied case: the hotspot settings are
     // on disk, and the radio did not do what they say. Reporting that as plain
@@ -469,11 +477,34 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // so the button can paint the two reasons differently: "not yet" (something
   // is still missing) is a quiet control, while "in flight" keeps its coral —
   // the action is happening, and coral means ACTION.
-  const incomplete =
-    !password ||
-    !confirmPassword ||
-    (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword));
+  const systemSecretMissing = !password || !confirmPassword;
+  const hotspotSecretOutstanding = hotspotEnabled && hotspotSecretMissing;
+  const incomplete = systemSecretMissing || hotspotSecretOutstanding;
   const blocked = saving || incomplete;
+
+  // Why the button will not move, in the same words as the fields it is
+  // waiting on. A disabled control that explains nothing is the whole defect:
+  // the only clue used to be a grey "Minimum 8 characters" on a collapsed row
+  // the owner had no reason to open.
+  const blockedReasonKey = saving
+    ? null
+    : systemSecretMissing && hotspotSecretOutstanding
+      ? "credentials.blockedBoth"
+      : systemSecretMissing
+        ? "credentials.blockedSystem"
+        : hotspotSecretOutstanding
+          ? "credentials.blockedHotspot"
+          : null;
+
+  // The second half of the disclosure's promise (see `hotspotSecretOpen`):
+  // both system passwords in and the hotspot secret still empty means this is
+  // the last outstanding field, so re-open the panel that holds it — once.
+  useEffect(() => {
+    if (reopenedForSystemPassword.current) return;
+    if (systemSecretMissing || !hotspotSecretOutstanding) return;
+    reopenedForSystemPassword.current = true;
+    setHotspotSecretOpen(true);
+  }, [systemSecretMissing, hotspotSecretOutstanding]);
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
@@ -862,11 +893,12 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
         {/* A disabled primary reads "not yet", not "broken": the product's own
             quiet-control recipe, solid. Opacity is deliberately not the signal
             — a button becoming unavailable is a fact, not a fade. */}
-        <div className="mt-[var(--s-6)]">
+        <div className="mt-[var(--s-6)] flex flex-wrap items-center gap-x-[var(--s-4)] gap-y-[var(--s-2)]">
           <button
             type="button"
             onClick={requestSave}
             disabled={blocked}
+            aria-describedby={blockedReasonKey ? "credentials-blocked-reason" : undefined}
             className={`w-full sm:w-auto inline-flex items-center justify-center gap-[var(--s-2)] min-h-[48px] px-[var(--s-6)] rounded-[var(--r-1)] ${
               incomplete
                 ? "bg-[var(--fill-2)] border border-[var(--hair-2)] text-[var(--text-muted)] cursor-not-allowed"
@@ -887,6 +919,24 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
             )}
             {saving ? t("connecting") : t("settings.connect")}
           </button>
+          {/* Beside the button, not buried up the form: the reason is only
+              useful where the owner is looking when nothing happens. `status`
+              announces it politely rather than interrupting whatever the
+              screen reader is saying about the field being typed in. */}
+          {blockedReasonKey && (
+            <p
+              id="credentials-blocked-reason"
+              role="status"
+              data-testid="credentials-blocked-reason"
+              className="m-0 text-[var(--amber-ink)]"
+              style={{
+                fontSize: "var(--t-2)",
+                lineHeight: "var(--lh-tight)",
+              }}
+            >
+              {t(blockedReasonKey)}
+            </p>
+          )}
         </div>
       </div>
     </div>

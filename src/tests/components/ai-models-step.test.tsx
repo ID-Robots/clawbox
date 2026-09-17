@@ -268,9 +268,13 @@ describe("AIModelsStep variants", () => {
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
     expect(getByText("All-in cloud AI for ClawBox — backups, remote desktop, full support")).toBeInTheDocument();
-    // The plan opens as a summary that still states what it costs; the pitch
-    // and the feature list sit behind its "Change".
-    expect(getByText("Pro plan · €9/month")).toBeInTheDocument();
+    // The plan opens as a summary; the pitch and the feature list sit behind
+    // its "Change". Nothing here has connected an account, so the summary says
+    // where the plan comes from rather than naming the seeded default — that
+    // default is "flash", and printing it read as "you are on Pro, €9/month"
+    // to Max and Free owners alike.
+    expect(getByText("Plan is taken from your account")).toBeInTheDocument();
+    expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
     fireEvent.click(getByRole("button", { name: /^Plan/ }));
     expect(getByText("Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.")).toBeInTheDocument();
     // The legacy "Paste token manually" dialog has been removed — connection

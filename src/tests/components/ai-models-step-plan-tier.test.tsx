@@ -71,6 +71,9 @@ function renderPanel() {
   );
 }
 
+/** What the summary says while the box has not been told what the account is. */
+const NEUTRAL = "Plan is taken from your account";
+
 describe("AIModelsStep — the plan card follows the account, not local storage", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -106,33 +109,40 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
   });
 
-  it("leaves the card alone when the portal did not answer this cycle", async () => {
+  it("names no plan at all when the portal did not answer this cycle", async () => {
     // tierSource "picker" means the status route never reached the portal. The
     // stored device tier cannot tell Free from "we never asked", so moving the
-    // card off a guess here is how a Free user got shown a paid plan.
+    // card off a guess here is how a Free user got shown a paid plan. The card
+    // does not guess in the other direction either: it names nothing.
     window.localStorage.setItem(CLAWAI_TIER_STORAGE_KEY, "pro");
     mockStatus({ clawaiConfigured: true, tierSource: "picker", clawaiAccountTier: "flash" });
     const { findByText, queryByText } = renderPanel();
 
-    expect(await findByText("Max plan · €49/month")).toBeInTheDocument();
+    expect(await findByText(NEUTRAL)).toBeInTheDocument();
     expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
+    expect(queryByText("Max plan · €49/month")).not.toBeInTheDocument();
   });
 
-  it("keeps the stored choice when no ClawBox AI account is paired at all", async () => {
+  it("keeps the stored choice behind a neutral summary when nothing is paired", async () => {
     // The wizard's connect flow: this picker is someone CHOOSING a plan they do
-    // not have yet, and there is no account to reconcile against.
+    // not have yet, and there is no account to reconcile against. The stored
+    // intent still drives which tier is selected — it just is not announced as
+    // the owner's plan until they say so or the portal does.
     window.localStorage.setItem(CLAWAI_TIER_STORAGE_KEY, "pro");
     mockStatus({ clawaiConfigured: false, tierSource: "picker", clawaiAccountTier: null });
-    const { findByText } = renderPanel();
+    const { findByText, getByRole } = renderPanel();
 
-    expect(await findByText("Max plan · €49/month")).toBeInTheDocument();
+    fireEvent.click(await findByText(NEUTRAL));
+    expect(getByRole("radio", { name: /Max tier/i })).toHaveAttribute("aria-checked", "true");
   });
 
   it("survives a status route that fails outright", async () => {
     mockStatus(null);
-    const { findByText } = renderPanel();
-    // No answer, so the stored default stands and nothing blows up.
-    expect(await findByText("Pro plan · €9/month")).toBeInTheDocument();
+    const { findByText, queryByText } = renderPanel();
+    // No answer means no account to report — and emphatically not the seeded
+    // "Pro plan · €9/month" this whole file exists because of.
+    expect(await findByText(NEUTRAL)).toBeInTheDocument();
+    expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
   });
 
   it("never overrides a plan the user picked in this session", async () => {
@@ -167,8 +177,9 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     }));
 
     const { getByRole, findByText, queryByText } = renderPanel();
-    // Open the picker and choose Max before the box has answered.
-    fireEvent.click(await findByText("Pro plan · €9/month"));
+    // Open the picker and choose Max before the box has answered. Nothing is
+    // known yet, so the summary is the neutral line rather than a plan name.
+    fireEvent.click(await findByText(NEUTRAL));
     fireEvent.click(getByRole("radio", { name: /Max tier/i }));
     await waitFor(() => expect(window.localStorage.getItem(CLAWAI_TIER_STORAGE_KEY)).toBe("pro"));
 

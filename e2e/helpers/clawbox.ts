@@ -1571,17 +1571,22 @@ export function wizardStepAfterWifi(page: Page) {
 /**
  * Fill the credentials step the way a customer does.
  *
- * The hotspot password and its confirmation sit behind a disclosure on the
- * hotspot's own card (CredentialsStep.tsx) — the row states the requirement,
- * a tap opens the fields. Both are still mandatory: the primary action stays
- * unavailable until they are supplied and matching, which is what every caller
- * of this helper goes on to exercise.
+ * The hotspot password and its confirmation sit on the hotspot's own card
+ * behind a disclosure that now OPENS ON ARRIVAL (CredentialsStep.tsx): they
+ * are the only fields here the primary action waits on and the only ones with
+ * no default read back from the device, so leaving them collapsed made Connect
+ * unavailable for a reason nothing on screen was showing. Clicking the row
+ * would therefore close it — so this only clicks when something has closed it.
+ * Both are still mandatory, which is what every caller goes on to exercise.
  */
 export async function fillCredentialsStep(page: Page) {
   await page.locator("#cred-password").fill("clawbox-pass");
   await page.locator("#cred-confirm").fill("clawbox-pass");
-  await page.getByRole("button", { name: /Hotspot Password/i }).click();
-  await page.locator("#hotspot-password").fill("hotspot-pass");
+  const hotspotSecret = page.locator("#hotspot-password");
+  if (!(await hotspotSecret.count())) {
+    await page.getByRole("button", { name: /Hotspot Password/i }).click();
+  }
+  await hotspotSecret.fill("hotspot-pass");
   await page.locator("#hotspot-confirm").fill("hotspot-pass");
 }
 
