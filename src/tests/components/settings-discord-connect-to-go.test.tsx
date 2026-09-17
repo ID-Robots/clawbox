@@ -76,6 +76,8 @@ describe("Discord connect and go", () => {
     render(<SettingsApp ui={ui} />);
     await waitFor(() => expect(document.getElementById("settings-dc-token")).not.toBeNull());
     expect(document.getElementById("settings-dc-appid")).toBeNull();
+    // Public Bot is on by default; the steps tell the owner to switch it off.
+    expect(document.body.textContent).toContain("settings.discordStepPublicBot");
   });
 
   it("offers the box's invite link after the save and finishes once the bot joined", async () => {

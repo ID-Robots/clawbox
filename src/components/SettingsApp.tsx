@@ -5840,6 +5840,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   </li>
                   <li>{t("settings.discordStep2")}</li>
                   <li>{t("settings.discordStep3")}</li>
+                  {/* Public Bot is on by default in the Developer Portal. Left on,
+                      anyone with the client id can add the bot to their own
+                      server — and a server's owner is given access on join. */}
+                  <li>{t("settings.discordStepPublicBot")}</li>
                   <li>{t("settings.discordStep4")}</li>
                 </ol>
 
