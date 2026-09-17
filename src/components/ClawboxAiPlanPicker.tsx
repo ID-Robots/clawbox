@@ -74,9 +74,15 @@ export default function ClawboxAiPlanPicker({
           <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
             {tr("ai.plan", "Plan")}
           </span>
+          {/* NOT `truncate`. The neutral line is a sentence, not a two-word
+              plan name, and in the settings column German clipped it to "Der
+              Tarif wird aus Ihrem Konto übernomm…" — the message that replaced
+              a wrong claim, hidden mid-word. It wraps instead; the button is
+              min-h-[44px] and grows. `break-words` is the guard a long
+              unbroken token would otherwise need. */}
           <span
             data-testid="clawai-plan-summary"
-            className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]"
+            className="break-words text-[length:var(--t-4)] text-[var(--text-primary)]"
           >
             {/* A plan is NAMED only once the box has been told what the
                 account is on. Before that this line stated the seeded default
