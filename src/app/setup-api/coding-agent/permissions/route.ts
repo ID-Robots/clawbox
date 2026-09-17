@@ -9,6 +9,7 @@ import {
   removeAllowRule,
 } from "@/lib/coding-agent";
 import { MAX_ALLOW_RULES, MAX_RULE_CHARS } from "@/lib/coding-permission-rules";
+import { sharedInputsDir } from "@/lib/coding-run-inputs";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
@@ -27,7 +28,13 @@ export const dynamic = "force-dynamic";
  * what keeps the agent out, the origin check is what keeps another page on the
  * owner's browser from adding a rule while they read it.
  *
- * GET                      → { allowRules, maxAllowRules }
+ * GET                      → { allowRules, maxAllowRules, sharedInputsDir }
+ *
+ * `sharedInputsDir` is the folder a run may READ without any rule at all — the
+ * answer to the question the rules card raises and could not answer, which is
+ * where to put a file a run needs. It is here rather than in the catalogue
+ * because it is a path on THIS box, and the panel must not compose one of its
+ * own.
  * POST   { rule: string }  → save one rule
  * DELETE ?rule=…           → take one back (a JSON body is read too)
  *
@@ -98,7 +105,11 @@ export async function GET(request: Request) {
   const denied = await guard(request, false);
   if (denied) return denied;
   try {
-    return NextResponse.json({ allowRules: await getAllowRules(), maxAllowRules: MAX_ALLOW_RULES });
+    return NextResponse.json({
+      allowRules: await getAllowRules(),
+      maxAllowRules: MAX_ALLOW_RULES,
+      sharedInputsDir: sharedInputsDir(),
+    });
   } catch (err) {
     return failed(err);
   }

@@ -210,6 +210,23 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
 
+  // ── The files a run was given to work from ───────────────────────────────
+  // The assistant writes what it generates into its own state folder, which no
+  // run may read. The box copies what a run was handed into a folder it can,
+  // and these are the words for where that is — on the run's page, beside a
+  // refusal, and in the rules card, because "where do I put the file" is the
+  // question every one of those three raises.
+  "codingAgent.inputsTitle": "Inputs for this run",
+  "codingAgent.inputsHint": "Files given to this run are in {folder}. Anything you put in {shared} can be read by any run on this box.",
+  "codingAgent.inputsEmpty": "This run was given no files.",
+  "codingAgent.inputsRefusedTitle": "Not handed over",
+  "codingAgent.inputsRefusedLocation": "not in a folder this box takes files from",
+  "codingAgent.inputsRefusedMissing": "not there, or not an ordinary file",
+  "codingAgent.inputsRefusedSize": "too large, or too many files for one run",
+  "codingAgent.inputsRefusedFailed": "could not be copied",
+  "codingAgent.deniedInputs": "Files a run may read live in {folder} and in {shared}. The assistant's own media folder is not one of them and no rule can open it — ask the assistant to hand the file over when it starts a run, or put the file in the shared folder yourself.",
+  "codingAgent.rulesInputs": "To give a run a file to work from, put it in {shared}, or ask the assistant to hand it over when it starts the run. The assistant's own media folder holds this box's credentials beside the pictures and can never be opened by a rule.",
+
   // ── Allowing a refused action next time ──────────────────────────────────
   // A refusal is only half an answer while the owner cannot say "yes, that one
   // is fine". `allow*` is the button on a refused action and the confirmation

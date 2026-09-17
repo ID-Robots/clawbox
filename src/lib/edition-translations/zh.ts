@@ -689,6 +689,16 @@ export const zh: Record<string, string> = {
   "codingAgent.harnessTestFailed": "无法启动框架测试",
   "codingAgent.harnessTestNoFolder": "请先选择一个项目文件夹。",
   "codingAgent.deniedHelp": "编码助手只能在自己的文件夹内运行固定的一组命令。这是安全限制在起作用，并非故障——运行通常会找到其他办法。",
+  "codingAgent.inputsTitle": "本次运行的输入文件",
+  "codingAgent.inputsHint": "交给本次运行的文件位于 {folder}。放入 {shared} 的任何文件，这台设备上的任何运行都能读取。",
+  "codingAgent.inputsEmpty": "本次运行没有获得任何文件。",
+  "codingAgent.inputsRefusedTitle": "未能交付",
+  "codingAgent.inputsRefusedLocation": "不在本设备取文件的文件夹内",
+  "codingAgent.inputsRefusedMissing": "不存在，或者不是普通文件",
+  "codingAgent.inputsRefusedSize": "太大，或者一次运行的文件太多",
+  "codingAgent.inputsRefusedFailed": "无法复制",
+  "codingAgent.deniedInputs": "运行可以读取的文件位于 {folder} 和 {shared}。助手自己的媒体文件夹不在其中，任何规则都无法打开它——请让助手在启动运行时把文件交过去，或者自己把文件放入共享文件夹。",
+  "codingAgent.rulesInputs": "要给运行一份可用的文件，请放入 {shared}，或请助手在启动运行时交付。助手自己的媒体文件夹里除了图片还保存着本设备的凭据，任何规则都无法打开。",
 
   // === 下次允许被拒绝的操作 ===
   "codingAgent.allowNextTime": "下次允许",

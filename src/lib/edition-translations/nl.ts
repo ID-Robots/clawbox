@@ -679,6 +679,16 @@ export const nl: Record<string, string> = {
   "codingAgent.harnessTestFailed": "Kon de harnesstest niet starten",
   "codingAgent.harnessTestNoFolder": "Kies eerst een projectmap.",
   "codingAgent.deniedHelp": "De coding agent mag alleen een vaste set opdrachten in zijn eigen map uitvoeren. Dit is de veiligheidsgrens die werkt, geen fout — de run vindt meestal een andere weg.",
+  "codingAgent.inputsTitle": "Invoer voor deze run",
+  "codingAgent.inputsHint": "Bestanden die aan deze run zijn meegegeven staan in {folder}. Alles wat u in {shared} zet, kan elke run op deze box lezen.",
+  "codingAgent.inputsEmpty": "Aan deze run zijn geen bestanden meegegeven.",
+  "codingAgent.inputsRefusedTitle": "Niet overgedragen",
+  "codingAgent.inputsRefusedLocation": "staat niet in een map waaruit deze box bestanden haalt",
+  "codingAgent.inputsRefusedMissing": "bestaat niet, of is geen gewoon bestand",
+  "codingAgent.inputsRefusedSize": "te groot, of te veel bestanden voor één run",
+  "codingAgent.inputsRefusedFailed": "kon niet worden gekopieerd",
+  "codingAgent.deniedInputs": "Bestanden die een run mag lezen staan in {folder} en in {shared}. De eigen mediamap van de assistent hoort daar niet bij en geen enkele regel kan die openen — vraag de assistent het bestand mee te geven bij het starten van een run, of zet het zelf in de gedeelde map.",
+  "codingAgent.rulesInputs": "Wilt u een run een bestand meegeven, zet het dan in {shared} of vraag de assistent het bij de start mee te geven. In de eigen mediamap van de assistent staan naast de afbeeldingen ook de inloggegevens van deze box; die map kan nooit met een regel worden geopend.",
 
   // === Een geweigerde actie de volgende keer toestaan ===
   "codingAgent.allowNextTime": "Volgende keer toestaan",

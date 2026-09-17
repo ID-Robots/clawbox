@@ -81,6 +81,7 @@ import {
   isInputRefusalCode,
   inputsRoot,
   listRunInputs,
+  sharedInputsDir,
   readInputPaths,
   removeRunInputs,
   runInputsDir,
@@ -1393,7 +1394,7 @@ export interface CodingRun {
    * `null` on a record written before this existed — never read as "no inputs",
    * only as "this build cannot say".
    */
-  inputs: { dir: string; files: RunInputFile[]; refused: { name: string; code: InputRefusalCode }[] } | null;
+  inputs: { dir: string; shared: string; files: RunInputFile[]; refused: { name: string; code: InputRefusalCode }[] } | null;
   /**
    * The NAMES of the owner's secrets this run was handed
    * (src/lib/project-secrets.ts) — never the values, which live in the child's
@@ -3667,7 +3668,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
           })
           .slice(0, MAX_RUN_INPUTS)
         : [];
-      return { dir: v.dir, files, refused };
+      // The shared folder is NOT read back off the record: it is one folder on
+      // this box, and a stale path in an old file would send the owner to a
+      // folder nothing reads.
+      return { dir: v.dir, shared: sharedInputsDir(), files, refused };
     })(),
     // A record from before the store existed has none. The names are re-filtered
     // rather than trusted: this list is rendered, and the file it comes from is
@@ -4504,7 +4508,7 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested, so it needs its own copy: a route holding a clone must not be
     // able to write the staged list the record keeps.
     inputs: run.inputs
-      ? { dir: run.inputs.dir, files: run.inputs.files.map((f) => ({ ...f })), refused: run.inputs.refused.map((r) => ({ ...r })) }
+      ? { dir: run.inputs.dir, shared: run.inputs.shared, files: run.inputs.files.map((f) => ({ ...f })), refused: run.inputs.refused.map((r) => ({ ...r })) }
       : null,
     secretNames: [...run.secretNames],
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
@@ -11135,7 +11139,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
  */
 async function stageInputs(run: CodingRun, named: unknown): Promise<void> {
   const dir = runInputsDir(run.id);
-  run.inputs = { dir, files: [], refused: [] };
+  run.inputs = { dir, shared: sharedInputsDir(), files: [], refused: [] };
   try {
     ensureInputsDirs(run.id);
   } catch {
@@ -11148,6 +11152,7 @@ async function stageInputs(run: CodingRun, named: unknown): Promise<void> {
     const result = await stageRunInputs(run.id, paths);
     run.inputs = {
       dir: result.dir,
+      shared: sharedInputsDir(),
       files: result.staged,
       // The NAME only: the record is drawn on a page and answered by a route,
       // and the absolute path of a file the box refused to copy says more about
@@ -11360,7 +11365,7 @@ function newRunRecord(fields: {
     // The folder is known the moment the id is; what lands in it is staged by
     // `stageInputs` a few lines into startRun, once the caller's paths have
     // been judged one by one.
-    inputs: { dir: runInputsDir(id), files: [], refused: [] },
+    inputs: { dir: runInputsDir(id), shared: sharedInputsDir(), files: [], refused: [] },
     // Filled at spawn by prepareRunSecrets, which is the only thing that knows
     // what this run's project resolved to.
     secretNames: [],

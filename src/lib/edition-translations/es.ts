@@ -674,6 +674,16 @@ export const es: Record<string, string> = {
   "codingAgent.harnessTestFailed": "No se pudo iniciar la prueba del harness",
   "codingAgent.harnessTestNoFolder": "Elige primero una carpeta de proyectos.",
   "codingAgent.deniedHelp": "El agente de código solo puede ejecutar un conjunto fijo de comandos dentro de su propia carpeta. Es el límite de seguridad funcionando, no un fallo: la ejecución suele encontrar otra vía.",
+  "codingAgent.inputsTitle": "Entradas para esta ejecución",
+  "codingAgent.inputsHint": "Los archivos entregados a esta ejecución están en {folder}. Lo que pongas en {shared} puede leerlo cualquier ejecución de esta caja.",
+  "codingAgent.inputsEmpty": "A esta ejecución no se le entregó ningún archivo.",
+  "codingAgent.inputsRefusedTitle": "No entregados",
+  "codingAgent.inputsRefusedLocation": "no está en una carpeta de la que esta caja tome archivos",
+  "codingAgent.inputsRefusedMissing": "no está ahí, o no es un archivo normal",
+  "codingAgent.inputsRefusedSize": "demasiado grande, o demasiados archivos para una ejecución",
+  "codingAgent.inputsRefusedFailed": "no se pudo copiar",
+  "codingAgent.deniedInputs": "Los archivos que una ejecución puede leer están en {folder} y en {shared}. La carpeta de medios del asistente no es una de ellas y ninguna regla puede abrirla: pide al asistente que entregue el archivo al iniciar la ejecución, o pon tú el archivo en la carpeta compartida.",
+  "codingAgent.rulesInputs": "Para dar a una ejecución un archivo con el que trabajar, ponlo en {shared} o pide al asistente que lo entregue al iniciarla. La carpeta de medios del asistente guarda las credenciales de esta caja junto a las imágenes y ninguna regla puede abrirla.",
 
   // === Permitir la próxima vez una acción denegada ===
   "codingAgent.allowNextTime": "Permitir la próxima vez",

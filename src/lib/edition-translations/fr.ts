@@ -679,6 +679,16 @@ export const fr: Record<string, string> = {
   "codingAgent.harnessTestFailed": "Impossible de démarrer le test du harnais",
   "codingAgent.harnessTestNoFolder": "Choisissez d'abord un dossier de projets.",
   "codingAgent.deniedHelp": "L'agent de code ne peut exécuter qu'un ensemble fixe de commandes dans son propre dossier. C'est la limite de sécurité qui fonctionne, pas une panne — l'exécution trouve généralement un autre moyen.",
+  "codingAgent.inputsTitle": "Fichiers fournis à cette exécution",
+  "codingAgent.inputsHint": "Les fichiers remis à cette exécution sont dans {folder}. Tout ce que vous déposez dans {shared} est lisible par n'importe quelle exécution de cette box.",
+  "codingAgent.inputsEmpty": "Aucun fichier n'a été remis à cette exécution.",
+  "codingAgent.inputsRefusedTitle": "Non remis",
+  "codingAgent.inputsRefusedLocation": "pas dans un dossier où cette box va chercher des fichiers",
+  "codingAgent.inputsRefusedMissing": "absent, ou pas un fichier ordinaire",
+  "codingAgent.inputsRefusedSize": "trop volumineux, ou trop de fichiers pour une exécution",
+  "codingAgent.inputsRefusedFailed": "n'a pas pu être copié",
+  "codingAgent.deniedInputs": "Les fichiers qu'une exécution peut lire sont dans {folder} et dans {shared}. Le dossier média de l'assistant n'en fait pas partie et aucune règle ne peut l'ouvrir — demandez à l'assistant de remettre le fichier au démarrage de l'exécution, ou déposez-le vous-même dans le dossier partagé.",
+  "codingAgent.rulesInputs": "Pour donner un fichier à une exécution, déposez-le dans {shared} ou demandez à l'assistant de le remettre au démarrage. Le dossier média de l'assistant contient les identifiants de cette box à côté des images et ne peut jamais être ouvert par une règle.",
 
   // === Autoriser la prochaine fois une action refusée ===
   "codingAgent.allowNextTime": "Autoriser la prochaine fois",
