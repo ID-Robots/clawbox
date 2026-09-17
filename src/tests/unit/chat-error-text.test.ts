@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { describeChatFailure } from "@/lib/chat-error-text";
+import { describeChatFailure, describeFallbackReply } from "@/lib/chat-error-text";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { translations } from "@/lib/translations";
 
@@ -269,5 +269,72 @@ describe("describeChatFailure — a spent ClawBox AI allowance", () => {
 
   it("keeps an ordinary rate limit on its own sentence", () => {
     expect(describeChatFailure("API rate limit reached. Please try again later.", undefined, { t: en, locale: "en", timeZone: "UTC" })).toContain("rate-limiting");
+  });
+});
+
+describe("the provider's own words, scrubbed with the repo's one inventory", () => {
+  // The pre-scrub used to be a regex of its own (`claw_`/`sk-` and nothing
+  // else), a third copy of "what may not reach a person" beside
+  // incident-sanitize.ts and safe-error-text.ts. It now calls
+  // `redactCredentialShapes`, so every shape THAT module knows is taken out of
+  // a bubble too — and a shape added there reaches this path with no second
+  // edit. `sanitizeErrorMessage` is still the wall behind it: an unstripped
+  // `claw_`/`sk-`/`Bearer ` rejects the whole message to GENERIC.
+  const detailWith = (body: string) =>
+    describeChatFailure("The agent run failed before producing a reply.", {
+      reason: "format",
+      provider: "openai",
+      model: "openai/gpt-5.5",
+      detail: `HTTP 400: ${JSON.stringify({ error: { message: body } })}`,
+    });
+
+  it("keeps the sentence and drops the credential, for shapes only the wider inventory knew", () => {
+    for (const [body, secret] of [
+      ["Incorrect API key provided: ghp_abcdefghijklmnopqrst", "ghp_"],
+      ["Token github_pat_11ABCDEFG0aaaaaaaaaaaa was refused", "github_pat_"],
+      ["Bad credential xoxb-1111111111-abcdefghijkl", "xoxb-"],
+    ] as const) {
+      const shown = detailWith(body);
+      expect(shown).not.toContain(secret);
+      // The refusal is still explained, not swallowed into the generic line.
+      expect(shown).toMatch(/gpt-5\.5/);
+    }
+  });
+
+  it("still falls to the generic line when a key shape survives into the sentence", () => {
+    // `sk-` is stripped by the inventory; the whole-message reject list is what
+    // catches anything that is not, and GENERIC is the honest answer then.
+    expect(detailWith("Bearer sk-abcdefghijklmnop rejected")).not.toMatch(/sk-/);
+  });
+});
+
+describe("a provider echoing the key it refused, masked", () => {
+  // Verbatim from OpenAI through the gateway on a box (2026-09-17). Two things
+  // have to happen to it: the masked key goes, and the developer-facing URL
+  // sentence goes — and the ORDER matters, because the shared inventory's
+  // token alphabet includes `.` and so eats the full stop the URL rule cuts at.
+  const DETAIL =
+    "unexpected status 401 Unauthorized: Incorrect API key provided: claw_08d*************************765e."
+    + " You can find your API key at https://platform.openai.com/account/api-keys.,"
+    + " url: https://api.openai.com/v1/responses, cf-ray: a3c7c040e8e4bc1a-SOF,"
+    + " request id: req_000000000000000000000000";
+
+  it("keeps the provider's sentence and nothing else", () => {
+    // Through the fallback note, which is where this detail actually reaches a
+    // person: `describeChatFailure` answers a 401 with the reconnect sentence
+    // before the provider's own words are ever quoted.
+    const shown = describeFallbackReply({
+      reason: "auth",
+      provider: "openai",
+      model: "openai/gpt-6-astra",
+      servedModel: "deepseek/deepseek-v4-flash",
+      detail: DETAIL,
+    }) ?? "";
+    expect(shown).toContain("Incorrect API key provided");
+    expect(shown).not.toContain("claw_");
+    expect(shown).not.toContain("*");
+    expect(shown).not.toMatch(/https?:\/\//);
+    expect(shown).not.toContain("cf-ray");
+    expect(shown).not.toContain("req_");
   });
 });

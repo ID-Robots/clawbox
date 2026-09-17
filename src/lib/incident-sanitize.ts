@@ -71,12 +71,20 @@ const MIN_SECRET_CHARS = 8;
 
 /** Credential shapes, longest-prefix first so `github_pat_` is not eaten by a
  *  shorter rule. The bodies are deliberately greedy over the token alphabet
- *  only: a trailing quote or bracket must survive so the sentence still reads. */
+ *  only: a trailing quote or bracket must survive so the sentence still reads.
+ *
+ *  The two PROVIDER-KEY bodies also take `*`, because the commonest way one of
+ *  them reaches a person is a provider echoing the key it refused with the
+ *  middle masked — verbatim from OpenAI on a box: "Incorrect API key provided:
+ *  claw_08d*************************765e". A masked key is still a key
+ *  fragment: it names the account and, with one un-masked pair of ends, the
+ *  credential. Without the star the run of asterisks broke the match and the
+ *  whole string survived. */
 const TOKEN_PATTERNS: RegExp[] = [
   /github_pat_[A-Za-z0-9_]{10,}/g,
   /gh[pousr]_[A-Za-z0-9_]{10,}/g,
-  /\bclaw_[A-Za-z0-9._~+/-]{8,}=*/g,
-  /\bsk-[A-Za-z0-9._~+/-]{8,}=*/g,
+  /\bclaw_[A-Za-z0-9._~+*/-]{8,}=*/g,
+  /\bsk-[A-Za-z0-9._~+*/-]{8,}=*/g,
   /\bxox[baprs]-[A-Za-z0-9-]{8,}/g,
   // A JWT: three dot-separated base64url runs. Shows up whole in HTTP errors.
   /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
@@ -205,6 +213,35 @@ function escapeLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Every credential SHAPE this module knows, taken out of one string.
+ *
+ * Exported because it is the repo's inventory of "what may not reach a person",
+ * and a second copy of it is how a shape added here stops reaching one of the
+ * paths that needs it. `src/lib/chat-error-text.ts` is the other caller: the
+ * provider's own sentence goes through it before a chat bubble is offered the
+ * text. That caller passes an EMPTY replacement, because its sentence has to
+ * still read as a sentence afterwards — "[redacted]" mid-clause is noise to a
+ * customer — where an Improvement Program issue wants the placeholder so a
+ * reader can see something was taken out.
+ *
+ * Named rules first and shapes second, for the reason in `sanitizeText`'s own
+ * step 2: `Authorization: Bearer <jwt>` redacted by shape first leaves the
+ * keyword rule matching the placeholder and a stray bracket behind.
+ */
+export function redactCredentialShapes(input: string, replacement: string = REDACTED): string {
+  if (typeof input !== "string" || input === "") return "";
+  let out = input;
+  out = out.replace(BEARER_RE, (m, value: string) =>
+    isPlaceholder(value) ? m : replacement ? `Bearer ${replacement}` : "");
+  out = out.replace(SECRET_KEYWORD_RE, (m, keyword: string, quote: string, value: string) =>
+    isPlaceholder(value) || /^bearer$/i.test(value)
+      ? m
+      : replacement ? `${keyword}=${quote}${replacement}${quote}` : "");
+  for (const re of TOKEN_PATTERNS) out = out.replace(re, replacement);
+  return out;
+}
+
 export interface SanitizeOptions {
   /**
    * Values this box holds as secrets — API keys, tokens, passwords — taken
@@ -235,16 +272,9 @@ export function sanitizeText(input: string, options: SanitizeOptions = {}): stri
     out = out.replace(new RegExp(escapeLiteral(trimmed), "g"), REDACTED);
   }
 
-  // 2. Credential shapes. The KEYWORD rules run FIRST and the shape patterns
-  //    after: `Authorization: Bearer <jwt>` redacted by shape first left the
-  //    keyword rule matching the placeholder itself and a stray bracket behind
-  //    ("Bearer [redacted]]"). Named-first, shapes-second has no such overlap.
-  out = out.replace(BEARER_RE, (m, value: string) => (isPlaceholder(value) ? m : `Bearer ${REDACTED}`));
-  out = out.replace(SECRET_KEYWORD_RE, (m, keyword: string, quote: string, value: string) =>
-    // Already redacted, or the value IS the scheme name and the token after it
-    // has gone: leave the line alone rather than stack one placeholder on another.
-    isPlaceholder(value) || /^bearer$/i.test(value) ? m : `${keyword}=${quote}${REDACTED}${quote}`);
-  for (const re of TOKEN_PATTERNS) out = out.replace(re, REDACTED);
+  // 2. Credential shapes — the shared inventory, so the chat's own pre-scrub
+  //    and this one cannot know different lists.
+  out = redactCredentialShapes(out);
 
   // 3. Identities and addresses. Email first: it contains a host.
   out = out.replace(EMAIL_RE, REDACTED);

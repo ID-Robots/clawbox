@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeChatFailure } from "@/lib/chat-error-text";
+import { describeChatFailure, describeFallbackReply } from "@/lib/chat-error-text";
 import {
   RunFailureLedger,
   runFailureFromAgentEvent,
@@ -280,5 +280,127 @@ describe("describeChatFailure with the gateway's reason", () => {
       detail: "HTTP 400: {\"type\":\"error\",\"error\":{\"message\":\"unterminated",
     });
     expect(notJson).not.toContain("{");
+  });
+});
+
+/**
+ * A turn that ended WELL on the configured fallback: the picked model failed
+ * at the provider and another one answered. Frames captured verbatim on a box
+ * (2026-09-17) — the ChatGPT lane's 401, then ClawBox AI Flash replying — with
+ * the ids and the key fragment the provider echoed replaced.
+ */
+const AUTH_DETAIL =
+  "unexpected status 401 Unauthorized: Incorrect API key provided: claw_08d*************************765e. You can find your API key at https://platform.openai.com/account/api-keys., url: https://api.openai.com/v1/responses, cf-ray: a3c7c040e8e4bc1a-SOF, request id: req_000000000000000000000000";
+
+const fallbackStepToFlash = {
+  runId: "run-fallback",
+  sessionKey: SESSION,
+  stream: "lifecycle",
+  data: {
+    phase: "fallback_step",
+    fallbackStepType: "fallback_step",
+    fallbackStepFromModel: "openai/gpt-6-astra",
+    fallbackStepToModel: "deepseek/deepseek-v4-flash",
+    fallbackStepFromFailureReason: "auth",
+    fallbackStepFromFailureDetail: AUTH_DETAIL,
+    fallbackStepChainPosition: 1,
+    fallbackStepFinalOutcome: "candidate_succeeded",
+  },
+};
+
+const fallbackSummary = {
+  runId: "run-fallback",
+  sessionKey: SESSION,
+  stream: "lifecycle",
+  data: {
+    phase: "fallback",
+    selectedProvider: "openai",
+    selectedModel: "gpt-6-astra",
+    activeProvider: "deepseek",
+    activeModel: "deepseek-v4-flash",
+    reasonSummary: "auth",
+    attemptSummaries: ["openai/gpt-6-astra auth"],
+    attempts: [{ provider: "openai", model: "gpt-6-astra", error: AUTH_DETAIL }],
+  },
+};
+
+const finalFrame = { runId: "run-fallback", sessionKey: SESSION, state: "final", stopReason: "stop", message: { role: "assistant", content: [{ type: "text", text: "Hi." }], timestamp: 1 } };
+
+describe("a reply another model wrote", () => {
+  it("reads the served model off the fallback frames", () => {
+    expect(runFailureFromAgentEvent(fallbackStepToFlash)?.context.servedModel).toBe("deepseek/deepseek-v4-flash");
+    expect(runFailureFromAgentEvent(fallbackSummary)).toEqual({
+      runId: "run-fallback",
+      context: {
+        provider: "openai",
+        model: "gpt-6-astra",
+        reason: "auth",
+        detail: AUTH_DETAIL,
+        servedProvider: "deepseek",
+        servedModel: "deepseek-v4-flash",
+      },
+    });
+  });
+
+  it("says which model answered, why the picked one did not, and what to do — without the key fragment", () => {
+    const ledger = new RunFailureLedger();
+    ledger.observe(fallbackStepToFlash);
+    ledger.observe(fallbackSummary);
+    const note = describeFallbackReply(ledger.settle(finalFrame));
+    expect(note).toBe(
+      "This reply came from deepseek-v4-flash, not gpt-6-astra: OpenAI did not accept this box's sign-in for gpt-6-astra (“Incorrect API key provided”). Reconnect it in Settings, under Providers, to get gpt-6-astra back.",
+    );
+    expect(note).not.toMatch(/claw_|765e|platform\.openai\.com|cf-ray|request id/);
+  });
+
+  it("says nothing under a reply the picked model wrote itself", () => {
+    const ledger = new RunFailureLedger();
+    ledger.observe(finishing);
+    expect(describeFallbackReply(ledger.settle({ runId: RUN, state: "final" }))).toBeUndefined();
+    expect(describeFallbackReply({})).toBeUndefined();
+  });
+
+  it("words the other reasons a fallback can have", () => {
+    expect(describeFallbackReply({ provider: "openai", model: "openai/gpt-6-astra", reason: "unknown", detail: "Explicit auth order for openai has no usable profiles.", servedModel: "deepseek/deepseek-v4-flash" })).toBe(
+      "This reply came from deepseek-v4-flash, not gpt-6-astra: OpenAI rejected the request for gpt-6-astra (“Explicit auth order for openai has no usable profiles”). Pick another model in the header if it keeps happening.",
+    );
+    expect(describeFallbackReply({ provider: "anthropic", model: "claude-opus-5", reason: "rate_limit", servedModel: "deepseek-v4-flash" })).toBe(
+      "This reply came from deepseek-v4-flash, not claude-opus-5: Anthropic is rate-limiting this box for claude-opus-5. It comes back on its own.",
+    );
+    expect(describeFallbackReply({ provider: "anthropic", model: "claude-x", reason: "model_not_found", servedModel: "deepseek-v4-flash" })).toBe(
+      "This reply came from deepseek-v4-flash, not claude-x: Anthropic does not offer claude-x. Pick another model in the header.",
+    );
+  });
+});
+
+describe("the transport-field trim on a hostile detail", () => {
+  it("stays linear on a hostile line whose TAIL cannot match (CodeQL js/redos)", () => {
+    // The tail is the whole test. A line that ends in a well-formed field
+    // (`",url:" + "\t,url:".repeat(20_000)`) matches the old regex
+    // `(?:,\s*(?:url|cf-ray|request id)\s*:\s*[^,]*)+\s*$` greedily from index
+    // 0 to the end and never backtracks — 2 ms on the OLD code, so a fixture
+    // shaped like that is green on both sides of the fix and pins nothing.
+    //
+    // A tail the engine CANNOT match is what forces it through the ambiguous
+    // `\s*` / `[^,]*` pairing. Measured on the old regex in node: 18 repeats
+    // 27 ms, 20 → 99 ms, 22 → 393 ms, 24 → 1643 ms — doubling per repeat. The
+    // split-and-pop is under a millisecond on the same 151 characters, so this
+    // 500 ms budget is a factor of three under the old code and a factor of
+    // hundreds over the new one.
+    const hostile = ",url:" + "\t,url:".repeat(24) + ",x";
+    const t0 = Date.now();
+    const text = describeChatFailure("x", { reason: "format", provider: "anthropic", model: "m", detail: hostile });
+    expect(Date.now() - t0).toBeLessThan(500);
+    // …and the ANSWER is unchanged: no field is TRAILING here, so the trim
+    // strips nothing and the hostile run survives into the sentence exactly as
+    // the old regex left it (the colons go later, to the `:` -before-a-comma
+    // rule this path has always had). Asserting it is what keeps this a speed
+    // test rather than a quiet behaviour change.
+    expect(text).toContain(",url,url");
+  });
+
+  it("still strips the real transport tail and keeps a comma inside the sentence", () => {
+    expect(describeChatFailure("x", { reason: "format", provider: "openai", model: "m", detail: "unexpected status 400 Bad Request: One, two and three., url: https://api.example/v1, cf-ray: abc-XYZ, request id: req_0" }))
+      .toBe("That message did not go through — OpenAI rejected the request for m: “One, two and three”. Pick another model in the header, or send it again.");
   });
 });

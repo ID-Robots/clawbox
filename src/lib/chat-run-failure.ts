@@ -17,6 +17,13 @@
 //   agent  lifecycle  phase=error          errorObservation={…}
 //   chat   state=error                     errorMessage, errorDetail={provider, model, failoverReason}
 //
+// and when a configured FALLBACK model answers instead — the turn ends
+// `final`, and nothing in that frame says another model wrote it:
+//
+//   agent  lifecycle  phase=fallback_step  fallbackStepFromModel, fallbackStepToModel, …FailureDetail
+//   agent  lifecycle  phase=fallback       selectedModel, activeModel, reasonSummary, attempts[{error}]
+//   chat   state=final                     message (no model, no provider)
+//
 // (captured verbatim on a box, core 2026.9.3). The `chat` event carries the
 // reason and the model; only the lifecycle frames carry the provider's own
 // words. This ledger keeps those frames by run id, for the few hundred
@@ -61,12 +68,30 @@ export function runFailureFromAgentEvent(
       ...(asText(data.fallbackStepFromFailureReason) ? { reason: asText(data.fallbackStepFromFailureReason) } : {}),
       ...(asText(data.fallbackStepFromModel) ? { model: asText(data.fallbackStepFromModel) } : {}),
       ...(asText(data.fallbackStepFromFailureDetail) ? { detail: asText(data.fallbackStepFromFailureDetail) } : {}),
+      ...(asText(data.fallbackStepToModel) ? { servedModel: asText(data.fallbackStepToModel) } : {}),
     };
     return Object.keys(context).length ? { runId, context } : null;
   }
   if (phase === "error" || phase === "finishing") {
     const context = fromObservation(data.errorObservation);
     return Object.keys(context).length ? { runId, context } : null;
+  }
+  // The turn ENDED WELL, on another model: the gateway's summary of the
+  // chain it walked. `selected*` is what the owner asked for, `active*` what
+  // answered, and the first attempt's error is why (captured verbatim on a
+  // box: a 401 on the picked model, then the configured fallback replied).
+  if (phase === "fallback") {
+    const attempts = Array.isArray(data.attempts) ? data.attempts : [];
+    const first = asRecord(attempts[0]);
+    const context: ChatRunFailureContext = {
+      ...(asText(data.selectedProvider) ? { provider: asText(data.selectedProvider) } : {}),
+      ...(asText(data.selectedModel) ? { model: asText(data.selectedModel) } : {}),
+      ...(asText(data.reasonSummary) ? { reason: asText(data.reasonSummary) } : {}),
+      ...(first && asText(first.error) ? { detail: asText(first.error) } : {}),
+      ...(asText(data.activeProvider) ? { servedProvider: asText(data.activeProvider) } : {}),
+      ...(asText(data.activeModel) ? { servedModel: asText(data.activeModel) } : {}),
+    };
+    return context.servedModel ? { runId, context } : null;
   }
   return null;
 }
@@ -104,9 +129,9 @@ export class RunFailureLedger {
   }
 
   /**
-   * Everything known about the run a `chat` error frame ends: the notes taken
-   * from its lifecycle frames under the facts the error frame carries itself.
-   * The note is consumed.
+   * Everything known about the run a `chat` frame ends — an error, or a final
+   * that another model wrote: the notes taken from its lifecycle frames under
+   * the facts the frame carries itself. The note is consumed.
    */
   settle(chatPayload: unknown): ChatRunFailureContext {
     const frame = asRecord(chatPayload);

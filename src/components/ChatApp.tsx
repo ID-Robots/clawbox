@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
-import { describeChatFailure } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
@@ -625,6 +625,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               appendAssistantReply(text, images, audio, files.length ? { files } : undefined)
             }
             applyStreaming('')
+            // A reply another model wrote — the picked one failed and the
+            // gateway's configured fallback answered. The `final` frame does
+            // not say so; the run's lifecycle frames did. One honest line
+            // under the reply, or the owner reads "I'm deepseek" under a
+            // header that says otherwise (a box, 2026-09-17).
+            const fallbackNote = describeFallbackReply(runFailureRef.current.settle(payload))
+            if (fallbackNote) setMessages(prev => [...prev, { role: 'system', text: fallbackNote, timestamp: Date.now() }])
             clearToolCalls()
             runIdRef.current = null
             setSending(false)

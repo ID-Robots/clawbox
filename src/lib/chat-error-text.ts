@@ -18,6 +18,7 @@
 // `sanitizeErrorMessage`, and otherwise the customer gets our own sentence.
 // What is different about a chat turn is that the customer can *do* something
 // about it — send it again — so the fallback says that rather than apologising.
+import { redactCredentialShapes } from "@/lib/incident-sanitize";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import {
   formatFreesUpAt,
@@ -104,6 +105,10 @@ export interface ChatRunFailureContext {
   model?: string;
   /** The provider's refusal as the gateway logged it: `HTTP 400: {"type":"error",…}`. */
   detail?: string;
+  /** Set when the turn ended WELL on a fallback: the provider that answered. */
+  servedProvider?: string;
+  /** Set when the turn ended WELL on a fallback: the model that answered. */
+  servedModel?: string;
 }
 
 /** The provider's name as the customer knows it, from the id the gateway uses. */
@@ -130,6 +135,13 @@ function providerLabel(provider: string | undefined): string {
   return PROVIDER_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 }
 
+/** The provider segment of a `provider/model` reference, when it has one. */
+function providerFromRef(model: string | undefined): string | undefined {
+  const id = model?.trim();
+  const slash = id ? id.indexOf("/") : -1;
+  return id && slash > 0 ? id.slice(0, slash) : undefined;
+}
+
 /** `anthropic/claude-x` and `claude-x` both read as the bare id. */
 function modelLabel(model: string | undefined): string {
   const id = model?.trim();
@@ -140,6 +152,21 @@ function modelLabel(model: string | undefined): string {
 
 /** How much of the provider's own sentence is worth a bubble. */
 const PROVIDER_MESSAGE_MAX = 240;
+
+/** A trailing `, url: …` / `, cf-ray: …` / `, request id: …` field of the transport's framing. */
+const TRANSPORT_FIELD_RE = /^\s*(?:url|cf-ray|request id)\s*:/i;
+
+/**
+ * Drop the transport's trailing fields, last to first. A split and a loop
+ * rather than one anchored regex: the regex form (`(?:,\s*key:[^,]*)+$`) is
+ * ambiguous between its `\s*` and `[^,]*` and backtracks exponentially on a
+ * hostile line of repeated `,url:` — a provider's error body is untrusted input.
+ */
+function withoutTrailingTransportFields(text: string): string {
+  const parts = text.split(",");
+  while (parts.length > 1 && TRANSPORT_FIELD_RE.test(parts[parts.length - 1])) parts.pop();
+  return parts.join(",");
+}
 
 /**
  * The provider's own words out of the gateway's detail line.
@@ -156,7 +183,13 @@ const PROVIDER_MESSAGE_MAX = 240;
 function providerMessageFromDetail(detail: string | undefined): string | undefined {
   const line = detail?.trim();
   if (!line) return undefined;
-  const body = line.replace(/^HTTP\s+\d{3}\s*:\s*/i, "").trim();
+  const framed = line
+    .replace(/^HTTP\s+\d{3}\s*:\s*/i, "")
+    // The transport's own framing of a non-JSON refusal ("unexpected status
+    // 401 Unauthorized: <sentence>., url: …, cf-ray: …, request id: …"):
+    // the sentence is the provider's, the rest is plumbing.
+    .replace(/^unexpected status\s+\d{3}\s+[A-Za-z ]+:\s*/i, "");
+  const body = withoutTrailingTransportFields(framed).trim();
   if (!body) return undefined;
   let text = body;
   if (body.startsWith("{")) {
@@ -168,7 +201,28 @@ function providerMessageFromDetail(detail: string | undefined): string | undefin
       return undefined;
     }
   }
-  const plain = text.replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  // A provider echoing the key it refused, masked or not, is still a key
+  // fragment in a chat bubble; the sentence stands without it. The inventory is
+  // `incident-sanitize.ts`'s — the one this repo already owns, covering the
+  // GitHub prefixes, JWTs, Slack tokens and the `token=`/`secret=` pairs as
+  // well as `claw_`/`sk-`/`Bearer ` — rather than a second, narrower regex
+  // here, so a shape added there reaches this path too. The empty replacement
+  // is deliberate: this text becomes a sentence a customer reads.
+  //
+  // Belt and braces, not the wall. `sanitizeErrorMessage` below rejects the
+  // WHOLE message on an unstripped `claw_`/`sk-`/`Bearer `, so anything this
+  // misses falls to the generic line rather than into a bubble.
+  // "You can find your API key at https://…" is the provider talking to its own
+  // developers; the customer's remedy is in our sentence. Cut BEFORE the
+  // credential scrub, not after: the shared inventory's token alphabet includes
+  // `.`, so it swallows the full stop that ends the sentence the key sits in and
+  // this rule would then have no boundary left to cut at.
+  const withoutDeveloperUrl = text.replace(/\.\s+[^.]*https?:\/\/[^\s]*.*$/i, ".");
+  const plain = redactCredentialShapes(withoutDeveloperUrl, "")
+    .replace(/:\s*(?=[.,]|$)/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.\s]+$/, "");
   if (!plain) return undefined;
   const safe = sanitizeErrorMessage(plain);
   if (!safe) return undefined;
@@ -198,7 +252,7 @@ function envelopeMessage(value: unknown, depth = 0): string | undefined {
  */
 function describeProviderFailure(context: ChatRunFailureContext): string | undefined {
   const reason = context.reason?.trim().toLowerCase();
-  const provider = providerLabel(context.provider);
+  const provider = providerLabel(context.provider ?? providerFromRef(context.model));
   const model = modelLabel(context.model);
   const message = providerMessageFromDetail(context.detail);
   const quoted = message ? `: “${message}”` : "";
@@ -235,6 +289,50 @@ function describeProviderFailure(context: ChatRunFailureContext): string | undef
 function isGatewayShrug(raw: string): boolean {
   return /^(?:⚠️\s*)?(?:the )?agent run failed(?: before producing a reply)?\.?$/i.test(raw)
     || /^LLM request failed(?: with an unknown error)?\.?$/i.test(raw);
+}
+
+/**
+ * The note under a reply that a FALLBACK model wrote.
+ *
+ * The header says which model the owner picked; when that model fails and
+ * the gateway's configured fallback answers, the reply looks like the
+ * pick's — a box (2026-09-17) answered "I'm deepseek-v4-flash" under a header
+ * that said GPT-6 Astra, and nothing on screen said why. The reason is on
+ * the gateway's `fallback` frame; this turns it into one honest line: which
+ * model wrote the reply, why the picked one did not, and the one thing to do.
+ * Returns nothing when the context says no fallback happened.
+ */
+export function describeFallbackReply(context: ChatRunFailureContext): string | undefined {
+  if (!context.servedModel) return undefined;
+  const served = modelLabel(context.servedModel);
+  const picked = modelLabel(context.model);
+  const provider = providerLabel(context.provider ?? providerFromRef(context.model));
+  const reason = context.reason?.trim().toLowerCase();
+  const message = providerMessageFromDetail(context.detail);
+  const quoted = message ? ` (“${message}”)` : "";
+  const because = (() => {
+    switch (reason) {
+      case "auth":
+      case "auth_permanent":
+        return `${provider} did not accept this box's sign-in for ${picked}${quoted}. Reconnect it in Settings, under Providers, to get ${picked} back.`;
+      case "rate_limit":
+        return `${provider} is rate-limiting this box for ${picked}. It comes back on its own.`;
+      case "model_not_found":
+        return `${provider} does not offer ${picked}. Pick another model in the header.`;
+      case "billing":
+        return `${provider} reports a billing problem with the account behind ${picked}${quoted}. Check the account with ${provider}.`;
+      case "context_overflow":
+        return `this conversation has grown too long for ${picked}. Start a New chat to get it back.`;
+      case "overloaded":
+      case "server_error":
+      case "timeout":
+      case "empty_response":
+        return `${provider} could not answer for ${picked} right now${quoted}. It usually comes back on its own.`;
+      default:
+        return `${provider} rejected the request for ${picked}${quoted}. Pick another model in the header if it keeps happening.`;
+    }
+  })();
+  return `This reply came from ${served}, not ${picked}: ${because}`;
 }
 
 /** Something went wrong and we will not say what, because we cannot say it safely. */

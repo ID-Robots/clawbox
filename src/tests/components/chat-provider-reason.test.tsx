@@ -67,6 +67,40 @@ const FRAMES = [
   },
 ];
 
+const AUTH_DETAIL =
+  "unexpected status 401 Unauthorized: Incorrect API key provided: claw_08d*************************765e. You can find your API key at https://platform.openai.com/account/api-keys., url: https://api.openai.com/v1/responses, cf-ray: a3c7c040e8e4bc1a-SOF, request id: req_000000000000000000000000";
+
+/** The same run shape when the configured fallback answers: the turn ends `final`. */
+const FALLBACK_FRAMES = [
+  lifecycle({
+    phase: "fallback_step",
+    fallbackStepType: "fallback_step",
+    fallbackStepFromModel: "openai/gpt-6-astra",
+    fallbackStepToModel: "deepseek/deepseek-v4-flash",
+    fallbackStepFromFailureReason: "auth",
+    fallbackStepFromFailureDetail: AUTH_DETAIL,
+    fallbackStepChainPosition: 1,
+    fallbackStepFinalOutcome: "candidate_succeeded",
+  }),
+  {
+    type: "event",
+    event: "chat",
+    payload: { runId: RUN, sessionKey: MAIN, agentId: "main", seq: 9, state: "final", stopReason: "stop", message: { role: "assistant", content: [{ type: "text", text: "Hi from the fallback." }], timestamp: 900 } },
+  },
+  lifecycle({
+    phase: "fallback",
+    selectedProvider: "openai",
+    selectedModel: "gpt-6-astra",
+    activeProvider: "deepseek",
+    activeModel: "deepseek-v4-flash",
+    reasonSummary: "auth",
+    attempts: [{ provider: "openai", model: "gpt-6-astra", error: AUTH_DETAIL }],
+  }),
+];
+
+const EXPECTED_NOTE =
+  "This reply came from deepseek-v4-flash, not gpt-6-astra: OpenAI did not accept this box's sign-in for gpt-6-astra (“Incorrect API key provided”). Reconnect it in Settings, under Providers, to get gpt-6-astra back.";
+
 const EXPECTED =
   "That message did not go through — Anthropic rejected the request for claude-fable-5-1: “Claude Code 2.1.75 does not support this model; version 2.1.251 or newer is required”. Pick another model in the header, or send it again.";
 
@@ -142,8 +176,8 @@ async function connected() {
   return sockets[sockets.length - 1];
 }
 
-async function pushFailedTurn(socket: FakeGatewayWs) {
-  for (const frame of FRAMES) {
+async function pushFrames(socket: FakeGatewayWs, frames: unknown[]) {
+  for (const frame of frames) {
     await act(async () => {
       socket.emit(frame);
       await new Promise((r) => setTimeout(r, 0));
@@ -170,7 +204,7 @@ describe("a turn the provider refused", () => {
   it("the mascot chat names the provider's reason instead of the gateway's shrug", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     const socket = await connected();
-    await pushFailedTurn(socket);
+    await pushFrames(socket, FRAMES);
     await screen.findByText(EXPECTED);
     expect(screen.queryByText(/agent run failed/i)).toBeNull();
     expect(screen.queryByText(/request_id/)).toBeNull();
@@ -179,8 +213,42 @@ describe("a turn the provider refused", () => {
   it("the full-screen chat does the same", async () => {
     render(<ChatApp />);
     const socket = await connected();
-    await pushFailedTurn(socket);
+    await pushFrames(socket, FRAMES);
     await screen.findByText(EXPECTED);
     expect(screen.queryByText(/agent run failed/i)).toBeNull();
+  });
+});
+
+describe("a reply the configured fallback wrote", () => {
+  beforeEach(() => {
+    sockets.length = 0;
+    resetHarnessCache();
+    window.localStorage.clear();
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+    installFetch();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    resetHarnessCache();
+  });
+
+  it("the mascot chat says which model answered and why the picked one did not", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const socket = await connected();
+    await pushFrames(socket, FALLBACK_FRAMES);
+    await screen.findByText("Hi from the fallback.");
+    await screen.findByText(EXPECTED_NOTE);
+    expect(screen.queryByText(/claw_|765e/)).toBeNull();
+  });
+
+  it("the full-screen chat does the same", async () => {
+    render(<ChatApp />);
+    const socket = await connected();
+    await pushFrames(socket, FALLBACK_FRAMES);
+    await screen.findByText("Hi from the fallback.");
+    await screen.findByText(EXPECTED_NOTE);
   });
 });
