@@ -309,7 +309,7 @@ describe("/setup-api/chat/model", () => {
     });
   });
 
-  it("switches the active chat model to Local AI and restarts the gateway", async () => {
+  it("switches the active chat model to Local AI without restarting the gateway — the switch is live", async () => {
     vi.mocked(readConfig)
       .mockResolvedValueOnce({
         auth: {
@@ -369,12 +369,29 @@ describe("/setup-api/chat/model", () => {
       "agents.defaults.model.primary",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
-    expect(restartGateway).toHaveBeenCalled();
+    // The open sessions are patched live and the gateway hot-applies the new
+    // default itself; a restart here cost ~20 s of "gateway starting" per
+    // switch and every run in flight.
+    expect(restartGateway).not.toHaveBeenCalled();
     expect(body.activeSource).toBe("local");
     expect(body.activeLabel).toBe("Gemma 4 Local");
   });
 
-  it("answers 502 when the switch landed but the gateway did not come back", async () => {
+  it("restarts only when the switch flipped a provider plugin — the one change the core cannot hot-apply", async () => {
+    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 502 when a plugin flip's restart landed but the gateway did not come back", async () => {
+    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
     // The primary is already written when the restart runs, so a gateway that
     // never starts listening again is neither the 200 this route used to give
     // (the box still answers on the OLD model) nor the 500 "Failed to switch
@@ -401,7 +418,8 @@ describe("/setup-api/chat/model", () => {
     ]);
   });
 
-  it("answers 502, not 500, when the restart is refused outright", async () => {
+  it("answers 502, not 500, when a plugin flip's restart is refused outright", async () => {
+    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
     // A masked unit (an update in flight) or a denied sudo is still not a failed
     // switch: the primary is on disk either way, and 500 "Failed to switch chat
     // model" over a written model is the same false failure by another route.
@@ -1623,7 +1641,12 @@ describe("/setup-api/chat/model", () => {
       // The CLI as a 2026.8.1 box answers it: the anthropic plugin is OFF
       // (an older gate switched it off on the last switch away from Claude)
       // and a batch carrying an `anthropic/*` primary is refused unless the
-      // same batch switches the plugin on ahead of it.
+      // same batch switches the plugin on ahead of it. The config the route
+      // reads before the batch says the same, which is what makes the switch
+      // a plugin flip — the one change that still restarts the gateway.
+      vi.mocked(readConfigStrict).mockResolvedValue({
+        plugins: { entries: { anthropic: { enabled: false } } },
+      } as never);
       vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => {
         const enableIdx = ops.findIndex((op) => op[0] === ENABLE_OP[0] && op[1] === "true");
         const primaryIdx = ops.findIndex((op) => isPrimaryWrite(op) && String(op[1]).startsWith("anthropic/"));
@@ -1790,6 +1813,8 @@ describe("/setup-api/chat/model", () => {
     });
 
     it("keeps the OFF half of the gate AFTER the write when the new primary is not Anthropic", async () => {
+      // The gate switches the anthropic plugin off: a flip, so the restart follows it.
+      vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
       // The OFF half (off only when nothing on the box could use the plugin)
       // stays where it was: never before the write, so a plugin whose model IS
       // the current primary is not switched off under it.
