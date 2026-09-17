@@ -11,23 +11,23 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 /**
  * 2026-09-16 — three field boxes went dark in the middle of the 4.0.0 update.
  *
- * The update runs `step_performance_mode` as step 2 of 13 (ahead of apt since 2026-09-17), and since 2660282a
- * (performance the default, `--apply` on every update) that step pinned every
- * core, the GPU and EMC to their ceilings BEFORE the OpenClaw npm install, the
- * rebuild and post_update. On each box the log stops within a minute of the
- * pin, seconds after `npm install -g openclaw@…` had finished — no shutdown,
- * NUL-padded syslog and npm log — and the box stayed dark until it was
- * power-cycled, with a core whose files had never reached the disk.
+ * The update used to run `step_performance_mode` as its second step, and since
+ * 2660282a (performance the default, `--apply` on every update) that step
+ * pinned every core, the GPU and EMC to their ceilings BEFORE the OpenClaw npm
+ * install, the rebuild and post_update. On each box the log stops within a
+ * minute of the pin, seconds after `npm install -g openclaw@…` had finished —
+ * no shutdown, NUL-padded syslog and npm log — and the box stayed dark until it
+ * was power-cycled, with a core whose files had never reached the disk.
  *
  * The pin buys nothing under an update: every full update ends in a reboot and
- * clawbox-performance.service applies the profile at that boot. So a DISPATCHED
- * step, while the updater holds `update_in_progress`, UNPINS for the length of
- * the update (`--restore`, which persists nothing — since performance became
- * the default every box boots pinned, so the next update would otherwise run
- * its heaviest work pinned from the first second) and only installs and
- * enables the unit; a full install and a hand-run `--step` with no update in
- * flight apply as before. This drives the shipped function under bash to hold
- * that.
+ * clawbox-performance.service applies the profile at that boot. The step was
+ * first made to UNPIN under a dispatched update (`--restore`, which persists
+ * nothing) and then, later on 2026-09-17, taken off the update list altogether
+ * (owner's ruling; src/lib/updater.ts UPDATE_STEPS). The guard stays in
+ * install.sh for a hand-run `--step performance_mode` while an update is in
+ * flight — it must unpin there too, never pin under the update's heaviest
+ * work — while a full install and a hand-run `--step` with no update in flight
+ * apply as before. This drives the shipped function under bash to hold that.
  */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");

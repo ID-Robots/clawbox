@@ -2177,9 +2177,11 @@ verify_build_present() {
     return 1
   fi
   if [ ! -f "$project_dir/scripts/verify-build-identity.sh" ]; then
-    # Same call the updater makes and the same verdict it draws: a script that
-    # is not there was not run, which is a warning, not a pass and not a
-    # failure (src/lib/updater.ts runBuildIdentityCheck).
+    # A script that is not there was not run, which is a warning, not a pass
+    # and not a failure. This is the ONE place the device runs the check now:
+    # the post-reboot update step that used to run it again against HEAD was
+    # removed on 2026-09-17 (post_update self-refreshes the checkout, so a
+    # commit pushed mid-update moved HEAD past the build and failed the run).
     echo "  WARNING: scripts/verify-build-identity.sh is missing — the build's identity was not checked" >&2
     return 0
   fi
@@ -8726,32 +8728,32 @@ step_performance_mode() {
     echo "  CLAWBOX_TEST_MODE=1, skipping nvpmodel/jetson_clocks"
     return 0
   fi
-  # NOT UNDER AN IN-APP UPDATE. This step is dispatched as step 2 of 13 — ahead
-  # of the apt transaction, the OpenClaw npm install, the rebuild's `next build`
-  # and post_update (it ran AFTER apt until 2026-09-17, so apt still ran pinned) — and
-  # `--apply` here pinned every core to 1,728 MHz, the GPU to 1,020 MHz with
-  # railgate off and EMC to 3,199 MHz for all of them. On 2026-09-16 three field
-  # boxes went dark within a minute of that, seconds after `npm install -g
-  # openclaw` had finished on six pinned cores over WiFi — no shutdown in any
-  # log, syslog and npm's own log NUL-padded where they stop — and stayed dark
-  # until they were power-cycled, each left with a core whose files had never
-  # reached the disk (see promote_staged_openclaw_core).
+  # NOT UNDER AN IN-APP UPDATE. Until 2026-09-17 the update dispatched this
+  # step itself (second, ahead of the apt transaction, the OpenClaw npm
+  # install, the rebuild's `next build` and post_update), and `--apply` there
+  # pinned every core to 1,728 MHz, the GPU to 1,020 MHz with railgate off and
+  # EMC to 3,199 MHz for all of them. On 2026-09-16 three field boxes went dark
+  # within a minute of that, seconds after `npm install -g openclaw` had
+  # finished on six pinned cores over WiFi — no shutdown in any log, syslog and
+  # npm's own log NUL-padded where they stop — and stayed dark until they were
+  # power-cycled, each left with a core whose files had never reached the disk
+  # (see promote_staged_openclaw_core).
   # Whatever the last straw was on that hardware, the pin bought nothing: every
   # full update ends in rebuild_reboot, and clawbox-performance.service applies
-  # the persisted or default profile at that boot anyway. So under an update
-  # this step UNPINS for the length of the update — `--restore`, the unit's
-  # own ExecStop verb: the clock snapshot back or the EMC lock cleared, the
-  # balanced nvpmodel cap, cpuidle on, and NOTHING persisted, so the owner's
-  # choice is untouched — and installs the unit that pins again at the reboot
-  # that ends the update. Not merely "leave the clocks alone": since
-  # performance became the default every box BOOTS pinned, so the next update
-  # on every box would otherwise run its apt transaction, the npm install and
-  # the `next build` — the heaviest sustained load this appliance ever sees —
-  # pinned from the first second. The ollama tuning and the cgroup guards this
-  # step also used to apply here are step_ollama_install's and post_update's
-  # after that reboot, for the same reason. A full install, and `sudo bash
-  # install.sh --step performance_mode` by hand with no update running, apply
-  # here exactly as they always did.
+  # the persisted or default profile at that boot anyway. So the step is OFF
+  # the update list (src/lib/updater.ts UPDATE_STEPS, owner's ruling
+  # 2026-09-17): an in-app update does not touch the power profile at all, and
+  # the box keeps the profile it booted with. The guard below is what remains
+  # of the in-between hours when the update still dispatched the step and it
+  # UNPINNED for the update's length — `--restore`, the unit's own ExecStop
+  # verb: the clock snapshot back or the EMC lock cleared, the balanced
+  # nvpmodel cap, cpuidle on, and NOTHING persisted — and it stays for a
+  # hand-run `sudo bash install.sh --step performance_mode` while an update
+  # is in flight, which must not pin the clocks under the update's heaviest
+  # work either. The ollama tuning and the cgroup guards this step also used
+  # to apply are step_ollama_install's and post_update's after the reboot. A
+  # full install, and a hand-run step with no update running, apply here
+  # exactly as they always did.
   if [ -n "${CLAWBOX_DISPATCHED_STEP:-}" ] && update_owns_the_box; then
     echo "  An in-app update owns the box: unpinning the clocks for the length of the update — clawbox-performance.service applies the power profile again at the reboot that ends it"
     "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --restore || \
@@ -8761,10 +8763,11 @@ step_performance_mode() {
   fi
   # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
   # box nothing is persisted, so this resolves to PERFORMANCE — the script's
-  # DEFAULT_MODE since the owner's ruling of 2026-09-15 — and because this step
-  # runs on every update as well as every install, it is what turns the pinned
-  # profile on for a box already in the field that never chose. An owner's
-  # persisted `balanced` is read back as such and kept.
+  # DEFAULT_MODE since the owner's ruling of 2026-09-15 — and because
+  # clawbox-performance.service applies the same resolution at every boot, the
+  # reboot that ends every in-app update included, that default reaches a box
+  # already in the field that never chose. An owner's persisted `balanced` is
+  # read back as such and kept.
   #
   # Before TASK-455 this was an unconditional `nvpmodel -m MAXN && jetson_clocks`,
   # which pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load

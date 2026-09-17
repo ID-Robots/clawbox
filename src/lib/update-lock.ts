@@ -17,8 +17,8 @@ import { get, set, setMany } from "./config-store";
  *
  * It deliberately OUTLIVES the reboot the update performs. The web server is
  * killed mid-run by do_rebuild and the flag is still set when the box comes
- * back, which is correct: post_update, gateway_verify and verify_build_identity
- * are still to come, and the desktop must stay locked through them. What clears
+ * back, which is correct: post_update and gateway_verify are still to come, and
+ * the desktop must stay locked through them. What clears
  * it is the run FINISHING — or, if the box came back with nothing to resume,
  * the boot-time continuation check, so a crashed update cannot lock the desktop
  * for ever.

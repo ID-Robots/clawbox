@@ -90,8 +90,8 @@ describe("the lock is written where a run starts and released where one ends", (
   it("is NOT released on the reboot path", () => {
     // This is the property that makes the lock work at all. do_rebuild kills
     // the web server mid-run; if anything on that path cleared the flag, the
-    // desktop would unlock while post_update, gateway_verify and
-    // verify_build_identity were still to come.
+    // desktop would unlock while post_update and gateway_verify were still to
+    // come.
     for (const name of ["updateClawBoxAndReboot", "waitForRebuildToTakeOver"]) {
       expect(fn(name), `${name} must not release the lock`).not.toContain("clearUpdateLock");
     }
