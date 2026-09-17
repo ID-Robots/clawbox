@@ -95,7 +95,12 @@ function isLabels(value: string, count: number): boolean {
 
 let configuredHosts: { signature: string; hosts: Set<string> } | null = null;
 
-function configuredOriginHosts(): Set<string> {
+/**
+ * Hostnames of the owner-configured control UI origins, in the form a Host
+ * header carries them (an IPv6 literal bare). Exported for the parity test,
+ * which compares this set against the CommonJS mirror's for the same file.
+ */
+export function configuredOriginHosts(): Set<string> {
   const file = resolveOriginsPath();
   let signature: string;
   try {

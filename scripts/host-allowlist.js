@@ -26,7 +26,11 @@ const { isLoopback } = require("./proxy-peer.js");
 const DEFAULT_ALLOWED_HOSTS = "clawbox.local,10.42.0.1,10.43.0.1,localhost";
 const DEFAULT_ORIGINS_PATH = "/home/clawbox/clawbox/data/control-ui-origins.json";
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const ORIGIN_RE = /^https?:\/\/([a-z0-9.-]+)(?::\d{1,5})?\/?$/i;
+
+// Both copied from src/lib/control-ui-origins.ts, which originHostname() below
+// mirrors rule for rule.
+const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const FORBIDDEN_RAW_ORIGIN_RE = /[\\%]|[^\x20-\x7e]/;
 
 function parseHostHeader(raw) {
   const value = String(raw == null ? "" : raw).trim().toLowerCase();
@@ -66,9 +70,65 @@ function isLabels(value, count) {
   return labels.length === count && labels.every((l) => LABEL_RE.test(l));
 }
 
-// Hostnames of the owner-configured control UI origins. Only a DNS name matters
-// here — an IP literal is admitted on its own — so a plain origin shape is
-// enough; anything else in the file is ignored, never thrown over.
+/**
+ * The hostname of ONE configured origin, in the form a Host header carries it
+ * (an IPv6 literal bare, without its brackets), or null for an entry this box
+ * will not trust.
+ *
+ * A rule-for-rule mirror of `normalizeOrigin()` in src/lib/control-ui-origins.ts
+ * — the SAME parser (`new URL`, the WHATWG one) in the same order, not a regex
+ * of its own. A regex was the first attempt and diverged immediately: `\d{1,5}`
+ * accepts `:99999`, which `new URL` throws on, so an entry the middleware
+ * dropped entirely would have had its hostname admitted here — and an upgrade
+ * this admits and the middleware refuses is exactly what the two copies exist
+ * to prevent (/terminal-ws is a shell). The remaining rules below are the same
+ * class of trap: `127.1` and `010.0.0.1` are hostnames to a regex and canonical
+ * dotted quads to WHATWG.
+ *
+ * Kept honest by src/tests/unit/host-allowlist-parity.test.ts, which feeds one
+ * table of origin files through both copies and compares the admitted set.
+ */
+function originHostname(raw) {
+  if (typeof raw !== "string") return null;
+  if (FORBIDDEN_RAW_ORIGIN_RE.test(raw)) return null;
+  const value = raw.trim();
+  if (!value || value.includes("*")) return null;
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  const scheme = url.protocol.slice(0, -1).toLowerCase();
+  if (scheme !== "http" && scheme !== "https") return null;
+
+  // `@` in the authority is userinfo even when empty (`http://@host`), which
+  // url.username cannot see once WHATWG has stripped it.
+  const rawAuthority = value.slice(value.indexOf("://") + 3).split(/[/?#]/)[0];
+  if (rawAuthority.includes("@")) return null;
+  if (url.username || url.password) return null;
+  if (url.pathname !== "" && url.pathname !== "/") return null;
+  if (url.search || url.hash) return null;
+
+  const hostname = url.hostname.toLowerCase();
+  if (!hostname) return null;
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    const bare = hostname.slice(1, -1);
+    return net.isIPv6(bare) ? bare : null;
+  }
+  if (!HOSTNAME_RE.test(hostname)) return null;
+  if (/^[0-9.]+$/.test(hostname) && !net.isIPv4(hostname)) return null;
+  // WHATWG rewrites IPv4 shorthand ("127.1", "010.0.0.1", "2130706433") to a
+  // canonical dotted quad. Only trust one that was already written that way.
+  if (net.isIPv4(hostname) && rawAuthority.replace(/:\d+$/, "").toLowerCase() !== hostname) return null;
+  return hostname;
+}
+
+// Hostnames of the owner-configured control UI origins. A missing, unreadable,
+// non-JSON or non-array file is no origins at all — never a throw, since this
+// runs in front of every upgrade.
 function configuredOriginHosts() {
   const file = process.env.CLAWBOX_CONTROL_UI_ORIGINS_FILE || DEFAULT_ORIGINS_PATH;
   const hosts = new Set();
@@ -80,11 +140,8 @@ function configuredOriginHosts() {
   }
   if (!Array.isArray(data)) return hosts;
   for (const entry of data) {
-    if (typeof entry !== "string") continue;
-    const match = ORIGIN_RE.exec(entry.trim());
-    if (!match) continue;
-    const hostname = match[1].toLowerCase();
-    if (hostname.split(".").every((l) => LABEL_RE.test(l))) hosts.add(hostname);
+    const hostname = originHostname(entry);
+    if (hostname) hosts.add(hostname);
   }
   return hosts;
 }
@@ -120,6 +177,7 @@ function isAllowedUpgrade(req) {
 }
 
 module.exports = {
+  configuredOriginHosts,
   isAllowedHostHeader,
   isAllowedHostname,
   isAllowedUpgrade,
