@@ -8,9 +8,10 @@ import fs from "fs/promises";
 //   1. the credential is written as an env REFERENCE plus a real env file. A
 //      literal `botToken` (the Telegram shape) would validate and start, and
 //      the bot would silently never log in.
-//   2. `dmPolicy`/`allowFrom` are never written. OpenClaw defaults to pairing;
-//      writing "open"/["*"] would expose the agent's shell/file/power tools to
-//      anyone who finds the bot.
+//   2. `dmPolicy` is never written and `allowFrom` only ever holds the guild
+//      owners' numeric ids. OpenClaw defaults to pairing; writing "open"/["*"]
+//      would expose the agent's shell/file/power tools to anyone who finds the
+//      bot.
 
 vi.mock("child_process", () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 
@@ -121,6 +122,73 @@ describe("setDiscordToken (OpenClaw config generation)", () => {
     // loads no channels at all — a Discord guess would take Telegram down too.
     await openclawConfig.setDiscordToken(TOKEN);
     expect(Object.keys(writtenJsonConfig().channels.discord).sort()).toEqual(["enabled", "token"]);
+  });
+
+  describe("with what Discord said about the bot", () => {
+    const APP_ID = "111111111111111111";
+    const GUILD = "900000000000000001";
+    const OWNER = "123456789012345678";
+
+    it("writes the application id, the guild and its owner — only schema keys", async () => {
+      await openclawConfig.setDiscordToken(TOKEN, {
+        applicationId: APP_ID,
+        guilds: [{ id: GUILD, ownerId: OWNER }],
+      });
+      const discord = writtenJsonConfig().channels.discord;
+      expect(Object.keys(discord).sort()).toEqual(["allowFrom", "applicationId", "enabled", "guilds", "token"]);
+      expect(discord.applicationId).toBe(APP_ID);
+      expect(discord.guilds).toEqual({ [GUILD]: { requireMention: false, users: [OWNER] } });
+      expect(discord.allowFrom).toEqual([OWNER]);
+      expect(discord).not.toHaveProperty("dmPolicy");
+    });
+
+    it("never carries a wildcard forward, but keeps an owner id already there", async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ channels: { discord: { dmPolicy: "open", allowFrom: ["*", OWNER] } } }),
+      );
+      await openclawConfig.setDiscordToken(TOKEN);
+      const discord = writtenJsonConfig().channels.discord;
+      expect(discord.allowFrom).toEqual([OWNER]);
+      expect(discord).not.toHaveProperty("dmPolicy");
+    });
+
+    it("leaves a guild the owner already tuned alone", async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ channels: { discord: { guilds: { [GUILD]: { requireMention: true } } } } }),
+      );
+      await openclawConfig.setDiscordToken(TOKEN, { guilds: [{ id: GUILD, ownerId: OWNER }] });
+      expect(writtenJsonConfig().channels.discord.guilds).toEqual({ [GUILD]: { requireMention: true } });
+    });
+
+    it("ignores ids that are not snowflakes", async () => {
+      await openclawConfig.setDiscordToken(TOKEN, {
+        applicationId: "abc",
+        guilds: [{ id: "*", ownerId: "*" }],
+      });
+      expect(Object.keys(writtenJsonConfig().channels.discord).sort()).toEqual(["enabled", "token"]);
+    });
+
+    it("setDiscordAccess refuses to create a channel with no token behind it", async () => {
+      const changed = await openclawConfig.setDiscordAccess({ guilds: [{ id: GUILD, ownerId: OWNER }] });
+      expect(changed).toBe(false);
+      expect(
+        (mockFs.writeFile.mock.calls as unknown as WriteCall[]).some((c) => String(c[0]).endsWith("openclaw.json.tmp")),
+      ).toBe(false);
+    });
+
+    it("setDiscordAccess adds a guild joined after the token was saved", async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ channels: { discord: { enabled: true, token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" } } } }),
+      );
+      const changed = await openclawConfig.setDiscordAccess({ guilds: [{ id: GUILD, ownerId: OWNER }] });
+      expect(changed).toBe(true);
+      const config = writtenJsonConfig() as ReturnType<typeof writtenJsonConfig> & {
+        plugins: { entries: Record<string, unknown> };
+      };
+      expect(config.channels.discord.guilds).toEqual({ [GUILD]: { requireMention: false, users: [OWNER] } });
+      expect(config.channels.discord.allowFrom).toEqual([OWNER]);
+      expect(config.plugins.entries.discord).toEqual({ enabled: true });
+    });
   });
 
   it("leaves the rest of the config, including Telegram, untouched", async () => {

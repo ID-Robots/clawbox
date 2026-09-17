@@ -58,7 +58,7 @@ function applyPolicy(config: Record<string, unknown>): Applied {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(config));
   const program = [
-    "import json, sys",
+    "import json, re, sys",
     "cfg = json.load(open(sys.argv[1]))",
     "changed = False",
     POLICY,
@@ -118,6 +118,33 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh channel security", () => {
     });
     expect(out.channels.telegram).not.toHaveProperty("allowFrom");
     expect(out.channels.discord).not.toHaveProperty("dmPolicy");
+  });
+
+  describe("discord owner access", () => {
+    // ClawBox writes the guild owners' numeric ids into
+    // channels.discord.allowFrom so the person who connected the bot can DM it
+    // without a pairing code. Those survive; nothing wider does.
+    const OWNER = "123456789012345678";
+
+    it("keeps specific numeric owner ids", () => {
+      const out = applyPolicy({ channels: { discord: { enabled: true, allowFrom: [OWNER] } } });
+      expect(out.channels.discord.allowFrom).toEqual([OWNER]);
+      expect(out.changed).toBe(false);
+    });
+
+    it("drops the wildcard and names but keeps the ids beside them", () => {
+      const out = applyPolicy({
+        channels: { discord: { dmPolicy: "open", allowFrom: ["*", OWNER, "someone#0001"] } },
+      });
+      expect(out.channels.discord.allowFrom).toEqual([OWNER]);
+      expect(out.channels.discord).not.toHaveProperty("dmPolicy");
+      expect(out.changed).toBe(true);
+    });
+
+    it("still strips every telegram allowFrom entry", () => {
+      const out = applyPolicy({ channels: { telegram: { allowFrom: [OWNER] } } });
+      expect(out.channels.telegram).not.toHaveProperty("allowFrom");
+    });
   });
 
   it("ignores a channels value that is not an object", () => {

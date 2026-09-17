@@ -136,7 +136,7 @@ describe("POST /setup-api/discord/configure (OpenClaw channel plugin)", () => {
     expect(body.warning).toBe("not_connected");
     // The credential is still on disk — the owner must not have to paste it
     // again to retry.
-    expect(mockSetDiscordToken).toHaveBeenCalledWith(TOKEN);
+    expect(mockSetDiscordToken).toHaveBeenCalledWith(TOKEN, expect.any(Object));
   });
 
   it("names an unresolvable token rather than calling it 'not connected'", async () => {

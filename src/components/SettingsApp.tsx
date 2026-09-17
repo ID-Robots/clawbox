@@ -373,6 +373,20 @@ function peekPendingSection(): Section | null {
 // The four states GET /setup-api/discord/status can report, each with exactly
 // one remedy in the UI. "connected" is the only one that may render as live.
 const DISCORD_STATES = ["connected", "intents-missing", "denied-no-allowlist", "offline"] as const;
+
+/** How often the panel asks whether an invited bot has joined a server. */
+const DISCORD_INVITE_POLL_MS = 4_000;
+
+/**
+ * The box's invite link, or null. Only Discord's own OAuth2 address with a
+ * numeric client id ever reaches an href, whatever a response carried.
+ */
+function safeDiscordInviteUrl(value: unknown): string | null {
+  return typeof value === "string" &&
+    /^https:\/\/discord\.com\/oauth2\/authorize\?client_id=\d{15,25}&[A-Za-z0-9=&+._-]*$/.test(value)
+    ? value
+    : null;
+}
 type DiscordConnectionState = (typeof DISCORD_STATES)[number];
 
 function isDiscordState(value: unknown): value is DiscordConnectionState {
@@ -2561,9 +2575,14 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // bot that is set up and silent.
   const [dcTokenRejected, setDcTokenRejected] = useState(false);
   const [dcReconfigure, setDcReconfigure] = useState(false);
-  // Application ID is only ever used in the browser to build the invite URL —
-  // it is public (it is in the invite link itself) and is never sent to the box.
-  const [dcAppId, setDcAppId] = useState("");
+  // The invite link comes from the box, which reads the application id off the
+  // token — the owner never types one. `dcNeedsInvite` is the step between a
+  // saved token and a working bot: the bot is in no server yet, so the panel
+  // offers the link and finishes the setup itself once the bot has joined.
+  const [dcInviteUrl, setDcInviteUrl] = useState<string | null>(null);
+  // "first": the bot is in no server, done as soon as it is in one.
+  // "another": opened from a working bot's link, done when a NEW server was set up.
+  const [dcNeedsInvite, setDcNeedsInvite] = useState<false | "first" | "another">(false);
   // What the gateway actually reports, not what a stored token implies.
   const [dcState, setDcState] = useState<DiscordConnectionState | null>(null);
   // The picker. `dcMembers` is what the bot can see; `dcSelected` is what the
@@ -2596,6 +2615,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       setDcReceiving(typeof d.receiving === "boolean" ? d.receiving : null);
       setDcBotName(typeof d.username === "string" ? d.username : null);
       setDcTokenRejected(d.tokenRejected === true);
+      setDcInviteUrl(safeDiscordInviteUrl(d.inviteUrl));
       setDcState(isDiscordState(d.state) ? d.state : null);
       setDcAllowlistSupported(d.allowlistSupported !== false);
       setDcAllowAllUsers(d.allowAllUsers === true);
@@ -2648,20 +2668,48 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   useEffect(() => () => dcSaveControllerRef.current?.abort(), []);
 
-  // The invite link is assembled client-side from a public Application ID.
-  // 274878286912 = view channels + send messages + read history + attach files
-  // + embed links + send in threads + add reactions: what the agent needs to
-  // hold a conversation, and nothing that can moderate or manage a server.
-  const DISCORD_INVITE_PERMISSIONS = "274878286912";
-  // Trim once and build the link from that exact string: the digits-only test
-  // and the interpolation have to see the same value for the guard to mean
-  // anything. Bound to one const, "only 15-25 digits, behind a literal
-  // https://discord.com/ prefix, ever reaches href" holds by construction.
-  const dcAppIdTrimmed = dcAppId.trim();
-  const dcAppIdValid = /^\d{15,25}$/.test(dcAppIdTrimmed);
-  const dcInviteUrl = dcAppIdValid
-    ? `https://discord.com/oauth2/authorize?client_id=${dcAppIdTrimmed}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`
-    : null;
+  // While the bot is in no server, ask the box every few seconds whether it has
+  // joined one. The `{sync:true}` save is a no-op until it has, and then gives
+  // the server's owner access and restarts the channel — the step the owner
+  // used to do by telling the agent in the chat.
+  useEffect(() => {
+    if (section !== "discord" || !dcNeedsInvite) return;
+    let cancelled = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch("/setup-api/discord/configure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sync: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled || !res.ok || data.needsInvite !== false) return;
+        if (dcNeedsInvite === "another" && data.changed !== true) return;
+        setDcNeedsInvite(false);
+        setDcStatus({
+          type: data.warning ? "error" : "success",
+          message: discordWarningText(data.warning) ?? t("settings.discordInviteDone"),
+        });
+        refreshDiscordStatus();
+        refreshDiscordMembers();
+      } catch {
+        // Offline for a moment — the next tick asks again.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = setInterval(tick, DISCORD_INVITE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // discordWarningText and t are recreated each render and read only when a
+    // tick lands; re-arming the interval for them would reset the clock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, dcNeedsInvite, refreshDiscordStatus, refreshDiscordMembers]);
 
   /** Warning tokens the configure route returns, mapped to translated copy. */
   const discordWarningText = (warning: unknown): string | null => {
@@ -2706,6 +2754,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // The preflight refusal is not a sentence, it is a checklist — render
         // the four steps rather than a one-line error nobody can act on.
         if (data.code === "intents_missing") {
+          setDcInviteUrl(safeDiscordInviteUrl(data.inviteUrl));
           setDcIntentsMissing(
             Array.isArray(data.missingIntents)
               ? data.missingIntents.filter((i: unknown) => typeof i === "string")
@@ -2721,6 +2770,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         const blocked = discordWarningText(data.code);
         if (blocked) {
           setDcStatus({ type: "error", message: blocked });
+          setDcInviteUrl(safeDiscordInviteUrl(data.inviteUrl));
+          setDcNeedsInvite(data.needsInvite === true ? "first" : false);
           setDcConfigured(true);
           setDcToken("");
           setDcReconfigure(false);
@@ -2738,6 +2789,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       });
       setDcConfigured(true);
       setDcTokenRejected(false);
+      setDcInviteUrl(safeDiscordInviteUrl(data.inviteUrl));
+      setDcNeedsInvite(data.needsInvite === true ? "first" : false);
       setDcBotName(typeof data.username === "string" ? data.username : null);
       setDcMembers(toDiscordMembers(data.members));
       setDcMembersUnavailable(data.warning === "members_unavailable");
@@ -5573,12 +5626,32 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                       {t("settings.discordAllowAllWarning")}
                     </p>
                   )}
-                  <button
-                    onClick={() => { setDcReconfigure(true); setDcStatus(null); }}
-                    className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
-                  >
-                    {t("settings.reconfigureBot")}
-                  </button>
+                  {dcStatus && !dcReconfigure && (
+                    <div className="mb-4"><StatusMessage type={dcStatus.type} message={dcStatus.message} /></div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                    <button
+                      onClick={() => { setDcReconfigure(true); setDcStatus(null); }}
+                      className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                    >
+                      {t("settings.reconfigureBot")}
+                    </button>
+                    {dcInviteUrl && !dcNeedsInvite && (
+                      <a
+                        href={dcInviteUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid="discord-invite-link"
+                        // Opened from here (a reload since the save, or a second
+                        // server): watch for the join the same way, so the new
+                        // server is set up without another save.
+                        onClick={() => { setDcStatus(null); setDcNeedsInvite("another"); }}
+                        className="text-sm text-[#98a2ff] hover:text-[#b8bfff] underline underline-offset-2"
+                      >
+                        {t("settings.discordInviteOpen")}
+                      </a>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
@@ -5634,6 +5707,38 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     ))}
                   </ul>
                 )}
+              </div>
+            )}
+
+            {/* The one step between a saved token and a working bot: add it to
+                a server. The panel finishes the setup on its own once it has
+                joined (see the `{sync:true}` poll above). */}
+            {dcConfigured && !dcReconfigure && dcNeedsInvite && (
+              <div
+                className="rounded-2xl border border-[#5865F2]/30 bg-[#5865F2]/[0.06] p-5"
+                data-testid="discord-invite"
+              >
+                <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                  {t("settings.discordInviteTitle")}
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.discordInviteHint")}</p>
+                {dcInviteUrl && (
+                  <a
+                    href={dcInviteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="discord-invite-open"
+                    className="flex items-center justify-center gap-2 w-full px-4 py-3 mt-3 bg-[#5865F2]/15 hover:bg-[#5865F2]/25 border border-[#5865F2]/40 hover:border-[#5865F2]/60 rounded-lg text-sm font-semibold text-[#98a2ff] transition-colors no-underline"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
+                    {t("settings.discordInviteOpen")}
+                  </a>
+                )}
+                <div className="flex items-center gap-2 mt-3 text-xs text-[var(--text-muted)]" role="status">
+                  <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 14 }} aria-hidden="true">progress_activity</span>
+                  {t("settings.discordInviteWaiting")}
+                </div>
+                <p className="text-[11px] text-[var(--text-muted)] mt-2 mb-0">{t("settings.discordPermissionsNote")}</p>
               </div>
             )}
 
@@ -5743,36 +5848,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 <div className="flex items-start gap-2 mt-4 px-3 py-2.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
                   <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
                   <p className="text-xs text-amber-200/90 m-0">{t("settings.discordIntentsWarning")}</p>
-                </div>
-
-                {/* Invite-link builder (client-side only) */}
-                <div className="mt-5 pt-4 border-t border-white/[0.06]">
-                  <span className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.discordInviteTitle")}</span>
-                  <p className="text-xs text-[var(--text-secondary)] mb-2">{t("settings.discordInviteHint")}</p>
-                  <input
-                    id="settings-dc-appid"
-                    type="text"
-                    value={dcAppId}
-                    onChange={(e) => setDcAppId(e.target.value)}
-                    placeholder={t("settings.discordAppIdPlaceholder")}
-                    aria-label={t("settings.discordAppIdPlaceholder")}
-                    inputMode="numeric"
-                    spellCheck={false}
-                    autoComplete="off"
-                    className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] font-mono outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15 placeholder:font-sans"
-                  />
-                  {dcInviteUrl && (
-                    <a
-                      href={dcInviteUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center justify-center gap-2 w-full px-4 py-3 mt-3 bg-[#5865F2]/15 hover:bg-[#5865F2]/25 border border-[#5865F2]/40 hover:border-[#5865F2]/60 rounded-lg text-sm font-semibold text-[#98a2ff] transition-colors no-underline"
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
-                      {t("settings.discordInviteOpen")}
-                    </a>
-                  )}
-                  <p className="text-[11px] text-[var(--text-muted)] mt-2 mb-0">{t("settings.discordPermissionsNote")}</p>
                 </div>
 
                 {/* Token input */}
