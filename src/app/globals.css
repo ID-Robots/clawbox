@@ -2192,3 +2192,39 @@ input[type="range"].appearance-none::-moz-range-track {
   font-size: 12.5px;
   border-radius: 12px;
 }
+
+/* ── Memory Shard's indexing bar (src/components/MemoryShardApp.tsx) ────────
+   A pass ClawBox runs itself counts the files its scan found, so that bar is a
+   real fraction and needs no keyframes — its width is a style. This is the
+   OTHER face: `openclaw memory index` reports its progress to a terminal
+   reporter that is a no-op on the pipe this box spawns it down, so that arm
+   sends no numbers and gets motion that says "working" without claiming a
+   percentage. Flat classes only — the setup-ground parity test parses every
+   selector in this file with its own small engine, which reads classes and
+   attributes but no combinators. */
+.memory-index-bar-sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  border-radius: inherit;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .memory-index-bar-sweep {
+    animation: memory-index-sweep 1.6s ease-in-out infinite;
+  }
+}
+/* Its resting frame: the whole track, dimmed. Without this the un-animated
+   sweep sits over the first 40% and reads as a stalled 40% run — a number the
+   box never reported. */
+@media (prefers-reduced-motion: reduce) {
+  .memory-index-bar-sweep {
+    width: 100%;
+    opacity: 0.45;
+    animation: none;
+  }
+}
+@keyframes memory-index-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}

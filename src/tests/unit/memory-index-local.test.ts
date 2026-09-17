@@ -674,3 +674,77 @@ describe("chunking", () => {
     expect(chunkText("   \n\n  ")).toEqual([]);
   });
 });
+
+/**
+ * The bar the owner watches. The point of the feature is that indexing stops
+ * being a screen with nothing on it: the pass has to say how many files its
+ * scan found and how many it has finished with, from the moment it knows, and
+ * it has to be telling the truth about both — a fraction over 1, or a
+ * denominator that grows, is worse than the nothing this replaces.
+ */
+describe("what a pass reports about its own progress", () => {
+  function reports() {
+    const seen: { filesDone: number; filesTotal: number; chunks: number }[] = [];
+    return { seen, report: (p: { filesDone: number; filesTotal: number; chunks: number }) => { seen.push({ ...p }); } };
+  }
+
+  it("names the total the scan found, and counts up to it without passing it", async () => {
+    for (let i = 0; i < 5; i += 1) write(`note-${i}.md`, `Paragraph ${i} about the deposit.`);
+    const { seen, report } = reports();
+    await runLocalIndexPass("full", undefined, report);
+
+    expect(seen.length).toBeGreaterThan(0);
+    // Every report is about the same walk: the denominator the scan settled on
+    // before the first file was opened.
+    for (const r of seen) {
+      expect(r.filesTotal).toBe(5);
+      expect(r.filesDone).toBeLessThanOrEqual(r.filesTotal);
+    }
+    // Monotone, or the bar would go backwards under the owner.
+    const done = seen.map((r) => r.filesDone);
+    expect([...done].sort((a, b) => a - b)).toEqual(done);
+    // The first report is the denominator arriving — the bar exists before any
+    // file has been read — and the last one is the whole walk.
+    expect(done[0]).toBe(0);
+    expect(done[done.length - 1]).toBe(5);
+  });
+
+  it("counts a file it SKIPPED as done, so an unchanged folder still moves the bar", async () => {
+    // The commonest pass there is: nothing changed, every file is skipped on
+    // its stat. Counted only on the files it re-embedded, the bar would have
+    // sat at 0 of 900 for the whole length of exactly that pass.
+    for (let i = 0; i < 4; i += 1) write(`note-${i}.md`, `Paragraph ${i} about the bicycle.`);
+    await runLocalIndexPass("full");
+    const before = embedCalls.texts.length;
+
+    const { seen, report } = reports();
+    await runLocalIndexPass("incremental", undefined, report);
+    expect(embedCalls.texts.length).toBe(before);
+    expect(seen[seen.length - 1]).toEqual({ filesDone: 4, filesTotal: 4, chunks: expect.any(Number) });
+  });
+
+  it("carries the chunks the index holds, growing as the pass writes them", async () => {
+    for (let i = 0; i < 4; i += 1) write(`note-${i}.md`, `Paragraph ${i} about the lasagne.`);
+    const { seen, report } = reports();
+    await runLocalIndexPass("full", undefined, report);
+    const chunks = seen.map((r) => r.chunks);
+    expect(chunks[0]).toBe(0);
+    expect(chunks[chunks.length - 1]).toBeGreaterThan(0);
+    expect([...chunks].sort((a, b) => a - b)).toEqual(chunks);
+  });
+
+  it("reports a total of zero for a box with nothing to index, rather than pretending", async () => {
+    // No files: the honest answer is a denominator of nothing, which the card
+    // draws as a bar with no percentage instead of an instant 100%.
+    const { seen, report } = reports();
+    await runLocalIndexPass("full", undefined, report);
+    expect(seen.every((r) => r.filesTotal === 0 && r.filesDone === 0)).toBe(true);
+  });
+
+  it("indexes exactly as it always did when nobody is watching", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    const result = await runLocalIndexPass("full");
+    expect(result.files).toBe(1);
+    expect(result.chunks).toBeGreaterThan(0);
+  });
+});

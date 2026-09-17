@@ -346,3 +346,111 @@ describe("which arm runs the pass", () => {
     await settledMemoryRun(clawkeepDir);
   });
 });
+
+/**
+ * The bar, at the seam.
+ *
+ * Progress rides on the run-state FILE, because that file is the only thing
+ * every reader of a run shares — the route, the scheduler, and the second copy
+ * of this module Next compiles into the same web server (see
+ * `src/lib/process-store.ts`). So what is pinned here is what lands on disk
+ * and what comes back out of `readMemoryRunState`, not an in-memory channel.
+ *
+ * And the honest half: on the arm that drives `openclaw memory index` there is
+ * nothing to report — that CLI writes its progress through a terminal reporter
+ * which answers a no-op for the non-TTY pipe this module spawns it down — so
+ * the field stays null there and the card draws a bar with no percentage
+ * rather than one it made up.
+ */
+describe("how far the pass has got", () => {
+  const statePath = () => path.join(clawkeepDir, "memory-index-state.json");
+
+  async function readState(): Promise<Record<string, unknown>> {
+    return JSON.parse(await fsp.readFile(statePath(), "utf8").catch(() => "{}")) as Record<string, unknown>;
+  }
+
+  it("puts files done, files found and chunks on the running record", async () => {
+    for (let i = 0; i < 80; i += 1) {
+      fs.writeFileSync(path.join(source, `note-${i}.md`), `Paragraph ${i}.\n\n`.repeat(60));
+    }
+    const local = await import("@/lib/memory-index-local");
+    await local.writeLocalSources([source]);
+    const { startMemoryIndex } = await lib();
+    await startMemoryIndex("full", "manual");
+
+    let seen: { filesDone?: number; filesTotal?: number; chunks?: number } | null = null;
+    for (let i = 0; i < 400 && !seen; i += 1) {
+      const state = await readState();
+      if (state.status === "running" && state.progress) {
+        seen = state.progress as { filesDone?: number; filesTotal?: number; chunks?: number };
+      }
+      if (state.status !== "running") break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(seen, "a running pass must say how far it has got").toBeTruthy();
+    expect(seen!.filesTotal).toBe(80);
+    expect(seen!.filesDone).toBeGreaterThanOrEqual(0);
+    expect(seen!.filesDone).toBeLessThanOrEqual(80);
+    expect(typeof seen!.chunks).toBe("number");
+    await settledMemoryRun(clawkeepDir);
+  });
+
+  it("takes the bar back off the record when the pass ends", async () => {
+    // A settled run with a bar on it is a card drawing progress over work that
+    // is finished. The final write also has to WIN: it is a rename, and a
+    // report still in flight would otherwise land on top of it for good.
+    fs.writeFileSync(path.join(source, "notes.md"), "The deposit is two months' rent.");
+    const local = await import("@/lib/memory-index-local");
+    await local.writeLocalSources([source]);
+    const { startMemoryIndex, readMemoryRunState } = await lib();
+    await startMemoryIndex("full", "manual");
+    const final = await settledMemoryRun(clawkeepDir);
+    expect(final.status).toBe("succeeded");
+
+    // Settled for long enough that any late report would have landed.
+    await new Promise((r) => setTimeout(r, 120));
+    const state = await readState();
+    expect(state.status).toBe("succeeded");
+    expect(state.progress).toBeNull();
+    expect((await readMemoryRunState()).progress).toBeNull();
+  });
+
+  it("answers null on the arm that cannot count, rather than a bar it invented", async () => {
+    absent.value = false;
+    const { startMemoryIndex } = await lib();
+    const started = await startMemoryIndex("full", "manual");
+    expect(started.accepted).toBe(true);
+    expect(started.run.progress).toBeNull();
+    await settledMemoryRun(clawkeepDir);
+  });
+
+  it("refuses a bar read off disk that would draw past its own end", async () => {
+    // The file is written by another copy of this module while a pass runs, so
+    // it is read as untrusted like everything else here: a fraction over 1 is
+    // the one value that makes the bar visibly lie.
+    const { readMemoryRunState } = await lib();
+    await fsp.writeFile(statePath(), JSON.stringify({
+      status: "running",
+      mode: "full",
+      trigger: "manual",
+      startedAtMs: Date.now(),
+      childPid: process.pid,
+      progress: { filesDone: 9_000, filesTotal: 12, chunks: -4 },
+    }));
+    const run = await readMemoryRunState();
+    expect(run.progress).toEqual({ filesDone: 12, filesTotal: 12, chunks: 0 });
+  });
+
+  it("ignores a bar on a record that is not running", async () => {
+    const { readMemoryRunState } = await lib();
+    await fsp.writeFile(statePath(), JSON.stringify({
+      status: "succeeded",
+      mode: "full",
+      trigger: "manual",
+      startedAtMs: Date.now() - 1_000,
+      finishedAtMs: Date.now(),
+      progress: { filesDone: 3, filesTotal: 9, chunks: 40 },
+    }));
+    expect((await readMemoryRunState()).progress).toBeNull();
+  });
+});
