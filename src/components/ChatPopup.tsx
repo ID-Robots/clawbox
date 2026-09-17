@@ -15,6 +15,7 @@ import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } f
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
+import { gatewayFrameError, isGatewayStartingRefusal } from '@/lib/chat-gateway-starting'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
 import { AskUserPrompt } from '@/lib/chat-ask-user'
@@ -183,59 +184,6 @@ const RETRY_DELAY = 3000
 // having to reload.
 const AUTH_BACKOFF_DELAY = 30000
 
-/**
- * The gateway's `details.reason` for a connect refused only because its startup
- * sidecars are still coming up (`GATEWAY_STARTUP_UNAVAILABLE_REASON` in the
- * core's `packages/gateway-protocol/src/startup-unavailable.ts`, v2026.9.3).
- */
-const GATEWAY_STARTUP_UNAVAILABLE_REASON = 'startup-sidecars'
-
-/** The fields of an `error` frame this client keeps, so a refusal can be judged
- *  on the gateway's own protocol rather than on its English. */
-export interface GatewayRefusal {
-  message?: string
-  code?: string
-  retryable?: boolean
-  details?: unknown
-}
-
-/** Build the rejection for an `ok: false` frame, carrying the structured
- *  fields rather than dropping them for the message alone. */
-export function gatewayFrameError(error: Record<string, unknown> | undefined): Error & GatewayRefusal {
-  const err = new Error((error?.message as string) || 'Request failed') as Error & GatewayRefusal
-  if (typeof error?.code === 'string') err.code = error.code
-  if (typeof error?.retryable === 'boolean') err.retryable = error.retryable
-  if (error && 'details' in error) err.details = error.details
-  return err
-}
-
-/**
- * Is this a connect the gateway refuses ONLY because it is not finished booting?
- *
- * The core answers that question in its own protocol, and this is its predicate
- * (`isRetryableGatewayStartupUnavailableError`, same file as the reason above):
- * `code === "UNAVAILABLE"` AND `retryable === true` AND
- * `details.reason === "startup-sidecars"`. All three are needed — the gateway
- * sends `UNAVAILABLE` for a Control-UI build mismatch (`retryable: false`) and
- * for an unsupported socket receiver too, and retrying either is a loop.
- *
- * The prose test is the FALLBACK, for a gateway too old to send the details
- * (and only then): it reads the sentence this build sends verbatim, "gateway
- * starting; retry shortly". It is anchored on that wording rather than on a
- * bare `starting`/`not ready`, because an unanchored match silently retries a
- * refusal that will never change — which is the failure the structured test
- * above exists to remove.
- */
-export function isGatewayStartingRefusal(refusal: GatewayRefusal | string | undefined): boolean {
-  const err: GatewayRefusal = typeof refusal === 'string' ? { message: refusal } : refusal ?? {}
-  const reason = (err.details as { reason?: unknown } | undefined)?.reason
-  if (typeof err.code === 'string') {
-    return err.code === 'UNAVAILABLE'
-      && err.retryable === true
-      && reason === GATEWAY_STARTUP_UNAVAILABLE_REASON
-  }
-  return /\bgateway (is )?starting\b|\bretry shortly\b|\bstartup (is )?pending\b/i.test(err.message ?? '')
-}
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 // The status line's small sibling of SPINNER_STYLE.
 const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border: '2px solid rgba(249,115,22,0.25)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }

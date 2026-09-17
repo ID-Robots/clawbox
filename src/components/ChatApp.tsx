@@ -83,13 +83,12 @@ import {
   type ChatAttachment,
   type StagingFailure,
 } from '@/lib/chat-attachments'
-import { gatewayFrameError, isGatewayStartingRefusal } from './ChatPopup'
-
-// The popup's ladder for a booting gateway, in the same units: a restart is
-// ten to twenty seconds, so forty tries three seconds apart outlasts a slow
-// one and still ends.
-const STARTING_RETRY_DELAY_MS = 3000
-const STARTING_MAX_RETRIES = 40
+import {
+  gatewayFrameError,
+  isGatewayStartingRefusal,
+  STARTING_MAX_RETRIES,
+  STARTING_RETRY_DELAY_MS,
+} from '@/lib/chat-gateway-starting'
 
 
 interface ChatAppProps {

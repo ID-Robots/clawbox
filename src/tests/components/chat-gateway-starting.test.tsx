@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import ChatPopup, { isGatewayStartingRefusal } from "@/components/ChatPopup";
+import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -110,32 +110,6 @@ describe("a gateway that is still starting", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     resetHarnessCache();
-  });
-
-  it("judges the refusal on the gateway's own three fields, not on its English", () => {
-    const starting = { code: "UNAVAILABLE", message: "gateway starting; retry shortly", retryable: true, details: { reason: "startup-sidecars" } };
-    expect(isGatewayStartingRefusal(starting)).toBe(true);
-    // The core re-wording that one sentence must not put the chat back on the
-    // Retry dead end: the fields are the contract, the prose is not.
-    expect(isGatewayStartingRefusal({ ...starting, message: "hold on, almost up" })).toBe(true);
-    // The same code for refusals that will NEVER change on their own — a
-    // Control UI build mismatch is `retryable: false`, an unsupported socket
-    // receiver carries neither field. Retrying either is a loop.
-    expect(isGatewayStartingRefusal({ code: "UNAVAILABLE", message: "protocol mismatch: Control UI updated; reload this page to continue", retryable: false, details: { code: "PROTOCOL_MISMATCH" } })).toBe(false);
-    expect(isGatewayStartingRefusal({ code: "UNAVAILABLE", message: "unsupported Gateway WebSocket receiver" })).toBe(false);
-    expect(isGatewayStartingRefusal({ code: "UNAUTHORIZED", message: "gateway starting; retry shortly" })).toBe(false);
-  });
-
-  it("falls back to the gateway's wording only for a frame that carries no code", () => {
-    expect(isGatewayStartingRefusal("gateway starting; retry shortly")).toBe(true);
-    expect(isGatewayStartingRefusal({ message: "gateway is starting" })).toBe(true);
-    // Anchored: an unrelated refusal that happens to contain "starting" or
-    // "not ready" was silently retried forty times behind the restart overlay.
-    expect(isGatewayStartingRefusal("Gateway not ready")).toBe(false);
-    expect(isGatewayStartingRefusal("starting the browser failed")).toBe(false);
-    expect(isGatewayStartingRefusal("protocol 4 is newer than this gateway understands")).toBe(false);
-    expect(isGatewayStartingRefusal("unauthorized")).toBe(false);
-    expect(isGatewayStartingRefusal(undefined)).toBe(false);
   });
 
   it("keeps connecting through the refusal and never offers Retry", async () => {
