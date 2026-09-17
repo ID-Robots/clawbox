@@ -65,14 +65,6 @@ type Draft = Record<string, { picked: string[]; typed: string }>;
 const EMPTY_DRAFT = { picked: [] as string[], typed: "" };
 
 /**
- * The values one question would post right now.
- *
- * Free text WINS for a single-select question — the owner typed instead of
- * picking, which is what the `isOther` box is for — and JOINS the ticks for a
- * multi-select one, where "these two plus something you did not offer" is a
- * sensible answer and the alternative is silently dropping what they typed.
- */
-/**
  * What is held for one question — `Object.hasOwn` rather than a bare read.
  *
  * A qid is a name the model chose, and `constructor` is a legal one under the
@@ -83,6 +75,14 @@ function draftFor(draft: Draft, qid: string) {
   return Object.hasOwn(draft, qid) ? draft[qid] : EMPTY_DRAFT;
 }
 
+/**
+ * The values one question would post right now.
+ *
+ * Free text WINS for a single-select question — the owner typed instead of
+ * picking, which is what the `isOther` box is for — and JOINS the ticks for a
+ * multi-select one, where "these two plus something you did not offer" is a
+ * sensible answer and the alternative is silently dropping what they typed.
+ */
 function valuesFor(question: AskUserQuestion, draft: Draft): string[] {
   const entry = draftFor(draft, question.questionId);
   const typed = entry.typed.trim();
@@ -151,12 +151,12 @@ export function AskUserPrompt({ card, nowMs, onAnswer }: AskUserPromptProps) {
   );
 
   const submit = useCallback(
-    (answers: Record<string, string[]>) => {
+    (chosen: Record<string, string[]>) => {
       // The draft has left the building. Clearing it now means a refused
       // resolve hands back an EMPTY card rather than a pre-filled one the
       // owner might send twice without noticing.
       setDraft({});
-      return onAnswer(card, answers);
+      return onAnswer(card, chosen);
     },
     [card, onAnswer],
   );
