@@ -43,11 +43,15 @@ async function askPortal(token: string): Promise<ClawaiUsageAnswer> {
   let res: Response;
   try {
     res = await fetch(usageUrl(), {
+      // The credential goes to the portal and nowhere else: only the standard
+      // Authorization header (a runtime drops it on a cross-origin redirect,
+      // which a custom header would survive), and no redirect is followed at
+      // all — a 3xx is answered as `unreachable` below.
       headers: {
         Authorization: `Bearer ${token}`,
-        "X-ClawBox-Token": token,
         Accept: "application/json",
       },
+      redirect: "manual",
       cache: "no-store",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
@@ -57,6 +61,7 @@ async function askPortal(token: string): Promise<ClawaiUsageAnswer> {
   if (res.status === 401 || res.status === 403 || res.status === 404) {
     return { available: false, reason: "refused" };
   }
+  // Not ok covers a redirect too (`redirect: "manual"` hands it back unfollowed).
   if (!res.ok) return { available: false, reason: "unreachable" };
   let body: unknown;
   try {

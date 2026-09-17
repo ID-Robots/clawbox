@@ -73,7 +73,9 @@ describe("/setup-api/ai-models/usage", () => {
 
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toBe("https://clawbox.com/api/portal/usage");
-    expect(init.headers).toMatchObject({ Authorization: "Bearer claw_box_token", "X-ClawBox-Token": "claw_box_token" });
+    expect(init.headers).toEqual({ Authorization: "Bearer claw_box_token", Accept: "application/json" });
+    // The credential is never walked to wherever a redirect points.
+    expect(init.redirect).toBe("manual");
 
     expect(body.available).toBe(true);
     expect(typeof body.timeZone).toBe("string");
@@ -113,6 +115,13 @@ describe("/setup-api/ai-models/usage", () => {
     (await import("@/lib/clawai-usage-portal"))._resetClawaiUsageCache();
     fetchSpy.mockRejectedValueOnce(new TypeError("fetch failed"));
     expect(await (await GET()).json()).toEqual({ available: false, reason: "unreachable" });
+  });
+
+  it("does not follow a redirect with the credential, and calls it unreachable", async () => {
+    mockToken.mockResolvedValue("claw_box_token");
+    fetchSpy.mockResolvedValue(new Response(null, { status: 302, headers: { Location: "https://elsewhere.example/usage" } }));
+    expect(await (await GET()).json()).toEqual({ available: false, reason: "unreachable" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("does not draw an interception page as usage", async () => {
