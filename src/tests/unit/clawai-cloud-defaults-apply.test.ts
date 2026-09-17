@@ -294,6 +294,27 @@ describe("readCloudDefaultsStatus", () => {
     expect(status.capabilities.stt).toEqual({ source: "local", target: "local", ownerChoice: true, reason: "owner" });
   });
 
+  /**
+   * TASK-860. `source` is what the box IS doing and `target` what the rule says
+   * it should — so the two disagreeing is the card's way of saying "this will
+   * move". On an unlinked box nothing will ever move transcription to the
+   * cloud, and reporting `source: "cloud"` there put a permanent, unactionable
+   * drift on the card over a box that was answering every recording on its own
+   * engine.
+   */
+  it("says an unlinked box hears on its own engine, agreeing with the target", async () => {
+    token.mockResolvedValue(null);
+    entitlement.mockResolvedValue(null);
+    const status = await readCloudDefaultsStatus();
+    expect(status.linked).toBe(false);
+    expect(status.capabilities.stt).toEqual({
+      source: "local",
+      target: "local",
+      ownerChoice: false,
+      reason: "not_linked",
+    });
+  });
+
   it("calls the index local on the edition that indexes on the box", async () => {
     openclawAbsent.mockReturnValue(true);
     const status = await readCloudDefaultsStatus();

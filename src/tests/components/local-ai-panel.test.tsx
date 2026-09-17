@@ -45,7 +45,7 @@ const WHISPER_STATE = {
 };
 const EMBED_STATUS = { installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 640 * 1024 * 1024, model: "qwen3-embedding-0.6b", engine: "llama.cpp" };
 
-function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
+function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
   posts = [];
   deletes = [];
   const json = (body: unknown, status = 200) =>
@@ -76,7 +76,13 @@ function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?:
       return json({ choice: over.ttsChoice ?? "auto", engines: [{ id: "local", configured: true }, { id: "cloud", configured: true }] });
     }
     if (url.startsWith("/setup-api/stt")) {
-      return json({ primary: over.sttPrimary ?? "cloud", engines: { cloud: { configured: true, label: "c" }, local: { installed: true, label: "l" } }, chain: ["cloud", "local"] });
+      const cloud = over.sttCloud ?? true;
+      const primary = over.sttPrimary ?? (cloud ? "cloud" : "local");
+      return json({
+        primary,
+        engines: { cloud: { configured: cloud, label: "c" }, local: { installed: true, label: "l" } },
+        chain: cloud ? ["cloud", "local"] : ["local"],
+      });
     }
     if (url.startsWith("/setup-api/local-ai/exclusive")) return json({ enabled: false });
     return json({ error: "unexpected" }, 404);
@@ -189,6 +195,39 @@ describe("LocalAiPanel", () => {
     fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
     fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
+  });
+
+  /**
+   * TASK-860. "Use as fallback" hands transcription back to the automatic
+   * ClawBox AI default, and on a box with no subscription that default is the
+   * engine on the box — the same one the row already is. Offered there, the
+   * action changes nothing and the row goes on reading "primary" after it, so
+   * the row offers it only once there is a cloud to fall back to.
+   */
+  it("does not offer the on-box transcriber as a fallback when there is no cloud to fall back to", async () => {
+    stubFetch({ sttCloud: false });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/primary/i));
+
+    // The row's own verbs are untouched — Enable and Uninstall are still there,
+    // and it is the role action alone that is gone with nothing to put behind
+    // the "more" button.
+    expect(screen.getByTestId("local-model-action-whisper-enable")).toBeInTheDocument();
+    expect(screen.getByTestId("local-model-action-whisper-uninstall")).toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-menu-whisper")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-action-whisper-fallback")).not.toBeInTheDocument();
+  });
+
+  it("offers it again on a linked box, where the cloud is a real fallback", async () => {
+    stubFetch({ sttPrimary: "local" });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/primary/i));
+
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-fallback"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "cloud" } }));
   });
 
   /**

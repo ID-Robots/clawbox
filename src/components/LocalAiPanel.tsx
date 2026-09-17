@@ -193,6 +193,17 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   }, [t]);
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
   const [roles, setRoles] = useState<Roles>({});
+  /**
+   * Whether the ClawBox cloud is behind the transcription row's OTHER engine.
+   *
+   * "Use as fallback" hands the capability back to the automatic ClawBox AI
+   * default, and on a box with no subscription that default IS the engine on
+   * the box — so on such a box the action cannot change anything, and the row
+   * would go on reading "primary" after it. A button that can only be a no-op
+   * is the same dead end the Gemma row's removal avoids; the row simply offers
+   * nothing until there is a cloud to fall back to.
+   */
+  const [sttCloudReady, setSttCloudReady] = useState(true);
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Not an error: a change that WENT THROUGH, which the box then qualified.
@@ -254,6 +265,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const ttsRole: Role = !localVoice ? null : tts?.choice === "local" ? "primary" : "fallback";
     const localStt = stt?.engines?.local?.installed === true;
     const sttRole: Role = !localStt ? null : stt?.primary === "local" ? "primary" : "fallback";
+    // Explicitly `!== false`, so a server that predates the field — or one whose
+    // read failed — leaves the action where it has always been rather than
+    // hiding it on a box that can use it.
+    setSttCloudReady(stt?.engines?.cloud?.configured !== false);
     setRoles({ llm, tts: ttsRole, stt: sttRole });
   }, []);
 
@@ -545,7 +560,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       case "stt": {
         if (entry.installed) {
           if (roles.stt === "primary") {
-            menu.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/stt", { primary: "cloud" }) });
+            // Only while there is a cloud engine to fall back to — see sttCloudReady.
+            if (sttCloudReady) {
+              menu.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/stt", { primary: "cloud" }) });
+            }
           } else {
             menu.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/stt", { primary: "local" }) });
           }
