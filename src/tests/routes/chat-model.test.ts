@@ -119,6 +119,12 @@ describe("/setup-api/chat/model", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // `clearAllMocks` keeps implementations and queued answers: the reasoning
+    // tests leave the gateway present and `models.list` configured, and every
+    // test after them would otherwise run against that instead of the
+    // default box with no gateway to ask.
+    vi.mocked(gatewayIsAbsent).mockReturnValue(true);
+    gatewayWsCallMock.mockReset();
 
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);

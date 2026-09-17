@@ -215,6 +215,23 @@ describe("edition gating", () => {
     expect(styled).not.toContain("mascot-waddle");
   });
 
+  it("keeps the crab's thinking verb while it wears the bundled pack, and gives someone else's pet none", async () => {
+    // The verb at the thinking dots is the crab's own. Making the crab a pet
+    // must not take it away: `brandCrab` is still the crab, as `data-mascot`
+    // says, while a pet the owner picked keeps the dots alone.
+    stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: false, active: BRAND_CRAB });
+    const crab = render(<Mascot thinking />);
+    await waitFor(() => expect(crab.container.querySelector('[data-pet="vibrant-clawd"]')).toBeTruthy());
+    await waitFor(() => expect(crab.getByTestId("mascot-thinking-verb")).toBeInTheDocument());
+    crab.unmount();
+    invalidatePetStatus();
+
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const pet = render(<Mascot thinking />);
+    await waitFor(() => expect(pet.container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    expect(pet.queryByTestId("mascot-thinking-verb")).toBeNull();
+  });
+
   it("wears the pet and never the crab on Hermes", async () => {
     stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
     const { container } = render(<Mascot />);

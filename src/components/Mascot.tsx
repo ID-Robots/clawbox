@@ -1895,7 +1895,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 animation: `think-dot 1.2s ${delay}s ease-in-out infinite`,
               }} />
             ))}
-            {!pet && thinkingVerb && (
+            {/* The crab's verb is the crab's whether it is drawn from CSS or
+                from the bundled pack: `brandCrab` is still the crab, as
+                `data-mascot` says, so only someone else's pet goes without. */}
+            {(!pet || brandCrab) && thinkingVerb && (
               <div data-testid="mascot-thinking-verb" style={{
                 marginLeft: 4, padding: '2px 8px', borderRadius: 999,
                 background: 'rgba(13,17,23,0.85)', border: '1px solid rgba(99,179,237,0.35)',
