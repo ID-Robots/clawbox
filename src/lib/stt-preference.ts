@@ -38,6 +38,37 @@ export const STT_PRIMARY_KEY = "stt_primary";
 export const TRANSCRIBE_MODEL =
   process.env.CLAWBOX_AI_TRANSCRIBE_MODEL?.trim() || "gpt-4o-mini-transcribe";
 
+/**
+ * The auth profile the cloud transcription row names as its own bearer.
+ *
+ * `tools.media.models[].profile` — the core's per-row credential binding
+ * (`MediaUnderstandingModelSchema`), resolved as a LOCKED profile id, so the row
+ * carries its credential instead of inheriting the provider's.
+ *
+ * It has to, now. This row's provider is `openai` — the only bundled
+ * media-understanding provider that speaks the proxy's transcription API — and
+ * its bearer used to be the ClawBox AI token ClawBox wrote onto
+ * `models.providers.openai.apiKey` for the image model. That key is gone (see
+ * `CLAWBOX_AI_IMAGE_PROVIDER` in clawbox-ai-models.ts: on the pinned core its
+ * mere presence takes a ChatGPT sign-in off its own provider), so without a
+ * profile here the core resolves the openai provider's ordinary credentials —
+ * the owner's ChatGPT OAuth, or nothing — and every channel voice note is
+ * refused before it is uploaded.
+ *
+ * `deepseek:default` is not a borrowed credential: it is the auth profile
+ * ClawBox itself writes for the ClawBox AI subscription
+ * (`CLAWBOX_AI_PROFILE_KEY` in the ai-models configure route), the same token,
+ * already in the core's own credential store. Naming it here keeps the
+ * transcription route on the proxy that serves it without putting that token on
+ * any provider's auth. The profile's own provider id is not a constraint: an
+ * explicit `profile` is a locked selection, resolved by id
+ * (`resolveApiKeyForProfile`), which is exactly why the field exists.
+ *
+ * scripts/gateway-pre-start.sh carries a copy of this string for the same
+ * reason it copies the model id; keep the two in step.
+ */
+export const TRANSCRIBE_AUTH_PROFILE = "deepseek:default";
+
 export function isSttEngine(value: unknown): value is SttEngine {
   return value === "cloud" || value === "local";
 }
@@ -78,7 +109,15 @@ export function buildAudioModels(order: readonly SttEngine[], localInstalled: bo
     if (engine === "cloud") {
       // capabilities says where the row may be used; OpenClaw 2's shared
       // tools.media.models list requires it on every row.
-      entries.push({ provider: "openai", model: TRANSCRIBE_MODEL, capabilities: ["audio"] });
+      entries.push({
+        provider: "openai",
+        model: TRANSCRIBE_MODEL,
+        // The row's own bearer — see TRANSCRIBE_AUTH_PROFILE. Without it this
+        // row has no credential at all now that nothing writes
+        // `models.providers.openai.apiKey`.
+        profile: TRANSCRIBE_AUTH_PROFILE,
+        capabilities: ["audio"],
+      });
     } else if (localInstalled) {
       entries.push({
         type: "cli",

@@ -996,7 +996,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // One openai profile on this box, so there is nothing to disambiguate and
     // an explicit order would only hide the credential the owner adds next —
     // the core already selects a usable profile over the
-    // `models.providers.openai.apiKey` fallback. And no `clear` either: ClawBox
+    // provider-entry fallback. And no `clear` either: ClawBox
     // has never written an order on this box, so the clear would be a CLI cold
     // start (~10 s on a Jetson, on the wizard's critical path) against a store
     // that has none.
@@ -3054,8 +3054,11 @@ describe("POST /setup-api/ai-models/configure", () => {
         "models.providers.deepseek",
         "models.mode",
         "agents.defaults.imageModel",
-        "models.providers.openai.apiKey",
-        "models.providers.openai.models",
+        // The ClawBox AI image endpoint, on its OWN provider id: an apiKey on
+        // `models.providers.openai` pins that provider to API-key auth and
+        // hides a ChatGPT sign-in (see CLAWBOX_AI_IMAGE_PROVIDER).
+        "models.providers.litellm.apiKey",
+        "models.providers.litellm.baseUrl",
         "agents.defaults.mediaModels.image",
         "agents.defaults.model.fallbacks",
       ]) {
@@ -3073,7 +3076,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       // The expensive ones. Each of these used to be written twice.
       expect(paths.filter((p) => p === "models.providers.deepseek")).toHaveLength(1);
-      expect(paths.filter((p) => p === "models.providers.openai.apiKey")).toHaveLength(1);
+      expect(paths.filter((p) => p === "models.providers.litellm.apiKey")).toHaveLength(1);
       expect(paths.filter((p) => p === "agents.defaults.mediaModels.image")).toHaveLength(1);
       // Two, not one: the generic auth-profile step and the ClawBox AI step
       // both name this path, with the same value. That overlap predates this

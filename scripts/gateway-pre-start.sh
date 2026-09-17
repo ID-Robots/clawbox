@@ -2262,12 +2262,27 @@ _clawai_proxy_base_url = ""
 # must name a model production allows: the proxy matches the bare id and
 # answers 400 "Model not allowed" on a miss.
 CLAWBOX_IMAGE_MODEL_ID = "gpt-image-1-mini"
-CLAWBOX_IMAGE_MODEL_NAME = "ClawBox AI Images"
-CLAWBOX_IMAGE_MODEL_REF = "openai/" + CLAWBOX_IMAGE_MODEL_ID
+# The provider the image endpoint is registered under, and the one it used to
+# be. `litellm` is the core's bundled OpenAI-compatible image provider: it takes
+# its bearer from `models.providers.litellm.apiKey` and its endpoint from that
+# entry's `baseUrl`, and posts `POST {baseUrl}/images/generations`. `openai` is
+# now FORBIDDEN as a home for this credential — on the pinned core a literal
+# apiKey there makes the runtime auth planner infer an api-key route requirement
+# for the whole provider and filter every subscription profile out of it, so a
+# ChatGPT (Codex) sign-in on the same box is never even considered and its turns
+# 401 against api.openai.com. See CLAWBOX_AI_IMAGE_PROVIDER in
+# src/lib/clawbox-ai-models.ts for the measured chain.
+CLAWBOX_IMAGE_PROVIDER = "litellm"
+CLAWBOX_LEGACY_IMAGE_PROVIDER = "openai"
+CLAWBOX_IMAGE_MODEL_REF = CLAWBOX_IMAGE_PROVIDER + "/" + CLAWBOX_IMAGE_MODEL_ID
+CLAWBOX_LEGACY_IMAGE_MODEL_REF = CLAWBOX_LEGACY_IMAGE_PROVIDER + "/" + CLAWBOX_IMAGE_MODEL_ID
 
-# Where OpenClaw sends an `openai` request that names no host of its own:
-# resolveConfiguredOpenAIBaseUrl, dist/shared-BdJp-xt6.js:11 on 2026.7.1-2.
+# Where a request that names no host of its own goes, per provider. `openai` is
+# resolveConfiguredOpenAIBaseUrl (dist/shared-BdJp-xt6.js:11 on 2026.7.1-2);
+# `litellm` is LITELLM_BASE_URL in extensions/litellm/onboard.ts. Used only to
+# answer "where would a row with no baseUrl send our token".
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+LITELLM_DEFAULT_BASE_URL = "http://localhost:4000"
 
 # Imported here rather than at the top of the block so this migration stays a
 # self-contained slice: src/tests/unit/gateway-pre-start-clawai-images.test.ts
@@ -2438,87 +2453,168 @@ _clawai_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider,
 if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
     _image_base_url = _clawai_image_base_url
 
-    openai_provider = models_providers.get("openai")
-    if not isinstance(openai_provider, dict):
-        openai_provider = {}
+    def _key_is_claw_or_empty(_key):
+        """Is this provider-entry apiKey ours to write or remove?
 
-    # A literal key we did not write is someone's own OpenAI credential. Leave
-    # it — and the whole migration — alone rather than overwrite it. ClawBox
-    # itself has never written this field (the openai setup path uses an auth
-    # profile), so anything else here was put there deliberately.
-    _existing_key = openai_provider.get("apiKey")
-    _key_is_ours = (
-        _existing_key is None
-        or (isinstance(_existing_key, str) and (not _existing_key.strip() or _existing_key.startswith("claw_")))
-    )
+        Absent, blank, or a `claw_` portal token. A literal key that is none of
+        those is the owner's own credential for that provider — ClawBox has
+        never written one — so it is neither overwritten nor removed. A
+        non-string is refused for the same reason: we cannot say what it is.
+        Mirrors canOwnClawboxAiImageApiKey() in the configure route.
+        """
+        return _key is None or (
+            isinstance(_key, str) and (not _key.strip() or _key.startswith("claw_"))
+        )
+
+    # ------------------------------------------------------------------
+    # LEGACY CLEANUP: take the ClawBox AI image setup off `models.providers.openai`.
+    #
+    # THE POINT OF THIS MIGRATION, not housekeeping, and it runs BEFORE and
+    # INDEPENDENTLY of everything below — before the ownership and foreign-route
+    # tests for the new provider, and outside the credential-refusal gate. A box
+    # that keeps this key cannot run its own ChatGPT sign-in whatever else is
+    # true of it: on the pinned core `prepareAgentRuntimeAuth` reads
+    # `models.providers.openai.apiKey`, infers `selectedConfiguredAuthMode =
+    # "api-key"` from its mere presence — no `auth: "api-key"` field required —
+    # and `selectProviderModelRouteAuth` then keeps only profiles whose mode maps
+    # to the api-key route. An OAuth profile maps to `subscription`, so
+    # `openai:chatgpt` is filtered out of its own provider and the portal token
+    # goes to api.openai.com instead: 401, then a silent failover to the fallback
+    # model. (The same filter is why an explicit
+    # `auth.order.openai: ["openai:chatgpt"]` answers "Explicit auth order for
+    # openai has no usable profiles" rather than repairing it.)
+    #
+    # Only what is OURS: the apiKey when `_key_is_claw_or_empty`, and rows
+    # `_is_our_image_row` positively claims. An owner's own OpenAI key and an
+    # owner's own row of the same id are left exactly as they are — and a box
+    # like that never had our image setup on this provider to begin with.
+    #
+    # An entry with nothing left is REMOVED rather than left empty: a present
+    # `models.providers.openai` is still a provider entry the core reads, and
+    # `resolveMergedModelProviderConfig` answering it is what decides whether the
+    # codex runtime may use its own native auth on a single route.
+    # ------------------------------------------------------------------
+    _legacy_provider = models_providers.get(CLAWBOX_LEGACY_IMAGE_PROVIDER)
+    if isinstance(_legacy_provider, dict) and _key_is_claw_or_empty(_legacy_provider.get("apiKey")):
+        _legacy_changed = False
+        _legacy_key = _legacy_provider.get("apiKey")
+        if isinstance(_legacy_key, str) and _legacy_key.strip():
+            del _legacy_provider["apiKey"]
+            _legacy_changed = True
+        _legacy_models = _legacy_provider.get("models")
+        if isinstance(_legacy_models, list):
+            _legacy_kept = [_m for _m in _legacy_models if not _is_our_image_row(_m)]
+            if len(_legacy_kept) != len(_legacy_models):
+                # An explicitly empty `models` is not the same statement to the
+                # core as an absent one, and this migration is what created the
+                # list on most boxes.
+                if _legacy_kept:
+                    _legacy_provider["models"] = _legacy_kept
+                else:
+                    del _legacy_provider["models"]
+                _legacy_changed = True
+        if _legacy_changed:
+            if not _legacy_provider:
+                del models_providers[CLAWBOX_LEGACY_IMAGE_PROVIDER]
+            print(
+                "  Moved the ClawBox AI image provider off models.providers."
+                + CLAWBOX_LEGACY_IMAGE_PROVIDER
+                + ": an apiKey there pins that provider to API-key auth and hides a ChatGPT sign-in"
+            )
+            changed = True
+
+    image_provider = models_providers.get(CLAWBOX_IMAGE_PROVIDER)
+    if not isinstance(image_provider, dict):
+        image_provider = {}
+
+    # A literal key we did not write is someone's own credential for this
+    # provider — an owner running a real LiteLLM proxy. Leave it, and the image
+    # half of the migration, alone rather than overwrite it. The legacy cleanup
+    # above has already run, so such a box still gets its ChatGPT lane back.
+    _existing_key = image_provider.get("apiKey")
+    _key_is_ours = _key_is_claw_or_empty(_existing_key)
 
     # The apiKey we are about to write is provider-wide, not image-only: nothing
-    # in OpenClaw scopes it to one model. getApiKeyForModel
-    # (dist/model-auth-CJEm9SNp.js:753 on 2026.7.1-2) walks per-entry bindings,
-    # auth profiles, then the environment, and lands on
-    # models.providers.<p>.apiKey last. A ClawBox has no openai auth profile and
-    # no OPENAI_API_KEY, so that last step is where every `openai/*` request gets
-    # its bearer — including one aimed at a host that is not ours.
-    #
-    # Two configured shapes route off-proxy, and the owner wrote both (ClawBox
-    # writes neither):
-    #   - a models[] row other than ours, whose endpoint resolves as
-    #     `row.baseUrl or provider.baseUrl or api.openai.com` — so a hand-added
-    #     {"id": "gpt-5", "api": "openai-completions"} with no baseUrl goes
-    #     straight to api.openai.com carrying claw_…
-    #   - a provider-level baseUrl, the fallback for every row without one.
-    # Either means an `openai` setup we did not build, so back the whole
-    # migration off. Half-configuring it — key written, images maybe working —
-    # is the outcome that mails the subscription token to a third party.
-    # An unparseable URL counts as foreign: we cannot say where it points.
-    # Mirrors foreignOpenAiRoute() in
-    # src/app/setup-api/ai-models/configure/route.ts — the SAME set
-    # _is_our_image_row uses, so the two questions this block asks ("is this
-    # row mine to repair" and "would my token leave the building") cannot
-    # disagree about a host, and neither can the two writers. On the old
-    # single-host form an owner row on a RETIRED ClawBox proxy was foreign
-    # here and ours in the route, so the same config produced two different
-    # box states depending on which ran last — and the back-off also gates the
-    # speech-to-text migration below.
+    # in OpenClaw scopes it to one model. So before writing it we have to know
+    # that every route already configured under this provider id stays on our
+    # own proxy. Two configured shapes send it off-proxy, and both are the
+    # owner's own work (ClawBox writes neither):
+    #   - a models[] row, whose endpoint resolves as
+    #     `row.baseUrl or provider.baseUrl or <provider default>`;
+    #   - a provider-level baseUrl, the fallback for every row without one —
+    #     on `litellm` that is a real LiteLLM proxy the owner runs.
+    # Either means a setup we did not build, so back the image write off rather
+    # than half-configure it. An unparseable URL counts as foreign: we cannot
+    # say where it points. Mirrors foreignImageProviderRoute() in
+    # src/app/setup-api/ai-models/configure/route.ts, and asks it with the SAME
+    # `_clawbox_proxy_hosts` set `_is_our_image_row` uses, so the two questions
+    # this block asks cannot disagree about a host.
     def _is_foreign(_url):
         _host = _url_host(_url)
         return _host is None or _host not in _clawbox_proxy_hosts
 
-    _provider_base_url = openai_provider.get("baseUrl")
+    _provider_base_url = image_provider.get("baseUrl")
     if not isinstance(_provider_base_url, str) or not _provider_base_url.strip():
         _provider_base_url = ""
     _foreign_route = _provider_base_url if (_provider_base_url and _is_foreign(_provider_base_url)) else None
     if _foreign_route is None:
-        for _row in (openai_provider.get("models") if isinstance(openai_provider.get("models"), list) else []):
-            # OUR row is skipped — not every row that happens to share its id.
-            # See _is_our_image_row: skipping by id let the upsert claim an
-            # owner's own gpt-image-1-mini row and repoint it at our proxy.
+        for _row in (image_provider.get("models") if isinstance(image_provider.get("models"), list) else []):
             if not isinstance(_row, dict) or _is_our_image_row(_row):
                 continue
             _row_base_url = _row.get("baseUrl")
             if not isinstance(_row_base_url, str) or not _row_base_url.strip():
-                _row_base_url = _provider_base_url or OPENAI_DEFAULT_BASE_URL
+                _row_base_url = _provider_base_url or LITELLM_DEFAULT_BASE_URL
             if _is_foreign(_row_base_url):
                 _foreign_route = _row_base_url
                 break
+
+    if not _key_is_ours:
+        print(
+            "  Skipped ClawBox AI image provider: models.providers."
+            + CLAWBOX_IMAGE_PROVIDER
+            + ".apiKey holds a non-ClawBox key we will not overwrite"
+        )
 
     if _key_is_ours and _foreign_route is not None:
         print(
             # The host only, like the TypeScript sibling: an owner-configured
             # URL can carry user-info or query credentials, and the journal
             # keeps what is logged.
-            "  Skipped ClawBox AI image provider: models.providers.openai already routes to "
+            "  Skipped ClawBox AI image provider: models.providers."
+            + CLAWBOX_IMAGE_PROVIDER
+            + " already routes to "
             + (_url_host(_foreign_route) or "an unparseable URL")
             + ", and the apiKey we would write there is the credential for that route too"
         )
 
     if _key_is_ours and _foreign_route is None:
-        models_providers["openai"] = openai_provider
+        # Named for the openai entry it used to live on, and still read by the
+        # channel-audio and cloud-voice migrations below as "the ClawBox AI
+        # proxy is ours to configure on this box". That fact is unchanged by the
+        # move; only where the image credential lives changed, and it is true of
+        # a refused box too — neither of those migrations reads the refusal.
         _clawai_openai_route_is_ours = True
         _clawai_proxy_base_url = _image_base_url
-        if openai_provider.get("apiKey") != _clawai_token:
-            openai_provider["apiKey"] = _clawai_token
-            changed = True
+        # Asked ONCE, and before the write rather than after it. Arming the
+        # entry and then taking it back in the same pass left `changed` true
+        # over a config nothing had actually changed — and `changed` is what
+        # makes the boot script rewrite openclaw.json, so every boot of a
+        # refused box would rewrite it.
+        _image_refused = _clawai_credential_refused()
+        if not _image_refused:
+            models_providers[CLAWBOX_IMAGE_PROVIDER] = image_provider
+            if image_provider.get("apiKey") != _clawai_token:
+                image_provider["apiKey"] = _clawai_token
+                changed = True
+            # Provider-level, not a per-model row: the generic OpenAI-compatible
+            # image provider reads `models.providers.<id>.baseUrl` and passes
+            # `req.model` through untouched, so the row the `openai` entry needed
+            # has no job here — and writing one would put
+            # `litellm/gpt-image-1-mini` into the core's own chat pickers, which
+            # is the exposure the old row had.
+            if image_provider.get("baseUrl") != _image_base_url:
+                image_provider["baseUrl"] = _image_base_url
+                changed = True
 
         # Resolved before EITHER arm below, because both ask the same question
         # of the slot: the upsert claims only an empty one, and the stand-down
@@ -2554,6 +2650,28 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         _image_model_fallbacks = (
             _image_model_cfg.get("fallbacks") if isinstance(_image_model_cfg, dict) else None
         )
+
+        def _slot_is_ours(_cfg):
+            """Is this slot the one WE wrote into an empty one?
+
+            Exactly `{"primary": <our ref>}` and nothing else, or the bare
+            string the core resolves as a model. An owner who added fallbacks
+            beside our primary OWNS the object now, and rewriting it would take
+            their fallbacks with it.
+
+            BOTH refs, which is what makes this the migration's claim as well as
+            the take-back's: every box in the field names
+            `openai/gpt-image-1-mini` here, a box that has already migrated names
+            the new one, so re-running is a no-op rather than a second claim.
+            Mirrors imageSlotIsOurs() in the configure route.
+            """
+            if isinstance(_cfg, str):
+                return _cfg.strip() in (CLAWBOX_IMAGE_MODEL_REF, CLAWBOX_LEGACY_IMAGE_MODEL_REF)
+            return (
+                isinstance(_cfg, dict)
+                and set(_cfg.keys()) == {"primary"}
+                and _cfg.get("primary") in (CLAWBOX_IMAGE_MODEL_REF, CLAWBOX_LEGACY_IMAGE_MODEL_REF)
+            )
         # A BARE STRING IS A MODEL (TASK-755). The core reaches this slot through
         # `hasExplicitToolModelConfig`, which COERCES the value first
         # (`coerceFactoryToolModelConfig` -> `resolvePrimaryStringValue`, which
@@ -2564,7 +2682,12 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         # was replaced on a boot that had nothing to do with image generation —
         # and it is the rule the take-back arm below already applies to a
         # string, so the two halves now agree about what a string means.
-        _has_image_model = bool(
+        # OURS IS NOT OCCUPIED. A slot naming the ref this box was provisioned
+        # with is the one we wrote into an empty slot, and repointing it at the
+        # new provider is the migration; only a value the OWNER put here is left
+        # alone. Without this a field box would keep `openai/gpt-image-1-mini` in
+        # the slot for ever while the row behind it had been removed.
+        _has_image_model = (not _slot_is_ours(_image_model_cfg)) and bool(
             (isinstance(_image_model_cfg, str) and _image_model_cfg.strip())
             or (
                 isinstance(_image_model_cfg, dict)
@@ -2622,14 +2745,8 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         # slot stands down; the row is still written and repaired, so the boot
         # after the migration lands has nothing left to do.
         _image_move_in_flight = _clawbox_v2 and "imageGenerationModel" in agents_defaults
-        _openai_models = openai_provider.get("models")
-        _our_entries = (
-            [m for m in _openai_models if _is_our_image_row(m)]
-            if isinstance(_openai_models, list)
-            else []
-        )
 
-        if _clawai_credential_refused():
+        if _image_refused:
             # THE OTHER DIRECTION, and it has to exist or this migration is
             # one-way — the same shape the cloud voice below already has, and
             # for a sharper reason. There is no back-off anywhere downstream of
@@ -2650,17 +2767,17 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             #     into an empty one. An owner who added fallbacks beside our
             #     primary owns the object now, and deleting the key would take
             #     their fallbacks with it.
-            #   - our own rows, positively identified by `_is_our_image_row` —
-            #     never every row that happens to share the id — and only on a
-            #     boot where the slot was ours or absent, because a slot the
-            #     owner aimed at that id would be left naming a row we had
-            #     removed.
-            # `models.providers.openai.apiKey` is deliberately NOT removed: the
-            # channel-audio and cloud-voice migrations below take their bearer
-            # from that same field, and removing it would take voice
-            # transcription down with the pictures. Ownership of the slot is
-            # unchanged by a dead credential either, so
-            # `_clawai_openai_route_is_ours` stays true.
+            #   - the provider entry itself, which since the move to
+            #     `models.providers.litellm` is the ClawBox AI IMAGE path and
+            #     nothing else. It used to be `models.providers.openai`, which
+            #     could not be removed because the channel-audio and cloud-voice
+            #     migrations below took their bearer from that same field; on its
+            #     own provider id there is nothing else to take down with it, so
+            #     the take-back is finally complete. The audio row carries its own
+            #     `profile` now (see the speech-to-text migration below) and the
+            #     cloud voice has always carried its own `apiKey`, so neither is
+            #     touched. Ownership of the slot is unchanged by a dead
+            #     credential, so `_clawai_openai_route_is_ours` stays true.
             #
             # SCOPE, stated plainly rather than implied: this arm covers the
             # IMAGE path only. Neither of those two migrations reads the
@@ -2670,13 +2787,6 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             # writes them — so a refused Max box still buys one refused round
             # trip per spoken reply and per voice note. Lower volume than the
             # image storm by orders of magnitude, and its own change.
-            def _slot_is_ours(_cfg):
-                return (
-                    isinstance(_cfg, dict)
-                    and set(_cfg.keys()) == {"primary"}
-                    and _cfg.get("primary") == CLAWBOX_IMAGE_MODEL_REF
-                )
-
             # EACH HOME ON ITS OWN, not the one `_image_model_cfg` resolved to.
             # A v2 box carrying both — a doctor pass, a hand edit, a loader
             # migration that copied rather than moved — would otherwise keep the
@@ -2731,48 +2841,40 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
                 if _v2_is_ours:
                     del _media_models["image"]
                     _stood_down = True
-                if _our_entries:
-                    _kept = [m for m in _openai_models if not _is_our_image_row(m)]
-                    # An explicitly empty `models` is not the same statement to
-                    # the core as an absent one, and this migration is what
-                    # created the list on most boxes.
-                    if _kept:
-                        openai_provider["models"] = _kept
-                    else:
-                        del openai_provider["models"]
-                    _stood_down = True
+                # The whole entry, and only when nothing but ours is in it: the
+                # credential and the endpoint we just wrote, and no `models[]` of
+                # anyone else's. A box that got this far past `_key_is_ours` and
+                # `_foreign_route` has no foreign route here, so a leftover row
+                # can only be one of ours from an older build.
+                _registered = models_providers.get(CLAWBOX_IMAGE_PROVIDER)
+                if isinstance(_registered, dict):
+                    _image_rows = _registered.get("models")
+                    _image_rows_are_ours = not isinstance(_image_rows, list) or all(
+                        _is_our_image_row(_m) for _m in _image_rows
+                    )
+                    if _image_rows_are_ours and set(_registered.keys()) <= {"apiKey", "baseUrl", "models"}:
+                        del models_providers[CLAWBOX_IMAGE_PROVIDER]
+                        _stood_down = True
                 if _stood_down:
                     print(
                         "  Removed the ClawBox AI image model: the proxy has refused this box's credential"
                     )
                     changed = True
         else:
-            # Upsert our entry, preserving any other model entries the box carries.
-            if not isinstance(_openai_models, list):
-                _openai_models = []
-                openai_provider["models"] = _openai_models
-            if not _our_entries:
-                _openai_models.append({
-                    "id": CLAWBOX_IMAGE_MODEL_ID,
-                    "name": CLAWBOX_IMAGE_MODEL_NAME,
-                    "baseUrl": _image_base_url,
-                })
-                changed = True
-            # Every duplicate of our row is repaired the same way: a stale copy
-            # left by an older upsert is offered by the same pickers as the live one.
-            for _entry in _our_entries:
-                if not isinstance(_entry.get("name"), str) or not _entry.get("name").strip():
-                    _entry["name"] = CLAWBOX_IMAGE_MODEL_NAME
-                    changed = True
-                if _entry.get("baseUrl") != _image_base_url:
-                    _entry["baseUrl"] = _image_base_url
-                    changed = True
-                # An `api` here widens where the image model is offered as a
-                # conversational model that fails on every turn — see the header
-                # above for why removing it narrows rather than closes that. Only
-                # ever ours to remove, so drop it wherever it appears.
-                if "api" in _entry:
-                    del _entry["api"]
+            # Our own leftover rows from the `openai` era have no home on this
+            # provider — the generic image provider reads the entry's baseUrl and
+            # never a row — and a row here would put `litellm/gpt-image-1-mini`
+            # into the core's own chat pickers. Ours only, by
+            # `_is_our_image_row`; anything else on this entry was refused as a
+            # foreign route long before here.
+            _image_rows = image_provider.get("models")
+            if isinstance(_image_rows, list):
+                _kept = [_m for _m in _image_rows if not _is_our_image_row(_m)]
+                if len(_kept) != len(_image_rows):
+                    if _kept:
+                        image_provider["models"] = _kept
+                    else:
+                        del image_provider["models"]
                     changed = True
 
             if not _has_image_model:
@@ -2781,22 +2883,33 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
                         "  Skipped the ClawBox AI image model: a legacy"
                         " agents.defaults.imageGenerationModel key is still waiting for the core's own migration"
                     )
-                elif _clawbox_v2:
-                    _media_models["image"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
-                    agents_defaults["mediaModels"] = _media_models
-                    changed = True
                 else:
-                    agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
-                    changed = True
+                    # `_has_image_model` is false for an empty slot AND for one
+                    # still holding our own legacy ref, so this write is both the
+                    # claim and the migration — and it has to report a change
+                    # only when it makes one, or the boot after the migration
+                    # would rewrite openclaw.json for ever.
+                    _slot = {"primary": CLAWBOX_IMAGE_MODEL_REF}
+                    if _clawbox_v2:
+                        if _media_models.get("image") != _slot:
+                            _media_models["image"] = _slot
+                            agents_defaults["mediaModels"] = _media_models
+                            changed = True
+                    elif agents_defaults.get("imageGenerationModel") != _slot:
+                        agents_defaults["imageGenerationModel"] = _slot
+                        changed = True
 
 # Migration: ClawBox AI speech to text.
 #
 # A voice note arriving over a chat channel — Telegram is the one v4 ships — is
 # transcribed through OpenClaw's media-understanding surface, and that surface
 # is not a models[] row and never reads one. It takes its endpoint from
-# `tools.media.audio.baseUrl` and its bearer from
-# `models.providers.openai.apiKey` — the same last-resort key walk described
-# above. So on a paired ClawBox that configures no audio at all, every voice
+# `tools.media.audio.baseUrl` and its bearer from the credential the core
+# resolves for the row's provider — which until this build meant
+# `models.providers.openai.apiKey`, the field the image migration used to write.
+# It no longer does, so the row names its own auth profile instead (see
+# CLAWBOX_TRANSCRIBE_AUTH_PROFILE below). So on a paired ClawBox that configures
+# no audio at all, every voice
 # note ships the claw_ subscription token to OpenAI's default host and comes
 # back
 #   HTTP 401 Incorrect API key provided: claw_…
@@ -2822,7 +2935,37 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 # import a TS constant. It must name a model production allows, because the
 # proxy matches the bare id and answers 400 on a miss.
 CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
-CLAWBOX_CLOUD_AUDIO_MODEL = {"provider": "openai", "model": CLAWBOX_TRANSCRIBE_MODEL_ID}
+# The auth profile the cloud row names as its OWN bearer, and it is now
+# load-bearing rather than belt-and-braces. This row's provider is `openai` —
+# the only bundled media-understanding provider that speaks the proxy's
+# transcription API — and its bearer used to be the ClawBox AI token the image
+# migration wrote onto `models.providers.openai.apiKey`. That key is gone (see
+# CLAWBOX_IMAGE_PROVIDER above: on the pinned core its presence alone takes a
+# ChatGPT sign-in off its own provider), so without a profile here the core
+# resolves the openai provider's ordinary credentials — the owner's ChatGPT
+# OAuth, or nothing — and refuses every channel voice note before it is
+# uploaded.
+#
+# `deepseek:default` is not a borrowed credential: it is the auth profile
+# ClawBox itself writes for the ClawBox AI subscription (CLAWBOX_AI_PROFILE_KEY
+# in the ai-models configure route), the same token, already in the core's own
+# store. `tools.media.models[].profile` is the core's per-row credential binding
+# and is resolved as a LOCKED profile id, by id rather than by the profile's own
+# provider — which is exactly why the field exists. Duplicated from
+# TRANSCRIBE_AUTH_PROFILE in src/lib/stt-preference.ts; keep the two in step.
+CLAWBOX_TRANSCRIBE_AUTH_PROFILE = "deepseek:default"
+CLAWBOX_CLOUD_AUDIO_MODEL = {
+    "provider": "openai",
+    "model": CLAWBOX_TRANSCRIBE_MODEL_ID,
+    "profile": CLAWBOX_TRANSCRIBE_AUTH_PROFILE,
+}
+# The same row as every box in the field still carries it — before the profile
+# was needed. Recognised as OURS so the migration repairs it in place instead of
+# calling it the owner's own transcription setup and standing down.
+CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL = {
+    "provider": "openai",
+    "model": CLAWBOX_TRANSCRIBE_MODEL_ID,
+}
 # What a box with no audio config gets: the cloud alone. The on-box engine is
 # a `type: "cli"` row running the workspace's stt-client.py, and it is
 # Settings (src/app/setup-api/stt) that adds it — only that route knows
@@ -2852,7 +2995,7 @@ def _is_clawbox_audio_model(_entry):
         _args = _entry.get("args")
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
         return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
-    return _entry == CLAWBOX_CLOUD_AUDIO_MODEL
+    return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
 
 
 def _is_clawbox_audio_models(_models):
@@ -3090,6 +3233,36 @@ if _clawai_openai_route_is_ours:
         _tools["media"] = _media
         cfg["tools"] = _tools
         changed = True
+
+    # REPAIR the row a box in the field already carries.
+    #
+    # The seed above only ever runs where there is no list, so every box paired
+    # before this change keeps a cloud row with no `profile` — and that row lost
+    # its bearer the moment the image migration stopped writing
+    # `models.providers.openai.apiKey`. Without this, channel voice notes on
+    # every existing box would be refused before upload with no way back short
+    # of clearing the list by hand.
+    #
+    # OURS only, by the same `_is_clawbox_audio_models` test the skip above uses,
+    # so a list the owner wrote is never touched; the ORDER is his speech-to-text
+    # preference and is preserved row for row. Idempotent: a row that already
+    # names the profile is left alone, so the next boot writes nothing.
+    if not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+        _audio_repaired = False
+        for _row in _audio_models:
+            if not isinstance(_row, dict) or _row.get("type") == "cli":
+                continue
+            if _row.get("model") != CLAWBOX_TRANSCRIBE_MODEL_ID:
+                continue
+            if _row.get("profile") != CLAWBOX_TRANSCRIBE_AUTH_PROFILE:
+                _row["profile"] = CLAWBOX_TRANSCRIBE_AUTH_PROFILE
+                _audio_repaired = True
+        if _audio_repaired:
+            print(
+                "  Gave the ClawBox AI transcription row its own auth profile:"
+                " the image migration no longer writes models.providers.openai.apiKey"
+            )
+            changed = True
 
 
 # Migration: ClawBox AI cloud voice (text to speech).

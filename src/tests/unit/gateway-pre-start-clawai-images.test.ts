@@ -19,7 +19,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const {
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
-  CLAWBOX_AI_IMAGE_MODEL_LABEL,
+  CLAWBOX_AI_LEGACY_IMAGE_MODEL,
   CLAWBOX_AI_PROXY_URLS,
 } =
   await (async () => {
@@ -124,6 +124,8 @@ function deviceStorePath(store?: DeviceStore): string {
 }
 
 /** A box provisioned with ClawBox AI: portal token + proxy on the deepseek entry. */
+
+/** A box provisioned with ClawBox AI: portal token + proxy on the deepseek entry. */
 function pairedBox(overrides: Config = {}): Config {
   return {
     models: {
@@ -136,17 +138,60 @@ function pairedBox(overrides: Config = {}): Config {
   };
 }
 
-function openaiProvider(cfg: Config): Record<string, unknown> {
-  const models = (cfg.models ?? {}) as { providers?: Record<string, Record<string, unknown>> };
-  return models.providers?.openai ?? {};
+/**
+ * A box as every build before this one provisioned it: the image credential and
+ * our image row on `models.providers.openai`, the slot naming `openai/…`.
+ *
+ * This is the shape in the field, and moving it is what the migration is for —
+ * an `apiKey` there pins the whole provider to API-key auth on the pinned core,
+ * so the owner's ChatGPT sign-in is filtered out of its own provider.
+ */
+function legacyBox(overrides: {
+  openai?: Record<string, unknown>;
+  defaults?: Record<string, unknown>;
+  v2?: boolean;
+} = {}): Config {
+  const slot = { primary: CLAWBOX_AI_LEGACY_IMAGE_MODEL };
+  return {
+    models: {
+      providers: {
+        deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+        openai: overrides.openai ?? {
+          apiKey: "claw_token123",
+          models: [{
+            id: CLAWBOX_AI_IMAGE_MODEL_ID,
+            name: "ClawBox AI Images",
+            baseUrl: "https://clawbox.com/api/ai",
+          }],
+        },
+      },
+    },
+    agents: {
+      defaults: overrides.defaults ?? (overrides.v2
+        ? { mediaModels: { image: slot } }
+        : { imageGenerationModel: slot }),
+    },
+  };
 }
 
-function openaiModels(cfg: Config): OpenAiModelEntry[] {
-  return (openaiProvider(cfg).models ?? []) as OpenAiModelEntry[];
+function providerEntry(cfg: Config, id: string): Record<string, unknown> | undefined {
+  const models = (cfg.models ?? {}) as { providers?: Record<string, unknown> };
+  const entry = models.providers?.[id];
+  return typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : undefined;
 }
 
-function imageEntry(cfg: Config): OpenAiModelEntry | undefined {
-  return openaiModels(cfg).find((m) => m.id === CLAWBOX_AI_IMAGE_MODEL_ID);
+/** `models.providers.litellm` — where the image endpoint lives now. */
+function imageProvider(cfg: Config): Record<string, unknown> {
+  return providerEntry(cfg, "litellm") ?? {};
+}
+
+/** `models.providers.openai` — where it used to, and what has to be given back. */
+function legacyProvider(cfg: Config): Record<string, unknown> | undefined {
+  return providerEntry(cfg, "openai");
+}
+
+function legacyModels(cfg: Config): OpenAiModelEntry[] {
+  return (legacyProvider(cfg)?.models ?? []) as OpenAiModelEntry[];
 }
 
 function imageGenerationModel(cfg: Config): unknown {
@@ -154,29 +199,56 @@ function imageGenerationModel(cfg: Config): unknown {
   return agents.defaults?.imageGenerationModel;
 }
 
+function mediaImage(cfg: Config): unknown {
+  const agents = (cfg.agents ?? {}) as { defaults?: { mediaModels?: { image?: unknown } } };
+  return agents.defaults?.mediaModels?.image;
+}
+
 describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", () => {
-  it("provisions provider, model entry and imageGenerationModel on a paired box", () => {
+  it("provisions the image provider and the slot on a paired box", () => {
     const { cfg, changed } = migrate(pairedBox());
 
     expect(changed).toBe(true);
-    expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-    expect(imageEntry(cfg)).toEqual({
-      id: CLAWBOX_AI_IMAGE_MODEL_ID,
-      name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+    expect(imageProvider(cfg)).toEqual({
+      apiKey: "claw_token123",
       baseUrl: "https://clawbox.com/api/ai",
     });
-    // The write that actually makes the tool appear. `imageModel` is a
-    // different key (vision) and must not be touched.
+    // The write that actually makes the tool appear — and the write that enables
+    // the bundled litellm plugin at gateway start
+    // (`collectConfiguredGenerationProviderIds` reads the provider id out of it).
+    // `imageModel` is a different key (vision) and must not be touched.
     expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     expect((cfg.agents as { defaults: Record<string, unknown> }).defaults.imageModel).toBeUndefined();
   });
 
-  it("keeps the model id in step with CLAWBOX_AI_IMAGE_MODEL_ID", () => {
-    // The .sh hardcodes the id because a shell migration cannot import the TS
+  it("writes NO models[] row — the generic image provider takes the provider baseUrl", () => {
+    // The row the `openai` entry needed had a cost: a configured row is exempt
+    // from the core's picker hide rule, so `openai/gpt-image-1-mini` stayed
+    // offerable as a chat model in OpenClaw's own surfaces. Writing none closes
+    // that for the new id rather than re-opening it.
+    const { cfg } = migrate(pairedBox());
+
+    expect(imageProvider(cfg)).not.toHaveProperty("models");
+  });
+
+  it("leaves models.providers.openai alone on a box that never had one", () => {
+    // The whole point: nothing this migration writes may land on the provider
+    // the ChatGPT sign-in belongs to.
+    const { cfg } = migrate(pairedBox());
+
+    expect(legacyProvider(cfg)).toBeUndefined();
+  });
+
+  it("keeps the model id and the provider ids in step with the TypeScript constants", () => {
+    // The .sh hardcodes them because a shell migration cannot import a TS
     // constant. The cloud proxy matches the bare id and answers 400 "Model not
-    // allowed" on a miss, so a drift here silently breaks every image request.
+    // allowed" on a miss, and the provider id decides which core plugin serves
+    // the request at all.
     expect(POLICY).toContain(`CLAWBOX_IMAGE_MODEL_ID = "${CLAWBOX_AI_IMAGE_MODEL_ID}"`);
-    expect(POLICY).toContain(`CLAWBOX_IMAGE_MODEL_NAME = "${CLAWBOX_AI_IMAGE_MODEL_LABEL}"`);
+    expect(POLICY).toContain(`CLAWBOX_IMAGE_PROVIDER = "${CLAWBOX_AI_IMAGE_MODEL.split("/")[0]}"`);
+    expect(POLICY).toContain(
+      `CLAWBOX_LEGACY_IMAGE_PROVIDER = "${CLAWBOX_AI_LEGACY_IMAGE_MODEL.split("/")[0]}"`,
+    );
   });
 
   it("is idempotent — a second run reports no change", () => {
@@ -194,7 +266,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
     });
 
     expect(changed).toBe(false);
-    expect(openaiProvider(cfg)).toEqual({});
+    expect(imageProvider(cfg)).toEqual({});
     expect(imageGenerationModel(cfg)).toBeUndefined();
   });
 
@@ -215,7 +287,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
     });
 
     expect(changed).toBe(false);
-    expect(openaiProvider(cfg)).toEqual({});
+    expect(imageProvider(cfg)).toEqual({});
     expect(imageGenerationModel(cfg)).toBeUndefined();
   });
 
@@ -228,390 +300,12 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
     expect(changed).toBe(false);
   });
 
-  it("refuses to overwrite a hand-placed non-ClawBox openai apiKey", () => {
-    // ClawBox has never written models.providers.openai.apiKey — the openai
-    // setup path uses an auth profile — so anything there is the owner's own
-    // credential. Overwriting it to enable a feature nobody asked for is not
-    // ours to do, and the whole migration backs off.
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { apiKey: "sk-proj-users-own-key" },
-        },
-      },
-    }));
-
-    expect(changed).toBe(false);
-    expect(openaiProvider(cfg).apiKey).toBe("sk-proj-users-own-key");
-    expect(openaiProvider(cfg).models).toBeUndefined();
-    expect(imageGenerationModel(cfg)).toBeUndefined();
-  });
-
-  it("claims an empty-string openai apiKey — a placeholder is not a credential", () => {
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { apiKey: "   " },
-        },
-      },
-    }));
-
-    expect(changed).toBe(true);
-    expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-  });
-
-  it("refreshes a stale claw_ token it wrote itself on an earlier pairing", () => {
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_new", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { apiKey: "claw_old" },
-        },
-      },
-    }));
-
-    expect(changed).toBe(true);
-    expect(openaiProvider(cfg).apiKey).toBe("claw_new");
-  });
-
-  it("preserves other entries in models.providers.openai.models[]", () => {
-    // A sibling row that stays on the ClawBox AI proxy: nothing leaves our
-    // infrastructure, so the migration runs and the row survives it. A sibling
-    // pointing anywhere else is the back-off case below.
-    const sibling = { id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://clawbox.com/api/ai" };
-    const { cfg } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { models: [sibling] },
-        },
-      },
-    }));
-
-    expect(openaiModels(cfg)).toHaveLength(2);
-    expect(openaiModels(cfg)[0]).toEqual(sibling);
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
-  });
-
-  describe("will not make the portal token the credential for someone else's endpoint", () => {
-    // models.providers.openai.apiKey is provider-wide. getApiKeyForModel
-    // (dist/model-auth-CJEm9SNp.js:753 on OpenClaw 2026.7.1-2) falls back to it
-    // for any `openai/*` model once per-entry bindings, auth profiles and
-    // OPENAI_API_KEY come up empty — which on a ClawBox they always do. So a
-    // configured route we did not build would start carrying the subscription
-    // token, and the whole migration backs off instead.
-    function backedOff(cfg: Config) {
-      const result = migrate(cfg);
-      expect(result.changed).toBe(false);
-      expect(openaiProvider(result.cfg).apiKey).toBeUndefined();
-      expect(imageEntry(result.cfg)).toBeUndefined();
-      expect(imageGenerationModel(result.cfg)).toBeUndefined();
-      return result;
-    }
-
-    function boxWithOpenai(openai: Record<string, unknown>): Config {
-      return pairedBox({
-        models: {
-          providers: {
-            deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-            openai,
-          },
-        },
-      });
-    }
-
-    it("backs off on a sibling row that resolves to api.openai.com", () => {
-      // CodeRabbit's case: `api` makes it a live chat row and the absent baseUrl
-      // means OpenClaw resolves it to api.openai.com, where our claw_ token
-      // would be sent as the bearer.
-      const { log } = backedOff(boxWithOpenai({ models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }] }));
-
-      expect(log).toContain("Skipped ClawBox AI image provider");
-      expect(log).toContain("api.openai.com");
-    });
-
-    it("backs off on a sibling row pointing at a third-party host", () => {
-      backedOff(boxWithOpenai({
-        models: [{ id: "local-gpt", name: "Local GPT", api: "openai-completions", baseUrl: "https://someone-elses-proxy.example/v1" }],
-      }));
-    });
-
-    it("backs off on a provider-level baseUrl that is not ours", () => {
-      // Every row without a baseUrl of its own inherits this one — including
-      // OpenClaw's bundled openai catalog rows.
-      const { log } = backedOff(boxWithOpenai({ baseUrl: "https://someone-elses-proxy.example/v1" }));
-
-      expect(log).toContain("someone-elses-proxy.example");
-    });
-
-    it("backs off on a baseUrl it cannot parse", () => {
-      // We cannot say where "not-a-url" points, and guessing permissively is
-      // the wrong direction to be wrong in.
-      backedOff(boxWithOpenai({ models: [{ id: "mystery", name: "Mystery", baseUrl: "not-a-url" }] }));
-    });
-
-    it("leaves an owner's own row of OUR id on their private proxy alone", () => {
-      // `gpt-image-1-mini` is a real OpenAI model id, and Azure OpenAI /
-      // LiteLLM / vLLM / any self-hosted OpenAI-compatible gateway is where a
-      // power user's row of that id actually lives. Claiming it by id repointed
-      // their route at our proxy, overwrote their `api`, and wrote the portal
-      // token as the provider-wide credential for a route we do not own.
-      const theirs = {
-        id: CLAWBOX_AI_IMAGE_MODEL_ID,
-        name: "My Azure image model",
-        api: "azure-images",
-        baseUrl: "https://my-azure.example/openai/v1",
-      };
-      const { cfg, changed, log } = migrate(boxWithOpenai({ models: [{ ...theirs }] }));
-
-      // Their row marks the route foreign, so the whole migration backs off.
-      expect(changed).toBe(false);
-      expect(openaiModels(cfg)).toEqual([theirs]);
-      expect(openaiProvider(cfg).apiKey).toBeUndefined();
-      expect(log).toContain("my-azure.example");
-    });
-
-    it("leaves an owner's row of OUR id with no baseUrl alone", () => {
-      // ClawBox has always written a baseUrl on its own row, so a row without
-      // one is the owner's, inheriting whatever the provider block says.
-      const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "gpt-image-1-mini", api: "openai-completions" };
-      const { cfg, changed } = migrate(boxWithOpenai({ models: [{ ...theirs }] }));
-
-      expect(changed).toBe(false);
-      expect(openaiModels(cfg)).toEqual([theirs]);
-    });
-
-    it("proceeds when a sibling row points at a RETIRED ClawBox proxy host", () => {
-      // The foreignness test asks "would our token leave the building?", so it
-      // has to know every host ClawBox has ever written, exactly as the
-      // ownership test does — and exactly as its TypeScript mirror now does.
-      // On the single-host form this backed the whole migration off, which
-      // also gates the speech-to-text migration after it, so the same config
-      // produced two different box states depending on which writer ran last.
-      const { cfg, changed } = migrate(boxWithOpenai({
-        models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://openclawhardware.dev/api/ai" }],
-      }));
-
-      expect(changed).toBe(true);
-      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-      expect(imageEntry(cfg)).toBeDefined();
-    });
-
-    it("proceeds when a sibling row points at the same proxy we do", () => {
-      const { cfg, changed } = migrate(boxWithOpenai({
-        models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://clawbox.com/api/ai" }],
-      }));
-
-      expect(changed).toBe(true);
-      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-    });
-
-    it("proceeds on a box whose only openai row is ours", () => {
-      // Re-running the migration must not back off on its own previous output.
-      const { cfg, changed } = migrate(boxWithOpenai({
-        apiKey: "claw_old",
-        models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://clawbox.com/api/ai" }],
-      }));
-
-      expect(changed).toBe(true);
-      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-    });
-
-    it("stays quiet about a box it was never going to touch", () => {
-      // The hand-placed-key branch already backs off; it should not also print
-      // a routing complaint about a config it is leaving alone.
-      const { log } = migrate(boxWithOpenai({
-        apiKey: "sk-proj-users-own-key",
-        models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }],
-      }));
-
-      expect(log).toBe("");
-    });
-  });
-
-  it("normalises a default port away, exactly as `new URL(u).host` does", () => {
-    // The docstring on `_url_host` claims it matches the TypeScript side so
-    // the two guards agree on one string. `urlsplit` KEEPS an explicit :443
-    // and `URL.host` drops it, so a row naming the default port explicitly was
-    // ours to the route and foreign to this script — which then backed the
-    // whole image migration off on a box the route had just repaired.
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: {
-            apiKey: "claw_token123",
-            models: [{
-              id: CLAWBOX_AI_IMAGE_MODEL_ID,
-              name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
-              baseUrl: "https://clawbox.com:443/api/ai",
-            }],
-          },
-        },
-      },
-      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
-    }));
-
-    // Recognised as ours: retargeted in place, not treated as a foreign route.
-    expect(changed).toBe(true);
-    expect(openaiModels(cfg)).toHaveLength(1);
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
-  });
-
-  it("still recognises our own row on a RETIRED proxy host as ours", () => {
-    // The ownership set carries every host ClawBox has ever written, so the
-    // documented retarget of an entry left on an old proxy still finds it —
-    // one row repaired in place, not a second one appended beside it.
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: {
-            apiKey: "claw_token123",
-            models: [{
-              id: CLAWBOX_AI_IMAGE_MODEL_ID,
-              name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
-              baseUrl: "https://www.openclawhardware.dev/api/ai",
-            }],
-          },
-        },
-      },
-      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
-    }));
-
-    expect(changed).toBe(true);
-    expect(openaiModels(cfg)).toHaveLength(1);
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
-  });
-
-  it("strips a stray `api` from every duplicate of our entry, not just the first", () => {
-    // A stale copy left by an older upsert is offered by the same pickers as
-    // the live one, so the `api` strip has to reach all of them.
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: {
-            apiKey: "claw_token123",
-            models: [
-              { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" },
-              { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" },
-            ],
-          },
-        },
-      },
-      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
-    }));
-
-    expect(changed).toBe(true);
-    expect(openaiModels(cfg)).toHaveLength(2);
-    for (const row of openaiModels(cfg)) expect(row).not.toHaveProperty("api");
-  });
-
-  it("keeps its ownership host list identical to the route's", () => {
-    // The two writers decide "is this row ours?" from separate literal lists,
-    // in two languages. If they ever diverge one writer claims a row the other
-    // calls foreign — and the route's back-off is total, so the box silently
-    // stops getting its image provider. Pinned here rather than left to
-    // convention.
-    const shellHosts = Array.from(POLICY.matchAll(/"(https:\/\/[^"]+)"/g))
-      .map((match) => match[1])
-      .filter((url) => url.includes("/api/ai"));
-    // Against the list the ROUTE actually uses, not a copy written here: a
-    // fourth host added to CLAWBOX_AI_PROXY_URLS alone must fail this, or the
-    // test pins the shell to itself and the two writers can still drift.
-    expect(new Set(shellHosts)).toEqual(new Set(CLAWBOX_AI_PROXY_URLS));
-  });
-
-  it("prints only the host of the route it refuses to claim, never its credentials", () => {
-    // The TypeScript sibling redacts this to host-only because an
-    // owner-configured URL can carry user-info or query credentials and the
-    // journal keeps what is logged. This block writes to that same journal.
-    const { log } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: {
-            models: [{
-              id: "their-model",
-              name: "Theirs",
-              api: "openai-completions",
-              baseUrl: "https://hunter2:s3cret@their-host.example/v1?token=abc",
-            }],
-          },
-        },
-      },
-    }));
-
-    expect(log).toContain("their-host.example");
-    expect(log).not.toContain("hunter2");
-    expect(log).not.toContain("s3cret");
-    expect(log).not.toContain("token=abc");
-  });
-
-  it("preserves other openai provider settings — it writes leaves, not the provider", () => {
-    const { cfg } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { request: { timeoutMs: 90000 } },
-        },
-      },
-    }));
-
-    expect(openaiProvider(cfg).request).toEqual({ timeoutMs: 90000 });
-    expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-  });
-
-  it("strips an `api` field from our entry so the image model stays out of the chat picker", () => {
-    // With `api` present, `models list --provider openai --all` offers
-    // openai/gpt-image-1-mini as a conversational model that fails on every
-    // turn. Only ever ours to remove.
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: {
-            apiKey: "claw_token123",
-            models: [{
-              id: CLAWBOX_AI_IMAGE_MODEL_ID,
-              name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
-              baseUrl: "https://clawbox.com/api/ai",
-              api: "openai-completions",
-            }],
-          },
-        },
-      },
-      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
-    }));
-
-    expect(changed).toBe(true);
-    expect(imageEntry(cfg)).not.toHaveProperty("api");
-  });
-
-  it("repairs an entry missing its required `name` — the gateway will not boot without one", () => {
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { apiKey: "claw_token123", models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, baseUrl: "https://clawbox.com/api/ai" }] },
-        },
-      },
-      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
-    }));
-
-    expect(changed).toBe(true);
-    expect(imageEntry(cfg)?.name).toBe(CLAWBOX_AI_IMAGE_MODEL_LABEL);
-  });
-
   it("takes the image baseUrl off the deepseek entry so a staging proxy stays staging", () => {
     const { cfg } = migrate(pairedBox({
       models: { providers: { deepseek: { apiKey: "claw_token123", baseUrl: "https://staging.clawbox.com/api/ai" } } },
     }));
 
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://staging.clawbox.com/api/ai");
+    expect(imageProvider(cfg).baseUrl).toBe("https://staging.clawbox.com/api/ai");
   });
 
   it("falls back to the production proxy when the deepseek entry carries no baseUrl", () => {
@@ -619,56 +313,348 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
       models: { providers: { deepseek: { apiKey: "claw_token123" } } },
     }));
 
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+    expect(imageProvider(cfg).baseUrl).toBe("https://clawbox.com/api/ai");
   });
 
-  it("retargets an entry left pointing at an old proxy", () => {
-    // The stale host on the IMAGE entry is the point of this fixture: deepseek
-    // already carries the current proxy, and the migration has to drag the
-    // model entry onto it. Renaming that literal to the current domain makes
-    // the test assert that migrating an already-correct entry reports a change.
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: {
-            apiKey: "claw_token123",
-            models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://openclawhardware.dev/api/ai" }],
+  it("keeps its ownership host list identical to the route's", () => {
+    // The two writers decide "is this row ours?" from separate literal lists,
+    // in two languages. If they ever diverge one writer claims a row the other
+    // calls foreign — and the route's back-off is total, so the box silently
+    // stops getting its image provider.
+    const shellHosts = Array.from(POLICY.matchAll(/"(https:\/\/[^"]+)"/g))
+      .map((match) => match[1])
+      .filter((url) => url.includes("/api/ai"));
+    expect(new Set(shellHosts)).toEqual(new Set(CLAWBOX_AI_PROXY_URLS));
+  });
+
+  describe("migrating a box provisioned on the openai provider", () => {
+    it("moves the credential off models.providers.openai and removes the empty entry", () => {
+      const { cfg, changed, log } = migrate(legacyBox());
+
+      expect(changed).toBe(true);
+      // THE DEFECT: an apiKey here makes the core infer an api-key route
+      // requirement for the whole provider and filter every subscription
+      // profile out of it, so the box's own ChatGPT sign-in is never tried.
+      expect(legacyProvider(cfg)).toBeUndefined();
+      expect(imageProvider(cfg)).toEqual({
+        apiKey: "claw_token123",
+        baseUrl: "https://clawbox.com/api/ai",
+      });
+      expect(log).toContain("Moved the ClawBox AI image provider off models.providers.openai");
+    });
+
+    it("repoints a slot that still names the legacy ref", () => {
+      const { cfg } = migrate(legacyBox());
+
+      expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    });
+
+    it("repoints the v2 home too", () => {
+      const { cfg } = migrate(legacyBox({ v2: true }), true);
+
+      expect(mediaImage(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+      expect(legacyProvider(cfg)).toBeUndefined();
+    });
+
+    it("repoints a bare-string slot naming the legacy ref", () => {
+      // The core resolves a bare string as a model, and this one names the row
+      // the migration has just removed — so it has to move with it.
+      const { cfg } = migrate(legacyBox({ defaults: { imageGenerationModel: CLAWBOX_AI_LEGACY_IMAGE_MODEL } }));
+
+      expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    });
+
+    it("is idempotent — the migrated box reports no change on the next boot", () => {
+      const once = migrate(legacyBox());
+      const twice = migrate(once.cfg);
+
+      expect(twice.changed).toBe(false);
+      expect(twice.cfg).toEqual(once.cfg);
+    });
+
+    it("keeps the rest of an openai entry the owner configured", () => {
+      // Leaves, not the provider: only our key and our row come off.
+      const { cfg } = migrate(legacyBox({
+        openai: {
+          apiKey: "claw_token123",
+          request: { timeoutMs: 90000 },
+          models: [{
+            id: CLAWBOX_AI_IMAGE_MODEL_ID,
+            name: "ClawBox AI Images",
+            baseUrl: "https://clawbox.com/api/ai",
+          }],
+        },
+      }));
+
+      expect(legacyProvider(cfg)).toEqual({ request: { timeoutMs: 90000 } });
+    });
+
+    it("keeps a sibling row of the owner's and removes only ours", () => {
+      const sibling = { id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://clawbox.com/api/ai" };
+      const { cfg } = migrate(legacyBox({
+        openai: {
+          apiKey: "claw_token123",
+          models: [
+            sibling,
+            { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai" },
+          ],
+        },
+      }));
+
+      expect(legacyModels(cfg)).toEqual([sibling]);
+      expect(legacyProvider(cfg)).not.toHaveProperty("apiKey");
+    });
+
+    it("removes every duplicate of our row, not just the first", () => {
+      const ours = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai" };
+      const { cfg } = migrate(legacyBox({
+        openai: { apiKey: "claw_token123", models: [{ ...ours }, { ...ours, api: "openai-completions" }] },
+      }));
+
+      expect(legacyProvider(cfg)).toBeUndefined();
+    });
+
+    it("recognises our row on a RETIRED proxy host as ours", () => {
+      // A box paired before the clawbox.com move still names an old host. The
+      // ownership set carries every host ClawBox has ever written, so the row
+      // is removed rather than mistaken for a third party's.
+      const { cfg } = migrate(legacyBox({
+        openai: {
+          apiKey: "claw_token123",
+          models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "ClawBox AI Images", baseUrl: "https://www.openclawhardware.dev/api/ai" }],
+        },
+      }));
+
+      expect(legacyProvider(cfg)).toBeUndefined();
+    });
+
+    it("normalises a default port away, exactly as `new URL(u).host` does", () => {
+      // `urlsplit` KEEPS an explicit :443 and `URL.host` drops it, so a row
+      // naming the default port was ours to the route and foreign to this
+      // script — and the two writers then disagreed about one config.
+      const { cfg } = migrate(legacyBox({
+        openai: {
+          apiKey: "claw_token123",
+          models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "ClawBox AI Images", baseUrl: "https://clawbox.com:443/api/ai" }],
+        },
+      }));
+
+      expect(legacyProvider(cfg)).toBeUndefined();
+    });
+
+    it("leaves an owner's own OpenAI key and their row of our id exactly as they are", () => {
+      // ClawBox has never written a non-`claw_` key there, so it is the owner's
+      // credential; and `gpt-image-1-mini` on their own host is their row. The
+      // box simply never had our image setup on this provider.
+      const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "My Azure image model", baseUrl: "https://my-azure.example/openai/v1" };
+      const { cfg, log } = migrate(legacyBox({
+        openai: { apiKey: "sk-proj-users-own-key", models: [theirs] },
+      }));
+
+      expect(legacyProvider(cfg)).toEqual({ apiKey: "sk-proj-users-own-key", models: [theirs] });
+      expect(log).not.toContain("Moved the ClawBox AI image provider");
+    });
+
+    it("still gives such a box its own image provider on the new id", () => {
+      // The owner's OpenAI setup is not a reason to withhold pictures: the two
+      // providers are independent now, which is the whole point of the move.
+      const { cfg, changed } = migrate(legacyBox({
+        openai: { apiKey: "sk-proj-users-own-key" },
+        defaults: {},
+      }));
+
+      expect(changed).toBe(true);
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+      expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    });
+
+    it("removes the key even when the new provider is one we refuse to touch", () => {
+      // The key is a defect on its own. A box running a real LiteLLM proxy gets
+      // no ClawBox image provider — and still gets its ChatGPT lane back.
+      const { cfg, changed, log } = migrate(legacyBox({
+        openai: { apiKey: "claw_token123" },
+      }));
+      expect(changed).toBe(true);
+      expect(legacyProvider(cfg)).toBeUndefined();
+      expect(log).toContain("Moved the ClawBox AI image provider off models.providers.openai");
+    });
+
+    it("leaves an image slot the owner chose, whatever the provider entry said", () => {
+      const { cfg } = migrate(legacyBox({ defaults: { imageGenerationModel: { primary: "replicate/flux-pro" } } }));
+
+      expect(imageGenerationModel(cfg)).toEqual({ primary: "replicate/flux-pro" });
+      expect(legacyProvider(cfg)).toBeUndefined();
+    });
+
+    it("leaves our legacy primary alone once the owner has added fallbacks to it", () => {
+      // We only ever wrote `{primary: <our ref>}` into an EMPTY slot. Anything
+      // else in the object is theirs.
+      const owned = { primary: CLAWBOX_AI_LEGACY_IMAGE_MODEL, fallbacks: ["openai/their-backup"] };
+      const { cfg } = migrate(legacyBox({ defaults: { imageGenerationModel: owned } }));
+
+      expect(imageGenerationModel(cfg)).toEqual(owned);
+    });
+  });
+
+  describe("will not make the portal token the credential for someone else's endpoint", () => {
+    // `models.providers.<id>.apiKey` is provider-wide, so before writing it we
+    // have to know that every route already configured under that id stays on
+    // our own proxy. On `litellm` a configured route means a real LiteLLM proxy
+    // the owner runs.
+    function backedOff(cfg: Config) {
+      const result = migrate(cfg);
+      expect(imageProvider(result.cfg).apiKey).toBeUndefined();
+      expect(imageGenerationModel(result.cfg)).toBeUndefined();
+      return result;
+    }
+
+    function boxWithLitellm(litellm: Record<string, unknown>): Config {
+      return pairedBox({
+        models: {
+          providers: {
+            deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+            litellm,
           },
         },
-      },
-      agents: { defaults: { imageGenerationModel: { primary: CLAWBOX_AI_IMAGE_MODEL } } },
-    }));
+      });
+    }
 
-    expect(changed).toBe(true);
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
-  });
+    it("refuses to overwrite a hand-placed non-ClawBox apiKey", () => {
+      const { cfg, changed, log } = migrate(boxWithLitellm({ apiKey: "sk-litellm-users-own-key" }));
 
-  it("replaces a models[] that is present but not a list", () => {
-    const { cfg } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { models: "nonsense" },
+      expect(changed).toBe(false);
+      expect(imageProvider(cfg).apiKey).toBe("sk-litellm-users-own-key");
+      expect(imageProvider(cfg)).not.toHaveProperty("baseUrl");
+      expect(imageGenerationModel(cfg)).toBeUndefined();
+      expect(log).toContain("holds a non-ClawBox key we will not overwrite");
+    });
+
+    it("claims an empty-string apiKey — a placeholder is not a credential", () => {
+      const { cfg, changed } = migrate(boxWithLitellm({ apiKey: "   " }));
+
+      expect(changed).toBe(true);
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+    });
+
+    it("refreshes a stale claw_ token it wrote itself on an earlier pairing", () => {
+      const { cfg, changed } = migrate(pairedBox({
+        models: {
+          providers: {
+            deepseek: { apiKey: "claw_new", baseUrl: "https://clawbox.com/api/ai" },
+            litellm: { apiKey: "claw_old", baseUrl: "https://clawbox.com/api/ai" },
+          },
         },
-      },
-    }));
+      }));
 
-    expect(imageEntry(cfg)?.name).toBe(CLAWBOX_AI_IMAGE_MODEL_LABEL);
-  });
+      expect(changed).toBe(true);
+      expect(imageProvider(cfg).apiKey).toBe("claw_new");
+    });
 
-  it("survives an openai provider that is not an object", () => {
-    const { cfg, changed } = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: "garbage",
+    it("backs off on a provider-level baseUrl that is not ours", () => {
+      // The owner's own LiteLLM proxy. Every row without a baseUrl of its own
+      // inherits this one.
+      const { log } = backedOff(boxWithLitellm({ baseUrl: "http://litellm.home.example:4000/v1" }));
+
+      expect(log).toContain("litellm.home.example:4000");
+    });
+
+    it("backs off on a sibling row that resolves to the LiteLLM default host", () => {
+      const { log } = backedOff(boxWithLitellm({
+        models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }],
+      }));
+
+      expect(log).toContain("Skipped ClawBox AI image provider");
+      expect(log).toContain("localhost:4000");
+    });
+
+    it("backs off on a sibling row pointing at a third-party host", () => {
+      backedOff(boxWithLitellm({
+        models: [{ id: "local-gpt", name: "Local GPT", api: "openai-completions", baseUrl: "https://someone-elses-proxy.example/v1" }],
+      }));
+    });
+
+    it("backs off on a baseUrl it cannot parse", () => {
+      // We cannot say where "not-a-url" points, and guessing permissively is
+      // the wrong direction to be wrong in.
+      backedOff(boxWithLitellm({ models: [{ id: "mystery", name: "Mystery", baseUrl: "not-a-url" }] }));
+    });
+
+    it("leaves an owner's own row of OUR id on their private proxy alone", () => {
+      const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "My own image model", baseUrl: "https://my-azure.example/openai/v1" };
+      const { cfg, log } = migrate(boxWithLitellm({ models: [{ ...theirs }] }));
+
+      expect(imageProvider(cfg).models).toEqual([theirs]);
+      expect(imageProvider(cfg).apiKey).toBeUndefined();
+      expect(log).toContain("my-azure.example");
+    });
+
+    it("proceeds when a sibling row points at a RETIRED ClawBox proxy host", () => {
+      const { cfg, changed } = migrate(boxWithLitellm({
+        models: [{ id: "house-model", name: "House model", baseUrl: "https://openclawhardware.dev/api/ai" }],
+      }));
+
+      expect(changed).toBe(true);
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+    });
+
+    it("proceeds on a box whose only row is one of ours from an older build", () => {
+      // Re-running must not back off on this migration's own output, and the
+      // leftover row is removed because the generic provider never reads one.
+      const { cfg, changed } = migrate(boxWithLitellm({
+        apiKey: "claw_old",
+        models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai" }],
+      }));
+
+      expect(changed).toBe(true);
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+      expect(imageProvider(cfg)).not.toHaveProperty("models");
+    });
+
+    it("prints only the host of the route it refuses to claim, never its credentials", () => {
+      // An owner-configured URL can carry user-info or query credentials, and
+      // the journal keeps what is logged.
+      const { log } = migrate(boxWithLitellm({
+        models: [{ id: "their-model", name: "Theirs", baseUrl: "https://hunter2:s3cret@their-host.example/v1?token=abc" }],
+      }));
+
+      expect(log).toContain("their-host.example");
+      expect(log).not.toContain("hunter2");
+      expect(log).not.toContain("s3cret");
+      expect(log).not.toContain("token=abc");
+    });
+
+    it("stays quiet about a box it was never going to touch", () => {
+      // The hand-placed-key branch backs off with its own sentence; it must not
+      // also print a routing complaint about a config it is leaving alone.
+      const { log } = migrate(boxWithLitellm({
+        apiKey: "sk-litellm-users-own-key",
+        baseUrl: "http://localhost:4000",
+      }));
+
+      expect(log).toContain("holds a non-ClawBox key");
+      expect(log).not.toContain("already routes to");
+    });
+
+    it("survives a provider entry that is not an object", () => {
+      const { cfg, changed } = migrate(pairedBox({
+        models: {
+          providers: {
+            deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+            litellm: "garbage",
+          },
         },
-      },
-    }));
+      }));
 
-    expect(changed).toBe(true);
-    expect(imageEntry(cfg)?.name).toBe(CLAWBOX_AI_IMAGE_MODEL_LABEL);
+      expect(changed).toBe(true);
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+    });
+
+    it("preserves other settings on the entry — it writes leaves, not the provider", () => {
+      const { cfg } = migrate(boxWithLitellm({ request: { timeoutMs: 90000 } }));
+
+      expect(imageProvider(cfg).request).toEqual({ timeoutMs: 90000 });
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+    });
   });
 
   describe("does not steal an image model the owner already chose", () => {
@@ -681,14 +667,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
     });
 
     it("leaves a fallbacks-only config alone", () => {
-      // The regression this test exists for: `{fallbacks:[...]}` with no
-      // `primary` used to have the WHOLE object replaced by
-      // `{primary: "openai/gpt-image-1-mini"}`, deleting the owner's fallbacks.
-      // OpenClaw's own gate (hasToolModelConfig,
-      // dist/model-config.helpers-BS3FWcoO.js:25 on 2026.7.1-2) accepts
-      // primary OR a non-empty fallback, so fallbacks-only is a working setup
-      // and the migration's stated intent — "a box whose owner pointed image
-      // generation at their own provider keeps that choice" — covers it.
+      // OpenClaw's own gate (hasToolModelConfig) accepts primary OR a non-empty
+      // fallback, so fallbacks-only is a working setup and replacing the whole
+      // object would delete the owner's fallbacks.
       const { cfg } = migrate(pairedBox({
         agents: { defaults: { imageGenerationModel: { fallbacks: ["replicate/flux-pro"] } } },
       }));
@@ -698,22 +679,19 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
 
     it("leaves a primary+fallbacks config alone", () => {
       const chosen = { primary: "replicate/flux-pro", fallbacks: ["stability/sd3"] };
-      const { cfg } = migrate(pairedBox({
-        agents: { defaults: { imageGenerationModel: chosen } },
-      }));
+      const { cfg } = migrate(pairedBox({ agents: { defaults: { imageGenerationModel: chosen } } }));
 
       expect(imageGenerationModel(cfg)).toEqual(chosen);
     });
 
-    it("still provisions the provider block when the slot is taken", () => {
-      // The token and model entry are ours regardless; only the slot is not.
+    it("still provisions the provider entry when the slot is taken", () => {
       const { cfg, changed } = migrate(pairedBox({
         agents: { defaults: { imageGenerationModel: { fallbacks: ["replicate/flux-pro"] } } },
       }));
 
       expect(changed).toBe(true);
-      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-      expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+      expect(imageProvider(cfg).apiKey).toBe("claw_token123");
+      expect(imageProvider(cfg).baseUrl).toBe("https://clawbox.com/api/ai");
     });
 
     it.each([
@@ -724,20 +702,12 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
       ["fallbacks that is not a list", { fallbacks: "replicate/flux-pro" }],
       ["a non-string primary", { primary: 42 }],
     ])("claims the slot when it holds %s — OpenClaw would not resolve a model from it", (_label, existing) => {
-      const { cfg } = migrate(pairedBox({
-        agents: { defaults: { imageGenerationModel: existing } },
-      }));
+      const { cfg } = migrate(pairedBox({ agents: { defaults: { imageGenerationModel: existing } } }));
 
       expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     });
 
     it("leaves a BARE STRING alone — the core resolves one as a model (TASK-755)", () => {
-      // Measured on 2026.8.1: `resolvePrimaryStringValue` returns the string
-      // itself, so `hasExplicitToolModelConfig` answers true and
-      // `{"agents":{"defaults":{"mediaModels":{"image":"openai/gpt-image-1"}}}}`
-      // is `valid:true` with no warnings. The dict-only test below reads that
-      // as an empty slot and replaces it — an owner-authored model, gone,
-      // silently, on a save that had nothing to do with image generation.
       const { cfg } = migrate(pairedBox({
         agents: { defaults: { imageGenerationModel: "replicate/flux-pro" } },
       }));
@@ -745,23 +715,11 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
       expect(imageGenerationModel(cfg)).toBe("replicate/flux-pro");
     });
 
-    it("leaves a bare string naming OUR own model alone too", () => {
-      // Ours by value, but not ours to rewrite: the owner may have typed it,
-      // and the shape already resolves to the model we would have written.
-      const { cfg } = migrate(pairedBox({
-        agents: { defaults: { imageGenerationModel: "openai/gpt-image-1-mini" } },
-      }));
-
-      expect(imageGenerationModel(cfg)).toBe("openai/gpt-image-1-mini");
-    });
-
     it.each([
       ["a blank string", "   "],
       ["an empty string", ""],
     ])("still claims the slot when it holds %s — the core resolves no model from it", (_label, existing) => {
-      const { cfg } = migrate(pairedBox({
-        agents: { defaults: { imageGenerationModel: existing } },
-      }));
+      const { cfg } = migrate(pairedBox({ agents: { defaults: { imageGenerationModel: existing } } }));
 
       expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     });
@@ -773,11 +731,6 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
 // fails config validation there. Same block, other home — picked from
 // CLAWBOX_OPENCLAW_V2, bound via globals() so this preamble can set it.
 describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
-  function mediaImage(cfg: Config): unknown {
-    const agents = (cfg.agents ?? {}) as { defaults?: { mediaModels?: { image?: unknown } } };
-    return agents.defaults?.mediaModels?.image;
-  }
-
   it("claims mediaModels.image on a paired box, and never writes the legacy key", () => {
     const { cfg, changed } = migrate(pairedBox(), true);
     expect(changed).toBe(true);
@@ -809,30 +762,11 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
   });
 
   /**
-   * TASK-743 — the dual-home shape, on the key this file's own header names
-   * first, and link 1 of the incident TASK-737 is about.
+   * TASK-743 — the dual-home shape, and link 1 of the incident TASK-737 is
+   * about. `agents.defaults` is `.strict()`, so both homes present is
+   * `Unrecognized key: "imageGenerationModel"` and gateway exit 78.
    *
-   * `_has_image_model` reads the legacy key as a FALLBACK when the v2 home is
-   * absent, so a box whose `agents.defaults.imageGenerationModel` names a model
-   * was never at risk. The shapes it reads as an EMPTY slot are: `{}`,
-   * `{"primary": ""}`, `{"fallbacks": []}`, a JSON `null`, a scalar — and for
-   * every one of them this block wrote `mediaModels.image` and left the legacy
-   * key sitting beside it. Measured against 2026.8.1, both homes present is
-   * `agents.defaults: Unrecognized key: "imageGenerationModel"`, exit 1 — the
-   * gateway exit 78 that kept a customer box dark for 25 hours.
-   *
-   * The guard is #751's, on the KEY rather than its contents, for the reason
-   * that comment gives about `messages.tts`: a discriminator that asked what
-   * the key HELD would go on writing the second home beside every shape that
-   * holds nothing.
-   *
-   * "Holds nothing" here means `_has_image_model`'s rule, which since TASK-755
-   * is the CORE's: a bare string is coerced (`hasExplicitToolModelConfig` ->
-   * `coerceFactoryToolModelConfig` -> `resolvePrimaryStringValue`, measured on
-   * 2026.8.1) and so is a configured model. It is therefore no longer one of
-   * the empty shapes below — it never reaches this guard at all, because the
-   * block leaves a configured slot alone one branch earlier. Its own case
-   * follows the loop.
+   * The guard is #751's, on the KEY rather than its contents.
    */
   describe("a legacy image key the core has not migrated yet", () => {
     const EMPTY_LEGACY_SHAPES: Array<[string, unknown]> = [
@@ -852,22 +786,15 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
           true,
         );
 
-        // The v2 home is NOT created…
         expect(mediaImage(cfg)).toBeUndefined();
-        // …and the legacy key is left exactly as it was, for the core's own
-        // migration to move. This block never removes it: taking it away here
-        // would be this file deciding a migration the core owns.
+        // The legacy key is left exactly as it was, for the core's own
+        // migration to move. This block never removes it.
         expect(imageGenerationModel(cfg)).toEqual(legacy);
         expect(log).toContain("Skipped the ClawBox AI image model");
       });
     }
 
     it("does not even reach the stand-down when the legacy key names a model as a bare string", () => {
-      // TASK-755. The stand-down exists for a key that holds NOTHING the core
-      // can resolve; a bare string is not that. The block leaves the slot alone
-      // one branch earlier, for the ordinary reason — it is configured — and
-      // the outcome the owner cares about is the same either way: the v2 home
-      // is not claimed and his value is still there for the core to move.
       const { cfg, log } = migrate(
         pairedBox({ agents: { defaults: { imageGenerationModel: "replicate/flux-pro" } } }),
         true,
@@ -878,28 +805,22 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
       expect(log).not.toContain("Skipped the ClawBox AI image model");
     });
 
-    it("still writes the provider and the model row, so the next boot has nothing left to do", () => {
-      // Narrower than #751's stand-down on purpose: the `models[]` row has ONE
-      // home on both cores and its repair is what keeps a box bootable, so only
-      // the slot stands down.
+    it("still writes the provider entry, so the next boot has nothing left to do", () => {
+      // Narrower than #751's stand-down on purpose: only the SLOT has two
+      // homes, so only the slot stands down.
       const { cfg, changed } = migrate(
         pairedBox({ agents: { defaults: { imageGenerationModel: { primary: "" } } } }),
         true,
       );
 
       expect(changed).toBe(true);
-      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-      expect(imageEntry(cfg)).toEqual({
-        id: CLAWBOX_AI_IMAGE_MODEL_ID,
-        name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+      expect(imageProvider(cfg)).toEqual({
+        apiKey: "claw_token123",
         baseUrl: "https://clawbox.com/api/ai",
       });
     });
 
     it("claims the v2 home the moment the core's migration has moved the key", () => {
-      // Standing down is never permanent — the same promise the cloud voice's
-      // guard makes. Once `doctor --fix` has moved the key, the next boot is an
-      // ordinary one.
       const { cfg, changed, log } = migrate(pairedBox(), true);
 
       expect(changed).toBe(true);
@@ -909,9 +830,6 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
     });
 
     it("does not stand down on a v1 core, whose only home this key is", () => {
-      // The guard is `_clawbox_v2` AND the key. On a 2026.7 box the legacy key
-      // IS the home, and standing down there would leave the image path
-      // undeclared for good.
       const { cfg, log } = migrate(
         pairedBox({ agents: { defaults: { imageGenerationModel: { primary: "" } } } }),
       );
@@ -921,9 +839,7 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
     });
 
     it("reports no change when the slot is all there was to write", () => {
-      // A box that already has our row and our provider, standing down on the
-      // slot, must not report a write it did not make — `changed` is what makes
-      // the boot script rewrite openclaw.json.
+      // `changed` is what makes the boot script rewrite openclaw.json.
       const armed = migrate(pairedBox(), true).cfg;
       const agents = (armed.agents ?? {}) as { defaults: Record<string, unknown> };
       delete (agents.defaults.mediaModels as Record<string, unknown>).image;
@@ -940,53 +856,38 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
  * TASK-727, second half: the agent's own image path.
  *
  * The pinned core has no back-off and no disable-on-refusal for image
- * generation — measured against openclaw@2026.8.1 on a box: the `openai`
- * extension declares `contracts.imageGenerationProviders` with nothing beside
- * it but `imageGenerationProviderMetadata.openai.authSignals`, and that is a
- * static AVAILABILITY gate (`toolMetadataPasses` asks whether a credential is
- * configured, never what a response said); the request itself is the bundled
- * OpenAI SDK's, whose `shouldRetry` covers 408/409/429/5xx and returns false
- * for 401 and 403. So nothing downstream of this script ever stops asking, and
- * the only lever the harness gives us is the one this block pulls: whether the
- * image path is declared at all.
+ * generation, so the only lever the harness gives us is whether the image path
+ * is declared at all. A box whose credential the proxy has PERMANENTLY refused
+ * otherwise spends refused calls for as long as it is switched on (6,554 in
+ * twelve hours from one box, ~34/min at the peak).
  *
- * Which made this migration's one-wayness the whole defect. It armed
- * `models.providers.openai` and the image slot on any `claw_`-prefixed token,
- * every boot, forever — with no arm in the other direction, unlike the cloud
- * voice forty lines below it. A box whose credential the proxy has PERMANENTLY
- * refused therefore had the picture path re-declared at every gateway start,
- * and the agent went on spending refused calls on it (6,554 in twelve hours
- * from one box, ~34/min at the peak).
+ * On its OWN provider id the take-back is finally complete: the entry is the
+ * image path and nothing else, so it goes with the row and the slot. It used to
+ * have to leave `models.providers.openai.apiKey` behind because channel audio
+ * took its bearer from that same field — the audio row carries its own
+ * `profile` now.
  */
 describe.skipIf(!hasPython3)("standing down when the credential has been refused", () => {
   const REFUSED = { clawai_credential_refused_at: 1_788_000_000_000 };
 
-  /** The box as this migration leaves an entitled one: our row, our slot. */
+  /** The box as this migration leaves an entitled one. */
   function armedBox(v2 = false): Config {
     return migrate(pairedBox(), v2).cfg;
-  }
-
-  function mediaImage(cfg: Config): unknown {
-    const agents = (cfg.agents ?? {}) as { defaults?: { mediaModels?: { image?: unknown } } };
-    return agents.defaults?.mediaModels?.image;
   }
 
   it("does not arm the image path on a box whose credential the proxy has refused", () => {
     const { cfg, changed } = migrate(pairedBox(), false, REFUSED);
 
     expect(imageGenerationModel(cfg)).toBeUndefined();
-    expect(imageEntry(cfg)).toBeUndefined();
-    // `changed` is still true: the credential refresh onto
-    // models.providers.openai.apiKey happens either way, because that field is
-    // the bearer for channel audio and the cloud voice, not just for pictures.
-    expect(changed).toBe(true);
+    expect(providerEntry(cfg, "litellm")).toBeUndefined();
+    expect(changed).toBe(false);
   });
 
-  it("takes back the row and the slot it wrote itself", () => {
+  it("takes back the provider entry and the slot it wrote itself", () => {
     const { cfg, changed, log } = migrate(armedBox(), false, REFUSED);
 
     expect(imageGenerationModel(cfg)).toBeUndefined();
-    expect(imageEntry(cfg)).toBeUndefined();
+    expect(providerEntry(cfg, "litellm")).toBeUndefined();
     expect(changed).toBe(true);
     expect(log).toContain("Removed the ClawBox AI image model");
   });
@@ -995,8 +896,19 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     const { cfg, changed } = migrate(armedBox(true), true, REFUSED);
 
     expect(mediaImage(cfg)).toBeUndefined();
-    expect(imageEntry(cfg)).toBeUndefined();
+    expect(providerEntry(cfg, "litellm")).toBeUndefined();
     expect(changed).toBe(true);
+  });
+
+  it("still moves a legacy openai box off that provider before standing down", () => {
+    // The two are independent: a refused credential is no reason to leave the
+    // key that hides the ChatGPT sign-in.
+    const { cfg, changed } = migrate(legacyBox(), false, REFUSED);
+
+    expect(changed).toBe(true);
+    expect(legacyProvider(cfg)).toBeUndefined();
+    expect(providerEntry(cfg, "litellm")).toBeUndefined();
+    expect(imageGenerationModel(cfg)).toBeUndefined();
   });
 
   it("re-arms once the refusal is cleared — a re-linked box gets its pictures back", () => {
@@ -1005,7 +917,7 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
 
     expect(changed).toBe(true);
     expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
-    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+    expect(imageProvider(cfg).baseUrl).toBe("https://clawbox.com/api/ai");
   });
 
   it("is idempotent — a second refused boot reports no change", () => {
@@ -1016,16 +928,7 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     expect(twice.cfg).toEqual(once.cfg);
   });
 
-  it("leaves the provider apiKey alone — the channel-audio surface reads the same slot", () => {
-    // `tools.media.audio` takes its bearer from models.providers.openai.apiKey
-    // (the migration below this one relies on it). Taking the picture path back
-    // must not silently take voice transcription with it.
-    const { cfg } = migrate(armedBox(), false, REFUSED);
-
-    expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
-  });
-
-  it("leaves an image model the owner chose", () => {
+  it("leaves an image model the owner chose, and the entry with it", () => {
     const { cfg } = migrate(
       pairedBox({ agents: { defaults: { imageGenerationModel: { primary: "openai/their-pick" } } } }),
       false,
@@ -1033,12 +936,10 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     );
 
     expect(imageGenerationModel(cfg)).toEqual({ primary: "openai/their-pick" });
-    expect(imageEntry(cfg)).toBeUndefined();
   });
 
   it("leaves our primary alone once the owner has added fallbacks to it", () => {
-    // We only ever wrote `{primary: <our ref>}` into an EMPTY slot. Anything
-    // else in the object is theirs, and deleting the key would take it with us.
+    // We only ever wrote `{primary: <our ref>}` into an EMPTY slot.
     const owned = { primary: CLAWBOX_AI_IMAGE_MODEL, fallbacks: ["openai/their-backup"] };
     const { cfg } = migrate(
       pairedBox({ agents: { defaults: { imageGenerationModel: owned } } }),
@@ -1049,14 +950,14 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     expect(imageGenerationModel(cfg)).toEqual(owned);
   });
 
-  it("leaves an owner's own gpt-image-1-mini row on their own endpoint", () => {
-    const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "Mine", baseUrl: "https://llm.home.lan/v1" };
+  it("leaves an owner's own litellm entry entirely alone", () => {
+    const theirs = { apiKey: "sk-litellm-users-own-key", baseUrl: "http://localhost:4000" };
     const { cfg, changed } = migrate(
       pairedBox({
         models: {
           providers: {
             deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-            openai: { apiKey: "claw_token123", models: [theirs] },
+            litellm: { ...theirs },
           },
         },
       }),
@@ -1064,7 +965,7 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
       REFUSED,
     );
 
-    expect(openaiModels(cfg)).toEqual([theirs]);
+    expect(imageProvider(cfg)).toEqual(theirs);
     expect(changed).toBe(false);
   });
 
@@ -1087,22 +988,19 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     ["a NaN stamp", { body: '{"clawai_credential_refused_at": NaN}' } as DeviceStore],
     // An integer too large for a double: Python parses it exactly, `JSON.parse`
     // reads the same bytes as `Infinity`, and `math.isfinite()` on it raises
-    // OverflowError instead of answering — which, escaping this heredoc, would
-    // leave the box with no gateway at all.
+    // OverflowError instead of answering.
     ["an integer past Number.MAX_VALUE", { body: `{"clawai_credential_refused_at": ${"9".repeat(400)}}` } as DeviceStore],
   ])("arms as before over %s — not knowing is not a refusal", (_label, store) => {
     const { cfg } = migrate(pairedBox(), false, store);
 
     expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
-    expect(imageEntry(cfg)?.id).toBe(CLAWBOX_AI_IMAGE_MODEL_ID);
+    expect(imageProvider(cfg).apiKey).toBe("claw_token123");
   });
 
   it("takes back BOTH homes on a v2 box that carries both", () => {
-    // Neither home may be left naming a row the other arm has just removed: the
-    // core's loader migration re-creates `mediaModels.image` from the legacy
-    // key, so a stand-down that cleared only one would be undone on the next
-    // load and left pointing at a model that is gone.
-    const both = migrate(armedBox(true), true, REFUSED).cfg;
+    // Neither home may be left naming a provider the other arm has just
+    // removed: the core's loader migration re-creates `mediaModels.image` from
+    // the legacy key, so a stand-down that cleared only one would be undone.
     const withLegacy = JSON.parse(JSON.stringify(armedBox(true))) as Config;
     ((withLegacy.agents as { defaults: Record<string, unknown> }).defaults)
       .imageGenerationModel = { primary: CLAWBOX_AI_IMAGE_MODEL };
@@ -1112,20 +1010,13 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
 
     expect(defaults.imageGenerationModel).toBeUndefined();
     expect(mediaImage(cfg)).toBeUndefined();
-    expect(imageEntry(cfg)).toBeUndefined();
-    expect(both).toBeTruthy();
+    expect(providerEntry(cfg, "litellm")).toBeUndefined();
   });
 
   /**
-   * TASK-743 — an EMPTY leftover legacy key used to veto the whole take-back.
-   *
-   * `_slot_is_theirs` asked `agents_defaults.get("imageGenerationModel") is not
-   * None`, so `{}`, `{"primary": ""}`, `{"fallbacks": []}` and `[]` — the very
-   * shapes the guard above treats as holding no decision — read as the owner's
-   * image configuration and stopped #755's arm from removing anything. A box
-   * whose credential the proxy had permanently refused therefore kept the image
-   * path declared for as long as that key survived, which is the TASK-727 shape
-   * (6,554 refused calls in twelve hours).
+   * TASK-743 — an EMPTY leftover legacy key used to veto the whole take-back,
+   * so a box whose credential the proxy had permanently refused kept the image
+   * path declared for as long as that key survived (the TASK-727 shape).
    *
    * Both arms now ask ONE question, and it is deliberately WIDER for the delete
    * than the upsert's: a bare string counts, because the core coerces one and
@@ -1145,15 +1036,14 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
 
     expect(changed).toBe(true);
     expect(mediaImage(cfg)).toBeUndefined();
-    expect(imageEntry(cfg)).toBeUndefined();
+    expect(providerEntry(cfg, "litellm")).toBeUndefined();
     // The leftover itself is not ours to remove — only the core migrates it.
     expect(imageGenerationModel(cfg)).toEqual(leftover);
   });
 
   it("still leaves a legacy key that NAMES a model, including a bare string", () => {
-    // The other side of the same predicate. A string is a configured model to
-    // the core (`hasExplicitToolModelConfig` coerces it), so it may well name
-    // our row — and a delete cannot be undone.
+    // A string is a configured model to the core, so it may well name our
+    // provider — and a delete cannot be undone.
     for (const theirs of [{ primary: "replicate/flux-pro" }, "replicate/flux-pro"]) {
       const withTheirs = JSON.parse(JSON.stringify(armedBox(true))) as Config;
       ((withTheirs.agents as { defaults: Record<string, unknown> }).defaults)
@@ -1162,32 +1052,8 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
       const { cfg, changed } = migrate(withTheirs, true, REFUSED);
 
       expect(changed).toBe(false);
-      expect(imageEntry(cfg)).toBeDefined();
+      expect(providerEntry(cfg, "litellm")).toBeDefined();
       expect(imageGenerationModel(cfg)).toEqual(theirs);
     }
-  });
-
-  it("removes the models list it created rather than leaving an empty one", () => {
-    // An explicitly empty `models` is not the same statement to the core as an
-    // absent one — a configured provider overrides the plugin catalog entirely.
-    const { cfg } = migrate(armedBox(), false, REFUSED);
-
-    expect("models" in openaiProvider(cfg)).toBe(false);
-  });
-
-  it("keeps the other rows when ours was not the only one", () => {
-    const theirs = { id: "gpt-5", name: "Theirs", baseUrl: "https://clawbox.com/api/ai" };
-    const armed = migrate(pairedBox({
-      models: {
-        providers: {
-          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { models: [theirs] },
-        },
-      },
-    })).cfg;
-
-    const { cfg } = migrate(armed, false, REFUSED);
-
-    expect(openaiModels(cfg)).toEqual([theirs]);
   });
 });
