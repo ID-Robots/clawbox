@@ -75,6 +75,9 @@ import { useModalDialog } from '@/hooks/useModalDialog'
 // is the provider/model header, which renders a different vendor's catalogue
 // and is product identity rather than a capability.
 import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
+import { useSlashCommands } from '@/lib/use-slash-commands'
+import { isSlashCommandMessage } from '@/lib/chat-slash-commands'
+import SlashCommandMenu from '@/components/SlashCommandMenu'
 import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // `extractText` stays with the gateway adapter: it strips that gateway's own
 // wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
@@ -4911,6 +4914,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
     // stream; those handlers paint the reply and end the run.
     if (result.acknowledgedOnly) return
+    // A COMMAND may have changed the model this box is configured to run —
+    // `/model <id> --global` on Hermes writes config.yaml, which is the very
+    // file the header reads. Without this the header kept the old name until
+    // the next visibility change or the 60 s tick, and every message sent in
+    // that window carried the stale model and switched the session back to it.
+    // Fired here, where a harness that answers on the promise has FINISHED the
+    // command; the gateway edition leaves above on `acknowledgedOnly` and is
+    // covered by its own `onProvidersChanged` signal.
+    //
+    // A switch the harness deliberately kept to this conversation writes no
+    // config and is not this call's to find — the route says that one in words,
+    // beside the command's own output.
+    if (isSlashCommandMessage(text)) void refreshChatModelState()
     settleRun(keyAtSend)
     // The reply belongs to a tab the owner has left. The box recorded it
     // before answering, so that tab replays it on return; here it only went
@@ -4955,7 +4971,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // where the batch card appears.
     void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming, refreshChatModelState])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
@@ -5873,13 +5889,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Notify parent of thinking state
   useEffect(() => { onThinkingChange?.(sending) }, [sending, onThinkingChange])
 
+  // Hoisted above the slash hook, which needs it: the menu's `enabled` is the
+  // composer's own `disabled` expression and the two must not drift.
+  const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
+
+  // ── Slash-command autocomplete ──────────────────────────────────────────
+  //
+  // The catalogue is the HARNESS'S, read through the adapter: `commands.list`
+  // on the gateway, `commands.catalog` on Hermes' dashboard. Everything this
+  // surface does with it — when to open, how to filter, which key does what —
+  // lives in the hook, so the full-screen chat gets the same behaviour from the
+  // same four lines rather than a second implementation of it.
+  const slash = useSlashCommands({
+    adapter: harnessLoaded ? adapter : null,
+    status,
+    value: input,
+    setValue: setInput,
+    inputRef,
+    // The SAME expression the textarea's `disabled` uses, not an approximation
+    // of it: the hook's contract is that the menu cannot outlive the composer,
+    // and `status === 'connected'` alone left the greeting window uncovered.
+    enabled: status === 'connected' && !greetingPending,
+  })
+
+  // The HANDLER, not the object it comes on: `useSlashCommands` returns a
+  // fresh literal every render, so a callback that depended on `slash` was
+  // rebuilt on every keystroke and its memo did nothing at all.
+  const slashKeyDown = slash.handleKeyDown
   // Handle Enter to send
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // The slash menu gets first refusal: with it open, Enter and Tab ACCEPT the
+    // highlighted command rather than sending, and the Arrows walk the list.
+    // With it closed the hook returns false and this behaves exactly as it
+    // always has.
+    if (slashKeyDown(e)) return
+    // An IME candidate window owns Enter while it is up; committing a
+    // half-composed word as a message is not a send the owner asked for.
+    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
     }
-  }, [sendMessage])
+  }, [sendMessage, slashKeyDown])
 
   const stopHeaderDrag = useCallback((e: React.PointerEvent<HTMLElement>) => {
     e.stopPropagation()
@@ -5920,7 +5971,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
   const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
 
-  const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
   // Shared actions retain the same behaviour in both responsive layouts.
   const renderAttachmentButton = () => (
     (caps.canAttachImages || caps.canAttachDocuments) && (
@@ -7233,9 +7283,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <textarea
           ref={inputRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          // The slash menu tracks the caret as well as the text, so the draft's
+          // setter and the caret move together through one handler.
+          onChange={slash.handleChange}
+          onSelect={slash.handleSelect}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          // The menu is a listbox this textarea OWNS: focus never moves to it,
+          // so the active row has to be announced from here — that is what
+          // `aria-activedescendant` is for, and it is valid on a textbox.
+          //
+          // The textarea deliberately keeps `role="textbox"` rather than
+          // becoming a `combobox` while the menu is up. Swapping an element's
+          // role underneath a screen reader mid-interaction is its own bug, and
+          // the attributes below carry the same three facts a combobox would:
+          // a list exists, here it is, this row is current.
+          aria-haspopup="listbox"
+          aria-controls={slash.open ? slash.listboxId : undefined}
+          aria-activedescendant={slash.activeOptionId}
+          aria-autocomplete="list"
           placeholder={
             status !== 'connected'
               ? t("chat.connectingPlaceholder")
@@ -7263,6 +7329,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           }}
         />
         {mobile && (mobileVoiceAction ? renderVoiceButton(true) : renderSendButton())}
+        {/* Portaled and fixed — this wrapper is `display: contents` on desktop
+            and the chat window clips its content, so an in-flow popover here
+            would be anchored to nothing and cut off by the window. */}
+        {slash.open && (
+          <SlashCommandMenu
+            anchorRef={inputRef}
+            commands={slash.items}
+            activeIndex={slash.activeIndex}
+            listboxId={slash.listboxId}
+            optionId={slash.optionId}
+            onPick={slash.accept}
+            onHover={slash.setActiveIndex}
+            ariaLabel={tr('chat.slash.menuLabel', 'Slash commands')}
+            emptyLabel={tr('chat.slash.noMatches', 'No matching commands')}
+            hermes={harnessId === 'hermes'}
+          />
+        )}
         </div>
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap

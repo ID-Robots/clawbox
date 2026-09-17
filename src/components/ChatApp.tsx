@@ -60,6 +60,8 @@ import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
 // so a wrapped reply showed its tags live and lost them after a reload — the
 // replayed path goes through this module's projection.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { useSlashCommands } from '@/lib/use-slash-commands'
+import SlashCommandMenu from '@/components/SlashCommandMenu'
 import {
   HarnessError,
   type HarnessAdapter,
@@ -299,7 +301,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     () => ({ gateway: gatewayLink, hermesContext }),
     [gatewayLink, hermesContext],
   )
-  const { adapter, capabilities: caps, resolved: harnessLoaded } = useHarnessAdapter(harnessWiring)
+  // `harnessId` is taken only so the portaled slash menu can carry the Hermes
+  // skin marker: it mounts on <body>, outside this surface's ancestor, so it
+  // cannot inherit the theme. Every other branch here is on `caps.*`, and
+  // deliberately stays that way.
+  const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } = useHarnessAdapter(harnessWiring)
   // Read by the callbacks that must stay stable: `connect` and `loadHistory` are
   // closed over by long-lived socket handlers, so neither may capture whichever
   // adapter was current on the first render — before the box had answered.
@@ -1124,12 +1130,36 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // Enter often inserts a newline instead of sending. ChatPopup's predicate.
   const sendable = input.trim().length > 0 || pendingAttachments.length > 0
 
+  // ── Slash-command autocomplete ──────────────────────────────────────────
+  //
+  // The same hook the mascot chat uses, over the same adapter: the list is the
+  // HARNESS'S (`commands.list` on the gateway, `commands.catalog` on Hermes'
+  // dashboard), and so is the behaviour. This surface's whole share of the
+  // feature is this call, the guard below and the menu at the composer.
+  const slash = useSlashCommands({
+    adapter: harnessLoaded ? adapter : null,
+    status,
+    value: input,
+    setValue: setInput,
+    inputRef,
+    enabled: status === 'connected',
+  })
+
+  // The HANDLER, not the object it comes on: `useSlashCommands` returns a
+  // fresh literal every render, so a callback that depended on `slash` was
+  // rebuilt on every keystroke and its memo did nothing at all.
+  const slashKeyDown = slash.handleKeyDown
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // The menu gets first refusal: with it open Enter and Tab accept the
+    // highlighted command instead of sending. Closed, this is unchanged.
+    if (slashKeyDown(e)) return
+    // An IME candidate window owns Enter while it is up.
+    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
     }
-  }, [sendMessage])
+  }, [sendMessage, slashKeyDown])
 
   return (
     <div style={{
@@ -1530,9 +1560,18 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         <textarea
           ref={inputRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          // The draft and the caret move together — see the mascot chat's note.
+          onChange={slash.handleChange}
+          onSelect={slash.handleSelect}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          // Focus never leaves this textarea: the menu is a listbox it owns and
+          // announces from here. The role stays `textbox` on purpose — see the
+          // note on the mascot chat's composer.
+          aria-haspopup="listbox"
+          aria-controls={slash.open ? slash.listboxId : undefined}
+          aria-activedescendant={slash.activeOptionId}
+          aria-autocomplete="list"
           placeholder={status === 'connected' ? t("chat.messagePlaceholder") : t("chat.connectingPlaceholder")}
           disabled={status !== 'connected'}
           rows={1}
@@ -1548,6 +1587,20 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
+        {slash.open && (
+          <SlashCommandMenu
+            anchorRef={inputRef}
+            commands={slash.items}
+            activeIndex={slash.activeIndex}
+            listboxId={slash.listboxId}
+            optionId={slash.optionId}
+            onPick={slash.accept}
+            onHover={slash.setActiveIndex}
+            ariaLabel={t("chat.slash.menuLabel")}
+            emptyLabel={t("chat.slash.noMatches")}
+            hermes={harnessId === 'hermes'}
+          />
+        )}
         {sending ? (
           <button
             onClick={abort}
