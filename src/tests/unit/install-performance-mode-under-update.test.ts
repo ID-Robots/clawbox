@@ -21,9 +21,13 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  *
  * The pin buys nothing under an update: every full update ends in a reboot and
  * clawbox-performance.service applies the profile at that boot. So a DISPATCHED
- * step, while the updater holds `update_in_progress`, only installs and enables
- * the unit; a full install and a hand-run `--step` with no update in flight
- * apply as before. This drives the shipped function under bash to hold that.
+ * step, while the updater holds `update_in_progress`, UNPINS for the length of
+ * the update (`--restore`, which persists nothing — since performance became
+ * the default every box boots pinned, so the next update would otherwise run
+ * its heaviest work pinned from the first second) and only installs and
+ * enables the unit; a full install and a hand-run `--step` with no update in
+ * flight apply as before. This drives the shipped function under bash to hold
+ * that.
  */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
@@ -75,13 +79,16 @@ function runStep(box: Box, env: Record<string, string>) {
 }
 
 describe("step_performance_mode under an in-app update", () => {
-  it("leaves the clocks alone while the updater holds the lock, and only installs the unit", () => {
+  it("unpins the clocks while the updater holds the lock, persists nothing, and only installs the unit", () => {
     const box = makeBox({ lock: { update_in_progress: true, update_lock_holder: { pid: 1 } } });
     try {
       const r = runStep(box, { CLAWBOX_DISPATCHED_STEP: "performance_mode" });
       expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout).toMatch(/leaving the clocks as they are/);
-      expect(box.calls()).toEqual(["install-unit"]);
+      expect(r.stdout).toMatch(/unpinning the clocks for the length of the update/);
+      // `--restore` is the unit's own ExecStop verb: it unpins and writes no
+      // state file, so the owner's choice is what the closing reboot applies.
+      // Never `--apply`, never `--balanced` (which would persist).
+      expect(box.calls()).toEqual(["power-mode --restore", "install-unit"]);
     } finally {
       rmSync(box.dir, { recursive: true, force: true });
     }

@@ -8697,15 +8697,23 @@ step_performance_mode() {
   # Whatever the last straw was on that hardware, the pin bought nothing: every
   # full update ends in rebuild_reboot, and clawbox-performance.service applies
   # the persisted or default profile at that boot anyway. So under an update
-  # this step only installs and enables the unit: the box updates under the
-  # clocks it was running when the owner pressed the button, and the profile
-  # lands at the reboot that ends the update. The ollama tuning and the cgroup
-  # guards it also used to apply here are step_ollama_install's and
-  # post_update's after that reboot, for the same reason. A full install, and
-  # `sudo bash install.sh --step performance_mode` by hand with no update
-  # running, apply here exactly as they always did.
+  # this step UNPINS for the length of the update — `--restore`, the unit's
+  # own ExecStop verb: the clock snapshot back or the EMC lock cleared, the
+  # balanced nvpmodel cap, cpuidle on, and NOTHING persisted, so the owner's
+  # choice is untouched — and installs the unit that pins again at the reboot
+  # that ends the update. Not merely "leave the clocks alone": since
+  # performance became the default every box BOOTS pinned, so the next update
+  # on every box would otherwise run its apt transaction, the npm install and
+  # the `next build` — the heaviest sustained load this appliance ever sees —
+  # pinned from the first second. The ollama tuning and the cgroup guards this
+  # step also used to apply here are step_ollama_install's and post_update's
+  # after that reboot, for the same reason. A full install, and `sudo bash
+  # install.sh --step performance_mode` by hand with no update running, apply
+  # here exactly as they always did.
   if [ -n "${CLAWBOX_DISPATCHED_STEP:-}" ] && update_owns_the_box; then
-    echo "  An in-app update owns the box: leaving the clocks as they are — clawbox-performance.service applies the power profile at the reboot that ends it"
+    echo "  An in-app update owns the box: unpinning the clocks for the length of the update — clawbox-performance.service applies the power profile again at the reboot that ends it"
+    "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --restore || \
+      echo "  Warning: could not unpin the clocks for the update (non-fatal)"
     install_performance_unit
     return 0
   fi
