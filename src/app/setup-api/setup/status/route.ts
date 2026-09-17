@@ -4,6 +4,7 @@ import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenC
 import { getActiveHarnessSource } from "@/lib/harness";
 import { hasValidSession, readSetupGateFacts } from "@/lib/route-auth";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
+import { parseSetupProgressStep, updateStepPassed } from "@/lib/setup-progress";
 
 export const dynamic = "force-dynamic";
 
@@ -58,9 +59,7 @@ export async function GET(request: Request) {
     const localAiModel = hasExplicitLocalAiFlag
       ? (config.local_ai_model || null)
       : (config.local_ai_model || inferredLocal?.model || null);
-    const setupProgressStep = typeof config.setup_progress_step === "number"
-      ? config.setup_progress_step
-      : Number(config.setup_progress_step ?? 0);
+    const setupProgressStep = parseSetupProgressStep(config.setup_progress_step);
     // Steps 1-3 of the wizard run before a session can exist, so their state
     // stays public; everything below is step 4+ and is behind the same session
     // the wizard holds by then.
@@ -74,9 +73,18 @@ export async function GET(request: Request) {
     const publicFields = {
       setup_complete: gateFacts.setupComplete,
       password_configured: gateFacts.passwordConfigured,
-      update_completed: !!config.update_completed,
+      // "Has the wizard's Update step been passed?", which is what this field
+      // has meant since it was born beside the other per-step flags and what
+      // the wizard reads back to pick a step to resume on. It is NOT "did an
+      // update run": the step is satisfied by doing nothing on a box that is
+      // already current, which is every freshly flashed box — it says "System
+      // is up to date", auto-advances, and the updater writes no record, so
+      // the config key alone answered `false` for ever (TASK-863). The key
+      // stays the updater's own (see `updateStepPassed`), and the wizard's
+      // persisted progress answers for the step it passed.
+      update_completed: !!config.update_completed || updateStepPassed(config),
       wifi_configured: !!config.wifi_configured,
-      setup_progress_step: Number.isInteger(setupProgressStep) && setupProgressStep > 0 ? setupProgressStep : null,
+      setup_progress_step: setupProgressStep,
     };
 
     return NextResponse.json(authenticated ? {

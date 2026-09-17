@@ -61,6 +61,22 @@ describe("POST /setup-api/setup/progress", () => {
     expect(config.setup_progress_step).toBe(5);
   });
 
+  it("never rewinds progress persisted by a build with more steps than this one", async () => {
+    // The stored value is read without this wizard's upper bound: rejecting it
+    // would make the next POST overwrite a later step with an earlier one and
+    // walk the owner back through screens they have already answered.
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({ setup_progress_step: 7 }), "utf-8");
+
+    const res = await progressPost(jsonRequest({ step: 3 }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.step).toBe(7);
+
+    const config = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
+    expect(config.setup_progress_step).toBe(7);
+  });
+
   it("rejects invalid step values", async () => {
     const res = await progressPost(jsonRequest({ step: 99 }));
     const body = await res.json();
