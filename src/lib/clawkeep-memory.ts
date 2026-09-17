@@ -36,6 +36,8 @@ import {
   IndexPassAbortedError,
   localMemoryStatusJson,
   runLocalIndexPass,
+  type LocalIndexProgress,
+  type LocalIndexProgressReporter,
 } from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
@@ -85,6 +87,31 @@ export interface MemoryIndexSchedule {
   weekday: number;
 }
 
+/**
+ * How far the pass that is going has got.
+ *
+ * Only ever present while a run is `running`, and only on an edition whose
+ * pass can actually count — ClawBox's own indexer knows how many files the
+ * scan found and how many it has finished with, while `openclaw memory index`
+ * reports its progress to a terminal reporter that is a no-op on the pipe this
+ * module spawns it down (2026.8.1: `createCliProgress` answers the noop
+ * reporter for a non-TTY stream unless the fallback is `log`, and the memory
+ * command asks for `line`). So the field is `null` there, on purpose, and the
+ * card draws a bar with no percentage rather than inventing one.
+ *
+ * FILES are the fraction and chunks are only a figure: the chunk total is not
+ * knowable until every file has been read, and a bar whose 100% moves is worse
+ * than no bar at all.
+ */
+export interface MemoryIndexProgress {
+  /** Files the pass has finished with — indexed, skipped or refused alike. */
+  filesDone: number;
+  /** Files its scan found. 0 while the scan is still walking. */
+  filesTotal: number;
+  /** Chunks in the index as the pass has left it so far. */
+  chunks: number;
+}
+
 interface PersistedMemoryRunState {
   status: MemoryRunStatus;
   mode: MemoryIndexMode | "";
@@ -97,6 +124,8 @@ interface PersistedMemoryRunState {
    *  written before the codes existed, which is why no surface may key its
    *  rendering on the code alone. */
   errorCode: MemoryRunErrorCode | "";
+  /** Null when the run is not going, and on an arm that cannot count. */
+  progress: MemoryIndexProgress | null;
   /** Internal only. Never returned by publicMemoryRunState(). */
   childPid: number;
 }
@@ -175,6 +204,12 @@ const LOCK_BUSY_EXIT = 75;
 const EXEC_FAILURE_EXITS = new Set([69, 126, 127]);
 /** How long a SIGTERM gets to close SQLite cleanly before SIGKILL follows. */
 const TERMINATE_GRACE_MS = 5_000;
+/**
+ * The floor between two progress writes. Half the card's fast poll (3 s), so
+ * every read it makes carries a figure that moved, without the pass paying an
+ * atomic write per file.
+ */
+const PROGRESS_WRITE_EVERY_MS = 1_500;
 
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-schedule.json");
 const RUN_STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-state.json");
@@ -199,6 +234,7 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   durationMs: 0,
   error: "",
   errorCode: "",
+  progress: null,
   childPid: 0,
 };
 
@@ -338,7 +374,36 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     errorCode: typeof raw.errorCode === "string" && RUN_ERROR_CODES.has(raw.errorCode)
       ? raw.errorCode as MemoryRunErrorCode
       : "",
+    // Only for a run that is going: a settled record carrying a bar's numbers
+    // would have a screen drawing one over a finished pass.
+    progress: status === "running" ? sanitiseProgress(raw.progress) : null,
     childPid: Number.isSafeInteger(raw.childPid) && Number(raw.childPid) > 0 ? Number(raw.childPid) : 0,
+  };
+}
+
+/**
+ * A progress record off disk, or null.
+ *
+ * Whole non-negative counts, and `filesDone` is never allowed past
+ * `filesTotal` — a fraction over 1 is the one value that would make the bar
+ * visibly lie, and the file this comes from is written by another copy of this
+ * module while the pass runs, so it is read as untrusted like everything else
+ * here. A record with no total at all is kept: that is the honest shape of a
+ * pass whose scan is still walking, and the card draws it without a
+ * percentage.
+ */
+function sanitiseProgress(value: unknown): MemoryIndexProgress | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const whole = (v: unknown) => {
+    const n = Number(v);
+    return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+  };
+  const filesTotal = whole(raw.filesTotal);
+  return {
+    filesDone: filesTotal > 0 ? Math.min(whole(raw.filesDone), filesTotal) : whole(raw.filesDone),
+    filesTotal,
+    chunks: whole(raw.chunks),
   };
 }
 
@@ -362,8 +427,8 @@ async function writeRunState(state: PersistedMemoryRunState): Promise<void> {
  * itself to the browser by default. Here it does not.
  */
 function publicMemoryRunState(state: PersistedMemoryRunState): MemoryRunState {
-  const { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode } = state;
-  return { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode };
+  const { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode, progress } = state;
+  return { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode, progress };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -387,6 +452,7 @@ async function markInterrupted(state: PersistedMemoryRunState): Promise<Persiste
     durationMs: state.startedAtMs ? Math.max(0, finishedAtMs - state.startedAtMs) : 0,
     error: INTERRUPTED_MESSAGE,
     errorCode: "interrupted",
+    progress: null,
     childPid: 0,
   };
   await writeRunState(failed);
@@ -1090,14 +1156,14 @@ function startOpenclawPass(mode: MemoryIndexMode): IndexPass {
   };
 }
 
-function startLocalPass(mode: MemoryIndexMode): IndexPass {
+function startLocalPass(mode: MemoryIndexMode, onProgress: LocalIndexProgressReporter): IndexPass {
   const controller = new AbortController();
   let tail = "";
   // `EMBED_MIGRATION_LOCK` is deliberately not taken here. Its only other
   // holder is `scripts/ensure-local-embeddings.sh`, which writes openclaw.json
   // and never runs on this SKU, so `RUN_LOCK_PATH` is the whole single-flight
   // and a second lock would only be a second thing to leave behind.
-  const ended = runLocalIndexPass(mode, controller.signal).then(
+  const ended = runLocalIndexPass(mode, controller.signal, onProgress).then(
     (result): PassOutcome => {
       // The pass's own numbers exist nowhere else — the run record keeps a
       // status and a duration, not a count — so they are said once, here.
@@ -1189,6 +1255,7 @@ export async function startMemoryIndex(
     durationMs: 0,
     error: "",
     errorCode: "",
+    progress: null,
     childPid: 0,
   };
   try {
@@ -1201,7 +1268,39 @@ export async function startMemoryIndex(
   // The one line that differs by edition. Everything above and below it — the
   // decline, the lock, the state file, the reconcile, the budget, the cache —
   // is the same work whoever does the indexing.
-  const pass = openclawIsAbsent() ? startLocalPass(mode) : startOpenclawPass(mode);
+  // How far the pass has got, on its way to the card's bar.
+  //
+  // The run-state file is the only thing every reader of a run shares — the
+  // route, the scheduler, another copy of this module (see process-store.ts) —
+  // so progress rides on it rather than on an in-memory channel the route
+  // handler might not be looking at. That makes each report an atomic file
+  // write, which is why the reporter is throttled rather than passed through:
+  // a pass over a folder of unchanged files walks thousands of them a second,
+  // and the card reads every three.
+  let settled = false;
+  let reportedAtMs = 0;
+  let reportInFlight = false;
+  /** The newest progress write, for `finish` to wait behind. */
+  let progressWritten: Promise<void> = Promise.resolve();
+  const publishProgress = (progress: LocalIndexProgress) => {
+    if (settled || reportInFlight) return;
+    const now = Date.now();
+    // The first report always lands, so the bar gets its denominator the
+    // moment the scan has one, whatever the clock says.
+    if (reportedAtMs && now - reportedAtMs < PROGRESS_WRITE_EVERY_MS) return;
+    reportedAtMs = now;
+    reportInFlight = true;
+    state = { ...state, progress };
+    // Never worth failing a run over. `finish` waits on this handle before it
+    // writes the settled record: `writeJsonAtomic` is a write-then-rename with
+    // no ordering between two calls, so a report still in flight would
+    // otherwise land after the final state and put a running run's bar back
+    // over it — for good, since nothing writes the file again.
+    progressWritten = writeRunState(state)
+      .catch(() => { /* the next report tries again */ })
+      .finally(() => { reportInFlight = false; });
+  };
+  const pass = openclawIsAbsent() ? startLocalPass(mode, publishProgress) : startOpenclawPass(mode);
   state = { ...state, childPid: pass.pid };
   try {
     await writeRunState(state);
@@ -1225,6 +1324,9 @@ export async function startMemoryIndex(
     pass.abandon();
   }, INDEX_TIMEOUT_MS);
   const finish = async (outcome: PassOutcome) => {
+    // Before anything else: a report that lands after this point would put a
+    // running run's bar back over the settled record.
+    settled = true;
     clearTimeout(timer);
     const finishedAtMs = Date.now();
     const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
@@ -1254,8 +1356,14 @@ export async function startMemoryIndex(
       durationMs: Math.max(0, finishedAtMs - startedAtMs),
       error: failure ? failure.error : "",
       errorCode: failure ? failure.errorCode : "",
+      // The bar belongs to a pass that is going. A finished run says what it
+      // did in its own line — mode, trigger, duration — and the index's real
+      // counts are the card's own figures by then.
+      progress: null,
       childPid: 0,
     };
+    // See `publishProgress`: no report may still be on its way to the file.
+    await progressWritten;
     await writeRunState(finalState).catch(() => { /* status route will reconcile */ });
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     // Whatever the cache holds now — the reading from before the pass, or one

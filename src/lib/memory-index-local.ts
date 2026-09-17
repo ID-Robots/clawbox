@@ -558,6 +558,30 @@ export interface LocalIndexPassResult {
   capped: boolean;
 }
 
+/**
+ * How far this pass has got, for the bar the owner is watching.
+ *
+ * Files rather than chunks as the denominator: the total number of chunks is
+ * not knowable until every file has been read, and a bar whose 100% moves is
+ * worse than no bar. `chunks` travels beside it as a figure, never as the
+ * fraction.
+ */
+export interface LocalIndexProgress {
+  /** Files this pass has finished with — indexed, skipped or refused alike. */
+  filesDone: number;
+  /** Files the scan found. 0 until the scan has finished. */
+  filesTotal: number;
+  /** Chunks in the store as this pass has left it so far. */
+  chunks: number;
+}
+
+/**
+ * Told how far the pass has got. Called often — once per file — and it is the
+ * CALLER that throttles what it does with that, because only the caller knows
+ * what a report costs it (the run-state file is an atomic write).
+ */
+export type LocalIndexProgressReporter = (progress: LocalIndexProgress) => void;
+
 function isIndexable(file: string): boolean {
   return (INDEXABLE_EXTENSIONS as readonly string[]).includes(path.extname(file).toLowerCase());
 }
@@ -685,6 +709,7 @@ interface PendingFile {
 export async function runLocalIndexPass(
   mode: MemoryIndexMode,
   signal?: AbortSignal,
+  onProgress?: LocalIndexProgressReporter,
 ): Promise<LocalIndexPassResult> {
   const db = await openIndexForWrite();
   try {
@@ -720,6 +745,12 @@ export async function runLocalIndexPass(
     let failures = scan.unreadableSources.size + scan.unusableDocuments;
     let capped = false;
     let wrote = false;
+    // The denominator as soon as it exists. Until the scan has walked every
+    // source the pass genuinely does not know how much work there is, and the
+    // bar says so by staying indeterminate rather than by guessing.
+    let filesDone = 0;
+    const report = () => onProgress?.({ filesDone, filesTotal: scan.files.length, chunks: chunkCount });
+    report();
 
     // Prepared ONCE. Every one of these was re-parsed and re-planned on each of
     // up to 20,000 files: ~10 us each, so about a second of pure SQL parsing
@@ -747,6 +778,14 @@ export async function runLocalIndexPass(
 
     for (const entry of scan.files) {
       throwIfAborted(signal);
+      // Reported at the TOP of the body and counted after it, because every
+      // path below — a skip, a refusal, an embed — leaves through a `continue`
+      // and a report at the bottom would have shown 0 of 900 for the whole
+      // length of a pass over unchanged files, which is the commonest pass
+      // there is. `filesDone` is therefore what is genuinely finished with,
+      // never one ahead of it.
+      report();
+      filesDone += 1;
       // ONE DESCRIPTOR for the size check, the skip decision and the read.
       // A path-level stat followed by a path-level readFile lets the file be
       // replaced between them, so the bytes that get embedded are not the ones
@@ -850,6 +889,10 @@ export async function runLocalIndexPass(
       chunkCount = chunkCount - replaced + pieces.length;
       wrote = true;
     }
+    // The last file's own outcome, which the loop's top-of-body report could
+    // not carry. Everything after this is bookkeeping over a walk that is
+    // finished, so this is the reading the bar rests on while it happens.
+    report();
 
     if (touched.length) {
       db.exec("BEGIN");

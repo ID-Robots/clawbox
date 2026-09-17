@@ -39,6 +39,8 @@ export const IDLE_MEMORY_RUN = {
   durationMs: 0,
   error: "",
   errorCode: "" as const,
+  /** No pass is going, so there is no bar to draw. */
+  progress: null,
 };
 
 export async function settledMemoryRun(

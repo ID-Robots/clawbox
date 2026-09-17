@@ -12,6 +12,7 @@ import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import type {
   ClawKeepMemoryStatus,
   MemoryIndexMode,
+  MemoryIndexProgress,
   MemoryIndexSchedule,
   MemoryRunState,
 } from "@/lib/clawkeep-memory";
@@ -105,6 +106,83 @@ function errorKeySuffix(code: string): string {
  */
 const SETTLE_READS = 3;
 
+/**
+ * The bar the owner watches while a pass runs.
+ *
+ * Two faces, and which one is drawn is decided by the box and never guessed
+ * at: a pass ClawBox runs itself counts the files its scan found and the ones
+ * it has finished with, so the bar is a real fraction with a percentage;
+ * `openclaw memory index` reports its own progress to a terminal reporter that
+ * is a no-op on the pipe this box spawns it down, so that arm sends no numbers
+ * and gets a sweeping bar with no percentage at all. Inventing one from a
+ * clock — the obvious alternative — is a bar that reaches 100% and then keeps
+ * the owner waiting, which is worse than the nothing this replaces.
+ *
+ * Files are the fraction and chunks are only a figure beside it: how many
+ * chunks a pass will write is not knowable until it has read every file, so a
+ * chunk fraction would have a denominator that moves.
+ */
+function MemoryIndexProgressBar({ progress, t, locale }: {
+  progress: MemoryIndexProgress | null;
+  t: (key: string, params?: Record<string, string | number>) => string;
+  locale: string;
+}) {
+  const total = progress?.filesTotal ?? 0;
+  const done = progress?.filesDone ?? 0;
+  // A total of zero is the honest shape of a scan that is still walking, and
+  // of the arm that cannot count at all. Both get the sweep.
+  const determinate = total > 0;
+  const percent = determinate ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const n = (value: number) => value.toLocaleString(locale);
+  // Through Intl rather than a `{percent}%` catalogue key: a percentage is a
+  // NUMBER, and the ten locales here disagree about the space before the sign
+  // (French and German write "14 %"). A key would also have been ten identical
+  // strings, which is the shape the i18n scan rightly refuses.
+  const percentText = new Intl.NumberFormat(locale, { style: "percent" }).format(percent / 100);
+  return (
+    <div className="space-y-1.5" data-testid="memory-shard-progress">
+      <div
+        className="h-1.5 rounded-full bg-white/10 overflow-hidden relative"
+        role="progressbar"
+        aria-label={t("clawkeep.memory.progressLabel")}
+        aria-valuemin={determinate ? 0 : undefined}
+        aria-valuemax={determinate ? 100 : undefined}
+        // Deliberately absent while indeterminate: that is what tells a screen
+        // reader the box does not know how far along it is, and a 0 there
+        // would announce "0%" for the whole pass.
+        aria-valuenow={determinate ? percent : undefined}
+        data-determinate={determinate ? "true" : "false"}
+      >
+        {determinate ? (
+          <div
+            className="h-full rounded-full bg-emerald-400/80 transition-[width] duration-500 ease-out"
+            style={{ width: `${percent}%` }}
+            data-testid="memory-shard-progress-fill"
+          />
+        ) : (
+          <div className="memory-index-bar-sweep bg-emerald-400/70" />
+        )}
+      </div>
+      <p className="text-[11px] text-[var(--text-muted)] flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate">
+          {determinate
+            ? t("clawkeep.memory.progressFiles", {
+              done: n(done),
+              total: n(total),
+              chunks: n(progress?.chunks ?? 0),
+            })
+            : t("clawkeep.memory.progressWorking")}
+        </span>
+        {determinate && (
+          <span className="tabular-nums shrink-0" data-testid="memory-shard-progress-percent">
+            {percentText}
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function MemoryIndexCard({ initial, onError }: {
   /** The status the window already read on the way in, when it recognised one.
    *  The card used to throw that payload away and probe again, which cost the
@@ -113,7 +191,7 @@ function MemoryIndexCard({ initial, onError }: {
   initial: ClawKeepMemoryStatus | null;
   onError: (msg: string) => void;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   // The route's sentences are English, always. Its contract — like every other
   // ClawBox route's — is a stable `code` beside them, so a screen can word the
   // fact in the owner's language; the server's English is the floor until the
@@ -376,6 +454,10 @@ function MemoryIndexCard({ initial, onError }: {
         <Stat label={t("clawkeep.memory.failed")} value={`${status.failedItems}`} />
         <Stat label={t("clawkeep.memory.indexSize")} value={status.indexBytes ? formatBytes(status.indexBytes) : "—"} />
       </div>
+
+      {/* Only while a pass is actually going: the bar is feedback on work in
+          flight, and a settled run says what it did in the line below. */}
+      {running && <MemoryIndexProgressBar progress={run.progress ?? null} t={t} locale={locale} />}
 
       {nothingToIndex && (
         <p className="text-[11px] text-[var(--text-muted)]">{t("clawkeep.memory.noFilesYet")}</p>
