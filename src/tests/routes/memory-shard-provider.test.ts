@@ -81,7 +81,7 @@ beforeEach(() => {
 describe("GET", () => {
   it("answers the model on this box, the cloud on offer, and whether the GGUF is here", async () => {
     const res = await (await route()).GET();
-    expect(await res.json()).toEqual({ source: "local", cloudSupported: true, cloudAvailable: true, localInstalled: false });
+    expect(await res.json()).toEqual({ source: "local", cloudSupported: true, cloudAvailable: true, cloudReason: null, localInstalled: false });
   });
 
   it("calls an index pointed off the box the cloud", async () => {
@@ -94,8 +94,27 @@ describe("GET", () => {
   it("offers no cloud on the edition that indexes on the box itself, and does not ask the resolver", async () => {
     h.absent = true;
     const body = await (await (await route()).GET()).json();
-    expect(body).toEqual({ source: "local", cloudSupported: false, cloudAvailable: false, localInstalled: false });
+    expect(body).toEqual({ source: "local", cloudSupported: false, cloudAvailable: false, cloudReason: "edition", localInstalled: false });
     expect(h.facts).not.toHaveBeenCalled();
+  });
+
+  it("carries WHY the cloud is not on offer, in the resolver's own vocabulary", async () => {
+    // Each reason has a different fix, so the switch has to be able to say
+    // which one it is rather than "not available on this box right now" — the
+    // note an owner whose box was simply not connected read as a fault
+    // (2026-09-17). The words are the cloud-defaults resolver's, so the card
+    // and the Local AI panel cannot disagree about the same box.
+    const cases: [Record<string, unknown>, string][] = [
+      [{ linked: false, entitlement: null, embeddingsSupported: true, embeddingsRouteReady: false }, "not_linked"],
+      [{ linked: true, entitlement: "free", embeddingsSupported: true, embeddingsRouteReady: false }, "plan"],
+      [{ linked: true, entitlement: null, embeddingsSupported: true, embeddingsRouteReady: false }, "plan"],
+      [{ linked: true, entitlement: "pro", embeddingsSupported: true, embeddingsRouteReady: false }, "route_unavailable"],
+    ];
+    for (const [facts, reason] of cases) {
+      h.facts.mockImplementation(async () => facts);
+      const body = await (await (await route()).GET()).json();
+      expect(body, reason).toMatchObject({ cloudAvailable: false, cloudReason: reason });
+    }
   });
 
   it("answers 503, never 'local', when the config cannot be read", async () => {
@@ -111,7 +130,10 @@ describe("GET", () => {
     h.factsThrow = true;
     const res = await (await route()).GET();
     expect(res.status).toBe(200);
-    expect((await res.json()).cloudAvailable).toBe(false);
+    const body = await res.json();
+    expect(body.cloudAvailable).toBe(false);
+    // …and it does not invent a reason it has no facts for.
+    expect(body.cloudReason).toBeNull();
   });
 });
 

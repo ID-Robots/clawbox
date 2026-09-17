@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { readInstallStream } from "@/lib/install-stream";
-import { type EmbedderChoiceStatus, type EmbeddingSource, parseEmbedderChoiceStatus } from "@/lib/memory-shard-state";
+import {
+  cloudEmbedderPickable,
+  cloudUnavailableNoteKey,
+  type EmbedderChoiceStatus,
+  type EmbeddingSource,
+  parseEmbedderChoiceStatus,
+} from "@/lib/memory-shard-state";
 import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import { CARD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
@@ -114,8 +120,9 @@ export default function MemoryShardEmbedderCard() {
       <div className={`${SEGMENTED_TRACK} mt-3`} role="radiogroup" aria-label={t("clawkeep.memory.embedder.title")}>
         {(["cloud", "local"] as const).map((option) => {
           // Moving ONTO the cloud needs it to be on offer here; a box already
-          // on it can always be taken back to the model on this box.
-          const blocked = option === "cloud" && status.source !== "cloud" && !(status.cloudSupported && status.cloudAvailable);
+          // on it can always be taken back to the model on this box. The rule
+          // itself is shared with the wizard's step 3, which had its own copy.
+          const blocked = option === "cloud" && !cloudEmbedderPickable(status);
           return (
             <button
               key={option}
@@ -140,9 +147,9 @@ export default function MemoryShardEmbedderCard() {
         <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-cloud-unsupported">
           {t("clawkeep.memory.embedder.cloudUnsupported")}
         </p>
-      ) : !status.cloudAvailable && status.source !== "cloud" ? (
+      ) : !cloudEmbedderPickable(status) ? (
         <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-cloud-unavailable">
-          {t("clawkeep.memory.embedder.cloudUnavailable")}
+          {t(cloudUnavailableNoteKey(status.cloudReason))}
         </p>
       ) : null}
 

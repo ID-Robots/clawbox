@@ -9,6 +9,8 @@
  * as coding-agent-status.ts and coding-pr-state.ts.
  */
 
+import type { CloudUnavailableReason } from "@/lib/clawai-cloud-defaults-state";
+
 /** The owner's consent for the index to run at all. Off on a new box. */
 export const MEMORY_SHARD_ENABLED_KEY = "memory_shard_enabled";
 
@@ -140,8 +142,70 @@ export interface EmbedderChoiceStatus {
   cloudSupported: boolean;
   /** Linked, on a paid ClawBox AI plan, and the cloud embedder answered this box. */
   cloudAvailable: boolean;
+  /**
+   * WHY the cloud model is not on offer, in the cloud-defaults resolver's own
+   * vocabulary — each word has a different remedy, and the switch says which.
+   *
+   * Null when the cloud IS on offer, and also when the box could not work the
+   * answer out at all (an older server, or a facts read that failed): a reason
+   * is never guessed, and the generic note stands in.
+   */
+  cloudReason: CloudUnavailableReason | null;
   /** The model for this box is on disk. */
   localInstalled: boolean;
+}
+
+/**
+ * The words {@link EmbedderChoiceStatus.cloudReason} may carry, for the parse
+ * below. Typed against the resolver's union, so a word DROPPED from it stops
+ * this file compiling; a word added to it falls through to the generic note,
+ * which is the safe direction.
+ */
+const CLOUD_UNAVAILABLE_REASONS: readonly CloudUnavailableReason[] = [
+  "not_linked",
+  "plan",
+  "route_unavailable",
+  "edition",
+  "owner",
+];
+
+/**
+ * May the owner pick the ClawBox AI cloud model?
+ *
+ * THE ONE COPY: the wizard's step 3 and the settings card both ask it, and they
+ * had drifted — the card exempted a box already indexing in the cloud and the
+ * wizard did not, so a live probe that answered false (it is an HTTP request,
+ * and false is what it answers on any hiccup) pre-selected a cloud box onto the
+ * 640 MB model on this box and Index now posted the move.
+ *
+ * A box already ON the cloud can always stay there: nothing has to be reached
+ * to keep an index where it is.
+ */
+export function cloudEmbedderPickable(status: EmbedderChoiceStatus): boolean {
+  return status.source === "cloud" || (status.cloudSupported && status.cloudAvailable);
+}
+
+/**
+ * The note under the switch when the cloud model cannot be picked: the REASON
+ * and its remedy, rather than "not available on this box right now" — which is
+ * what a box that had simply never been connected to ClawBox AI said, and read
+ * as a fault of the box (owner, 2026-09-17).
+ */
+export function cloudUnavailableNoteKey(reason: CloudUnavailableReason | null): string {
+  switch (reason) {
+    case "not_linked":
+      return "clawkeep.memory.embedder.cloudNotLinked";
+    case "plan":
+      return "clawkeep.memory.embedder.cloudPlan";
+    case "route_unavailable":
+      return "clawkeep.memory.embedder.cloudRouteDown";
+    case "edition":
+      return "clawkeep.memory.embedder.cloudUnsupported";
+    // "owner" is not a refusal — the owner can always change their own pick
+    // back — and null is "the box could not say". Both get the generic line.
+    default:
+      return "clawkeep.memory.embedder.cloudUnavailable";
+  }
 }
 
 /**
@@ -157,6 +221,8 @@ export function parseEmbedderChoiceStatus(raw: unknown): EmbedderChoiceStatus | 
     source: r.source,
     cloudSupported: r.cloudSupported === true,
     cloudAvailable: r.cloudAvailable === true,
+    // An older server sends no reason at all; null is the generic note.
+    cloudReason: CLOUD_UNAVAILABLE_REASONS.find((reason) => reason === r.cloudReason) ?? null,
     localInstalled: r.localInstalled === true,
   };
 }
