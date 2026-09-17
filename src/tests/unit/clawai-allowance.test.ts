@@ -97,6 +97,12 @@ describe("formatFreesUpAt", () => {
     expect(formatFreesUpAt("2026-09-24T08:00:00.000Z", { locale: "en", timeZone: "UTC", now })).toBe("Sep 24, 08:00");
   });
 
+  it("never quotes an instant from an earlier day as a bare clock", () => {
+    // A paused run looked at days later: "14:05" alone would read as today.
+    expect(formatFreesUpAt("2026-09-14T14:05:00.000Z", { locale: "en", timeZone: "UTC", now })).toBe("Mon 14:05");
+    expect(formatFreesUpAt("2026-09-17T08:00:00.000Z", { locale: "en", timeZone: "UTC", now })).toBe("08:00");
+  });
+
   it("writes the clock in the owner's language", () => {
     expect(formatFreesUpAt("2026-09-19T14:05:00.000Z", { locale: "de", timeZone: "UTC", now })).toBe("Sa., 14:05");
   });

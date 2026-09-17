@@ -157,9 +157,9 @@ function calendarDay(format: Intl.DateTimeFormat, at: number): string {
 }
 
 /**
- * "Frees up at" as the owner reads a clock: `HH:MM` when the instant is later
- * today, the weekday in front of it within the week, and the date in front of
- * it beyond that. Null when there is no instant to show.
+ * "Frees up at" as the owner reads a clock: `HH:MM` when the instant is today,
+ * the weekday in front of it within six days either side, and the date in
+ * front of it beyond that. Null when there is no instant to show.
  *
  * Never a bare `HH:MM` for another day. A weekly window can free up four days
  * from now, and "14:05" alone would read as this afternoon.
@@ -170,10 +170,12 @@ export function formatFreesUpAt(resetAt: string | null | undefined, options: Fre
   if (Number.isNaN(at)) return null;
   const now = options.now ?? Date.now();
   const clock = dateTimeFormat(options.locale, {}, options.timeZone);
-  if (at <= now || calendarDay(clock, at) === calendarDay(clock, now)) {
+  if (calendarDay(clock, at) === calendarDay(clock, now)) {
     return clock.format(at);
   }
-  if (at - now < 6 * DAY_MS) {
+  // Either side of now: an instant already past (a paused run looked at days
+  // later) needs its day just as much as one still to come.
+  if (Math.abs(at - now) < 6 * DAY_MS) {
     return dateTimeFormat(options.locale, { weekday: "short" }, options.timeZone).format(at);
   }
   return dateTimeFormat(options.locale, { day: "numeric", month: "short" }, options.timeZone).format(at);

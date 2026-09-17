@@ -281,6 +281,14 @@ describe("a run ClawBox AI refused for allowance", () => {
     expect(run.pauseReason).toMatchObject({ kind: "allowance", meter: "burst" });
   });
 
+  it("does not read a failure that merely MENTIONS a refusal code as the proxy refusing", async () => {
+    // A run working on this very codebase can end in an error whose words
+    // quote the codes; only the proxy's own 429 answer is an allowance refusal.
+    const run = await runRefusedWith("Tests failed: expected the weekly_limit_exceeded refusal to pause the run, but it failed.");
+    expect(run.status).toBe("failed");
+    expect(run.pauseReason).toBeNull();
+  });
+
   it("leaves an ordinary provider error a failure", async () => {
     const run = await runRefusedWith('API Error: 400 {"error":{"message":"Bad request","type":"invalid_request_error"}}');
     expect(run.status).toBe("failed");

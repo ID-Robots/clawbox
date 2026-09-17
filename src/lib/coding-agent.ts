@@ -9596,6 +9596,9 @@ async function settleWork(killed: ChildProcess[], timeoutMs: number): Promise<vo
   );
 }
 
+/** The shape of the ClawBox AI proxy's allowance refusal as a harness relays it. */
+const PROXY_REFUSAL_RE = /\b429\b|\busage_limit\b/;
+
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
@@ -9683,7 +9686,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // and its "frees up at" on the record for the card and the agent to say.
     // Only for a run nobody asked to end, and only with a session to come back
     // to; without one there is nothing Resume could carry on from.
-    if (run.status === "failed" && state.endRequested === null && run.sessionId) {
+    // Only the proxy's own answer counts — its 429 or its `usage_limit`
+    // envelope — never words that merely quote a code: a run working on this
+    // very codebase can fail with a sentence about `weekly_limit_exceeded`.
+    if (run.status === "failed" && state.endRequested === null && run.sessionId && PROXY_REFUSAL_RE.test(run.error ?? "")) {
       const refusal = parseClawaiAllowanceRefusal(run.error);
       if (refusal) {
         run.status = "paused";
