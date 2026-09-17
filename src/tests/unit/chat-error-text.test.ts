@@ -225,7 +225,7 @@ describe("describeChatFailure — a spent ClawBox AI allowance", () => {
   };
 
   it("names the weekly chat allowance and when it frees up", () => {
-    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "Weekly token allowance used up."), { t: en, locale: "en", timeZone: "UTC" });
+    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "Weekly token allowance used up."), undefined, { t: en, locale: "en", timeZone: "UTC" });
     expect(shown).toContain("this week's ClawBox AI chat allowance is used up");
     expect(shown).toContain("It frees up at 10:30.");
     expect(shown).toContain("Settings, under Providers");
@@ -234,18 +234,18 @@ describe("describeChatFailure — a spent ClawBox AI allowance", () => {
   });
 
   it("tells a burst refusal apart from a spent week", () => {
-    const shown = describeChatFailure(envelope("burst_limit_exceeded", "Short-term burst limit reached"), { t: en, locale: "en", timeZone: "UTC" });
+    const shown = describeChatFailure(envelope("burst_limit_exceeded", "Short-term burst limit reached"), undefined, { t: en, locale: "en", timeZone: "UTC" });
     expect(shown).toContain("5-hour burst limit is reached");
     expect(shown).toContain("Your weekly allowance still has room");
   });
 
   it("names the memory indexing allowance", () => {
-    const shown = describeChatFailure(envelope("embeddings_weekly_limit_exceeded", "Memory indexing allowance used up."), { t: en, locale: "en", timeZone: "UTC" });
+    const shown = describeChatFailure(envelope("embeddings_weekly_limit_exceeded", "Memory indexing allowance used up."), undefined, { t: en, locale: "en", timeZone: "UTC" });
     expect(shown).toContain("memory indexing allowance is used up");
   });
 
   it("promises no hour the refusal did not carry", () => {
-    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "out", null), { t: en, locale: "en", timeZone: "UTC" });
+    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "out", null), undefined, { t: en, locale: "en", timeZone: "UTC" });
     expect(shown).toContain("It frees up as older usage leaves the rolling window.");
     expect(shown).not.toMatch(/\d{2}:\d{2}/);
   });
@@ -256,7 +256,7 @@ describe("describeChatFailure — a spent ClawBox AI allowance", () => {
       for (const [k, v] of Object.entries(params ?? {})) str = str.replaceAll(`{${k}}`, String(v));
       return str;
     };
-    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "Weekly token allowance used up."), { t: de, locale: "de", timeZone: "UTC" });
+    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "Weekly token allowance used up."), undefined, { t: de, locale: "de", timeZone: "UTC" });
     expect(shown).toContain(translations.de["chat.allowanceWeekly"]);
     expect(shown).toContain("Es wird um 10:30 frei.");
   });
@@ -264,10 +264,10 @@ describe("describeChatFailure — a spent ClawBox AI allowance", () => {
   it("falls back to English with no translator, or one that does not know the key", () => {
     const raw = envelope("weekly_limit_exceeded", "Weekly token allowance used up.");
     expect(describeChatFailure(raw)).toContain("this week's ClawBox AI chat allowance is used up");
-    expect(describeChatFailure(raw, { t: (key) => key, locale: "en" })).toContain("this week's ClawBox AI chat allowance is used up");
+    expect(describeChatFailure(raw, undefined, { t: (key) => key, locale: "en" })).toContain("this week's ClawBox AI chat allowance is used up");
   });
 
   it("keeps an ordinary rate limit on its own sentence", () => {
-    expect(describeChatFailure("API rate limit reached. Please try again later.", { t: en, locale: "en", timeZone: "UTC" })).toContain("rate-limiting");
+    expect(describeChatFailure("API rate limit reached. Please try again later.", undefined, { t: en, locale: "en", timeZone: "UTC" })).toContain("rate-limiting");
   });
 });

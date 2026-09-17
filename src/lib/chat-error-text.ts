@@ -90,6 +90,153 @@ function isCredentialRejected(raw: string): boolean {
     .test(raw);
 }
 
+/**
+ * What the gateway knew about the run when it declared the turn dead — see
+ * `chat-run-failure.ts` for where each field comes from on the wire. Every
+ * field is optional: a turn can fail before the provider was ever asked.
+ */
+export interface ChatRunFailureContext {
+  /** The gateway's failover reason token: `format`, `model_not_found`, `rate_limit`, … */
+  reason?: string;
+  /** Provider id as the gateway names it: `anthropic`, `openai`, `clawai`, … */
+  provider?: string;
+  /** Model id, bare or `provider/`-prefixed. */
+  model?: string;
+  /** The provider's refusal as the gateway logged it: `HTTP 400: {"type":"error",…}`. */
+  detail?: string;
+}
+
+/** The provider's name as the customer knows it, from the id the gateway uses. */
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  "openai-codex": "OpenAI",
+  google: "Google",
+  openrouter: "OpenRouter",
+  clawai: "ClawBox AI",
+  clawbox: "ClawBox AI",
+  "clawbox-ai": "ClawBox AI",
+  ollama: "the local model runner",
+  "github-copilot": "GitHub Copilot",
+  xai: "xAI",
+  groq: "Groq",
+  mistral: "Mistral",
+  deepseek: "DeepSeek",
+};
+
+function providerLabel(provider: string | undefined): string {
+  const id = provider?.trim().toLowerCase();
+  if (!id) return "the AI provider";
+  return PROVIDER_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/** `anthropic/claude-x` and `claude-x` both read as the bare id. */
+function modelLabel(model: string | undefined): string {
+  const id = model?.trim();
+  if (!id) return "the current model";
+  const slash = id.indexOf("/");
+  return slash >= 0 ? id.slice(slash + 1) || id : id;
+}
+
+/** How much of the provider's own sentence is worth a bubble. */
+const PROVIDER_MESSAGE_MAX = 240;
+
+/**
+ * The provider's own words out of the gateway's detail line.
+ *
+ * The line is `HTTP <status>: <body>` where the body is whatever the provider
+ * answered — for Anthropic and OpenAI a JSON error envelope, for a proxy
+ * sometimes an HTML page or a bare sentence. The envelope's message is the
+ * part written for a person ("Claude Code 2.1.75 does not support this
+ * model; version 2.1.251 or newer is required"); the rest is `type`, a
+ * `request_id` and braces. A body that is not an envelope is used as it is.
+ * Whatever comes out still has to pass the leak rules, like every other
+ * message from a failing layer.
+ */
+function providerMessageFromDetail(detail: string | undefined): string | undefined {
+  const line = detail?.trim();
+  if (!line) return undefined;
+  const body = line.replace(/^HTTP\s+\d{3}\s*:\s*/i, "").trim();
+  if (!body) return undefined;
+  let text = body;
+  if (body.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      text = envelopeMessage(parsed) ?? "";
+    } catch {
+      // A truncated envelope: braces and half a key are not a sentence.
+      return undefined;
+    }
+  }
+  const plain = text.replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  if (!plain) return undefined;
+  const safe = sanitizeErrorMessage(plain);
+  if (!safe) return undefined;
+  return safe.length > PROVIDER_MESSAGE_MAX ? `${safe.slice(0, PROVIDER_MESSAGE_MAX - 1).trimEnd()}…` : safe;
+}
+
+/** The human sentence inside a provider's error envelope, whichever shape it takes. */
+function envelopeMessage(value: unknown, depth = 0): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 3) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["message", "error", "detail", "msg"]) {
+    const found = envelopeMessage(record[key], depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * The customer's sentence when the gateway told us WHY the provider failed.
+ *
+ * Every reason token below is one the gateway's own failover classifier
+ * emits (`failoverReason` on its lifecycle and chat error frames). Rate limits
+ * and refused credentials are handled before this by the predicates above,
+ * which read the same evidence. Returns nothing when the context says
+ * nothing a customer can act on — the caller's fallback rules still apply.
+ */
+function describeProviderFailure(context: ChatRunFailureContext): string | undefined {
+  const reason = context.reason?.trim().toLowerCase();
+  const provider = providerLabel(context.provider);
+  const model = modelLabel(context.model);
+  const message = providerMessageFromDetail(context.detail);
+  const quoted = message ? `: “${message}”` : "";
+  switch (reason) {
+    case "model_not_found":
+      return `That message did not go through — ${provider} does not offer the model this chat is set to (${model}). Pick another model in the header and send it again.`;
+    case "context_overflow":
+      return `That message did not go through — this conversation has grown too long for ${model}. Start a New chat and send it there.`;
+    case "billing":
+      return `That message did not go through — ${provider} reports a billing problem with this account${quoted}. Check the account with ${provider}, or switch to a different provider in Settings.`;
+    case "overloaded":
+    case "server_error":
+    case "timeout":
+    case "empty_response":
+      return `That message did not go through — ${provider} is having trouble right now${quoted}. Nothing is broken on this box. Wait a minute and send it again.`;
+    case "format":
+      return `That message did not go through — ${provider} rejected the request for ${model}${quoted}. Pick another model in the header, or send it again.`;
+    default:
+      // An unnamed or unclassified reason is still worth the provider's own
+      // words when we have them; without them there is nothing to add.
+      return message
+        ? `That message did not go through — ${provider} answered${quoted}. Pick another model in the header, or send it again.`
+        : undefined;
+  }
+}
+
+/**
+ * The gateway's own shrug — what it says when it has no copy for the reason a
+ * run died ("The agent run failed before producing a reply.", "agent run
+ * failed" on newer cores, "LLM request failed."). It carries nothing, so it
+ * must not be relayed as "Error: …" as if it were the reason; ours at least
+ * says what to do. Matched on the core's wording, like the predicates above.
+ */
+function isGatewayShrug(raw: string): boolean {
+  return /^(?:⚠️\s*)?(?:the )?agent run failed(?: before producing a reply)?\.?$/i.test(raw)
+    || /^LLM request failed(?: with an unknown error)?\.?$/i.test(raw);
+}
+
 /** Something went wrong and we will not say what, because we cannot say it safely. */
 const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
 
@@ -171,26 +318,41 @@ function allowanceSentence(raw: string, words: ChatFailureWords | undefined): st
  * bubble — is worse than a vague one, because the customer cannot tell whether
  * the box is thinking or dead.
  */
-export function describeChatFailure(raw: unknown, words?: ChatFailureWords): string {
+export function describeChatFailure(raw: unknown, context?: ChatRunFailureContext, words?: ChatFailureWords): string {
   const text = typeof raw === "string" ? raw.trim() : "";
-  if (!text) return GENERIC;
+  // The predicates read the provider's detail too: a 429 or a 401 lives in
+  // the detail line when the gateway's own sentence is the generic one.
+  const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
+  if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
   // Ahead of the rate limit: a spent allowance also arrives as a 429, and the
   // generic "wait a minute" is exactly the wrong advice for a window that frees
   // up days from now. The refusal names which allowance and when, so say that.
-  const allowance = allowanceSentence(text, words);
+  // Read off the same evidence as the rate limit: the refusal's code sits in
+  // the provider's detail line when the gateway's own sentence is the generic one.
+  const allowance = allowanceSentence(evidence, words);
   if (allowance) return allowance;
   // Before the sanitizer: the raw rate-limit wording would itself pass the leak
   // rules ("API rate limit reached…" carries no path or handle), so without
   // this the customer would get that bare operator line instead of the calm,
   // actionable one — and a 429 buried in an otherwise unsafe string would be
   // dropped to the generic fallback, losing the one fact that explains it.
-  if (isRateLimit(text)) return RATE_LIMIT;
+  if (isRateLimit(evidence)) return RATE_LIMIT;
   // Before the sanitizer for the same reason as the rate limit: "HTTP 403:
   // Invalid token" carries no path or handle, so it would otherwise pass the
   // leak rules and be relayed verbatim — which is exactly the bubble TASK-419
   // is about.
-  if (isCredentialRejected(text)) return CREDENTIAL_REJECTED;
+  if (isCredentialRejected(evidence) || context?.reason === "auth" || context?.reason === "auth_permanent") {
+    return CREDENTIAL_REJECTED;
+  }
+  // The gateway's reason and the provider's words beat the gateway's sentence:
+  // for a reason it has no copy for, that sentence is the generic one, and
+  // for one it has, ours says the same thing in the customer's terms.
+  if (context) {
+    const described = describeProviderFailure(context);
+    if (described) return described;
+  }
+  if (!text || isGatewayShrug(text)) return GENERIC;
   const safe = sanitizeErrorMessage(text);
   // A message that passes the leak rules is worth showing: "Request exceeds the
   // size limit" tells the customer what to change, and replacing it with the

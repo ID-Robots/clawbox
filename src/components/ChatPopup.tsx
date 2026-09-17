@@ -62,6 +62,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
+import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
@@ -1986,6 +1987,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (error) tabErrorsRef.current.set(key, error)
   }, [])
   const runIdRef = useRef<string | null>(null)
+  // What the gateway said about a run before it declared the turn dead — the
+  // provider's own refusal rides on the lifecycle frames, never on the `chat`
+  // error itself. See lib/chat-run-failure.ts.
+  const runFailureRef = useRef(new RunFailureLedger())
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
    *
@@ -2636,6 +2641,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (eventName === 'agent') {
           const payload = data.payload as Record<string, unknown> | undefined
           if (!payload) return
+          // Before the session filter: `settleRun` below words a background
+          // session's failure too, and it needs the same notes.
+          runFailureRef.current.observe(payload)
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
           if (payload.stream === 'tool') {
@@ -2749,8 +2757,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // session filter, which is what would otherwise drop the event. The
           // error branch below never runs for a background session, and a
           // history reload cannot recreate what was never stored.
+          // One sentence per failed run, worded once: the ledger's note is
+          // consumed here and reused by the error branch below.
+          const failureText = state === 'error'
+            ? describeChatFailure(payload.errorMessage, runFailureRef.current.settle(payload), failureWordsRef.current)
+            : undefined
           if (state === 'final' || state === 'aborted' || state === 'error') {
-            settleRun(sk, state === 'error' ? describeChatFailure(payload.errorMessage, failureWordsRef.current) : undefined)
+            settleRun(sk, failureText)
           }
           if (sk !== sessionKeyRef.current) return
 
@@ -2919,7 +2932,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureWordsRef.current), timestamp: Date.now() }])
+              setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now() }])
             }
           }
         }
@@ -4850,7 +4863,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // now, so this is the only gate left.
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined, failureWordsRef.current)
+        : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
       settleRun(keyAtSend, failure)
       // It failed in a tab the owner has left: the composer, the caret and
       // the pills on screen belong to the tab they are looking at now, and
