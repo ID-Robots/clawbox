@@ -43,6 +43,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 import {
   clearFactoryGitIdentity,
   FACTORY_GIT_IDENTITY,
+  FACTORY_IDENTITY_BUDGET_MS,
   factoryIdentityRemovedLine,
 } from "@/lib/coding-git-factory-identity";
 import { CODING_GIT_PLACEHOLDER, resolveCodingGitIdentity } from "@/lib/coding-git-identity";
@@ -284,6 +285,37 @@ describe("running it on every boot", () => {
 
     expect(globalValues(home, "init.defaultBranch")).toEqual(["main"]);
     expect(globalValues(home, "credential.https://github.com.helper")).toEqual(["!gh auth git-credential"]);
+  });
+});
+
+describe("the budget boot waits on", () => {
+  it("returns without touching anything once the budget is spent", async () => {
+    // Boot AWAITS this, so a git that hangs is a box that is slow to come up.
+    // One budget across every command bounds that; a job that runs out stops
+    // before starting the next one rather than leaving one going.
+    const home = flashedHome();
+    const lines: string[] = [];
+
+    const result = await clearFactoryGitIdentity({ home, budgetMs: 0, log: (m) => lines.push(m) });
+
+    expect(result.removed).toEqual([]);
+    expect(result.outcomes).toEqual({ "user.name": "failed", "user.email": "failed" });
+    expect(result.failures).toHaveLength(2);
+    for (const line of result.failures) expect(line).toMatch(/Ran out of time/);
+    expect(lines).toHaveLength(2);
+    // Nothing was started, so nothing was changed — the next boot tries again.
+    expect(globalValues(home, "user.name")).toEqual([FACTORY_GIT_IDENTITY.name]);
+    expect(globalValues(home, "user.email")).toEqual([FACTORY_GIT_IDENTITY.email]);
+  });
+
+  it("finishes a real box's cleanup well inside it", async () => {
+    const home = flashedHome();
+    const started = Date.now();
+
+    const result = await clearFactoryGitIdentity({ home, log: () => {} });
+
+    expect(result.removed).toEqual(["user.name", "user.email"]);
+    expect(Date.now() - started).toBeLessThan(FACTORY_IDENTITY_BUDGET_MS);
   });
 });
 

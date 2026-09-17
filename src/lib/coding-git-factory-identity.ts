@@ -81,6 +81,19 @@ function equalsFactoryValue(key: FactoryIdentityKey, value: string): boolean {
 /** Reading and unsetting two keys should never take this long. */
 const GIT_CONFIG_TIMEOUT_MS = 10_000;
 
+/**
+ * What the WHOLE job may spend, across every command it runs.
+ *
+ * Boot awaits this (see `register()` in src/instrumentation.ts), so a git that
+ * hangs is a box that is slow to come up. Five commands with a timeout each and
+ * no shared budget is a minute of that; one budget for all of them bounds it at
+ * twenty seconds however git misbehaves. A run that spends it stops before
+ * starting the next command rather than leaving one going: nothing is abandoned
+ * mid-flight, the keys it did not reach are reported as failures, and the next
+ * boot — three minutes later at worst, on a box that reboots — tries again.
+ */
+export const FACTORY_IDENTITY_BUDGET_MS = 20_000;
+
 /** git's own "you tried to unset an option which does not exist". Not a fault:
  *  something else removed it between the read and the write. */
 const GIT_NOTHING_TO_UNSET = 5;
@@ -107,6 +120,24 @@ function gitEnv(home: string): Record<string, string> {
   };
 }
 
+/**
+ * What is left of the budget, and what to say when there is none.
+ *
+ * A deadline rather than a per-command timeout, so the bound holds across all
+ * of them. `runChild` never outlives the timeout it is given — it SIGKILLs its
+ * own child — so passing the remainder is what makes "this function returns
+ * inside the budget" true rather than hoped for.
+ */
+type Budget = { deadlineAt: number };
+
+function budgetLeft(budget: Budget): number {
+  return budget.deadlineAt - Date.now();
+}
+
+function outOfBudgetDetail(key: FactoryIdentityKey): string {
+  return `Ran out of time before ${key} could be settled; the next boot tries again.`;
+}
+
 /** Every value the global config holds for a key — or the admission that git
  *  could not be asked, which is not the same as "the key is not set". */
 type GlobalValuesProbe =
@@ -121,9 +152,11 @@ type GlobalValuesProbe =
  * twice is exactly the box this has to clean. Every value is read, and the
  * decision below is made on all of them.
  */
-async function globalValues(home: string, key: FactoryIdentityKey): Promise<GlobalValuesProbe> {
+async function globalValues(home: string, key: FactoryIdentityKey, budget: Budget): Promise<GlobalValuesProbe> {
+  const left = budgetLeft(budget);
+  if (left <= 0) return { known: false, detail: outOfBudgetDetail(key) };
   const r = await runChild("git", ["config", "--global", "--get-all", key], {
-    timeoutMs: GIT_CONFIG_TIMEOUT_MS,
+    timeoutMs: Math.min(GIT_CONFIG_TIMEOUT_MS, left),
     env: gitEnv(home),
   });
   if (r.code === 0) {
@@ -175,12 +208,18 @@ export function factoryIdentityRemovedLine(key: FactoryIdentityKey, value: strin
  * `home` is the clawbox user's home; the web server runs as that user
  * (`config/clawbox-setup.service`: `User=clawbox`), so the default is simply
  * its own HOME, with the same `/home/clawbox` floor the resolver uses.
+ *
+ * `budgetMs` bounds the WHOLE call, not each command in it — see
+ * FACTORY_IDENTITY_BUDGET_MS. It returns inside that budget with no child of
+ * its own still running: every command is awaited, and each is given only what
+ * is left, so none can outlive the deadline and none is abandoned.
  */
 export async function clearFactoryGitIdentity(
-  options: { home?: string; log?: (message: string) => void } = {},
+  options: { home?: string; log?: (message: string) => void; budgetMs?: number } = {},
 ): Promise<FactoryGitIdentityCleanup> {
   const home = options.home ?? process.env.HOME ?? "/home/clawbox";
   const log = options.log ?? ((message: string) => console.log(message));
+  const budget: Budget = { deadlineAt: Date.now() + (options.budgetMs ?? FACTORY_IDENTITY_BUDGET_MS) };
   const outcomes = {} as Record<FactoryIdentityKey, FactoryIdentityOutcome>;
   const removed: FactoryIdentityKey[] = [];
   const failures: string[] = [];
@@ -189,7 +228,7 @@ export async function clearFactoryGitIdentity(
   // `~/.gitconfig` through git's own lock file, and two at once is one of them
   // losing to "could not lock config file" for no reason at all.
   for (const key of FACTORY_IDENTITY_KEYS) {
-    const probe = await globalValues(home, key);
+    const probe = await globalValues(home, key, budget);
     if (!probe.known) {
       outcomes[key] = "failed";
       failures.push(probe.detail);
@@ -208,11 +247,22 @@ export async function clearFactoryGitIdentity(
       continue;
     }
     const value = probe.values[probe.values.length - 1];
+    // Checked BEFORE the write, never in the middle of one: a budget that ran
+    // out is a reason not to start git, and never a reason to walk away from a
+    // `~/.gitconfig` that is being rewritten.
+    const leftToUnset = budgetLeft(budget);
+    if (leftToUnset <= 0) {
+      outcomes[key] = "failed";
+      const detail = outOfBudgetDetail(key);
+      failures.push(detail);
+      log(`[git-identity] ${detail}`);
+      continue;
+    }
     // `--unset-all`, because `--unset` refuses a key with more than one value
     // ("has multiple values") and would leave the factory identity in place on
     // precisely the config that needs it removed most.
     const unset = await runChild("git", ["config", "--global", "--unset-all", key], {
-      timeoutMs: GIT_CONFIG_TIMEOUT_MS,
+      timeoutMs: Math.min(GIT_CONFIG_TIMEOUT_MS, leftToUnset),
       env: gitEnv(home),
     });
     if (unset.code !== 0 && unset.code !== GIT_NOTHING_TO_UNSET) {
@@ -228,7 +278,11 @@ export async function clearFactoryGitIdentity(
     // and then not found by the unset — which exits 5, the code this treats as
     // "somebody else removed it". Reporting that as removed would leave the
     // factory identity on the box behind a journal line saying it was gone.
-    const after = await globalValues(home, key);
+    //
+    // A budget that runs out HERE reports the key as unsettled even though the
+    // unset returned: "git was asked and the answer was not checked" is not
+    // "removed", and the next boot finds the key absent and says so.
+    const after = await globalValues(home, key, budget);
     if (!after.known || after.values.some((value) => equalsFactoryValue(key, value))) {
       outcomes[key] = "failed";
       const detail = after.known
