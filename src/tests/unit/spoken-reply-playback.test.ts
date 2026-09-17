@@ -23,7 +23,7 @@ describe("the document's one spoken-reply speaker", () => {
     claimSpokenReply(b, "b");
     expect(a.pause).toHaveBeenCalled();
     expect(a.currentTime).toBe(0);
-    expect(currentSpokenReply()).toEqual({ src: "b", element: b });
+    expect(currentSpokenReply()).toEqual({ src: "b", element: b, detached: false });
   });
 
   it("only the holder can release", () => {
@@ -61,6 +61,17 @@ describe("the document's one spoken-reply speaker", () => {
     stopSpokenReply("a");
     stopSpokenReply();
     expect(spokenReplyInterruptions()).toBe(start + 3);
+  });
+
+  it("records whether the element is the chat's own detached one", () => {
+    // What a bubble may OFFER for the clip: a detached element's position is
+    // the chat queue's, so the bubble draws Stop and no pause for it.
+    const own = fakeElement();
+    const chats = fakeElement();
+    claimSpokenReply(own, "a");
+    expect(currentSpokenReply()?.detached).toBe(false);
+    claimSpokenReply(chats, "b", { automatic: true, detached: true });
+    expect(currentSpokenReply()?.detached).toBe(true);
   });
 
   it("tells subscribers when the speaker changes", () => {

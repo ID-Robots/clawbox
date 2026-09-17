@@ -24,6 +24,18 @@ export interface SpokenReplyPlayback {
   src: string
   /** The element making the sound. */
   element: HTMLAudioElement
+  /**
+   * The element is the chat's own detached `new Audio(src)` rather than a
+   * player a bubble rendered.
+   *
+   * It decides what the bubble may OFFER. Nothing on screen can resume a
+   * detached element where it left off — its position belongs to the chat's
+   * own queue, and the next press plays the bubble's element from the first
+   * word — so a bubble speaking through one offers Stop and no pause. A
+   * button that said "pause" and silently went back to the beginning would be
+   * naming something the box does not do.
+   */
+  detached: boolean
 }
 
 let current: SpokenReplyPlayback | null = null
@@ -57,15 +69,20 @@ export function currentSpokenReply(): SpokenReplyPlayback | null {
  * `element` has started (or is about to start) playing `src`: it takes the
  * speaker, and whatever held it is stopped. The same element claiming again
  * (a resume after a pause) changes nothing.
+ *
+ * `automatic` is about the CUT (the chat's own queue moving on rather than a
+ * person pressing something); `detached` is about the ELEMENT (see the record
+ * above). The chat's automatic playback is both; the Voice tab's sample
+ * autoplays an element a player rendered and is neither.
  */
 export function claimSpokenReply(
   element: HTMLAudioElement,
   src: string,
-  { automatic = false }: { automatic?: boolean } = {},
+  { automatic = false, detached = false }: { automatic?: boolean; detached?: boolean } = {},
 ): void {
   const previous = current
   if (previous && previous.element === element && previous.src === src) return
-  current = { src, element }
+  current = { src, element, detached }
   if (previous && previous.element !== element) {
     // Only a person's press counts as cutting in; the chat's own queue
     // displacing something must not cancel the rest of that queue.

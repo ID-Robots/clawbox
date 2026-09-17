@@ -3697,7 +3697,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Paused from outside (the owner's Stop, a release, a newer reply, a
       // bubble pressed): heard enough.
       player.addEventListener('pause', letGo, { once: true })
-      claimSpokenReply(player, src, { automatic: true })
+      claimSpokenReply(player, src, { automatic: true, detached: true })
       const started = player.play()
       // A browser that wants the gesture and the sound in the same tick
       // refuses; the bubble's own player is there for exactly that case — and

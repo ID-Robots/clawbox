@@ -384,7 +384,12 @@ export default function SpokenReplyPlayer({
   const external = useSyncExternalStore(subscribeSpokenReply, currentSpokenReply, () => null)
   // Our own element holding the speaker lands here too; the effects below
   // then simply follow it, and the callbacks tell the two apart.
-  const externalElement = external && external.src === src ? external.element : null
+  const speaker = external && external.src === src ? external : null
+  const externalElement = speaker?.element ?? null
+  // Whether the sound is coming from the chat's own detached element rather
+  // than ours. Then there is no pause to offer — see `detached` on the record
+  // — so the transport is a single Stop for as long as it speaks.
+  const detached = speaker?.detached === true
   /** The element the controls act on: the one speaking this clip, else ours. */
   const driving = useCallback(
     (): HTMLAudioElement | null => externalElement ?? audioRef.current,
@@ -434,9 +439,6 @@ export default function SpokenReplyPlayer({
   }, [src])
 
   const toggle = useCallback(() => {
-    // The automatic playback is not ours to resume later: pausing it is
-    // stopping it, and the next press plays the reply here from the start.
-    if (externalElement && externalElement !== audioRef.current) { stopSpokenReply(src); return }
     const element = audioRef.current
     if (!element) return
     if (element.paused) {
@@ -447,7 +449,7 @@ export default function SpokenReplyPlayer({
     } else {
       element.pause()
     }
-  }, [externalElement, src])
+  }, [])
 
   /**
    * Stop: silence now and back to the start, so the next press plays the
@@ -546,29 +548,20 @@ export default function SpokenReplyPlayer({
         onError={() => { setFailedSrc(src); onError?.() }}
         style={{ display: 'none' }}
       />
-      <button
-        type="button"
-        className="spoken-reply-play"
-        data-testid="spoken-reply-play"
-        onClick={toggle}
-        disabled={failed}
-        // The verb of the NEXT press, in front of the name the caller computed.
-        aria-label={`${verb} ${label}`}
-        title={verb}
-      >
-        <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 18 }}>
-          {playing ? 'pause' : 'play_arrow'}
-        </span>
-      </button>
-      {/* Stop, only while the reply is actually speaking: one press silences
-          it and puts it back to the start. Beside play rather than instead of
-          it, because pause (keep my place) and stop (I have heard enough) are
-          different wishes — and a reply the chat started on its own has no
-          place to keep. */}
-      {playing && (
+      {/* The transport. A reply the CHAT is speaking through its own detached
+          element (see `detached` on the playback record) gets a single Stop:
+          that element's position is the chat queue's, not this bubble's, so
+          there is no pause here that could be honoured and a button reading
+          "pause" that silently went back to the beginning would be naming
+          something the box does not do. The bubble's OWN playback gets both,
+          because pause (keep my place) and stop (I have heard enough) are
+          different wishes and it can keep either promise. */}
+      {detached ? (
         <button
           type="button"
-          className="spoken-reply-play spoken-reply-stop"
+          // The PRIMARY transport dress (coral), not the quieter `-stop` one:
+          // here it is the only control there is, not a second one beside play.
+          className="spoken-reply-play"
           data-testid="spoken-reply-stop"
           onClick={stop}
           aria-label={`${t('chat.audioStop')} ${label}`}
@@ -576,6 +569,35 @@ export default function SpokenReplyPlayer({
         >
           <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 18 }}>stop</span>
         </button>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="spoken-reply-play"
+            data-testid="spoken-reply-play"
+            onClick={toggle}
+            disabled={failed}
+            // The verb of the NEXT press, in front of the name the caller computed.
+            aria-label={`${verb} ${label}`}
+            title={verb}
+          >
+            <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 18 }}>
+              {playing ? 'pause' : 'play_arrow'}
+            </span>
+          </button>
+          {playing && (
+            <button
+              type="button"
+              className="spoken-reply-play spoken-reply-stop"
+              data-testid="spoken-reply-stop"
+              onClick={stop}
+              aria-label={`${t('chat.audioStop')} ${label}`}
+              title={t('chat.audioStop')}
+            >
+              <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 18 }}>stop</span>
+            </button>
+          )}
+        </>
       )}
       {/* A clip the element could not load says so, in the place the shape
           would have been, and the transport goes with it: a control that is

@@ -598,8 +598,10 @@ describe("spoken replies in the desktop chat", () => {
     const stop = await screen.findByTestId("spoken-reply-stop");
     const detached = play.mock.contexts[play.mock.contexts.length - 1] as HTMLMediaElement;
     expect(media.isPlaying(detached)).toBe(true);
-    // The bubble says what is happening: pressing play/pause would pause.
-    expect(screen.getByTestId("spoken-reply-play")).toHaveAccessibleName(/^chat\.audioPause /);
+    // Stop is the whole transport while the chat's own element speaks: its
+    // position belongs to the chat's queue, so there is no pause to offer.
+    expect(stop).toHaveAccessibleName(/^chat\.audioStop /);
+    expect(screen.queryByTestId("spoken-reply-play")).toBeNull();
 
     fireEvent.click(stop);
     expect(media.isPlaying(detached)).toBe(false);

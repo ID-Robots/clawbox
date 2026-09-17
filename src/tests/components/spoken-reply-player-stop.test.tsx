@@ -65,6 +65,7 @@ function twoReplies() {
     return {
       audio: root.getByTestId("chat-audio") as HTMLAudioElement,
       play: () => root.getByTestId("spoken-reply-play"),
+      maybePlay: () => root.queryByTestId("spoken-reply-play"),
       stop: () => root.queryByTestId("spoken-reply-stop"),
     };
   };
@@ -121,20 +122,26 @@ describe("stopping a spoken reply", () => {
     const { a, b } = twoReplies();
     const automatic = new Audio("/clip-a.wav");
     act(() => {
-      claimSpokenReply(automatic, "/clip-a.wav", { automatic: true });
+      claimSpokenReply(automatic, "/clip-a.wav", { automatic: true, detached: true });
       void automatic.play();
     });
-    // The bubble for THAT clip reads as playing and offers Stop; the other
-    // bubble is untouched.
+    // The bubble for THAT clip offers Stop — and ONLY Stop, because that
+    // element's position is the chat queue's and no pause here could be
+    // honoured. The other bubble is untouched.
     await waitFor(() => expect(a.stop()).not.toBeNull());
-    expect(a.play()).toHaveAccessibleName("chat.audioPause A");
+    expect(a.stop()).toHaveAccessibleName("chat.audioStop A");
+    expect(a.maybePlay()).toBeNull();
     expect(b.stop()).toBeNull();
+    expect(b.maybePlay()).not.toBeNull();
 
     fireEvent.click(a.stop()!);
     expect(isPlaying(automatic)).toBe(false);
+    expect(automatic.currentTime).toBe(0);
     await waitFor(() => expect(a.stop()).toBeNull());
-    // The bubble's own player plays it again.
+    // The transport comes back, and the bubble's own player plays the reply
+    // again from its first word.
     fireEvent.click(a.play());
     await waitFor(() => expect(isPlaying(a.audio)).toBe(true));
+    expect(a.audio.currentTime).toBe(0);
   });
 });
