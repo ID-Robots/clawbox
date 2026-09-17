@@ -338,6 +338,12 @@ interface ChatModelState {
      * the only fix, so the row must not say "set up in Settings" — that sends
      * the owner to re-enter something they already have. */
     reauthRequired?: boolean
+    /** The reasoning-effort levels the GATEWAY published for this model, off
+     * its own `models.list` (see `readGatewayThinkingLevels` in
+     * setup-api/chat/model/route.ts). Optional, and ABSENT is not "none": a
+     * gateway that could not be asked, or a core too old to send the field,
+     * leaves the header on ClawBox's local table. */
+    thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
   local: { available: boolean; label: string | null; model: string | null }
@@ -1449,9 +1455,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
     return activeOption?.model ?? chatModelState.activeModel ?? null
   }, [chatModelState])
+  // What the gateway itself says the ACTIVE model takes, when the box has one
+  // to ask. Memoised on the row rather than on the whole state, which is
+  // replaced on every poll.
+  const headerThinkingLevels = useMemo<string[] | undefined>(() => {
+    if (!chatModelState) return undefined
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    return activeOption?.thinkingLevels
+  }, [chatModelState])
   const reasoningConfig = useMemo<ProviderReasoningConfig>(
-    () => getProviderReasoningConfig(headerProvider, headerModel),
-    [headerProvider, headerModel],
+    () => getProviderReasoningConfig(headerProvider, headerModel, headerThinkingLevels),
+    [headerProvider, headerModel, headerThinkingLevels],
   )
   const visibleThinkingLevels = reasoningConfig.levels
   // Snap the displayed value to a level the active provider actually
@@ -2127,7 +2143,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // reasoning-capable model is folded to the local model's `off`) and returns
     // null while the provider is still unknown (catalog loading) so we hold the
     // push rather than sending a speculative value the gateway would reject.
-    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel, headerModel)
+    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel, headerModel, headerThinkingLevels)
     if (wireLevel === null) return
     // Reconcile legacy Pro session pins even when the device default is
     // already Flash. The gateway owns this write and preserves the transcript.
@@ -2167,7 +2183,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
     })
   // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
-  }, [status, headerProvider, headerModel, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
+  }, [status, headerProvider, headerModel, headerThinkingLevels, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -2180,13 +2196,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // A persisted user choice is per provider and still wins.
   useEffect(() => {
     if (!headerProvider) return
-    const cfg = getProviderReasoningConfig(headerProvider, headerModel)
+    const cfg = getProviderReasoningConfig(headerProvider, headerModel, headerThinkingLevels)
     const persisted = readPersistedThinkingLevel(headerProvider, cfg)
     if (thinkingLevelRef.current !== persisted) applyThinkingLevel(persisted)
-  }, [headerProvider, headerModel, applyThinkingLevel])
+  }, [headerProvider, headerModel, headerThinkingLevels, applyThinkingLevel])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
-    const cfg = getProviderReasoningConfig(headerProvider, headerModel)
+    const cfg = getProviderReasoningConfig(headerProvider, headerModel, headerThinkingLevels)
     const normalized: ThinkingLevel = cfg.levels.includes(next as ThinkingLevel)
       ? (next as ThinkingLevel)
       : cfg.default
@@ -2203,7 +2219,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (headerProvider) {
       try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, normalized) } catch { /* localStorage unavailable */ }
     }
-  }, [headerProvider, headerModel, applyThinkingLevel])
+  }, [headerProvider, headerModel, headerThinkingLevels, applyThinkingLevel])
 
   // Connect to gateway
   const connectionGenerationRef = useRef(0)

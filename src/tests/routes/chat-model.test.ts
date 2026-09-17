@@ -20,6 +20,16 @@ vi.mock("@/lib/config-store", () => ({
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
+// The picker asks the gateway for each model's own reasoning-effort levels
+// (`models.list`) over the in-process socket. Mocked so a suite can hand it the
+// gateway's real answer, and unavailable by default — which is the fallback
+// path every other case here exercises.
+const { gatewayWsCallMock } = vi.hoisted(() => ({ gatewayWsCallMock: vi.fn() }));
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()),
+  gatewayWsCall: gatewayWsCallMock,
+}));
+
 // The catalogue is told out-of-band when the plugin gate changes the provider
 // set; the real module forks `openclaw models list`.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
@@ -27,6 +37,10 @@ vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // The picker asks the gateway for each model's own thinking levels; every
+  // case here is a box with none reachable, which is the fallback the local
+  // reasoning table exists for.
+  gatewayIsAbsent: vi.fn(() => true),
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
@@ -88,7 +102,7 @@ vi.mock("@/lib/ollama-capabilities", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, gatewayIsAbsent, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
@@ -1433,6 +1447,94 @@ describe("/setup-api/chat/model", () => {
     expect((await response.json()).error).toContain("not a chat model");
     expect(runOpenclawConfigSet).not.toHaveBeenCalled();
     expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  // M2 of the 2026-09-17 review. ClawBox kept a hand-written table of which
+  // provider offers which reasoning-effort levels, plus a regex for the Claude
+  // models that refuse `off`; the gateway publishes the fact natively, per
+  // MODEL, on every row of `models.list` (`thinkingLevels: [{ id, label }]`,
+  // built by `resolveEffectiveThinkingProfile` at v2026.9.3). With the
+  // in-process socket that read costs milliseconds, which is exactly the
+  // constraint that justified the local table alone.
+  describe("the reasoning levels the gateway itself publishes", () => {
+    const pairedBox = () => {
+      vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "anthropic" });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "api_key" } } },
+        agents: { defaults: { model: { primary: "anthropic/claude-mythos-preview" } } },
+      } as never);
+    };
+
+    it("stamps the active row with what models.list said", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          {
+            id: "claude-mythos-preview",
+            provider: "anthropic",
+            thinkingLevels: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+            ],
+          },
+          { id: "gpt-5.5", provider: "openai", thinkingLevels: [{ id: "off", label: "Off" }] },
+        ],
+      });
+      pairedBox();
+
+      const body = await (await GET()).json();
+
+      expect(gatewayWsCallMock).toHaveBeenCalledWith("models.list", {}, expect.anything());
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toEqual(["low", "medium", "high"]);
+      // `off` is not among them, which is the whole point: the chat's safe
+      // start value IS `off` and the gateway refuses it for this model.
+      expect(anthropic.thinkingLevels).not.toContain("off");
+    });
+
+    it("says nothing at all when the gateway could not be asked", async () => {
+      // Absent is NOT "no levels": the header falls back to the local table,
+      // which is a correct answer, and inventing an empty list would take
+      // every effort control away on a box whose gateway was restarting.
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      const { GatewayWsUnavailableError } = await import("@/lib/openclaw-gateway-ws");
+      gatewayWsCallMock.mockRejectedValue(new GatewayWsUnavailableError("gateway connect timed out"));
+      pairedBox();
+
+      const body = await (await GET()).json();
+
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic).toBeDefined();
+      expect(anthropic.thinkingLevels).toBeUndefined();
+    });
+
+    it("never asks a box that runs no gateway", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(true);
+      pairedBox();
+
+      await GET();
+
+      expect(gatewayWsCallMock).not.toHaveBeenCalled();
+    });
+
+    it("survives a row shape it does not recognise", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          null,
+          "not a row",
+          { id: "claude-mythos-preview" },
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: "nope" },
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: [{ label: "no id" }] },
+        ],
+      });
+      pairedBox();
+
+      const body = await (await GET()).json();
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toBeUndefined();
+    });
   });
 
   // The UI sweep of 2026-09-07: the picker offered "Ollama Local" backed by

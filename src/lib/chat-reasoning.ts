@@ -93,7 +93,20 @@ export const FALLBACK_REASONING_CONFIG: ProviderReasoningConfig = {
 //   (use minimal|low|medium|adaptive|high|xhigh|max)
 // Offering "off" for these was a control the gateway could only refuse, and
 // the chat's safe start value IS "off", so every fresh session hit it.
-const CLAUDE_MANDATORY_THINKING_RE = /claude-(fable|mythos)-5/i;
+//
+// Transcribed from the core's own predicate at v2026.9.3
+// (`requiresClaudeMandatoryAdaptiveThinking`,
+// `packages/llm-core/src/model-contracts/anthropic.ts`), which is
+//   resolveClaudeFable5ModelIdentity(ref) !== undefined
+//   || resolveClaudeMythos5ModelIdentity(ref) !== undefined
+//   || /(?:^|-)claude-mythos-preview(?=$|[^a-z0-9])/.test(modelId)
+// — the first two being `/(?:^|-)claude-fable-5(?=$|[^a-z0-9])/` and
+// `/(?:^|-)claude-mythos-5(?=$|[^a-z0-9])/`. Three things the hand-written
+// `/claude-(fable|mythos)-5/i` got wrong: it missed `claude-mythos-preview`
+// altogether (a box pinned to it was offered "Off", started at `off`, and the
+// gateway refused every fresh session), it had no LEADING boundary, and it had
+// no TRAILING one — so `claude-fable-50` matched.
+const CLAUDE_MANDATORY_THINKING_RE = /(?:^|-)claude-(?:fable-5|mythos-(?:5|preview))(?=$|[^a-z0-9])/i;
 const MANDATORY_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high"];
 
 function requiresMandatoryThinking(provider: string, model: string | null | undefined): boolean {
@@ -102,15 +115,58 @@ function requiresMandatoryThinking(provider: string, model: string | null | unde
   return (provider === "anthropic" || model.startsWith("anthropic/")) && CLAUDE_MANDATORY_THINKING_RE.test(bare);
 }
 
+/**
+ * What the GATEWAY says this model's thinking levels are, when it has been
+ * asked.
+ *
+ * HARNESS-FIRST. The gateway publishes this natively: every row of a
+ * `models.list` result carries `thinkingLevels: [{ id, label }]`, built from
+ * `resolveEffectiveThinkingProfile` (`src/gateway/server-methods/models-list-result.ts`
+ * at v2026.9.3, schema in `packages/gateway-protocol/src/schema/agents-models-skills.ts`).
+ * `/setup-api/chat/model` now asks for it over the in-process socket, which
+ * costs milliseconds — the constraint that justified the local table alone —
+ * and hands it to the header as `thinkingLevels` on the active option.
+ *
+ * INTERSECTED with ClawBox's uniform ladder rather than adopted whole. The
+ * product decision above is that the picker looks the same on every provider:
+ * the gateway's list decides what is REFUSABLE, ClawBox's decides what is
+ * OFFERED, and the answer is what both agree on. An empty intersection means
+ * the model runs on levels ClawBox does not offer at all — the mandatory-
+ * thinking case, among others — so the gateway's own first level is taken and
+ * the ladder's default is clamped into it.
+ *
+ * Absent or unusable (an old core, a gateway that was down, the Hermes SKU),
+ * the local table below answers exactly as it did.
+ */
+export function intersectWithLadder(
+  ladder: ProviderReasoningConfig,
+  gatewayLevels: readonly string[] | null | undefined,
+): ProviderReasoningConfig {
+  if (!Array.isArray(gatewayLevels) || gatewayLevels.length === 0) return ladder;
+  const supported = gatewayLevels.filter(isThinkingLevel);
+  if (supported.length === 0) return ladder;
+  const levels = ladder.levels.filter((level) => supported.includes(level));
+  if (levels.length === 0) {
+    // Nothing in common: offer what the gateway will actually take, narrowed to
+    // the ladder's own order so the control still reads left-to-right the way
+    // every other provider's does.
+    const ordered = UNIFORM_LEVELS.filter((level) => supported.includes(level));
+    const only = ordered.length > 0 ? ordered : [supported[0]];
+    return { levels: only, default: only.includes(ladder.default) ? ladder.default : only[0] };
+  }
+  return { levels, default: levels.includes(ladder.default) ? ladder.default : levels[0] };
+}
+
 export function getProviderReasoningConfig(
   provider: string | null | undefined,
   model?: string | null,
+  gatewayLevels?: readonly string[] | null,
 ): ProviderReasoningConfig {
   if (!provider) return FALLBACK_REASONING_CONFIG;
-  if (requiresMandatoryThinking(provider, model)) {
-    return { levels: MANDATORY_THINKING_LEVELS, default: "medium" };
-  }
-  return REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG;
+  const ladder = requiresMandatoryThinking(provider, model)
+    ? { levels: MANDATORY_THINKING_LEVELS, default: "medium" as ThinkingLevel }
+    : REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG;
+  return intersectWithLadder(ladder, gatewayLevels);
 }
 
 // The single level that is always safe to send: every provider config includes
@@ -137,9 +193,10 @@ export function resolveWireThinkingLevel(
   provider: string | null | undefined,
   desired: ThinkingLevel,
   model?: string | null,
+  gatewayLevels?: readonly string[] | null,
 ): ThinkingLevel | null {
   if (!provider) return null;
-  const cfg = getProviderReasoningConfig(provider, model);
+  const cfg = getProviderReasoningConfig(provider, model, gatewayLevels);
   return cfg.levels.includes(desired) ? desired : cfg.default;
 }
 

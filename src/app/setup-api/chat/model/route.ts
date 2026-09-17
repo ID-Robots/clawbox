@@ -3,6 +3,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
 import {
+  gatewayIsAbsent,
   inferConfiguredLocalModel,
   readConfig,
   readConfigStrict,
@@ -41,6 +42,7 @@ import {
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { GatewayWsUnavailableError, gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import {
   forgetClawboxAiPickIfMovedOff,
@@ -103,7 +105,76 @@ interface ChatModelOption {
    * be routed until the owner signs in again (src/lib/chatgpt-subscription.ts).
    */
   reauthRequired?: true;
+  /**
+   * The reasoning-effort levels the GATEWAY says this model takes, from its own
+   * `models.list` (see {@link readGatewayThinkingLevels}). Absent whenever the
+   * gateway could not be asked, which is not the same as "none": the header
+   * falls back to ClawBox's local table then, exactly as it always did.
+   */
+  thinkingLevels?: string[];
 }
+
+/**
+ * What the gateway says each model's reasoning-effort levels are.
+ *
+ * HARNESS-FIRST. ClawBox kept a hand-written table of which provider offers
+ * which effort levels (`REASONING_BY_PROVIDER` in src/lib/chat-reasoning.ts)
+ * plus a regex for the Claude models that refuse `off`. The gateway publishes
+ * the fact natively, per MODEL rather than per provider: every row of a
+ * `models.list` result carries `thinkingLevels: [{ id, label }]`, built by
+ * `resolveEffectiveThinkingProfile`
+ * (`src/gateway/server-methods/models-list-result.ts` at v2026.9.3; schema at
+ * `packages/gateway-protocol/src/schema/agents-models-skills.ts`). It is the
+ * same source the gateway then judges a `thinkingLevel` against, so a level it
+ * publishes is a level it will take.
+ *
+ * Asked over the in-process socket, which is what makes this affordable: the
+ * local table exists because the answer used to cost a ~3 s CLI start, and
+ * `gatewayWsCall` costs milliseconds. Never fatal — the map is a decoration on
+ * the rows, and a box with no gateway (the Hermes SKU), one that is still
+ * booting, or a core too old to send the field all answer an empty map and the
+ * local table stands. That is deliberately a FALLBACK and not a second source
+ * of truth: `intersectWithLadder` takes what the two agree on.
+ */
+async function readGatewayThinkingLevels(): Promise<Map<string, string[]>> {
+  const byRef = new Map<string, string[]>();
+  let payload: Record<string, unknown>;
+  try {
+    if (gatewayIsAbsent()) return byRef;
+    payload = await gatewayWsCall("models.list", {}, { timeoutMs: GATEWAY_MODELS_LIST_TIMEOUT_MS });
+  } catch (err) {
+    // A gateway that is down or still booting is the ordinary case on a box
+    // that has just restarted one, and it is not worth a line per poll. The
+    // whole read is inside the catch — including the edition probe — because
+    // this is a DECORATION on the picker's rows and must never be the reason
+    // the owner cannot see which model the box runs.
+    if (!(err instanceof GatewayWsUnavailableError)) {
+      console.warn("[chat/model] gateway models.list refused; using the local reasoning table");
+    }
+    return byRef;
+  }
+  const models = payload.models;
+  if (!Array.isArray(models)) return byRef;
+  for (const row of models) {
+    if (!row || typeof row !== "object") continue;
+    const { id, provider, thinkingLevels } = row as {
+      id?: unknown; provider?: unknown; thinkingLevels?: unknown;
+    };
+    if (typeof id !== "string" || typeof provider !== "string") continue;
+    if (!Array.isArray(thinkingLevels)) continue;
+    const levels = thinkingLevels
+      .map((level) => (level && typeof level === "object" ? (level as { id?: unknown }).id : undefined))
+      .filter((level): level is string => typeof level === "string" && level.length > 0);
+    if (levels.length === 0) continue;
+    byRef.set(`${provider}/${id}`.toLowerCase(), levels);
+  }
+  return byRef;
+}
+
+/** The picker's read is on the owner's click path, and the local table is a
+ *  correct answer — so a gateway mid-restart is waited on briefly, not for the
+ *  default ten seconds. */
+const GATEWAY_MODELS_LIST_TIMEOUT_MS = 2_000;
 
 const PROVIDER_LABELS: Record<string, string> = {
   clawai: "ClawBox AI",
@@ -482,10 +553,11 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
  * so one request reads openclaw.json once; GET reads it here.
  */
 async function loadChatModelState(preloaded?: OpenClawConfig) {
-  const [configStore, openclawConfig, storedPrimaryModel] = await Promise.all([
+  const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
+    readGatewayThinkingLevels(),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
   // Subscription-only providers, computed ONCE: the row attribution below and
@@ -588,6 +660,10 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     // first row to claim a model keeps the bare id; a later one is qualified,
     // so no two rows collide.
     const claimed = [...configuredPrimaryOptions.values()].some((option) => option.id === trimmedModel);
+    // The gateway's answer for THIS model, keyed by the ref the row carries.
+    // Absent means "not asked or not known", never "no levels" — the header
+    // falls back to the local ladder then.
+    const thinkingLevels = gatewayThinkingLevels.get(trimmedModel.toLowerCase());
     configuredPrimaryOptions.set(provider, {
       id: claimed ? `${provider}:${trimmedModel}` : trimmedModel,
       label,
@@ -596,6 +672,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
       available: true,
       settingsSection: "ai",
       isLocal: false,
+      ...(thinkingLevels ? { thinkingLevels } : {}),
     });
   };
 
@@ -723,6 +800,12 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
         available: true,
         settingsSection: "localAi",
         isLocal: true,
+        // The local model's levels are the gateway's to state too: llama.cpp
+        // takes `off` alone, and the hard-coded row for it here says the same
+        // thing only for as long as that stays true of every local model.
+        ...(gatewayThinkingLevels.has(localModel.toLowerCase())
+          ? { thinkingLevels: gatewayThinkingLevels.get(localModel.toLowerCase())! }
+          : {}),
       }
     : {
         id: "__setup_local__",
