@@ -865,18 +865,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
-  // Phone composer: whether the folded provider/model/effort pills are shown,
-  // and whether there are any to fold (a ClawBox AI chat can have none).
-  const [pickersOpen, setPickersOpen] = useState(false)
-  const pillsRef = useRef<HTMLDivElement | null>(null)
-  const [hasPills, setHasPills] = useState(false)
-  // No dependency list on purpose: the pills are rendered by several branches
-  // below, so re-measure after every commit; it only sets state on a change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    const next = (pillsRef.current?.childElementCount ?? 0) > 0
-    if (next !== hasPills) setHasPills(next)
-  })
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -5693,15 +5681,75 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
 
   const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
-
-  // The microphone. Compact (36px, in the composer's button row) on a big
-  // screen; LARGE on a phone — a 72px round button beside the text box, bottom
-  // right where the thumb already is, because on a phone voice is often the
-  // whole interaction (the owner talks to the box while driving) and a 36px
-  // icon among four others is a target you have to look at to hit. Same
-  // handlers, same disabled rule and the same test ids either way; only the
-  // size and the recording state's weight differ — the large one turns solid
-  // red with a stop square and a pulsing ring, readable at a glance.
+  // Shared actions retain the same behaviour in both responsive layouts.
+  const renderAttachmentButton = () => (
+    (caps.canAttachImages || caps.canAttachDocuments) && (
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        disabled={status !== 'connected'}
+        title={tr('chat.attachFile', 'Attach file')}
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
+          cursor: status === 'connected' ? 'pointer' : 'default',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'all 0.15s',
+        }}
+        onMouseEnter={(e) => { if (status === 'connected') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
+      </button>
+    )
+  )
+  const renderSendButton = () => (
+    sending ? (
+      <button
+        onClick={abort}
+        title={t("chat.stop")}
+        aria-label={t("chat.stop")}
+        data-testid="chat-stop"
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: 'rgba(239,68,68,0.2)', color: '#ef4444',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'background 0.15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.35)'}
+        onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+        </svg>
+      </button>
+    ) : (
+      <button
+        onClick={sendMessage}
+        disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
+        title={t("chat.send")}
+        aria-label={t("chat.send")}
+        data-testid="chat-send"
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
+          color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
+          cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'all 0.15s',
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
+        </svg>
+      </button>
+    )
+  )
+  // Keep recording/transcription controls reachable even if a draft changes.
+  const mobileVoiceAction = caps.canTranscribe && (
+    voice.state === 'recording' || voice.state === 'requesting' || voice.state === 'transcribing'
+    || (!sending && !input.trim() && attachments.length === 0)
+  )
+  // Compact desktop mic; 44px in-flow phone target with shared recording feedback.
   const renderVoiceButton = (large: boolean) => {
     if (voice.state === 'recording') {
       return (
@@ -6916,22 +6964,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
       )}
 
-      {/* Composer — the shape people know from Claude's own UI: the text
-          box on top, full width, and one row under it with the attach,
-          microphone and picture buttons on the left and, on the right, the
-          provider / model / effort pills beside the send button. */}
+      {/* Desktop keeps the full-width text box over its action/settings row.
+          Phones put attachment and mic/send beside the text, settings below. */}
       <div
         data-testid="chat-composer"
-        data-pickers-open={mobile && pickersOpen ? true : undefined}
+        className="chat-composer"
         style={{
         padding: mobile ? '10px 12px 10px' : '10px 14px 10px',
         borderTop: (attachments.length > 0 || showNewApp) ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
-        {/* On a phone the microphone leaves the button row and stands beside
-            the text box at thumb size — see renderVoiceButton. */}
-        <div style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 10 } : { display: 'contents' }}>
+        {/* Primary phone row: attachment, text, then microphone or send/stop. */}
+        <div className="chat-composer-primary" style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
+        {mobile && renderAttachmentButton()}
         <textarea
           ref={inputRef}
           value={input}
@@ -6964,7 +7010,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
-        {caps.canTranscribe && mobile && renderVoiceButton(true)}
+        {mobile && (mobileVoiceAction ? renderVoiceButton(true) : renderSendButton())}
         </div>
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
@@ -6975,24 +7021,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             into the user's own bubble and then dropped, so the customer sees
             their screenshot in the transcript and an answer that never looked
             at it. */}
-        {(caps.canAttachImages || caps.canAttachDocuments) && (
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={status !== 'connected'}
-          title={tr('chat.attachFile', 'Attach file')}
-          style={{
-            width: 36, height: 36, borderRadius: 10, border: 'none',
-            background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
-            cursor: status === 'connected' ? 'pointer' : 'default',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0, transition: 'all 0.15s',
-          }}
-          onMouseEnter={(e) => { if (status === 'connected') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
-        </button>
-        )}
+        {!mobile && renderAttachmentButton()}
         {/* Voice input. Shown wherever the box has something to transcribe WITH
             — the route itself is edition-neutral, so what actually decides is
             whether this device holds a ClawBox AI credential. Offering the
@@ -7063,26 +7092,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               paperclip with the whole width empty beside it. Sharing one basis
               (the pills' plus the gap plus the button) makes the break happen
               in front of both or neither, at 3, 4 or 5 buttons. */}
-          {/* Phone: the provider / model / effort pills are a secondary
-              setting, folded behind one button so the row under the text box
-              is attach, create, pickers … send, all one size. Opening it lays
-              the pills out as a full-width row of their own (globals.css,
-              [data-chat-mobile]); every picker is still one tap away. */}
-          {mobile && hasPills && (
-            <button
-              type="button"
-              onClick={() => setPickersOpen(o => !o)}
-              aria-expanded={pickersOpen}
-              aria-label={t("chat.modelPickers")}
-              title={t("chat.modelPickers")}
-              data-testid="chat-pickers-toggle"
-              className="chat-pickers-toggle"
-            >
-              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>tune</span>
-            </button>
-          )}
           <div className="chat-composer-tail">
-          <div ref={pillsRef} className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
+          <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
             // below — provider → model (scoped to it) → thinking effort. Every
@@ -7377,46 +7388,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           )}
           </>)}
         </div>
-        {sending ? (
-          <button
-            onClick={abort}
-            title={t("chat.stop")}
-            aria-label={t("chat.stop")}
-            data-testid="chat-stop"
-            style={{
-              width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: 'rgba(239,68,68,0.2)', color: '#ef4444',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'background 0.15s',
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.35)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
-          </button>
-        ) : (
-          <button
-            onClick={sendMessage}
-            disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
-            title={t("chat.send")}
-            aria-label={t("chat.send")}
-            data-testid="chat-send"
-            style={{
-              width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
-              color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
-              cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'all 0.15s',
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
-            </svg>
-          </button>
-        )}
+        {!mobile && renderSendButton()}
         </div>
         </div>
       </div>

@@ -391,9 +391,8 @@ h6 {
  * and a readable pill row no longer fit on one line, the pills take a line of
  * their own — see .chat-header-pills' flex-basis, which is what decides when
  * that happens. */
-/* The phone chat's microphone: 72px, round, beside the text box. Solid orange
- * at rest, solid red with a pulsing ring while it records, so the state reads
- * at a glance from arm's length. See renderVoiceButton in ChatPopup.tsx. */
+/* Phone voice feedback. The composer rules below size this in-flow target to
+ * 44px; the recording state stays red with a reduced-motion-aware pulse. */
 .chat-voice-large {
   width: 72px;
   height: 72px;
@@ -2148,53 +2147,37 @@ input[type="range"].appearance-none::-moz-range-track {
   }
 }
 
-/* Phone chat composer (ChatPopup, mobile). Two tidy rows instead of three
- * ragged ones: the text box beside the big microphone (the primary action),
- * then ONE row of equal 40px buttons — attach, create, picture, the pickers
- * toggle — with Send (or Stop) pinned right. The provider / model / effort
- * pills fold behind the toggle and, when opened, take a full-width row of
- * their own under it, each pill an equal share. `display: contents` on the
- * tail lets the pills and Send be ordered as members of the row itself. */
-@media (max-width: 767px) {
-  [data-chat-mobile] .chat-voice-large { width: 64px; height: 64px; flex-basis: 64px; }
-  [data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 32px !important; }
-  [data-chat-mobile] .chat-composer-row { flex-wrap: wrap; gap: 8px; }
-  [data-chat-mobile] .chat-composer-tail { display: contents; }
-  [data-chat-mobile] .chat-composer-row > button,
-  [data-chat-mobile] .chat-composer-tail > button {
-    width: 40px !important;
-    height: 40px !important;
-    border-radius: 12px !important;
-  }
-  [data-chat-mobile] [data-testid="chat-send"],
-  [data-chat-mobile] [data-testid="chat-stop"] { margin-left: auto; }
-  [data-chat-mobile] .chat-header-pills {
-    display: none;
-    order: 10;
-    flex: 1 0 100%;
-    gap: 8px;
-  }
-  [data-chat-mobile] [data-pickers-open] .chat-header-pills { display: flex; }
-  [data-chat-mobile] .chat-header-pills .header-dropdown { flex: 1 1 0; }
-  [data-chat-mobile] .chat-header-pills .header-dropdown-trigger {
-    width: 100%;
-    max-width: none !important;
-    min-height: 40px;
-    font-size: 12.5px;
-    border-radius: 12px;
-  }
-  .chat-pickers-toggle {
-    border: none;
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    cursor: pointer;
-  }
-  .chat-pickers-toggle[aria-expanded="true"] {
-    background: rgba(249, 115, 22, 0.2);
-    color: #f97316;
-  }
+/* Phone composer: one in-flow primary row and one settings row.
+ * Scope to the component's mobile mode (also used in phone landscape), not
+ * only viewport width. Desktop geometry and button sizes remain unchanged. */
+[data-chat-mobile] .chat-composer { flex-shrink: 0; }
+[data-chat-mobile] .chat-composer-primary { min-width: 0; }
+[data-chat-mobile] .chat-composer-primary > button {
+  width: 44px !important;
+  height: 44px !important;
+  flex: 0 0 44px;
+  border-radius: 12px !important;
+}
+[data-chat-mobile] .chat-composer-primary textarea {
+  font-size: 16px !important;
+  min-height: 44px;
+  padding: 10px 12px !important;
+}
+[data-chat-mobile] .chat-voice-large { box-shadow: none; }
+[data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 24px !important; }
+[data-chat-mobile] .chat-composer-row { flex-wrap: nowrap; gap: 6px; min-width: 0; }
+[data-chat-mobile] .chat-composer-row > button {
+  width: 36px !important;
+  height: 40px !important;
+  border-radius: 12px !important;
+}
+[data-chat-mobile] .chat-composer-tail { flex: 1 1 0; min-width: 0; }
+[data-chat-mobile] .chat-header-pills { gap: 4px; flex: 1 1 0; }
+[data-chat-mobile] .chat-header-pills .header-dropdown { flex: 1 1 0; }
+[data-chat-mobile] .chat-header-pills .header-dropdown-trigger {
+  width: 100%;
+  max-width: none !important;
+  min-height: 40px;
+  font-size: 12.5px;
+  border-radius: 12px;
 }

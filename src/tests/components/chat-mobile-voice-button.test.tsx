@@ -215,7 +215,7 @@ describe("the phone chat's microphone", () => {
     resetHarnessCache();
   });
 
-  it("is the large, thumb-sized button beside the text box on a phone", async () => {
+  it("is the touch microphone beside the text box on a phone", async () => {
     installFetch("hello");
     render(<ChatPopup isOpen onClose={() => {}} mobile />);
     const record = await readyToRecord();
@@ -227,6 +227,30 @@ describe("the phone chat's microphone", () => {
     expect(record.parentElement).toContainElement(screen.getByRole("textbox"));
     // Exactly one microphone — the compact one is not drawn as well.
     expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
+  });
+
+  it("swaps the idle microphone for Send while typing and restores it when cleared", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "A typed question" } });
+    expect(screen.queryByTestId("voice-record")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-send")).toBeEnabled();
+    expect(input.parentElement).toContainElement(screen.getByTestId("chat-send"));
+    fireEvent.change(input, { target: { value: "" } });
+    expect(screen.getByTestId("voice-record")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-send")).not.toBeInTheDocument();
+  });
+
+  it("does not hide the recording stop action when text is entered", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    fireEvent.click(await readyToRecord());
+    await screen.findByTestId("voice-stop");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Draft during capture" } });
+    expect(screen.getByTestId("voice-stop")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-send")).not.toBeInTheDocument();
   });
 
   it("turns into the large stop button while it records, and records through the same flow", async () => {
