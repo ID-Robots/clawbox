@@ -125,6 +125,13 @@ describe("/setup-api/chat/model", () => {
     // default box with no gateway to ask.
     vi.mocked(gatewayIsAbsent).mockReturnValue(true);
     gatewayWsCallMock.mockReset();
+    // Implementations too, not only call history: the Anthropic ordering
+    // suite replaces these two, and nothing restored them for the tests after
+    // it — a ChatGPT case could run against a batch that refuses to forward.
+    vi.mocked(readConfigStrict).mockReset().mockResolvedValue({} as never);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockImplementation(async (ops) => {
+      for (const op of ops) await vi.mocked(runOpenclawConfigSet)(op);
+    });
 
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);
