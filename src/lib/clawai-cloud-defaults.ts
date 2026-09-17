@@ -332,6 +332,13 @@ async function promote(capability: CloudCapability, voice: VoiceSnapshot): Promi
  * restart of the harness the owner may be mid-conversation with is a far worse
  * trade than a channel order that lands a few seconds later. The owner's own
  * change through `/setup-api/stt` still restarts, as it always did.
+ *
+ * Nothing here re-checks that the box is LINKED, and it does not have to: the
+ * caller only reaches a capability whose `target` is the cloud, which for
+ * transcription is `facts.linked` itself. What makes a stale `cloud` in the
+ * store harmless in the other direction — an owner who unlinks, or a credential
+ * the portal revokes — is `resolveSttPrimary`, which will not report the cloud
+ * as the engine that hears a box holding no credential for it.
  */
 async function promoteStt(): Promise<boolean> {
   const order = sttEngineOrder("cloud");

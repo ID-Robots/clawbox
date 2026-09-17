@@ -9,7 +9,13 @@ import { syncChannelAudio } from "@/lib/stt-channel";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
-import { getSttPrimary, isSttEngine, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
+import {
+  isSttEngine,
+  readStoredSttPrimary,
+  resolveSttPrimary,
+  setSttPrimary,
+  sttEngineOrder,
+} from "@/lib/stt-preference";
 
 /**
  * GET  /setup-api/stt            → which engine hears this box first, and what
@@ -40,8 +46,15 @@ const EDITION_UNSUPPORTED = {
 } as const;
 
 async function status() {
-  const [primary, local, token] = await Promise.all([getSttPrimary(), localSttInstalled(), resolveClawaiToken()]);
+  const [stored, local, token] = await Promise.all([
+    readStoredSttPrimary(),
+    localSttInstalled(),
+    resolveClawaiToken(),
+  ]);
   const cloudConfigured = token !== null;
+  // The credential this read already holds, rather than `getSttPrimary()`
+  // fetching it a second time. Same verdict either way.
+  const primary = resolveSttPrimary(stored, cloudConfigured);
   return {
     primary,
     engines: {
@@ -107,7 +120,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const local = await localSttInstalled();
+    const [local, token] = await Promise.all([localSttInstalled(), resolveClawaiToken()]);
     // Refuse rather than write a primary the box cannot honour: an engine that
     // is not installed must read as not installed, not as a selected option
     // that never hears anything. Same call the tts route makes.
@@ -131,9 +144,17 @@ export async function POST(req: Request) {
     // case and stays AFTER its write, because a cleared pin over an engine that
     // did not move is the one that loses a decision.
     if (primary === "local") await noteOwnerChoice("stt");
+    // The channel list is written in the order the box will ACTUALLY hear in,
+    // which is not always the one that was posted: `{primary:"cloud"}` is the
+    // panel's "Use as fallback" handing the capability back to the automatic
+    // default, and on a box with no ClawBox AI credential that default is the
+    // engine on the box. Writing the cloud row first there would make every
+    // voice note pay a refused round trip before the engine that can answer,
+    // and would disagree with the primary this same response reports.
+    const effective = resolveSttPrimary(primary, token !== null);
     // Gateway first, preference second, so a failed CLI write leaves the
     // stored preference describing what the box still does.
-    const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(primary), local.installed);
+    const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(effective), local.installed);
     await setSttPrimary(primary);
     if (primary !== "local") await clearOwnerChoice("stt");
     if (wrote) {
