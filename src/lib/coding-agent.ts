@@ -12097,9 +12097,39 @@ function spawnOrSettle(
  * module in the next line depend on that. The promise is the added half: a
  * teardown that removes the suite's temp tree must await it, or it races the
  * `git` a just-finished run is still spawning inside that tree. A run this
- * call kills counts too, which is why the children go to `settleWork`.
+ * call kills counts too, which is why the children go to the drain — and so
+ * does a run the chain being drained STARTS behind the sweep, which is why the
+ * drain looks again rather than answering the first time `settling` empties.
+ * See `drainForTests`.
  */
 export function _resetCodingAgentStateForTests(): Promise<void> {
+  const killed = endEveryLiveRun();
+  if (store.flushTimer) {
+    clearTimeout(store.flushTimer);
+    store.flushTimer = null;
+  }
+  store.dirty = false;
+  store.runs = null;
+  store.signature = null;
+  // `exitHookInstalled` is deliberately LEFT set: the listener it guards is on
+  // `process`, which this cannot take back, and it works against the shared
+  // `live` map either way — clearing the flag would add one more listener per
+  // test instead of reusing the one that is already there.
+  // Module state like the rest: left set, it would refuse the next test file's
+  // runs from a fault the box under test never had.
+  liveHarnessFault = null;
+  // A start this reset interrupted would otherwise leave its slot held for the
+  // life of the process, which is a permanent discount on the limit.
+  store.startingRuns = 0;
+  return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS);
+}
+
+/**
+ * End everything that is live right now, and answer the children whose exit the
+ * drain has to wait for. Split out of the reset because the reset has to do it
+ * MORE THAN ONCE — see `drainForTests`.
+ */
+function endEveryLiveRun(): ChildProcess[] {
   const killed: ChildProcess[] = [];
   for (const state of live.values()) {
     clearTimeout(state.timeout);
@@ -12128,22 +12158,45 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   prWatchers.clear();
   deployWatchers.clear();
   reviewWatchers.clear();
-  if (store.flushTimer) {
-    clearTimeout(store.flushTimer);
-    store.flushTimer = null;
+  return killed;
+}
+
+/**
+ * The teardown drain, swept until the box is actually quiet.
+ *
+ * One pass is not enough, because the chain this waits for is the chain that
+ * STARTS runs: `reviewAndShip` awaits `maybeStartReviewPass`, which spawns the
+ * automatic review pass, and `enforceDeliverable` resumes the record for
+ * another attempt. Both register a brand-new live run — after `live` was swept,
+ * so nothing killed it, and `settling` empties the moment the chain that
+ * started it returns. `settleWork` then reported success with a harness process
+ * still going, holding the previous test's module copy, its temp tree and every
+ * shared mock in that file.
+ *
+ * What it cost: `coding-pipeline-driver.test.ts` and
+ * `coding-agent-durable-completion.test.ts` failed in CI's full run and passed
+ * on their own, the leaked run's finish notice landing in the NEXT test's
+ * freshly cleared spy. Reproduced on demand under CPU load, and pinned by
+ * `coding-agent-reset-drain.test.ts`.
+ *
+ * So: drain, then look again, and end whatever appeared behind the sweep. The
+ * overall budget is unchanged — `settleWork` is handed what is left of it and
+ * says so once, at the end, exactly as before.
+ */
+async function drainForTests(initial: ChildProcess[], timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const left = () => Math.max(0, deadline - Date.now());
+  let killed = initial;
+  while (left() > 0) {
+    await settleWork(killed, left());
+    if (live.size === 0 && settling.size === 0) return;
+    if (left() === 0) return;
+    killed = endEveryLiveRun();
+    // A start this sweep interrupted must not keep its slot either.
+    store.startingRuns = 0;
+    // A live run with no child yet — a spawn caught mid-flight — gives
+    // `settleWork` nothing to wait on, and it would answer at once. Give the
+    // spawn a turn rather than spinning on it.
+    if (killed.length === 0 && settling.size === 0) await wait(Math.min(REAP_POLL_MS, left()));
   }
-  store.dirty = false;
-  store.runs = null;
-  store.signature = null;
-  // `exitHookInstalled` is deliberately LEFT set: the listener it guards is on
-  // `process`, which this cannot take back, and it works against the shared
-  // `live` map either way — clearing the flag would add one more listener per
-  // test instead of reusing the one that is already there.
-  // Module state like the rest: left set, it would refuse the next test file's
-  // runs from a fault the box under test never had.
-  liveHarnessFault = null;
-  // A start this reset interrupted would otherwise leave its slot held for the
-  // life of the process, which is a permanent discount on the limit.
-  store.startingRuns = 0;
-  return settleWork(killed, SETTLE_DRAIN_BUDGET_MS);
 }
