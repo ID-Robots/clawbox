@@ -13,6 +13,7 @@ const WebSocket = require("ws");
 const { Transform } = require("stream");
 const { attachAccessLog } = require("./scripts/access-log.js");
 const { attachProxyPeerGuard } = require("./scripts/proxy-peer.js");
+const { isAllowedUpgrade } = require("./scripts/host-allowlist.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -190,6 +191,18 @@ function hasValidSession(req) {
   } catch {
     return false;
   }
+}
+
+// An upgrade addressed to a name that is not this box's own (see
+// scripts/host-allowlist.js). Checked before the session and before the route,
+// on :80 and :443 alike: upgrades never reach the middleware's Host allow-list.
+function rejectForeignHostUpgrade(socket) {
+  try {
+    socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+  } catch {
+    // socket already gone
+  }
+  socket.destroy();
 }
 
 function rejectUpgrade(socket) {
@@ -590,6 +603,9 @@ function closeFrameSanitizer() {
 
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
+    if (!isAllowedUpgrade(req)) {
+      return rejectForeignHostUpgrade(socket);
+    }
     const { targetPort, url, requireAuth, sanitizeClose } = resolveUpgradeTarget(req.url);
     if (requireAuth && !hasValidSession(req)) {
       return rejectUpgrade(socket);
@@ -653,6 +669,9 @@ function startHttpsServer(httpServer) {
     const wss = new WebSocket.Server({ noServer: true });
 
     httpsServer.on("upgrade", (req, socket, head) => {
+      if (!isAllowedUpgrade(req)) {
+        return rejectForeignHostUpgrade(socket);
+      }
       const gate = resolveUpgradeTarget(req.url || "/");
       if (gate.requireAuth && !hasValidSession(req)) {
         return rejectUpgrade(socket);
