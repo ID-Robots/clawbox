@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useId, useRef, useCallback } from "react";
+import { useMobileBack } from "@/lib/mobile-back";
 import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
@@ -695,6 +696,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
   }, []);
   const [isMobile, setIsMobile] = useState(false);
+  // On a phone a section is a level below the list: Back returns to the list
+  // rather than closing Settings (lib/mobile-back).
+  useMobileBack(isMobile && mobileSection !== null, () => setMobileSection(null));
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 640);
     check();

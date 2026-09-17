@@ -265,6 +265,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.retry": "Retry",
     "chat.voice.record": "Record a voice message",
     "chat.desktop": "Desktop",
+    "chat.modelPickers": "Model and reasoning",
     "chat.showDesktop": "Show the desktop",
     "chat.voice.stop": "Stop recording",
     "chat.voice.cancel": "Cancel",

@@ -865,6 +865,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
+  // Phone composer: whether the folded provider/model/effort pills are shown,
+  // and whether there are any to fold (a ClawBox AI chat can have none).
+  const [pickersOpen, setPickersOpen] = useState(false)
+  const pillsRef = useRef<HTMLDivElement | null>(null)
+  const [hasPills, setHasPills] = useState(false)
+  // No dependency list on purpose: the pills are rendered by several branches
+  // below, so re-measure after every commit; it only sets state on a change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const next = (pillsRef.current?.childElementCount ?? 0) > 0
+    if (next !== hasPills) setHasPills(next)
+  })
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -5760,6 +5772,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   return (
     <div
       data-testid="chat-popup"
+      // Hook for the phone-sized touch targets in globals.css (.chat-mobile).
+      data-chat-mobile={mobile || undefined}
       ref={popupRef}
       // On the CAPTURE phase: the header, the pills and the composer all stop
       // their own pointer events, and a click that raises no surface is a click
@@ -6906,8 +6920,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           box on top, full width, and one row under it with the attach,
           microphone and picture buttons on the left and, on the right, the
           provider / model / effort pills beside the send button. */}
-      <div style={{
-        padding: '10px 14px 10px',
+      <div
+        data-testid="chat-composer"
+        data-pickers-open={mobile && pickersOpen ? true : undefined}
+        style={{
+        padding: mobile ? '10px 12px 10px' : '10px 14px 10px',
         borderTop: (attachments.length > 0 || showNewApp) ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
@@ -7046,8 +7063,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               paperclip with the whole width empty beside it. Sharing one basis
               (the pills' plus the gap plus the button) makes the break happen
               in front of both or neither, at 3, 4 or 5 buttons. */}
+          {/* Phone: the provider / model / effort pills are a secondary
+              setting, folded behind one button so the row under the text box
+              is attach, create, pickers … send, all one size. Opening it lays
+              the pills out as a full-width row of their own (globals.css,
+              [data-chat-mobile]); every picker is still one tap away. */}
+          {mobile && hasPills && (
+            <button
+              type="button"
+              onClick={() => setPickersOpen(o => !o)}
+              aria-expanded={pickersOpen}
+              aria-label={t("chat.modelPickers")}
+              title={t("chat.modelPickers")}
+              data-testid="chat-pickers-toggle"
+              className="chat-pickers-toggle"
+            >
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>tune</span>
+            </button>
+          )}
           <div className="chat-composer-tail">
-          <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
+          <div ref={pillsRef} className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
             // below — provider → model (scoped to it) → thinking effort. Every
@@ -7346,6 +7381,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <button
             onClick={abort}
             title={t("chat.stop")}
+            aria-label={t("chat.stop")}
+            data-testid="chat-stop"
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
               background: 'rgba(239,68,68,0.2)', color: '#ef4444',
@@ -7364,6 +7401,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             onClick={sendMessage}
             disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
             title={t("chat.send")}
+            aria-label={t("chat.send")}
+            data-testid="chat-send"
             style={{
               width: 36, height: 36, borderRadius: 10, border: 'none',
               background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',

@@ -715,20 +715,20 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
           }}
         >
           <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot}`} />
-          <span className="text-xs font-mono" style={{ color: "#9ca3af" }}>
+          <span className="shrink-0 text-xs font-mono" style={{ color: "#9ca3af" }}>
             {statusLabel}
           </span>
           {/* The socket's address is a diagnostic for a connection that
               failed; a shell the owner ended has nothing to diagnose. */}
           {status !== "exited" && (
-            <span className="text-xs font-mono ml-1" style={{ color: "#6b7280" }}>
+            <span className="text-xs font-mono ml-1 min-w-0 truncate" style={{ color: "#6b7280" }}>
               — {wsUrl}
             </span>
           )}
           <div className="flex-1" />
           <button
             onClick={handleReconnect}
-            className="text-xs px-2 py-0.5 rounded transition-colors font-mono"
+            className="shrink-0 whitespace-nowrap text-xs px-2 py-0.5 rounded transition-colors font-mono"
             style={{
               background: "rgba(34,197,94,0.15)",
               color: "var(--coral-bright)",

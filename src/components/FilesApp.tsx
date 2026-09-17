@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
@@ -249,6 +250,18 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   // Two different sentences; one boolean said "first N shown" for both.
   const [searchStoppedBy, setSearchStoppedBy] = useState<"matches" | "scanned" | null>(null);
   const [viewer, setViewer] = useState<{ relPath: string; entry: FileEntry } | null>(null);
+  // On a phone, Back walks up the folder tree one level per press (and closes
+  // an open file or the covering sidebar first) instead of closing Files.
+  const phoneLayout = usePhoneLayout();
+  const folderDepth = currentPath.split("/").filter(Boolean).length;
+  useMobileBack(phoneLayout && folderDepth > 0, () => {
+    const parts = currentPath.split("/").filter(Boolean);
+    parts.pop();
+    void load(parts.join("/"));
+  }, folderDepth);
+  useMobileBack(phoneLayout && narrow && sidebarOpen, () => setSidebarOpen(false));
+  useMobileBack(phoneLayout && viewer !== null, () => setViewer(null));
+
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
