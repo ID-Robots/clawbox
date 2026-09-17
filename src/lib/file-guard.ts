@@ -100,6 +100,26 @@ const PROTECTED_FILE_RES: RegExp[] = [
  */
 export const CODING_AGENT_ARTIFACTS_SUBTREE = "coding-agent-artifacts";
 
+/**
+ * Where a coding-agent run finds the files it was GIVEN to work from — the
+ * pictures the assistant generated for the task, an attachment that arrived in
+ * chat, anything the owner dropped in by hand.
+ *
+ * Owned here for the reason the artifacts subtree above is: this is the
+ * alias-free end of the import graph, and the list just below is the one thing
+ * that decides what under data/ a run may open at all.
+ *
+ * It exists because the assistant writes its generated media into its OWN
+ * state directory (`~/.openclaw/media`), which sits inside a credential store
+ * this box denies to every run, wholesale and on purpose — the same folder
+ * holds openclaw.json, the provider keys and every session transcript. So an
+ * asset made FOR a coding task could not be read BY it, and a run either drew
+ * it again or gave up. The box copies the named assets out into this tree
+ * instead (src/lib/coding-run-inputs.ts), which is safe by construction:
+ * nothing is opened that was not deliberately put here.
+ */
+export const CODING_AGENT_INPUTS_SUBTREE = "coding-agent-inputs";
+
 export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "webapps",       // built desktop webapps, also served by the webapps route
   "icons",         // installed-app icons, also served by the icon route
@@ -108,6 +128,7 @@ export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "llamacpp",      // local-model runtime: downloaded weights, pid file, log
   "embed",         // memory-search embedder runtime: its GGUF and log (embed-server.ts)
   CODING_AGENT_ARTIFACTS_SUBTREE,
+  CODING_AGENT_INPUTS_SUBTREE,
 ]);
 
 // DATA_DIR is already absolute and normalised (config-store builds it with
