@@ -9,10 +9,17 @@
  * words and no pass is started over a switch that did not land.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 import MemoryShardEmbedderCard from "@/components/MemoryShardEmbedderCard";
 
-type Choice = { source: "cloud" | "local"; cloudSupported: boolean; cloudAvailable: boolean; localInstalled: boolean };
+type Choice = {
+  source: "cloud" | "local";
+  cloudSupported: boolean;
+  cloudAvailable: boolean;
+  cloudReason?: string | null;
+  localInstalled: boolean;
+};
 
 let choice: Choice;
 let calls: { url: string; body: unknown }[];
@@ -85,6 +92,30 @@ describe("MemoryShardEmbedderCard", () => {
     render(<MemoryShardEmbedderCard />);
     expect(await screen.findByTestId("memory-shard-embedder-cloud")).toBeDisabled();
     expect(screen.getByTestId("memory-shard-embedder-cloud-unavailable")).toBeInTheDocument();
+  });
+
+  it("says WHY the cloud is not on offer and what makes it available", async () => {
+    // The card said "not available on this box right now" to a box that had
+    // simply never been connected to ClawBox AI. Each reason has a different
+    // fix, and the resolver already names them (CloudUnavailableReason).
+    for (const [reason, key] of [
+      ["not_linked", "clawkeep.memory.embedder.cloudNotLinked"],
+      ["plan", "clawkeep.memory.embedder.cloudPlan"],
+      ["route_unavailable", "clawkeep.memory.embedder.cloudRouteDown"],
+    ] as const) {
+      cleanup();
+      choice = { source: "local", cloudSupported: true, cloudAvailable: false, cloudReason: reason, localInstalled: true };
+      render(<MemoryShardEmbedderCard />);
+      expect(await screen.findByTestId("memory-shard-embedder-cloud-unavailable"), reason).toHaveTextContent(key);
+      expect(clawkeepTranslations.en[key], key).toBeTruthy();
+    }
+  });
+
+  it("keeps the cloud selectable on a box already indexing there, whatever the probe says", async () => {
+    choice = { source: "cloud", cloudSupported: true, cloudAvailable: false, cloudReason: "route_unavailable", localInstalled: true };
+    render(<MemoryShardEmbedderCard />);
+    expect(await screen.findByTestId("memory-shard-embedder-cloud")).not.toBeDisabled();
+    expect(screen.queryByTestId("memory-shard-embedder-cloud-unavailable")).toBeNull();
   });
 
   it("says the edition indexes on the box itself, and offers no cloud there", async () => {

@@ -12,7 +12,7 @@
  * search reached it directly and could not wake it).
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import MemoryShardWizard from "@/components/MemoryShardWizard";
 import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 
@@ -231,6 +231,60 @@ describe("MemoryShardWizard", () => {
     expect(await screen.findByTestId("memory-shard-source-cloud")).toBeDisabled();
     expect(screen.getByTestId("memory-shard-source-local")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("memory-shard-source-cloud-unavailable")).toBeInTheDocument();
+  });
+
+  /** Straight to step 3, with the provider read already answered. */
+  async function atProvisionStep(provider: unknown) {
+    stub({ provider });
+    const done = vi.fn();
+    render(<MemoryShardWizard onDone={done} />);
+    await leaveIntro();
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    await waitFor(() => expect(screen.getByTestId("memory-shard-index-now")).not.toBeDisabled());
+    return done;
+  }
+
+  it("keeps the ClawBox AI cloud selected on a box whose index is already embedded there", async () => {
+    // `cloudAvailable` is a LIVE probe of the proxy's embeddings route and
+    // answers false on any hiccup. That may not pre-select a box that is
+    // already indexing in the cloud onto the 640 MB model on this box: the
+    // settings card has never allowed that (its own `blocked` exempts a box
+    // already on the cloud) and Index now here would post the move.
+    const done = await atProvisionStep({ source: "cloud", cloudSupported: true, cloudAvailable: false, localInstalled: false });
+    expect(screen.getByTestId("memory-shard-source-cloud")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("memory-shard-source-cloud")).not.toBeDisabled();
+    expect(screen.queryByTestId("memory-shard-source-cloud-unavailable")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeUndefined();
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "cloud" });
+  });
+
+  it("says WHY the cloud model cannot be picked and what makes it available, reason by reason", async () => {
+    // "not available on this box right now" named neither the cause nor the
+    // cure, so the commonest one of all — a box with no ClawBox AI credential
+    // on it yet — read as a fault of the box (owner, 2026-09-17).
+    const notes: [string, string][] = [
+      ["not_linked", "clawkeep.memory.embedder.cloudNotLinked"],
+      ["plan", "clawkeep.memory.embedder.cloudPlan"],
+      ["route_unavailable", "clawkeep.memory.embedder.cloudRouteDown"],
+    ];
+    for (const [reason, key] of notes) {
+      cleanup();
+      await atProvisionStep({ source: "local", cloudSupported: true, cloudAvailable: false, cloudReason: reason, localInstalled: false });
+      expect(screen.getByTestId("memory-shard-source-cloud-unavailable"), reason).toHaveTextContent(key);
+      expect(clawkeepTranslations.en[key], key).toBeTruthy();
+    }
+    // The remedy, not a restatement of the symptom.
+    expect(clawkeepTranslations.en["clawkeep.memory.embedder.cloudNotLinked"]).toMatch(/Settings/);
+  });
+
+  it("falls back to the generic note when the box could not say why", async () => {
+    await atProvisionStep({ source: "local", cloudSupported: true, cloudAvailable: false, localInstalled: false });
+    expect(screen.getByTestId("memory-shard-source-cloud-unavailable"))
+      .toHaveTextContent("clawkeep.memory.embedder.cloudUnavailable");
   });
 
   it("holds Index now until the read of where the model may run has answered", async () => {

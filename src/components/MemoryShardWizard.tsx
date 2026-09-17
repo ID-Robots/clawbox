@@ -8,7 +8,15 @@ import PaidFeatureGate, { PAID_GATE_POLL_MS, paidGateFace } from "./PaidFeatureG
 import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
-import { type EmbedderChoiceStatus, type EmbeddingSource, parseEmbedderChoiceStatus, type ProvisionPhase, TIME_OF_DAY } from "@/lib/memory-shard-state";
+import {
+  cloudEmbedderPickable,
+  cloudUnavailableNoteKey,
+  type EmbedderChoiceStatus,
+  type EmbeddingSource,
+  parseEmbedderChoiceStatus,
+  type ProvisionPhase,
+  TIME_OF_DAY,
+} from "@/lib/memory-shard-state";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 
 /**
@@ -113,11 +121,13 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
 
   // ─── Where the model runs: the ClawBox AI cloud, or this box ───
   // Read on mount so it has answered by the time the last step is on screen.
-  // The DEFAULT is the cloud whenever the box says it is on offer — a paid
-  // plan and a cloud embedder that answered (the owner's ruling, 2026-09-15:
-  // no 640 MB download for a box that has a plan) — and the owner's own pick
-  // always wins over that default. A read that fails, or an older server,
-  // leaves the model on this box, which is what every box did before.
+  // The DEFAULT is the cloud whenever the box says it can be picked — a paid
+  // plan and a cloud embedder that answered, or an index already embedded there
+  // (the owner's ruling, 2026-09-15: no 640 MB download for a box that has a
+  // plan) — and the owner's own pick always wins over that default. A read that
+  // fails, or an older server, leaves the model on this box, which is what
+  // every box did before; the note under the switch then says WHY, because
+  // "not available right now" read as a fault of the box.
   const [embedder, setEmbedder] = useState<EmbedderChoiceStatus | null>(null);
   const [pickedSource, setPickedSource] = useState<EmbeddingSource | null>(null);
   // Whether that read has ANSWERED, apart from what it answered: `embedder` is
@@ -135,7 +145,11 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
       .finally(() => { if (live) setEmbedderSettled(true); });
     return () => { live = false; };
   }, []);
-  const source: EmbeddingSource = pickedSource ?? (embedder?.cloudAvailable ? "cloud" : "local");
+  // The one rule, shared with the settings card — see `cloudEmbedderPickable`.
+  // The cloud is the DEFAULT wherever it can be picked, which includes a box
+  // whose index is already embedded there but whose probe has not answered.
+  const cloudPickable = embedder !== null && cloudEmbedderPickable(embedder);
+  const source: EmbeddingSource = pickedSource ?? (cloudPickable ? "cloud" : "local");
 
   // ─── Step 4: the model, then the first index ───
   const [reachedPhase, setPhase] = useState<ProvisionPhase>("idle");
@@ -460,7 +474,7 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
                     type="button"
                     role="radio"
                     aria-checked={source === option}
-                    disabled={busy === "provision" || (option === "cloud" && !embedder.cloudAvailable)}
+                    disabled={busy === "provision" || (option === "cloud" && !cloudPickable)}
                     onClick={() => setPickedSource(option)}
                     data-testid={`memory-shard-source-${option}`}
                     className={`${source === option ? SEGMENT_ON : SEGMENT_OFF} disabled:opacity-50 disabled:cursor-not-allowed`}
@@ -472,9 +486,9 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
               <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-source-hint">
                 {t(source === "cloud" ? "clawkeep.memory.embedder.cloudHint" : "clawkeep.memory.embedder.localHint")}
               </p>
-              {!embedder.cloudAvailable && (
+              {!cloudPickable && (
                 <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-source-cloud-unavailable">
-                  {t("clawkeep.memory.embedder.cloudUnavailable")}
+                  {t(cloudUnavailableNoteKey(embedder.cloudReason))}
                 </p>
               )}
             </div>
