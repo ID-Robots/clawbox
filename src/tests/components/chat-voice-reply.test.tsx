@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
+import { _resetSpokenReplyPlaybackForTests } from "@/lib/spoken-reply-playback";
 
 // The same ceiling the sibling chat suites take: under a full-suite run every
 // worker gets a slice of the box's cores and the 5 s default expires on
@@ -240,6 +241,7 @@ function installMedia() {
 const MEDIA = window.HTMLMediaElement.prototype;
 const originalPlay = Object.getOwnPropertyDescriptor(MEDIA, "play");
 const originalPause = Object.getOwnPropertyDescriptor(MEDIA, "pause");
+const originalPaused = Object.getOwnPropertyDescriptor(MEDIA, "paused");
 const originalCreate = URL.createObjectURL;
 const originalRevoke = URL.revokeObjectURL;
 let play: ReturnType<typeof vi.fn>;
@@ -289,6 +291,9 @@ describe("spoken replies in the desktop chat", () => {
   afterEach(() => {
     if (originalPlay) Object.defineProperty(MEDIA, "play", originalPlay);
     if (originalPause) Object.defineProperty(MEDIA, "pause", originalPause);
+    if (originalPaused) Object.defineProperty(MEDIA, "paused", originalPaused);
+    else delete (MEDIA as unknown as Record<string, unknown>).paused;
+    _resetSpokenReplyPlaybackForTests();
     URL.createObjectURL = originalCreate;
     URL.revokeObjectURL = originalRevoke;
     vi.unstubAllGlobals();
@@ -556,5 +561,83 @@ describe("spoken replies in the desktop chat", () => {
     // owed aloud all the same.
     await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]), { timeout: 8000 });
   }, 12_000);
+
+  /**
+   * The owner's Stop (TASK-890). A reply the chat plays on its own is a
+   * detached media element, not the bubble's; it used to leave the bubble
+   * reading "play" with nothing on screen that could silence it.
+   *
+   * Playback here does NOT end on its own: the element reports `play` and then
+   * stays playing until something pauses it, which is the state a Stop is for.
+   */
+  function holdPlayback() {
+    const pausedBy = new WeakMap<HTMLMediaElement, boolean>();
+    Object.defineProperty(MEDIA, "paused", {
+      configurable: true,
+      get(this: HTMLMediaElement) { return pausedBy.get(this) !== false; },
+    });
+    play.mockImplementation(async function (this: HTMLMediaElement) {
+      pausedBy.set(this, false);
+      this.dispatchEvent(new Event("play"));
+    });
+    const pause = vi.fn(function (this: HTMLMediaElement) {
+      if (pausedBy.get(this) === false) {
+        pausedBy.set(this, true);
+        this.dispatchEvent(new Event("pause"));
+      }
+    });
+    Object.defineProperty(MEDIA, "pause", { configurable: true, value: pause });
+    return { pause, isPlaying: (el: HTMLMediaElement) => pausedBy.get(el) === false };
+  }
+
+  it("puts a Stop on the bubble of a reply playing on its own, and one press silences it", async () => {
+    replyText = "Fine, thanks.";
+    const media = holdPlayback();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    const stop = await screen.findByTestId("spoken-reply-stop");
+    const detached = play.mock.contexts[play.mock.contexts.length - 1] as HTMLMediaElement;
+    expect(media.isPlaying(detached)).toBe(true);
+    // The bubble says what is happening: pressing play/pause would pause.
+    expect(screen.getByTestId("spoken-reply-play")).toHaveAccessibleName(/^chat\.audioPause /);
+
+    fireEvent.click(stop);
+    expect(media.isPlaying(detached)).toBe(false);
+    await waitFor(() => expect(screen.queryByTestId("spoken-reply-stop")).toBeNull());
+    // The text reply and its clip stay; the clip plays again from the start.
+    expect(screen.getAllByText("Fine, thanks.").length).toBeGreaterThan(0);
+    const bubbleAudio = screen.getByTestId("chat-audio") as HTMLAudioElement;
+    expect(bubbleAudio.currentTime).toBe(0);
+    fireEvent.click(screen.getByTestId("spoken-reply-play"));
+    await waitFor(() => expect(media.isPlaying(bubbleAudio)).toBe(true));
+    await screen.findByTestId("spoken-reply-stop");
+  });
+
+  it("stops the reply that is speaking when the owner sends a new prompt", async () => {
+    replyText = "Fine, thanks.";
+    const media = holdPlayback();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await screen.findByTestId("spoken-reply-stop");
+    const detached = play.mock.contexts[play.mock.contexts.length - 1] as HTMLMediaElement;
+
+    const textarea = await screen.findByRole("textbox");
+    await waitFor(() => expect(textarea).not.toBeDisabled());
+    fireEvent.change(textarea, { target: { value: "and tomorrow?" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(media.isPlaying(detached)).toBe(false);
+    await waitFor(() => expect(screen.queryByTestId("spoken-reply-stop")).toBeNull());
+  });
+
+  it("stops the reply that is speaking when the owner starts a new spoken question", async () => {
+    replyText = "Fine, thanks.";
+    const media = holdPlayback();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await screen.findByTestId("spoken-reply-stop");
+    const detached = play.mock.contexts[play.mock.contexts.length - 1] as HTMLMediaElement;
+    fireEvent.click(await screen.findByTestId("voice-record"));
+    expect(media.isPlaying(detached)).toBe(false);
+  });
 
 });

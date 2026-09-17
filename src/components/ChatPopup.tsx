@@ -362,6 +362,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
+import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
 import { DESKTOP_GAP, DESKTOP_LAYERS, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
@@ -893,6 +894,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     speechGenerationRef.current += 1
     replyPlayerRef.current?.pause()
     replyPlayerRef.current = null
+    // A bubble's own player too: the conversation it was speaking is gone.
+    stopSpokenReply()
     for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
     spokenUrlsRef.current = []
     // The notes those URLs carried go with them: a released clip has no player
@@ -3683,10 +3686,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       replyPlayerRef.current?.pause()
       const player = new Audio(src)
       replyPlayerRef.current = player
-      player.addEventListener('ended', done, { once: true })
-      player.addEventListener('error', done, { once: true })
-      // Paused from outside (a release, a newer reply): heard enough.
-      player.addEventListener('pause', done, { once: true })
+      // The document's one speaker (lib/spoken-reply-playback.ts): claimed as
+      // this starts, so a bubble someone pressed falls silent rather than
+      // talking under it, and so the bubble this reply lands in can draw
+      // Stop for it. Named by the bubble's own `src`, not `player.src`, which
+      // the browser has already resolved to an absolute URL.
+      const letGo = () => { releaseSpokenReply(player); done() }
+      player.addEventListener('ended', letGo, { once: true })
+      player.addEventListener('error', letGo, { once: true })
+      // Paused from outside (the owner's Stop, a release, a newer reply, a
+      // bubble pressed): heard enough.
+      player.addEventListener('pause', letGo, { once: true })
+      claimSpokenReply(player, src, { automatic: true })
       const started = player.play()
       // A browser that wants the gesture and the sound in the same tick
       // refuses; the bubble's own player is there for exactly that case — and
@@ -3697,7 +3708,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (started && typeof started.catch === 'function') {
         started.catch(() => {
           setAutoplayBlocked(prev => (prev.includes(src) ? prev : [...prev, src]))
-          done()
+          letGo()
         })
       }
       window.setTimeout(done, PLAYBACK_MAX_MS)
@@ -3725,6 +3736,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // first. The box queues syntheses too; a 429 here means that queue is
     // full, which a short wait usually clears.
     const generation = speechGenerationRef.current
+    // Read at the moment the reply QUEUES: if the owner stops a reply, sends a
+    // new prompt or presses another bubble while this one waits its turn, it
+    // is still made and put on its bubble, but it does not start talking.
+    const interruptions = spokenReplyInterruptions()
+    const aloud = () => play && spokenReplyInterruptions() === interruptions
     const chainRef = play ? speakChainRef : clipChainRef
     const previous = chainRef.current
     let release: () => void = () => {}
@@ -3732,7 +3748,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     try {
       await previous
       if (speechGenerationRef.current !== generation) return
-      if (audio.length > 0) { if (play) await playReply(audio[0]); return }
+      if (audio.length > 0) { if (aloud()) await playReply(audio[0]); return }
       // Something may have spoken this reply while the clip waited its turn —
       // the history reconcile, or a gateway that pushed its TTS supplement
       // inside the final and had it merged. Then there is nothing to make.
@@ -3756,7 +3772,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // through, so "Speaking…" never counts the seconds an EARLIER reply was
       // taking; cleared in the same breath as the response, so the line goes
       // the moment the player takes over.
-      if (play) { setSpeakingFor(0); setSpeakingReply(true) }
+      if (aloud()) { setSpeakingFor(0); setSpeakingReply(true) }
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
           res = await fetch('/setup-api/tts/speak', {
@@ -3830,7 +3846,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // result synchronously, which React does not promise.
         return prev
       })
-      if (play) await playReply(url)
+      if (aloud()) await playReply(url)
     } catch { /* the reply is on screen; the voice was a bonus */ }
     finally { release() }
   }, [playReply])
@@ -3980,6 +3996,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const startRecording = useCallback(async () => {
     if (voice.state === 'recording' || voice.state === 'requesting') return
+    // A new question starts here: the last answer stops talking, and does not
+    // end up on the recording either.
+    stopSpokenReply()
     // Read live rather than from `captureAvailability`: the state exists to
     // label the button before anyone clicks, and a stale render must never be
     // what decides whether the microphone is opened.
@@ -4908,6 +4927,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text && attachments.length === 0) return
+    // A new prompt: the reply still speaking stops. Its text and its clip stay
+    // on the bubble, to be played again from the start.
+    stopSpokenReply()
     const currentAttachments = [...attachments]
     setInput('')
     setAttachments([])

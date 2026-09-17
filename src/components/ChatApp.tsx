@@ -15,6 +15,7 @@ import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
+import { stopSpokenReply } from '@/lib/spoken-reply-playback'
 import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
@@ -910,6 +911,8 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     const text = input.trim()
     const staged = [...pendingAttachments]
     if ((!text && staged.length === 0) || sending) return
+    // A new prompt: the reply still speaking stops; its bubble keeps the clip.
+    stopSpokenReply()
 
     // Pictures render in the bubble; everything else keeps a 📎 line, because a
     // document has nothing to show and a caption alone would refer to nothing.

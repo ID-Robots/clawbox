@@ -1,7 +1,14 @@
 'use client'
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useT } from '@/lib/i18n'
+import {
+  claimSpokenReply,
+  currentSpokenReply,
+  releaseSpokenReply,
+  stopSpokenReply,
+  subscribeSpokenReply,
+} from '@/lib/spoken-reply-playback'
 
 /**
  * The player a spoken reply gets: ClawBox's own transport, not the browser's.
@@ -369,15 +376,27 @@ export default function SpokenReplyPlayer({
     onAudioElementRef.current?.(element)
   }, [])
 
+  // The chat's automatic playback is a detached `new Audio(src)` of its own,
+  // not this element. It claims the document's one speaker for THIS clip (see
+  // lib/spoken-reply-playback.ts), and while it holds it this transport follows
+  // that element instead — so a reply playing on its own reads "pause", its
+  // bar moves, and it has a Stop control on the bubble it belongs to.
+  const external = useSyncExternalStore(subscribeSpokenReply, currentSpokenReply, () => null)
+  // Our own element holding the speaker lands here too; the effects below
+  // then simply follow it, and the callbacks tell the two apart.
+  const externalElement = external && external.src === src ? external.element : null
+  /** The element the controls act on: the one speaking this clip, else ours. */
+  const driving = useCallback(
+    (): HTMLAudioElement | null => externalElement ?? audioRef.current,
+    [externalElement],
+  )
+
   // The element is the source of truth for all four numbers on screen: it is
   // also driven from OUTSIDE — the Voice tab calls play() on it through
   // `onAudioElement` — so state that only followed this component's own clicks
-  // would go stale the moment it was. (The chat's automatic playback is a
-  // detached `new Audio(src)` of its own and never touches this element; that
-  // is why a reply can be audibly playing while this transport still reads
-  // "play". Pre-existing, and named in the PR body.)
+  // would go stale the moment it was.
   useEffect(() => {
-    const element = audioRef.current
+    const element = externalElement ?? audioRef.current
     if (!element) return
     const sync = () => {
       setElapsed(element.currentTime || 0)
@@ -388,9 +407,36 @@ export default function SpokenReplyPlayer({
     const events = ['play', 'pause', 'ended', 'timeupdate', 'loadedmetadata', 'durationchange', 'seeked']
     for (const event of events) element.addEventListener(event, sync)
     return () => { for (const event of events) element.removeEventListener(event, sync) }
+  }, [src, externalElement])
+
+  // Our own element takes the speaker when it starts — which stops any other
+  // reply, bubble or automatic, so two replies never talk at once — and lets
+  // go when it stops. Unmounted mid-sentence, it falls silent with its bubble.
+  useEffect(() => {
+    const element = audioRef.current
+    if (!element) return
+    const claim = () => claimSpokenReply(element, src)
+    const release = () => releaseSpokenReply(element)
+    element.addEventListener('play', claim)
+    element.addEventListener('pause', release)
+    element.addEventListener('ended', release)
+    element.addEventListener('error', release)
+    return () => {
+      element.removeEventListener('play', claim)
+      element.removeEventListener('pause', release)
+      element.removeEventListener('ended', release)
+      element.removeEventListener('error', release)
+      if (currentSpokenReply()?.element === element) {
+        try { element.pause() } catch { /* jsdom */ }
+        releaseSpokenReply(element)
+      }
+    }
   }, [src])
 
   const toggle = useCallback(() => {
+    // The automatic playback is not ours to resume later: pausing it is
+    // stopping it, and the next press plays the reply here from the start.
+    if (externalElement && externalElement !== audioRef.current) { stopSpokenReply(src); return }
     const element = audioRef.current
     if (!element) return
     if (element.paused) {
@@ -401,19 +447,33 @@ export default function SpokenReplyPlayer({
     } else {
       element.pause()
     }
-  }, [])
+  }, [externalElement, src])
+
+  /**
+   * Stop: silence now and back to the start, so the next press plays the
+   * reply from its first word. The reply's text is not touched.
+   */
+  const stop = useCallback(() => {
+    if (stopSpokenReply(src)) return
+    const element = audioRef.current
+    if (!element) return
+    try { element.pause() } catch { /* jsdom */ }
+    try { element.currentTime = 0 } catch { /* no metadata yet */ }
+    setElapsed(0)
+    setPlaying(false)
+  }, [src])
 
   const seekTo = useCallback((seconds: number) => {
-    const element = audioRef.current
+    const element = driving()
     if (!element) return
     const total = Number.isFinite(element.duration) ? element.duration : 0
     const next = Math.max(0, Math.min(total, seconds))
     element.currentTime = next
     setElapsed(next)
-  }, [])
+  }, [driving])
 
   const onWaveKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    const element = audioRef.current
+    const element = driving()
     if (!element) return
     const at = element.currentTime || 0
     const total = Number.isFinite(element.duration) ? element.duration : 0
@@ -426,16 +486,16 @@ export default function SpokenReplyPlayer({
       default: return
     }
     event.preventDefault()
-  }, [seekTo, toggle])
+  }, [driving, seekTo, toggle])
 
   const scrubToPointer = useCallback((clientX: number, target: HTMLDivElement) => {
-    const element = audioRef.current
+    const element = driving()
     if (!element) return
     const box = target.getBoundingClientRect()
     if (!box.width) return
     const total = Number.isFinite(element.duration) ? element.duration : 0
     seekTo(((clientX - box.left) / box.width) * total)
-  }, [seekTo])
+  }, [driving, seekTo])
 
   const onWavePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const wave = event.currentTarget
@@ -500,6 +560,23 @@ export default function SpokenReplyPlayer({
           {playing ? 'pause' : 'play_arrow'}
         </span>
       </button>
+      {/* Stop, only while the reply is actually speaking: one press silences
+          it and puts it back to the start. Beside play rather than instead of
+          it, because pause (keep my place) and stop (I have heard enough) are
+          different wishes — and a reply the chat started on its own has no
+          place to keep. */}
+      {playing && (
+        <button
+          type="button"
+          className="spoken-reply-play spoken-reply-stop"
+          data-testid="spoken-reply-stop"
+          onClick={stop}
+          aria-label={`${t('chat.audioStop')} ${label}`}
+          title={t('chat.audioStop')}
+        >
+          <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 18 }}>stop</span>
+        </button>
+      )}
       {/* A clip the element could not load says so, in the place the shape
           would have been, and the transport goes with it: a control that is
           still pressable over a missing file is a control that lies. */}
