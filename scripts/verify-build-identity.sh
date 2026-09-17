@@ -6,9 +6,13 @@
 # One script, two callers, deliberately:
 #   * CI (.github/workflows/build-identity.yml) runs it after `bun run build`,
 #     so a PR whose build cannot be traced back to its own SHA goes red.
-#   * The in-app updater runs it as the last step of an update, so a device
-#     that rebooted onto a build that is NOT the code it just synced says so
-#     loudly instead of serving 404s for features whose source is on disk.
+#   * install.sh's do_rebuild runs it right after `bun run build`, in the same
+#     process and against the commit it just built, so a rebuild whose output
+#     is NOT the code it was made from (a half-copied postbuild, an unstamped
+#     build) is rolled back instead of serving 404s for features whose source
+#     is on disk. It is deliberately NOT a post-reboot update step any more:
+#     post_update self-refreshes the checkout, so a commit pushed during the
+#     update moved HEAD past the build and failed a run that was fine.
 # A second copy of this logic would eventually disagree with the first, and the
 # whole point of the check is that both sides answer the same question.
 #

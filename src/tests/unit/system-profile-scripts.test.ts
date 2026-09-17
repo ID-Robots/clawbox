@@ -112,8 +112,9 @@ describe("clawbox-power-mode.sh --check", () => {
   it("defaults to performance when nothing is persisted", () => {
     // The owner's ruling of 2026-09-15: a fresh box, and a box already in the
     // field that never chose, run the pinned profile. install.sh's
-    // step_performance_mode runs `--apply` on every install AND update, and
-    // this resolution is what carries the default onto a box that predates it.
+    // step_performance_mode runs `--apply` on every full install and
+    // clawbox-performance.service at every boot, and this resolution is what
+    // carries the default onto a box that predates it.
     const out = lastJson(run(POWER, ["--check"], {
       CLAWBOX_NVPMODEL_CONF: conf,
       CLAWBOX_STATE_DIR: tmpdir(),

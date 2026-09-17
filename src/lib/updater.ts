@@ -1480,58 +1480,6 @@ export async function removeOrphanDeployedSha(projectDir: string = PROJECT_DIR):
   }
 }
 
-/**
- * Run scripts/verify-build-identity.sh against `projectDir`.
- *
- * Delegating to the script rather than reimplementing the comparison here is
- * the point: CI gates pull requests with the same code path, so the device and
- * the pipeline cannot come to different conclusions about the same build.
- *
- * "skipped" is not "passed" — it means the script was not there to run, which
- * is reported as a warning rather than a failure.
- */
-export async function runBuildIdentityCheck(
-  projectDir: string = PROJECT_DIR,
-): Promise<{ status: "ok" | "skipped"; detail: string } | { status: "failed"; detail: string }> {
-  const script = path.join(projectDir, "scripts", "verify-build-identity.sh");
-  if (!existsSync(script)) {
-    return { status: "skipped", detail: "scripts/verify-build-identity.sh is missing" };
-  }
-  try {
-    const { stdout } = await execFile("/bin/bash", [script, "--project-dir", projectDir], {
-      timeout: 60_000,
-    });
-    return { status: "ok", detail: stdout.trim() };
-  } catch (err) {
-    const e = err as { stderr?: string; stdout?: string; message?: string };
-    const detail = (e.stderr || e.stdout || e.message || "").trim().split("\n").filter(Boolean).pop()
-      || "build identity could not be verified";
-    return { status: "failed", detail };
-  }
-}
-
-/**
- * The loud half of the ruling: after the rebuild, the build MUST be the code
- * on disk. Everything before this warns and carries on; this one fails.
- */
-async function verifyBuildIdentityAfterUpdate(): Promise<void> {
-  const result = await runBuildIdentityCheck();
-  if (result.status === "ok") {
-    console.log(`[Updater] ${result.detail}`);
-    return;
-  }
-  if (result.status === "skipped") {
-    warnUpdate(
-      "verify-script-missing",
-      `Could not verify the new build's identity: ${result.detail}.`,
-    );
-    return;
-  }
-  throw new Error(
-    `The device rebooted onto a build that does not match its own source — ${result.detail}`,
-  );
-}
-
 async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
@@ -3256,18 +3204,6 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     failFast: true,
   },
   {
-    id: "performance_mode",
-    label: "Setting the power profile",
-    // FIRST among the root steps that do real work, and ahead of apt_update on
-    // purpose: under an in-app update this step UNPINS the clocks (install.sh
-    // step_performance_mode, `--restore` while the lock is held) so the apt
-    // transaction, the npm install and the rebuild all run unpinned; the
-    // closing reboot pins again. It applied the pinned profile here until
-    // 2026-09-17, one step before the npm install three field boxes died in.
-    timeoutMs: 60_000,
-    requiresRoot: true,
-  },
-  {
     id: "apt_update",
     label: "Updating system packages",
     // 120 s was right while this step only refreshed apt and installed packages
@@ -3400,19 +3336,29 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // fails the install if anything IS listening on 18789.
     applies: () => !gatewayIsAbsent(),
   },
-  {
-    // The only hard gate this feature adds. Everything before it warns and
-    // carries on; a device that has finished rebuilding and STILL does not
-    // serve its own source has a problem no warning covers — that is the
-    // state in which fixes look shipped and are not.
-    //
-    // Last, and after the reboot: it can only be answered once the new build
-    // is the one on disk.
-    id: "verify_build_identity",
-    label: "Verifying the new build matches the code",
-    timeoutMs: 60_000,
-    customRun: verifyBuildIdentityAfterUpdate,
-  },
+  // Two steps are deliberately NOT on this list any more (owner's rulings,
+  // 2026-09-17).
+  //
+  // `performance_mode` ("Setting the power profile") ran second, ahead of
+  // apt_update. Until that morning it APPLIED the pinned profile there — one
+  // step before the npm install three field boxes died in on 2026-09-16 — and
+  // for a few hours after it unpinned for the update's length instead. Now the
+  // update does not touch the power profile at all: the box keeps the profile
+  // it booted with, and clawbox-performance.service applies the persisted or
+  // default one at the reboot that ends the update. install.sh's
+  // step_performance_mode still runs on a full install and by hand, and its
+  // update_owns_the_box guard stays for a hand-run step while an update is in
+  // flight.
+  //
+  // `verify_build_identity` ("Verifying the new build matches the code") was
+  // the last step. It ran verify-build-identity.sh against HEAD after
+  // post_update, and post_update is a self-updating step: install.sh's
+  // bootstrap block does `git fetch` + `reset --hard origin/<branch>` before
+  // it runs, so a commit pushed to the branch DURING the update moved the
+  // checkout past the build and the whole run ended red over a box that was
+  // fine. The build is still verified where it cannot drift — install.sh's
+  // do_rebuild runs the same script right after `bun run build`, in the same
+  // process, against the commit it just built — and CI runs it on every PR.
 ];
 
 /**
@@ -4143,14 +4089,7 @@ async function interruptedStepIndex(steps: UpdateStepDef[]): Promise<number> {
       const at = steps.findIndex((s) => s.id === id);
       if (at > 0 && at < index) index = at;
     }
-    // Never past the power-profile step. A box that died and was power-cycled
-    // boots with clawbox-performance.service pinning the clocks again, and a
-    // resume that skipped `performance_mode` would run the npm install and the
-    // rebuild pinned — the very condition that step unpins under an update
-    // (install.sh step_performance_mode). The steps between it and the recorded
-    // one are cheap, idempotent no-ops on a box they already ran on.
-    const unpin = steps.findIndex((s) => s.id === "performance_mode");
-    return unpin > 0 && index > unpin ? unpin : index;
+    return index;
   } catch {
     return 0;
   }

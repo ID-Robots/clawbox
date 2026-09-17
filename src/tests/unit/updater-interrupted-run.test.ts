@@ -485,29 +485,26 @@ describe("an interrupted run says which step died and what took the box, and res
     expect(state.error).toBe(updater.INTERRUPTED_MESSAGE);
   });
 
-  it("Resume continues from the interrupted step — no later than the power-profile step, which unpins the clocks", async () => {
+  it("Resume continues from the interrupted step", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     networkAnswers(true);
     const warnings = [{ code: "checkout-behind-pin", message: "The checkout was 71 commits behind its pin." }];
     diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" }, warnings });
     const died = stepIndex("openclaw_install");
-    const unpin = stepIndex("performance_mode");
-    expect(died).toBeGreaterThan(unpin);
-    expect(unpin).toBeGreaterThan(0);
+    expect(died).toBeGreaterThan(0);
 
     expect(updater.startUpdate()).toEqual({ started: true });
 
-    // A power-cycled box boots with clawbox-performance.service pinning the
-    // clocks again; a resume that skipped `performance_mode` would run the
-    // npm install pinned — the very thing that step unpins under an update.
-    // So the run picks up THERE, and parks on that step's (never-settling)
-    // root dispatch — which is the state this case reads.
-    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(unpin));
+    // The run picks up AT the recorded step — everything before it painted
+    // completed, nothing re-run — and parks on that step's (never-settling)
+    // root dispatch, which is the state this case reads. (Until 2026-09-17 a
+    // resume was held back to the power-profile step so the clocks were
+    // unpinned first; that step is off the update list, so nothing holds it.)
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(died));
     const state = updater.getUpdateState();
     expect(state.phase).toBe("running");
-    expect(state.steps.slice(0, unpin).every((s) => s.status === "completed")).toBe(true);
-    expect(state.steps[unpin].status).not.toBe("completed");
-    expect(state.steps[died].status).toBe("pending");
+    expect(state.steps.slice(0, died).every((s) => s.status === "completed")).toBe(true);
+    expect(state.steps[died].status).not.toBe("completed");
     // The interrupted run's own diagnosis travels with the resume.
     expect(state.warnings).toEqual(warnings);
     // The record is consumed by the prologue, so a run that dies AGAIN is
@@ -518,19 +515,20 @@ describe("an interrupted run says which step died and what took the box, and res
       ));
   });
 
-  it("resumes at the power-profile step for a record on the step right after it", async () => {
-    // Since 2026-09-17 the power-profile step is step 2, ahead of apt: every
-    // resumable step is after it, so every resume passes through the unpin.
+  it("resumes at the second step for a record on it, not from the top", async () => {
+    // Index 1 is the lowest position a resume can land on: a record naming
+    // the FIRST step is the same as starting over and is read as no position.
     vi.spyOn(console, "log").mockImplementation(() => {});
     networkAnswers(true);
     diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "replaced", step: "apt_update" } });
-    const unpin = stepIndex("performance_mode");
-    expect(stepIndex("apt_update")).toBe(unpin + 1);
+    const apt = stepIndex("apt_update");
+    expect(apt).toBe(1);
 
     expect(updater.startUpdate()).toEqual({ started: true });
 
-    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(unpin));
-    expect(updater.getUpdateState().steps[stepIndex("apt_update")].status).toBe("pending");
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(apt));
+    expect(updater.getUpdateState().steps[0].status).toBe("completed");
+    expect(updater.getUpdateState().steps[apt].status).not.toBe("completed");
   });
 
   it("keeps its position when a resume is refused for want of a network", async () => {
@@ -604,8 +602,7 @@ describe("an interrupted run says which step died and what took the box, and res
     networkAnswers(true);
     diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install", failed: ["apt_update"] } });
     expect(updater.startUpdate()).toEqual({ started: true });
-    const resumeAt = Math.min(apt, stepIndex("performance_mode"));
-    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(resumeAt));
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(apt));
   });
 
   it("Dismiss takes the step record with the stamp, so the next update starts from the top", async () => {

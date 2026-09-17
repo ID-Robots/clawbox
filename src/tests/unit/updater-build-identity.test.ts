@@ -11,14 +11,15 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // The updater's step list is built from the running edition, and the module
 // probes the device at import time. Nothing below starts an update or touches
-// systemd: these tests exercise the three units of the WARN + AUTO-REPIN path
+// systemd: these tests exercise the two units of the WARN + AUTO-REPIN path
 // against a throwaway git repo, exactly as the ruling describes them.
 //
 // Krasi's ruling (2026-08-24): a drifted box is NOT blocked at update time —
 // the update proceeds, prints a clear warning, and re-pins to the tested
-// commit as part of the run. Only the POST-update verification fails loudly.
-
-const REPO_ROOT = path.resolve(__dirname, "../../..");
+// commit as part of the run. The post-update verification step that used to
+// fail loudly was removed on 2026-09-17 (see the note at the end of
+// UPDATE_STEPS in src/lib/updater.ts); the build is still verified by
+// install.sh's do_rebuild right after `bun run build`, and by CI.
 
 const HAS_GIT = (() => {
   try {
@@ -31,7 +32,7 @@ const HAS_GIT = (() => {
 
 const d = HAS_GIT ? describe : describe.skip;
 
-d("updater — build drift: warn, repin, verify", () => {
+d("updater — build drift: warn, repin", () => {
   let repo: string;
   let head: string;
   let mod: typeof import("@/lib/updater");
@@ -158,71 +159,5 @@ d("updater — build drift: warn, repin, verify", () => {
       expect(fs.existsSync(path.join(repo, ".update-branch"))).toBe(false);
       expect(warnings.map((w) => w.code)).toEqual(["repin-refused"]);
     });
-  });
-
-  describe("runBuildIdentityCheck (the one loud gate)", () => {
-    beforeEach(() => {
-      // The real script, not a copy of its logic — the whole point is that the
-      // device and CI run the same file.
-      fs.mkdirSync(path.join(repo, "scripts"), { recursive: true });
-      fs.copyFileSync(
-        path.join(REPO_ROOT, "scripts", "verify-build-identity.sh"),
-        path.join(repo, "scripts", "verify-build-identity.sh"),
-      );
-    });
-
-    it("passes when the build is the checkout", async () => {
-      writeBuildInfo(head);
-      const result = await mod.runBuildIdentityCheck(repo);
-      expect(result.status).toBe("ok");
-      expect(result.detail).toContain(head.slice(0, 7));
-    });
-
-    it("fails loudly when the rebuild produced someone else's commit", async () => {
-      const stale = git("rev-parse", "HEAD~1");
-      writeBuildInfo(stale);
-
-      const result = await mod.runBuildIdentityCheck(repo);
-      expect(result.status).toBe("failed");
-      expect(result.detail).toContain(stale);
-      expect(result.detail).toContain(head);
-    });
-
-    it("fails when the stamp describes assets other than the deployed ones", async () => {
-      writeBuildInfo(head, "recordedbuild");
-      fs.writeFileSync(path.join(repo, ".next", "BUILD_ID"), "someotherbuild\n");
-
-      const result = await mod.runBuildIdentityCheck(repo);
-      expect(result.status).toBe("failed");
-      expect(result.detail).toContain("someotherbuild");
-    });
-
-    it("fails when the build carries no identity", async () => {
-      fs.mkdirSync(path.join(repo, ".next"), { recursive: true });
-      fs.writeFileSync(path.join(repo, ".next", "BUILD_ID"), "legacybuild\n");
-
-      const result = await mod.runBuildIdentityCheck(repo);
-      expect(result.status).toBe("failed");
-      expect(result.detail).toContain("no build-info.json");
-    });
-
-    // Missing script ≠ verified. It must not silently pass as "ok".
-    it("reports a missing verifier as skipped, not as a pass", async () => {
-      fs.rmSync(path.join(repo, "scripts", "verify-build-identity.sh"), { force: true });
-      const result = await mod.runBuildIdentityCheck(repo);
-      expect(result.status).toBe("skipped");
-    });
-  });
-
-  it("registers the verification as the last step of a real update", async () => {
-    // Reading the shipped step list rather than re-declaring it: a step added
-    // anywhere but the end would be verifying a build that is not yet deployed.
-    const src = fs.readFileSync(path.join(REPO_ROOT, "src/lib/updater.ts"), "utf-8");
-    const list = src.slice(src.indexOf("const UPDATE_STEPS"), src.indexOf("\n];", src.indexOf("const UPDATE_STEPS")));
-    const ids = [...list.matchAll(/^\s{4}id: (?:"([a-z_]+)"|RESTART_STEP_ID),/gm)].map((m) => m[1] ?? "restart");
-
-    expect(ids).toContain("verify_build_identity");
-    expect(ids[ids.length - 1]).toBe("verify_build_identity");
-    expect(ids.indexOf("verify_build_identity")).toBeGreaterThan(ids.indexOf("restart"));
   });
 });

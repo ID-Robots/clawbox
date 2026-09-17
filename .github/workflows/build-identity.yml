@@ -20,7 +20,8 @@ permissions:
 # nothing in the repo could have caught it.
 #
 # So the build is asserted to know its own source, on every PR, using the SAME
-# script the device runs after an update (scripts/verify-build-identity.sh).
+# script the device runs right after `bun run build` in an update's rebuild
+# (scripts/verify-build-identity.sh, from install.sh's do_rebuild).
 # One implementation, two callers — a second copy would eventually disagree
 # with the first, and the whole value of the check is that it does not.
 jobs:

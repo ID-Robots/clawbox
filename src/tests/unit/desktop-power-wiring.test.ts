@@ -51,8 +51,8 @@ describe("the power script's default", () => {
 
   it("is performance since 2026-09-15, with balanced kept as the owner's opt-out", () => {
     // The owner's ruling: an unconfigured or corrupted state file resolves to
-    // the pinned profile, and step_performance_mode's --apply on every update
-    // is what carries that onto a box already in the field.
+    // the pinned profile, and clawbox-performance.service's --apply at every
+    // boot is what carries that onto a box already in the field.
     expect(script).toContain('DEFAULT_MODE="performance"');
     // A persisted literal is returned untouched, so an owner's `balanced`
     // survives the update that flipped the default.
