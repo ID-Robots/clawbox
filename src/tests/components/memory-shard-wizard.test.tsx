@@ -259,7 +259,11 @@ describe("MemoryShardWizard", () => {
     fireEvent.click(screen.getByTestId("memory-shard-index-now"));
     await waitFor(() => expect(done).toHaveBeenCalled());
     expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeUndefined();
-    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "cloud" });
+    // …and no switch is asked for either: the index is already there, and the
+    // route's switch re-checks the very probe that just answered false, so
+    // posting it would turn a hiccup into a 409 over an index that was never
+    // going to move. The wizard finishes on what the box already has.
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();
   });
 
   it("says WHY the cloud model cannot be picked and what makes it available, reason by reason", async () => {

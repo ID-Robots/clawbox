@@ -131,15 +131,26 @@ describe("what the gateway path refuses to claim", () => {
     expect(spawnMock).toHaveBeenCalled();
   });
 
-  it("accepts a changedPaths that names the LEAVES under the path asked for", async () => {
-    patchMock.mockResolvedValue({
-      noop: false,
-      changedPaths: ["tts.providers.tts-local-cli.command", "tts.providers.tts-local-cli.voice"],
-    });
+  it("keeps an object value on the CLI — the CLI REPLACES it, the gateway would MERGE it", async () => {
+    // `config.patch` is an RFC-7396 merge: a key the caller left out of the
+    // object survives it (a stale `apiKey` under a provider entry, say),
+    // which is a different config from the one asked for. The CLI's
+    // `config set <path> <json>` replaces the value, so containers keep it.
+    spawnSucceeds();
     await lib.runOpenclawConfigSet(
       ["tts.providers.tts-local-cli", JSON.stringify({ command: "clawbox-tts.sh", voice: "af_heart" }), "--json"],
     );
-    expect(spawnMock).not.toHaveBeenCalled();
+    expect(patchMock).not.toHaveBeenCalled();
+    expect(spawnMock).toHaveBeenCalled();
+  });
+
+  it("keeps an array value on the CLI for the same reason", async () => {
+    spawnSucceeds();
+    await lib.runOpenclawConfigSet(
+      ["agents.defaults.model.fallbacks", JSON.stringify(["llamacpp/gemma4-e2b-it-q4_0"]), "--json"],
+    );
+    expect(patchMock).not.toHaveBeenCalled();
+    expect(spawnMock).toHaveBeenCalled();
   });
 
   it("retries the gateway on the config-mutation conflict instead of paying a CLI start", async () => {

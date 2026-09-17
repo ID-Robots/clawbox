@@ -383,6 +383,20 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
       expect(changed).toBe(false);
       expect(audio(cfg)).toEqual(owner);
     });
+
+    it("leaves a row that names the owner's OWN profile alone", () => {
+      // Our row is recognised by exact equality, so a cloud row the owner has
+      // pointed at their own OpenAI profile is theirs, not ours — and the
+      // repair must not overwrite the profile they chose. Pinned so a looser
+      // predicate cannot quietly start doing that.
+      const owned = { provider: "openai", model: TRANSCRIBE_MODEL, profile: "openai:default" };
+      const { cfg, changed } = migrate({
+        tools: { media: { audio: { baseUrl: PROXY, models: [owned] } } },
+      });
+
+      expect(changed).toBe(false);
+      expect(audio(cfg)!.models).toEqual([owned]);
+    });
   });
 });
 

@@ -1535,6 +1535,33 @@ describe("/setup-api/chat/model", () => {
       const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
       expect(anthropic.thinkingLevels).toBeUndefined();
     });
+
+    it("asks the gateway ONCE per switch, for the read the answer is built from", async () => {
+      // POST reads the state twice — once for its routing facts, once fresh
+      // after the write — and the levels are a decoration on the second. A
+      // `models.list` round trip on the first cost the connect and method
+      // deadlines twice per switch on a slow gateway, for a map nothing read.
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: [{ id: "low", label: "Low" }, { id: "high", label: "High" }] },
+        ],
+      });
+      pairedBox();
+
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-mythos-preview" }),
+      }));
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(gatewayWsCallMock.mock.calls.filter((call) => call[0] === "models.list")).toHaveLength(1);
+      // …and that one read is the one the rows are decorated from.
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toEqual(["low", "high"]);
+    });
   });
 
   // The UI sweep of 2026-09-07: the picker offered "Ollama Local" backed by

@@ -176,15 +176,28 @@ function detailsDelta(line: string): { opens: number; closes: number } {
   };
 }
 
-/** Where this run's own `</details>` sits, or null while it is still streaming. */
-function lastDetailsClose(inner: string): { index: number; length: number } | null {
-  const pattern = /<\/details\s*>/gi;
-  let found: { index: number; length: number } | null = null;
+/**
+ * Where this block's OWN `</details>` sits, or null while it is still streaming.
+ *
+ * Depth-aware, not "the last close in the run": `detailsDelta` can return to
+ * zero inside the first collected line, so the run may hold a complete block
+ * AND later markup — `<details>a</details> tail <details>b</details>` on one
+ * line. Taking the last close there would cut the body at the SECOND block's
+ * end and print the first block's literal `</details>` in the bubble.
+ */
+function matchingDetailsClose(inner: string): { index: number; length: number } | null {
+  const pattern = /<details(?:\s[^>]*)?>|<\/details\s*>/gi;
+  let depth = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(inner)) !== null) {
-    found = { index: match.index, length: match[0].length };
+    if (match[0][1] === "/") {
+      if (depth === 0) return { index: match.index, length: match[0].length };
+      depth--;
+    } else {
+      depth++;
+    }
   }
-  return found;
+  return null;
 }
 
 /**
@@ -313,10 +326,10 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       const openMatch = joined.match(DETAILS_OPEN_RE);
       const openEnd = (openMatch?.index ?? 0) + (openMatch?.[0].length ?? 0);
       let inner = joined.slice(openEnd);
-      // The LAST close in the balanced run is this block's own; an inner
+      // The close that BALANCES the opening tag is this block's own; an inner
       // `<details>` inside it keeps its tags and folds again on the way back
       // through this renderer.
-      const close = lastDetailsClose(inner);
+      const close = matchingDetailsClose(inner);
       // An unterminated block is the normal STREAMING shape — the closing tag
       // has not arrived yet — and must fold rather than flash its tags.
       let after = "";
@@ -325,8 +338,13 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
         inner = inner.slice(0, close.index);
       }
       blocks.push({ kind: "details", ...splitDetails(inner, detailsLabel) });
-      // Whatever followed `</details>` on the same line is ordinary text again.
-      if (after.trim()) para.push(after);
+      // Whatever followed `</details>` on the same line is ordinary text
+      // again — unless it opens another block, in which case it is scanned as
+      // a line of its own so that one folds too instead of printing its tags.
+      if (after.trim()) {
+        if (DETAILS_OPEN_RE.test(after)) lines.splice(i + 1, 0, after);
+        else para.push(after);
+      }
       continue;
     }
 

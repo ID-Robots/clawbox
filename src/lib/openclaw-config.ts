@@ -207,6 +207,12 @@ async function configSetViaGateway(
     }
     const segments = configPathSegments(entry.path);
     if (!segments || segments.length === 0) return false;
+    // A container value is a REPLACEMENT for the CLI and a MERGE for
+    // `config.patch`: a key the caller left out survives the merge, which is
+    // a different config from the one asked for (a stale `apiKey` under a
+    // provider entry, say). Only a scalar means the same thing to both
+    // writers, so objects and arrays keep the CLI they always had.
+    if (entry.value !== null && typeof entry.value === "object") return false;
     askedPaths.push(segments.join("."));
     let node: Record<string, unknown> = patch;
     for (const key of segments.slice(0, -1)) {

@@ -86,6 +86,23 @@ describe("reporting the installed Claude Code version", () => {
     expect(r.bundle).toBe(BUNDLE_BEFORE);
   });
 
+  it("judges every copy of the constant in a file on its own — an older first copy cannot drag a newer one down", () => {
+    // One file, two constants: the rewrite is per occurrence, so the older
+    // one comes up to the installed version and the newer one is left as it
+    // is. Deciding on the first match alone rewrote BOTH, and the second was
+    // the downgrade the step exists to refuse.
+    const dist = path.join(tmp, "home", ".npm-global", "lib", "node_modules", "openclaw", "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(
+      path.join(dist, "anthropic-abc123.js"),
+      "ANTHROPIC_CLAUDE_CODE_VERSION=`2.1.75`;ANTHROPIC_CLAUDE_CODE_VERSION=`2.1.300`;",
+    );
+    const r = run("2.1.200");
+    expect(r.status).toBe(0);
+    expect(r.bundle).toBe("ANTHROPIC_CLAUDE_CODE_VERSION=`2.1.200`;ANTHROPIC_CLAUDE_CODE_VERSION=`2.1.300`;");
+    expect(r.out).toMatch(/the core said Claude Code 2\.1\.75; now reporting the installed 2\.1\.200/);
+  });
+
   it("leaves the core alone, and says so, when no Claude Code is installed", () => {
     const r = run(null);
     expect(r.status).toBe(0);

@@ -300,6 +300,24 @@ describe("runHermesSlashCommand", () => {
     }
   });
 
+  it("reports a socket that dropped AFTER the command was written as STILL RUNNING, never as no transport", async () => {
+    // The gateway restarts, or the dashboard drops the socket, between the
+    // frame going out and its reply. The command may well have run; answering
+    // null would have the route hand `/undo` to the model on top of it.
+    const call = runHermesSlashCommand({ command: "/undo 2", sessionId: "20260917_090000_aabbcc" });
+    const socket = await latest();
+    socket.open();
+    await untilSent(socket, 1);
+    socket.deliver({ jsonrpc: "2.0", id: 1, result: { session_id: "rt1", stored_session_id: "20260917_090000_aabbcc" } });
+    await untilSent(socket, 2);
+    expect(socket.sent[1].method).toBe("slash.exec");
+    socket.emit("close");
+    const answer = await call;
+    expect(answer).not.toBeNull();
+    expect(answer?.sessionId).toBe("20260917_090000_aabbcc");
+    expect(answer?.output).toMatch(/still running/i);
+  });
+
   it("answers null when there is no dashboard to reach, so the caller can fall back", async () => {
     ticketMock.mockResolvedValue(null);
     expect(await runHermesSlashCommand({ command: "/status" })).toBeNull();

@@ -65,6 +65,24 @@ describe("details blocks", () => {
     expect(container.textContent).not.toContain("<details>");
   });
 
+  it("folds two blocks that share one line, each behind its own summary", () => {
+    // The run is balanced inside the first line, so it holds a whole block
+    // AND the second one. Taking the LAST close cut the first block's body at
+    // the second's end and printed the first `</details>` as text.
+    const { container } = bubble(
+      "<details><summary>First</summary>alpha</details> between <details><summary>Second</summary>beta</details>",
+    );
+    expect(screen.getAllByTestId("chat-markdown-details-toggle")).toHaveLength(2);
+    expect(container.textContent).toContain("First");
+    expect(container.textContent).toContain("Second");
+    expect(container.textContent).toContain("between");
+    expect(container.textContent).not.toContain("</details>");
+    expect(container.textContent).not.toContain("<details>");
+    // Closed by default, both of them.
+    expect(container.textContent).not.toContain("alpha");
+    expect(container.textContent).not.toContain("beta");
+  });
+
   it("admits no other HTML", () => {
     // Nothing here is a sanitiser: React prints text, and this is the proof
     // that consuming `<details>` did not open a door beside it.

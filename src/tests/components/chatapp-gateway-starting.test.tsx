@@ -131,4 +131,24 @@ describe("the full page's starting-retry ladder", () => {
     expect(instances.slice(0, 2).every((s) => s.closed)).toBe(true);
     await waitFor(() => expect(instances[instances.length - 1].closed).toBe(false));
   });
+
+  it("does not paint the error panel when the browser fires close for the refused socket", async () => {
+    // A real socket fires `close` for the close() the retry branch calls, and
+    // this component's close handler paints "Could not connect" whenever no
+    // connect has succeeded yet — which, mid-ladder, is always. The fake
+    // above never fires it, so the handler has to be DETACHED before the
+    // close for this to hold, and that is what is pinned here.
+    refusals = 2;
+    render(<ChatApp />);
+    await waitFor(() => expect(instances.length).toBeGreaterThanOrEqual(1));
+    await waitFor(() => expect(instances[0].closed).toBe(true));
+    await act(async () => { instances[0].onclose?.(); });
+    expect(document.body.textContent).not.toContain("Could not connect to gateway");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    await waitFor(() => expect(instances.length).toBeGreaterThanOrEqual(3));
+    await waitFor(() => expect(instances[instances.length - 1].closed).toBe(false));
+    expect(document.body.textContent).not.toContain("Could not connect to gateway");
+  });
 });

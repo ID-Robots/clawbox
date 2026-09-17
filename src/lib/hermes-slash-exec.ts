@@ -289,7 +289,14 @@ export async function runHermesSlashCommand(
   socket.on("error", killAll);
   socket.on("close", killAll);
 
-  /** One request. Null for a dead socket, TIMED_OUT when we stopped waiting. */
+  /**
+   * One request. Null ONLY when the frame never reached the wire; TIMED_OUT
+   * when it was written and no answer came back — including a socket that
+   * died AFTER the write (`killAll` settles every pending entry), which may
+   * well have executed the command. Reporting that as "no transport" sent the
+   * caller down its fall-through: the chat route would hand the same `/undo`
+   * or `/compress` to the model while the gateway had already run it.
+   */
   const call = (
     method: string,
     params: Record<string, unknown>,
@@ -302,17 +309,19 @@ export async function runHermesSlashCommand(
       }
       const id = nextId++;
       let settled = false;
+      let written = false;
       const finish = (frame: CallResult) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         pending.delete(id);
-        resolve(frame);
+        resolve(frame === null && written ? TIMED_OUT : frame);
       };
       const timer = setTimeout(() => finish(TIMED_OUT), timeoutMs);
       pending.set(id, finish);
       try {
         socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        written = true;
       } catch {
         finish(null);
       }

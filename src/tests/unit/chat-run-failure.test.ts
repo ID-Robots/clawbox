@@ -384,18 +384,19 @@ describe("the transport-field trim on a hostile detail", () => {
     // A tail the engine CANNOT match is what forces it through the ambiguous
     // `\s*` / `[^,]*` pairing. Measured on the old regex in node: 18 repeats
     // 27 ms, 20 → 99 ms, 22 → 393 ms, 24 → 1643 ms — doubling per repeat. The
-    // split-and-pop is under a millisecond on the same 151 characters, so this
-    // 500 ms budget is a factor of three under the old code and a factor of
-    // hundreds over the new one.
+    // split-and-pop is under a millisecond on the same 151 characters.
+    //
+    // No wall-clock assertion: under the full suite's parallel run and on a
+    // slow device, `Date.now()` measures scheduling as much as the code, and
+    // two samples cannot prove linearity either. The source-level guard is
+    // the repository's CodeQL `js/redos` check; what this pins is that the
+    // hostile input goes THROUGH the trim and comes out unchanged.
     const hostile = ",url:" + "\t,url:".repeat(24) + ",x";
-    const t0 = Date.now();
     const text = describeChatFailure("x", { reason: "format", provider: "anthropic", model: "m", detail: hostile });
-    expect(Date.now() - t0).toBeLessThan(500);
-    // …and the ANSWER is unchanged: no field is TRAILING here, so the trim
-    // strips nothing and the hostile run survives into the sentence exactly as
-    // the old regex left it (the colons go later, to the `:` -before-a-comma
-    // rule this path has always had). Asserting it is what keeps this a speed
-    // test rather than a quiet behaviour change.
+    // The ANSWER is unchanged: no field is TRAILING here, so the trim strips
+    // nothing and the hostile run survives into the sentence exactly as the
+    // old regex left it (the colons go later, to the `:` -before-a-comma
+    // rule this path has always had).
     expect(text).toContain(",url,url");
   });
 

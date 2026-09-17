@@ -892,6 +892,21 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     expect(log).toContain("Removed the ClawBox AI image model");
   });
 
+  it("takes back the credential and the endpoint from an entry the owner has added their own settings to", () => {
+    // The whole-entry delete only fires when nothing but ours is in it. An
+    // owner who added `request` to the entry keeps that — but the refused key
+    // and our endpoint must still go, or the bundled plugin keeps offering
+    // chat rows on a credential the proxy refuses.
+    const box = armedBox();
+    providerEntry(box, "litellm")!.request = { timeoutMs: 90000 };
+    const { cfg, changed, log } = migrate(box, false, REFUSED);
+
+    expect(imageGenerationModel(cfg)).toBeUndefined();
+    expect(providerEntry(cfg, "litellm")).toEqual({ request: { timeoutMs: 90000 } });
+    expect(changed).toBe(true);
+    expect(log).toContain("Removed the ClawBox AI image model");
+  });
+
   it("takes back the v2 home too", () => {
     const { cfg, changed } = migrate(armedBox(true), true, REFUSED);
 

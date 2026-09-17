@@ -301,10 +301,15 @@ describe("the provider's own words, scrubbed with the repo's one inventory", () 
     }
   });
 
-  it("still falls to the generic line when a key shape survives into the sentence", () => {
-    // `sk-` is stripped by the inventory; the whole-message reject list is what
-    // catches anything that is not, and GENERIC is the honest answer then.
-    expect(detailWith("Bearer sk-abcdefghijklmnop rejected")).not.toMatch(/sk-/);
+  it("strips a bearer token whole and keeps what the provider said around it", () => {
+    // The inventory takes the entire `Bearer sk-…` shape out BEFORE the
+    // whole-message reject list runs, so this never reaches GENERIC: the
+    // provider's one remaining word is quoted and the refusal is still
+    // explained. Pinned to the exact sentence, so a redaction regression that
+    // let some other text through could not pass on "no key fragment" alone.
+    expect(detailWith("Bearer sk-abcdefghijklmnop rejected")).toBe(
+      "That message did not go through — OpenAI rejected the request for gpt-5.5: “rejected”. Pick another model in the header, or send it again.",
+    );
   });
 });
 

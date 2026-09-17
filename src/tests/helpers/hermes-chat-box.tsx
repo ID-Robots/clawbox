@@ -85,7 +85,7 @@ export interface HermesBox {
    * Hermes' own `commands.catalog`. Empty by default, so a test that says
    * nothing about commands gets no popover and is unaffected.
    */
-  commandRows: { id: string; usage: string; description: string; source: "harness" }[];
+  commandRows: { id: string; usage: string; description: string; acceptsArgs: boolean; source: "harness" }[];
   /**
    * What that route says about whether it could ASK the dashboard.
    *

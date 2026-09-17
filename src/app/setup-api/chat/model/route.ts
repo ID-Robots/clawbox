@@ -551,13 +551,19 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
 /**
  * `preloaded` is the config POST has already read for its own routing facts,
  * so one request reads openclaw.json once; GET reads it here.
+ *
+ * `gatewayLevels: false` skips the `models.list` round trip. The levels are a
+ * DECORATION on the rows the answer carries, and POST's pre-write read is for
+ * routing facts only — every response it sends is built from a fresh read
+ * after the write, so asking the gateway twice per switch bought nothing and,
+ * on a slow gateway, cost the connect and method deadlines twice over.
  */
-async function loadChatModelState(preloaded?: OpenClawConfig) {
+async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean } = {}) {
   const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
-    readGatewayThinkingLevels(),
+    read.gatewayLevels === false ? new Map<string, string[]>() : readGatewayThinkingLevels(),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
   // Subscription-only providers, computed ONCE: the row attribution below and
@@ -1055,7 +1061,9 @@ export async function POST(request: Request) {
     // One read of openclaw.json for the request: the state below and every
     // credential fact the routing turns on come from the same snapshot.
     const preloadedConfig = await readConfig().catch(() => null);
-    const state = await loadChatModelState(preloadedConfig ?? {});
+    // Routing facts only: no response below is built from this snapshot, so
+    // the gateway's `models.list` is asked once, for the fresh read that is.
+    const state = await loadChatModelState(preloadedConfig ?? {}, { gatewayLevels: false });
     // Set wherever a pick is resolved onto the ChatGPT subscription: that
     // route is written under `openai/`, so the namespace cannot say so and
     // the runtime arm below has to be told.
@@ -1368,9 +1376,9 @@ export async function POST(request: Request) {
     // Read/recheck/append under the native config lock. Never serialize an
     // allowlist from the earlier request snapshot into a retryable CLI batch.
     // The equivalent Flash permission remains if primary validation later fails.
-    const policyRepaired = targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash
-      ? await repairClawboxAiFlashModelPolicy()
-      : false;
+    // Whether it repaired anything no longer decides a re-read: every answer
+    // below comes from a fresh read (see loadChatModelState).
+    if (targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash) await repairClawboxAiFlashModelPolicy();
 
     if (state.activeModel === targetModel) {
       // Naming the model the box already runs is still a choice, and the write
@@ -1398,7 +1406,6 @@ export async function POST(request: Request) {
       //     a same-model pick is free only when they already agree.
       let sameModelWarning: string | undefined;
       const armed = chatgptRuntimeArmed(preloadedConfig, targetModel);
-      const wrote = chatgptRouted !== armed || policyRepaired;
       if (chatgptRouted && !armed) {
         await runOpenclawConfigSet(chatgptRuntimeArmOp(targetModel));
       } else if (!chatgptRouted && armed) {
@@ -1408,13 +1415,12 @@ export async function POST(request: Request) {
       // config as it was, where the arm this branch just removed still says
       // the model belongs to the ChatGPT row. Answering with that would tell
       // the owner they are on the subscription in the same response that took
-      // them off it. A branch that wrote nothing keeps the snapshot it has.
-      // Another lock holder may have already repaired or removed the Pro
-      // permission. Re-read a previously flagged policy even if we wrote
-      // nothing, so the response does not keep a stale migration flag.
-      const settledState = wrote || state.needsFlashModelMigration
-        ? await loadChatModelState()
-        : state;
+      // them off it. Another lock holder may have already repaired or removed
+      // the Pro permission, so a previously flagged policy is re-read too.
+      // And a branch that wrote nothing re-reads all the same: the pre-write
+      // snapshot carries no gateway reasoning levels (see loadChatModelState),
+      // and this is the one read of the request that decorates the rows.
+      const settledState = await loadChatModelState();
       const sameModelOption = settledState.options.find((option) =>
         option.model === targetModel
         && (!pickedUiProvider || option.provider === pickedUiProvider));

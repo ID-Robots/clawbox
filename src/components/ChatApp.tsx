@@ -483,7 +483,12 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             startingRetriesRef.current++
             // THIS socket, not whatever `wsRef` happens to hold: a newer
             // connect may already own the ref, and closing it here would tear
-            // down the attempt that is about to succeed.
+            // down the attempt that is about to succeed. Its handlers come off
+            // FIRST: the browser fires `close` for the close below, and this
+            // socket's onClose would paint the error panel over a retry that
+            // is still climbing — and null a `wsRef` a newer socket owns.
+            ws.onclose = null
+            ws.onmessage = null
             try { ws.close() } catch { /* already closing */ }
             if (wsRef.current === ws) wsRef.current = null
             if (startingRetryTimerRef.current) clearTimeout(startingRetryTimerRef.current)
@@ -1150,11 +1155,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // rebuilt on every keystroke and its memo did nothing at all.
   const slashKeyDown = slash.handleKeyDown
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // An IME candidate window owns Enter while it is up — before the menu,
+    // which would otherwise accept a command on the keystroke that was
+    // committing a half-composed word.
+    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
     // The menu gets first refusal: with it open Enter and Tab accept the
     // highlighted command instead of sending. Closed, this is unchanged.
     if (slashKeyDown(e)) return
-    // An IME candidate window owns Enter while it is up.
-    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()

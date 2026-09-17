@@ -117,4 +117,17 @@ describe("GET /setup-api/pets/sprite", () => {
   it("still 404s a pet that is neither installed nor bundled", async () => {
     expect((await sprite("boba")).status).toBe(404);
   });
+
+  it("falls back to the bundled pack when the owner's copy of it is unusable", async () => {
+    // An empty directory at the owner's path — a materialisation that died
+    // half way, a stray mkdir — used to shadow the shipped pack outright: the
+    // crab read as not installed, the sprite route 404'd, and the Hermes
+    // arm's copy step skips an existing destination, so nothing repaired it.
+    fs.mkdirSync(path.join(tmpHome, "data", "pets", "vibrant-clawd"), { recursive: true });
+
+    const crab = (await gallery()).pets.find((p) => p.slug === "vibrant-clawd");
+    expect(crab?.installed).toBe(true);
+    expect(crab?.builtin).toBe(true);
+    expect((await sprite("vibrant-clawd")).status).toBe(200);
+  });
 });

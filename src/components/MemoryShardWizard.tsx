@@ -260,13 +260,21 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
 
       setPhase("switching-provider");
       setDetail(null);
-      const provider = await fetch(
+      // A box whose index is ALREADY embedded in the cloud has nothing to
+      // switch: the cloud can be picked there whatever the live probe said
+      // (see `cloudEmbedderPickable`), but the route's switch re-checks that
+      // probe and the token and answers 409 on a hiccup — a failed wizard over
+      // an index that was never going to move. The local path always posts:
+      // its owner's-choice mark is what keeps the next boot's cloud default
+      // from moving the index back.
+      const alreadyInCloud = source === "cloud" && embedder?.source === "cloud";
+      const provider = alreadyInCloud ? null : await fetch(
         "/setup-api/clawkeep/memory/provider",
         source === "cloud"
           ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: "cloud" }), signal }
           : { method: "POST", signal },
       );
-      if (!provider.ok) {
+      if (provider && !provider.ok) {
         const out = (await provider.json().catch(() => null)) as { error?: string } | null;
         throw new Error(out?.error || t("clawkeep.memory.setup.providerFailed"));
       }

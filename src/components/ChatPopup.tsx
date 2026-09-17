@@ -5918,14 +5918,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const slashKeyDown = slash.handleKeyDown
   // Handle Enter to send
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // An IME candidate window owns Enter while it is up; committing a
+    // half-composed word as a message is not a send the owner asked for —
+    // and, checked BEFORE the menu, neither is accepting a command on it.
+    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
     // The slash menu gets first refusal: with it open, Enter and Tab ACCEPT the
     // highlighted command rather than sending, and the Arrows walk the list.
     // With it closed the hook returns false and this behaves exactly as it
     // always has.
     if (slashKeyDown(e)) return
-    // An IME candidate window owns Enter while it is up; committing a
-    // half-composed word as a message is not a send the owner asked for.
-    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()

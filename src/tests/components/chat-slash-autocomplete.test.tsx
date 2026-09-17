@@ -245,6 +245,23 @@ describe("slash-command autocomplete (OpenClaw, mascot chat)", () => {
     expect(framesFor("chat.send")).toHaveLength(0);
   });
 
+  it("leaves Enter to an IME candidate window even while the menu is open", async () => {
+    // The Enter that commits a half-composed word is the IME's, not the
+    // menu's: accepting a command on it would swallow the composition. So the
+    // composition flag is checked BEFORE the menu gets its first refusal.
+    await mountReady();
+    await openMenu();
+    const el = composer();
+    fireEvent.keyDown(el, { key: "ArrowDown" });
+    await waitFor(() => expect(menu()?.querySelectorAll('[aria-selected="true"]').length).toBe(1));
+    fireEvent.keyDown(el, { key: "Enter", isComposing: true });
+    // Neither accepted nor sent: the draft is still the bare slash, and the
+    // menu is still up for the keystroke that follows the commit.
+    expect(composer().value).toBe("/");
+    expect(menu()).not.toBeNull();
+    expect(framesFor("chat.send")).toHaveLength(0);
+  });
+
   it("puts the caret after a space for a command that takes arguments", async () => {
     await mountReady();
     await openMenu("/mo");

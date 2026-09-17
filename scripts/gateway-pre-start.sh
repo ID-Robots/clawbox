@@ -2861,9 +2861,20 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
                     _image_rows_are_ours = not isinstance(_image_rows, list) or all(
                         _is_our_image_row(_m) for _m in _image_rows
                     )
-                    if _image_rows_are_ours and set(_registered.keys()) <= {"apiKey", "baseUrl", "models"}:
-                        del models_providers[CLAWBOX_IMAGE_PROVIDER]
-                        _stood_down = True
+                    if _image_rows_are_ours:
+                        if set(_registered.keys()) <= {"apiKey", "baseUrl", "models"}:
+                            del models_providers[CLAWBOX_IMAGE_PROVIDER]
+                            _stood_down = True
+                        else:
+                            # The owner has added their own settings to the entry
+                            # (`request`, say): those stay, and only the credential,
+                            # the endpoint and our rows go — leaving the refused key
+                            # in place would keep the bundled plugin offering chat
+                            # rows on it.
+                            for _key in ("apiKey", "baseUrl", "models"):
+                                if _key in _registered:
+                                    del _registered[_key]
+                                    _stood_down = True
                 if _stood_down:
                     print(
                         "  Removed the ClawBox AI image model: the proxy has refused this box's credential"
@@ -7810,13 +7821,25 @@ for root, dirs, files in os.walk(dist):
         if not matches:
             continue
         found = True
-        current = matches[0].group(3)
-        if current == installed:
+        # Decide per OCCURRENCE, not per file: `pattern.sub` rewrites every
+        # constant in the file, so judging only the first would let an older
+        # first copy drag a newer second one down — the downgrade this block
+        # exists to refuse.
+        versions = {m.group(3) for m in matches}
+        if versions == {installed}:
             continue
-        if tuple_of(current) >= installed_t:
-            kept.append((os.path.relpath(path, dist), current))
+        older = sorted((v for v in versions if tuple_of(v) < installed_t), key=tuple_of)
+        if not older:
+            kept.append((os.path.relpath(path, dist), sorted(versions, key=tuple_of)[0]))
             continue
-        rewritten = pattern.sub(lambda m: f"ANTHROPIC_CLAUDE_CODE_VERSION{m.group(1)}{m.group(2)}{installed}{m.group(2)}", text)
+        current = older[0]
+
+        def bump(m):
+            if tuple_of(m.group(3)) >= installed_t:
+                return m.group(0)
+            return f"ANTHROPIC_CLAUDE_CODE_VERSION{m.group(1)}{m.group(2)}{installed}{m.group(2)}"
+
+        rewritten = pattern.sub(bump, text)
         mode = os.stat(path).st_mode & 0o777
         fd, tmp = tempfile.mkstemp(dir=root, prefix=f".{name}.", suffix=".tmp")
         try:

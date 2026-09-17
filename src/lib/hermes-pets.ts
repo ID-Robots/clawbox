@@ -221,9 +221,19 @@ export function loadPet(rawSlug: string): InstalledPet | null {
   if (!slug) return null;
   // The owner's own store first, the shipped pack second: a slug the owner
   // installed or generated himself must keep winning over a bundled one of the
-  // same name, exactly as it would over a curated one.
+  // same name, exactly as it would over a curated one. But a copy that is
+  // UNUSABLE — a stray file at that path, a directory with no sheet in it —
+  // must not shadow the pack ClawBox ships: that marked the bundled crab as
+  // not installed, and the Hermes arm's materialisation (which skips an
+  // existing destination) could never repair it.
   const ownDir = path.join(petsDir(), slug);
-  const dir = fs.existsSync(ownDir) ? ownDir : (builtinPetDir(slug) ?? ownDir);
+  const own = loadPetFrom(ownDir, slug);
+  if (own) return own;
+  const shipped = builtinPetDir(slug);
+  return shipped && shipped !== ownDir ? loadPetFrom(shipped, slug) : null;
+}
+
+function loadPetFrom(dir: string, slug: string): InstalledPet | null {
   let meta: Record<string, unknown> = {};
   try {
     if (!fs.statSync(dir).isDirectory()) return null;
