@@ -32,6 +32,9 @@ export interface ChatMessage {
   // different elements with different affordances, and merging them would make
   // every existing `images.length` check quietly wrong.
   audio?: string[];
+  // /setup-api/chat/media download URLs (or https URLs) for any other file the
+  // agent sent — rendered as download cards with name and size.
+  files?: string[];
   // The run this turn belongs to. Set locally when the turn is sent and read
   // back off the gateway's own record, so a turn can be recognised as "the one
   // already on the server" without comparing text or clocks. The gateway

@@ -4,6 +4,8 @@ import fsp from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import { chatMediaRoot } from "@/lib/harness/media-root";
+import { getActiveHarness } from "@/lib/harness";
+import { openclawWorkspaceDir } from "@/lib/language-persona";
 
 export const dynamic = "force-dynamic";
 
@@ -36,8 +38,9 @@ export const dynamic = "force-dynamic";
 // the same question. On an OpenClaw box the answer is byte-identical to the
 // constant this replaced, so nothing about that path changes.
 
-// Extension → Content-Type. Doubles as the allowlist: anything not named here
-// is refused rather than served under a guessed type. `.svg` is absent on
+// Extension → Content-Type for what the chat renders INLINE. Anything not named
+// here is served only as an `application/octet-stream` attachment download,
+// never under a guessed type. `.svg` is absent on
 // purpose — it is a scriptable document and these paths come from model output.
 const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -79,6 +82,57 @@ const AUDIO_MIME_TYPES = new Set([
 // A generated 1024×1024 PNG runs ~1.5 MB; this leaves room for larger renders
 // without letting the route buffer something unbounded into memory.
 const MAX_BYTES = 25 * 1024 * 1024;
+
+// Anything that is not rendered inline — a PDF, a zip, a CSV the agent made —
+// is only ever handed over as a download, streamed, so it can be larger.
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
+/** Filename for Content-Disposition, safe for the header in both spellings. */
+function contentDisposition(name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
+interface Root {
+  logical: string;
+  real: string;
+  /** Refuse dot-segments below this root (`.git`, `.env`, `.openclaw`, …). */
+  hideDotfiles: boolean;
+}
+
+/**
+ * The trees this route may read from. The media tree always; on OpenClaw also
+ * the agent workspace, because OpenClaw's own protocol lets a reply attach a
+ * file by an absolute or workspace-relative path (docs: rich-output-protocol)
+ * and a report the agent wrote into its workspace is exactly what the owner
+ * wants to download. The workspace also holds dotfiles and, if configured as
+ * `~`, the whole home — so every dot-segment below it is refused, which keeps
+ * `~/.openclaw`, `.ssh`, `.env` and `.git` out of reach.
+ */
+async function allowedRoots(): Promise<{ roots: Root[]; workspace: string | null }> {
+  const roots: Root[] = [];
+  const mediaLogical = await chatMediaRoot();
+  const mediaReal = await resolvedRoot(mediaLogical);
+  if (mediaReal) roots.push({ logical: mediaLogical, real: mediaReal, hideDotfiles: false });
+  let workspace: string | null = null;
+  if ((await getActiveHarness()) !== "hermes") {
+    workspace = openclawWorkspaceDir();
+    const wsReal = await resolvedRoot(workspace);
+    if (wsReal) roots.push({ logical: workspace, real: wsReal, hideDotfiles: true });
+  }
+  return { roots, workspace };
+}
+
+/** A path relative to `base` that stays inside it, or null. */
+function inside(base: string, target: string): string | null {
+  const rel = path.relative(base, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return rel;
+}
+
+function hasDotSegment(rel: string): boolean {
+  return rel.split(path.sep).some((segment) => segment.startsWith("."));
+}
 
 /**
  * Parse one `Range: bytes=…` header against a known size.
@@ -132,146 +186,135 @@ async function resolvedRoot(logical: string): Promise<string | null> {
   }
 }
 
-export async function GET(req: NextRequest) {
+type Resolved =
+  | { ok: true; safe: string; size: number; contentType: string; inline: boolean; name: string }
+  | { ok: false; response: NextResponse };
+
+function fail(status: number, error: string): Resolved {
+  return { ok: false, response: NextResponse.json({ error }, { status }) };
+}
+
+async function resolveRequest(req: NextRequest): Promise<Resolved> {
   const requested = req.nextUrl.searchParams.get("path");
-  if (!requested) {
-    return NextResponse.json({ error: "Missing path" }, { status: 400 });
-  }
-  if (!path.isAbsolute(requested)) {
-    return NextResponse.json({ error: "Path must be absolute" }, { status: 400 });
-  }
+  if (!requested) return fail(400, "Missing path");
+  if (requested.includes("\0")) return fail(400, "Invalid path");
 
   const hintedMime = (req.nextUrl.searchParams.get("mime") ?? "")
     .split(";", 1)[0].trim().toLowerCase();
   const extension = path.extname(requested).toLowerCase();
   // A MIME hint exists only for structured attachments whose provider wrote
-  // an extensionless file. It must never override a named unsupported type:
-  // otherwise `secret.json?mime=audio/wav` defeats this route's allowlist.
-  const contentType = CONTENT_TYPES[extension]
+  // an extensionless file. It must never override a named type: otherwise
+  // `secret.json?mime=audio/wav` would be served as something playable.
+  const inlineType = CONTENT_TYPES[extension]
     ?? (!extension && AUDIO_MIME_TYPES.has(hintedMime) ? hintedMime : undefined);
-  if (!contentType) {
-    return NextResponse.json({ error: "Unsupported media type" }, { status: 415 });
-  }
+  // Everything else is still served — but only as an opaque download, never
+  // under a guessed type a browser could render (svg, html, …).
+  const forceDownload = req.nextUrl.searchParams.get("download") === "1";
+  const inline = Boolean(inlineType) && !forceDownload;
+  const contentType = inlineType ?? "application/octet-stream";
 
-  const logicalRoot = await chatMediaRoot();
-  const root = await resolvedRoot(logicalRoot);
-  if (!root) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
+  const { roots, workspace } = await allowedRoots();
 
-  // TWO containment tests, and the order of the first one is the point.
+  // TWO containment tests. The first is purely lexical and runs before any
+  // filesystem call touches the query string: the request is reduced to a
+  // path RELATIVE to an allowed root and rebuilt by joining that cleared
+  // segment onto the trusted root. A relative request is resolved against the
+  // workspace — never the server's cwd — and refused where there is none.
   //
-  // This one is purely lexical and runs BEFORE any filesystem call touches the
-  // query string. It reduces the request to a path RELATIVE to the media root,
-  // rejects anything that climbs out, and rebuilds the absolute path by joining
-  // that cleared segment onto the root. Nothing derived from the query string is
-  // handed to the filesystem; realpath below receives a value built from a
-  // trusted base.
-  //
-  // Written this way deliberately. Comparing `path.resolve(requested)` against
-  // the root with startsWith is equally correct and reads more naturally, but
-  // the root is only known after an async call, so a scanner cannot tie the
-  // guard to the sink and js/path-injection stayed open at high severity. This
-  // form is both correct and legible to the tool.
-  // A shared-identity install gives one legitimate file two spellings: the
-  // logical `~/.openclaw/media/...` path the harness writes into its message,
-  // and the resolved target path returned by realpath. Accept either root,
-  // then rebuild from the trusted resolved root. Comparing only against the
-  // resolved root rejects the logical spelling and 404s every real reply.
-  //
-  // `root` is still untrusted-free: it comes from realpath of a module
-  // constant, never from the request. Relative-then-join is what makes the
-  // guard legible to the scanner where a startsWith comparison was not.
-  const resolvedRequested = path.resolve(requested);
-  const logicalRel = path.relative(logicalRoot, resolvedRequested);
-  const resolvedRel = path.relative(root, resolvedRequested);
-  const rel = !logicalRel.startsWith("..") && !path.isAbsolute(logicalRel)
-    ? logicalRel
-    : !resolvedRel.startsWith("..") && !path.isAbsolute(resolvedRel)
-      ? resolvedRel
-      : null;
-  if (rel === null) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-  const candidate = path.join(root, rel);
+  // A shared-identity install gives one legitimate file two spellings (the
+  // logical `~/.openclaw/media/...` and its realpath), so either spelling of a
+  // root is accepted, then rebuilt from the resolved one.
+  let absolute: string;
+  if (path.isAbsolute(requested)) absolute = path.resolve(requested);
+  else if (workspace) absolute = path.resolve(workspace, requested);
+  else return fail(400, "Path must be absolute");
 
-  // The second test still resolves symlinks, because the lexical check above
-  // cannot see them: a link planted inside the media tree pointing at
-  // ~/.openclaw/openclaw.json is textually contained and still an escape
-  // (CWE-59). A path that does not exist fails here too, reported as a miss
-  // rather than distinguishing the two cases.
+  let root: Root | null = null;
+  let rel: string | null = null;
+  for (const candidateRoot of roots) {
+    const found = inside(candidateRoot.logical, absolute) ?? inside(candidateRoot.real, absolute);
+    if (found !== null) {
+      root = candidateRoot;
+      rel = found;
+      break;
+    }
+  }
+  if (!root || rel === null) return fail(404, "Not found");
+  if (root.hideDotfiles && hasDotSegment(rel)) return fail(404, "Not found");
+  const candidate = path.join(root.real, rel);
+
+  // The second test resolves symlinks, which the lexical check cannot see: a
+  // link planted inside the tree pointing at ~/.openclaw/openclaw.json is
+  // textually contained and still an escape (CWE-59).
   let real: string;
   try {
     real = await fsp.realpath(candidate);
   } catch {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return fail(404, "Not found");
   }
-  // Exact match or a genuine descendant. The separator matters: without it a
-  // sibling such as `~/.openclaw/media-backup` would slip through the prefix.
-  if (real !== root && !real.startsWith(root + path.sep)) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
+  const realRel = inside(root.real, real);
+  if (realRel === null) return fail(404, "Not found");
+  if (root.hideDotfiles && hasDotSegment(realRel)) return fail(404, "Not found");
+  const safe = path.join(root.real, realRel);
 
-  // Reads go through `safe`, rebuilt from the resolved root plus the segment the
-  // symlink check just cleared — so the value handed to stat and
-  // createReadStream is constructed from trusted parts rather than carried down
-  // from the request.
-  const realRel = path.relative(root, real);
-  if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-  const safe = path.join(root, realRel);
-
+  let stat: fs.Stats;
   try {
-    const stat = await fsp.stat(safe);
-    if (!stat.isFile()) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
-    }
-    if (stat.size > MAX_BYTES) {
-      return NextResponse.json({ error: "Media too large" }, { status: 413 });
-    }
-    // Streamed, not buffered — the sibling files route does the same, for the
-    // same reason: a 25 MB ceiling read into RAM (and then copied again into a
-    // Uint8Array) is not something to hand a Jetson per request.
-    const range = parseRange(req.headers.get("range"), stat.size);
+    stat = await fsp.stat(safe);
+  } catch {
+    return fail(404, "Not found");
+  }
+  if (!stat.isFile()) return fail(404, "Not found");
+  if (stat.size > (inline ? MAX_BYTES : MAX_DOWNLOAD_BYTES)) return fail(413, "Media too large");
+  return { ok: true, safe, size: stat.size, contentType, inline, name: path.basename(safe) };
+}
+
+function baseHeaders(resolved: Extract<Resolved, { ok: true }>): Record<string, string> {
+  return {
+    "Content-Type": resolved.contentType,
+    // Advertised on every response: a media element reads this from the
+    // first, full-file reply and only asks for ranges afterwards.
+    "Accept-Ranges": "bytes",
+    // Authentication is cookie-based, browser caches are not keyed by that
+    // cookie: never let a file outlive logout in a cache.
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    ...(resolved.inline ? {} : { "Content-Disposition": contentDisposition(resolved.name) }),
+  };
+}
+
+/** Size and type without the body — what a download card shows before a click. */
+export async function HEAD(req: NextRequest) {
+  const resolved = await resolveRequest(req);
+  if (!resolved.ok) return new NextResponse(null, { status: resolved.response.status });
+  return new NextResponse(null, {
+    headers: { ...baseHeaders(resolved), "Content-Length": String(resolved.size) },
+  });
+}
+
+export async function GET(req: NextRequest) {
+  const resolved = await resolveRequest(req);
+  if (!resolved.ok) return resolved.response;
+  const headers = baseHeaders(resolved);
+  try {
+    // Streamed, not buffered: a Jetson should not hold a file in RAM per request.
+    const range = parseRange(req.headers.get("range"), resolved.size);
     if (range) {
       const partial = Readable.toWeb(
-        fs.createReadStream(safe, { start: range.start, end: range.end }),
+        fs.createReadStream(resolved.safe, { start: range.start, end: range.end }),
       ) as unknown as ReadableStream;
       return new NextResponse(partial, {
         status: 206,
         headers: {
-          "Content-Type": contentType,
+          ...headers,
           "Content-Length": String(range.end - range.start + 1),
-          "Content-Range": `bytes ${range.start}-${range.end}/${stat.size}`,
-          "Accept-Ranges": "bytes",
-          // Authentication is cookie-based, while browser caches are not keyed
-          // by that cookie. Revalidating every media read prevents a recording
-          // cached before logout/password rotation from surviving revocation.
-          "Cache-Control": "private, no-store",
-          "X-Content-Type-Options": "nosniff",
-          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "Content-Range": `bytes ${range.start}-${range.end}/${resolved.size}`,
         },
       });
     }
-    const body = Readable.toWeb(fs.createReadStream(safe)) as unknown as ReadableStream;
+    const body = Readable.toWeb(fs.createReadStream(resolved.safe)) as unknown as ReadableStream;
     return new NextResponse(body, {
-      headers: {
-        "Content-Type": contentType,
-        "Content-Length": String(stat.size),
-        // Advertised on every response, not only the partial ones: a media
-        // element reads this from the first, full-file reply and only asks for
-        // ranges afterwards. Without it the scrubber is dead however well the
-        // 206 path works.
-        "Accept-Ranges": "bytes",
-        // Per-device, per-conversation content: keep it out of shared caches,
-        // stop the browser sniffing it into something executable, and give it
-        // no ambient authority if it is ever opened as a document.
-        //
-        "Cache-Control": "private, no-store",
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
-      },
+      headers: { ...headers, "Content-Length": String(resolved.size) },
     });
   } catch {
     return NextResponse.json({ error: "Not found" }, { status: 404 });

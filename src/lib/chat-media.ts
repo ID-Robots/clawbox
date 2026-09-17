@@ -145,16 +145,105 @@ export function mediaFileName(url: string): string {
 
 /**
  * Convenience for the chat components: caption plus the ready-to-render image
- * and audio URLs the reply named. Video and documents are still dropped — the
- * bubbles have nowhere to put them yet.
+ * and audio URLs the reply named, and every other file (PDF, zip, video, …) as
+ * a download URL for the file card.
  */
-export function splitAssistantMedia(raw: string): { text: string; images: string[]; audio: string[] } {
+export function splitAssistantMedia(raw: string): { text: string; images: string[]; audio: string[]; files: string[] } {
   const { text, media } = splitMediaDirectives(raw);
   return {
     text,
     images: media.filter(isImageMedia).map(source => mediaUrl(source)),
     audio: media.filter(isAudioMedia).map(source => mediaUrl(source)),
+    files: media.filter(source => !isImageMedia(source) && !isAudioMedia(source)).map(source => mediaUrl(source)),
   };
+}
+
+// ── Files the agent sends ───────────────────────────────────────────────────
+//
+// Besides `MEDIA:` lines, OpenClaw attaches files structurally: an
+// `attachment` content part (as TTS does) or `mediaUrl` / `mediaUrls` fields
+// on the message (docs: reference/rich-output-protocol). Audio is read by
+// `extractAudioAttachments`; this reads everything else, so a PDF the agent
+// sent does not vanish from the bubble.
+
+/** Files kept per message. */
+const MAX_FILES_PER_MESSAGE = 8;
+
+/** De-duplicate and cap the file refs attached to one message. */
+export function boundedFiles(...groups: string[][]): string[] {
+  return [...new Set(groups.flat())].slice(0, MAX_FILES_PER_MESSAGE);
+}
+
+/** Only sources a browser may be pointed at: local paths, https and our data. */
+function acceptableSource(source: string): boolean {
+  if (/^https:/i.test(source)) return true;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(source)) return source.toLowerCase().startsWith("file://");
+  return source.length > 0;
+}
+
+/**
+ * Non-audio structured attachments on one gateway message, split into images
+ * (rendered inline) and files (rendered as download cards).
+ */
+export function extractFileAttachments(msg: unknown): { images: string[]; files: string[] } {
+  const images: string[] = [];
+  const files: string[] = [];
+  if (!msg || typeof msg !== "object") return { images, files };
+  const sources: Array<{ url: string; mimeType?: string; kind?: unknown }> = [];
+  const m = msg as { content?: unknown; mediaUrl?: unknown; mediaUrls?: unknown };
+  if (typeof m.mediaUrl === "string") sources.push({ url: m.mediaUrl });
+  if (Array.isArray(m.mediaUrls)) {
+    for (const url of m.mediaUrls) if (typeof url === "string") sources.push({ url });
+  }
+  if (Array.isArray(m.content)) {
+    for (const block of m.content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as { type?: unknown; attachment?: unknown };
+      if (b.type !== "attachment" || !b.attachment || typeof b.attachment !== "object") continue;
+      const a = b.attachment as { url?: unknown; kind?: unknown; mimeType?: unknown };
+      if (typeof a.url !== "string") continue;
+      sources.push({
+        url: a.url,
+        kind: a.kind,
+        mimeType: typeof a.mimeType === "string" ? a.mimeType.toLowerCase() : undefined,
+      });
+    }
+  }
+  for (const { url, kind, mimeType } of sources) {
+    const source = url.trim();
+    if (!acceptableSource(source)) continue;
+    // Audio has its own extractor and its own player.
+    if (kind === "audio" || mimeType?.startsWith("audio/") || isAudioMedia(source)) continue;
+    if (isImageMedia(source)) images.push(mediaUrl(source));
+    else files.push(mediaUrl(source));
+  }
+  return { images: [...new Set(images)], files: boundedFiles(files) };
+}
+
+/** Human-readable name for a file card: the harness' own filename. */
+export function mediaDisplayName(url: string): string {
+  const name = mediaFileName(url);
+  return name === "image.png" && url.startsWith("data:") ? "file" : name;
+}
+
+/** Download URL for a file card: our own route is told to send an attachment. */
+export function mediaDownloadUrl(url: string): string {
+  if (!url.startsWith("/setup-api/chat/media?")) return url;
+  return url.includes("download=1") ? url : `${url}&download=1`;
+}
+
+/** `1.4 MB`-style size for a file card. Locale-free on purpose: units are universal. */
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
 // ── Spoken replies ──────────────────────────────────────────────────────────

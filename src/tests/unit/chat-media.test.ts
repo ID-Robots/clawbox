@@ -7,6 +7,11 @@ import {
   mediaFileName,
   isAudioMedia,
   extractAudioAttachments,
+  extractFileAttachments,
+  boundedFiles,
+  formatFileSize,
+  mediaDownloadUrl,
+  mediaDisplayName,
 } from "@/lib/chat-media";
 
 // The exact reply shape the image tool produced on the device: a caption, a
@@ -180,11 +185,15 @@ describe("chat-media", () => {
       expect(audio).toEqual([`/setup-api/chat/media?path=${encodeURIComponent("/a/x.mp3")}`]);
     });
 
-    it("still drops media no bubble can render", () => {
-      const { text, images, audio } = splitAssistantMedia("Clip:\nMEDIA:/a/x.mp4");
-      expect(text).toBe("Clip:");
+    it("hands every other file over as a download card", () => {
+      const { text, images, audio, files } = splitAssistantMedia("Report:\nMEDIA:/a/x.mp4\nMEDIA:/a/report.pdf");
+      expect(text).toBe("Report:");
       expect(images).toEqual([]);
       expect(audio).toEqual([]);
+      expect(files).toEqual([
+        `/setup-api/chat/media?path=${encodeURIComponent("/a/x.mp4")}`,
+        `/setup-api/chat/media?path=${encodeURIComponent("/a/report.pdf")}`,
+      ]);
     });
 
     it("yields an image with an empty caption when the reply is only a directive", () => {
@@ -304,6 +313,64 @@ describe("chat-media", () => {
       expect(extractAudioAttachments({
         content: [{ type: "attachment", attachment: { kind: "audio", mimeType: "audio/wav" } }],
       })).toEqual([]);
+    });
+  });
+
+  describe("extractFileAttachments", () => {
+    const route = (p: string) => `/setup-api/chat/media?path=${encodeURIComponent(p)}`;
+
+    it("reads non-audio attachment parts and mediaUrl fields", () => {
+      const msg = {
+        role: "assistant",
+        mediaUrl: "/w/a.zip",
+        mediaUrls: ["/w/b.csv", "https://example.com/c.png"],
+        content: [
+          { type: "text", text: "here" },
+          { type: "attachment", attachment: { url: "/w/doc.pdf", kind: "document", mimeType: "application/pdf" } },
+          { type: "attachment", attachment: { url: "/w/voice.wav", kind: "audio" } },
+          { type: "attachment", attachment: { url: "/w/pic.jpg" } },
+        ],
+      };
+      const { images, files } = extractFileAttachments(msg);
+      expect(images).toEqual(["https://example.com/c.png", route("/w/pic.jpg")]);
+      expect(files).toEqual([route("/w/a.zip"), route("/w/b.csv"), route("/w/doc.pdf")]);
+    });
+
+    it("skips audio by MIME type and refuses non-https schemes", () => {
+      const msg = {
+        mediaUrls: ["javascript:alert(1)", "http://10.0.0.1/x.pdf", "data:text/html,hi"],
+        content: [{ type: "attachment", attachment: { url: "/w/rec", mimeType: "audio/ogg" } }],
+      };
+      expect(extractFileAttachments(msg)).toEqual({ images: [], files: [] });
+    });
+
+    it("survives anything that is not a message", () => {
+      for (const v of [null, undefined, 3, "x", { content: "nope" }]) {
+        expect(extractFileAttachments(v)).toEqual({ images: [], files: [] });
+      }
+    });
+
+    it("caps and de-duplicates", () => {
+      const urls = Array.from({ length: 20 }, (_, i) => `/w/f${i % 12}.bin`);
+      expect(extractFileAttachments({ mediaUrls: urls }).files).toHaveLength(8);
+      expect(boundedFiles(["a", "a", "b"])).toEqual(["a", "b"]);
+    });
+  });
+
+  describe("file card helpers", () => {
+    it("formats sizes", () => {
+      expect(formatFileSize(0)).toBe("0 B");
+      expect(formatFileSize(1536)).toBe("1.5 KB");
+      expect(formatFileSize(25 * 1024 * 1024)).toBe("25 MB");
+      expect(formatFileSize(-1)).toBe("");
+    });
+
+    it("asks the media route for a download and names the file", () => {
+      const url = mediaUrl("/w/report final.pdf");
+      expect(mediaDownloadUrl(url)).toBe(`${url}&download=1`);
+      expect(mediaDownloadUrl(mediaDownloadUrl(url))).toBe(`${url}&download=1`);
+      expect(mediaDownloadUrl("https://example.com/a.pdf")).toBe("https://example.com/a.pdf");
+      expect(mediaDisplayName(url)).toBe("report final.pdf");
     });
   });
 });

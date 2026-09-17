@@ -66,16 +66,22 @@ describe("/setup-api/chat/media", () => {
     expect((await GET(request(null))).status).toBe(400);
   });
 
-  it("rejects a relative path", async () => {
-    expect((await GET(request("cat.png"))).status).toBe(400);
+  it("resolves a relative path against the workspace, never the cwd", async () => {
+    // No workspace file of that name: a miss, not a read from process.cwd().
+    expect((await GET(request("package.json"))).status).toBe(404);
+    const workspace = path.join(tmpHome, ".openclaw", "workspace");
+    fs.mkdirSync(path.join(workspace, "out"), { recursive: true });
+    fs.writeFileSync(path.join(workspace, "out", "report.pdf"), "%PDF-1.4");
+    const res = await GET(request("out/report.pdf"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/octet-stream");
   });
 
   it("refuses a file outside the media tree", async () => {
     const secret = path.join(tmpHome, ".openclaw", "openclaw.json");
     fs.writeFileSync(secret, "{}");
-    // .json is not an allowed type, so this is refused on the type gate...
-    expect((await GET(request(secret))).status).toBe(415);
-    // ...and a same-extension file outside the tree is refused on containment.
+    // Outside every allowed root — refused on containment, whatever its type.
+    expect((await GET(request(secret))).status).toBe(404);
     const outside = path.join(tmpHome, "elsewhere.png");
     fs.writeFileSync(outside, PNG);
     expect((await GET(request(outside))).status).toBe(404);
@@ -122,11 +128,58 @@ describe("/setup-api/chat/media", () => {
     fs.rmSync(realHome, { recursive: true, force: true });
   });
 
-  it("refuses a type it will not serve, including svg", async () => {
-    for (const name of ["notes.txt", "doc.pdf", "vector.svg"]) {
+  it("serves any other type only as an opaque download, including svg", async () => {
+    for (const name of ["notes.txt", "doc.pdf", "vector.svg", "page.html"]) {
       fs.writeFileSync(path.join(mediaDir, name), "x");
-      expect((await GET(request(path.join(mediaDir, name)))).status).toBe(415);
+      const res = await GET(request(path.join(mediaDir, name)));
+      expect(res.status, name).toBe(200);
+      expect(res.headers.get("Content-Type"), name).toBe("application/octet-stream");
+      expect(res.headers.get("Content-Disposition"), name).toContain(`filename="${name}"`);
+      expect(res.headers.get("Content-Disposition"), name).toMatch(/^attachment;/);
+      expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     }
+  });
+
+  it("encodes a non-ASCII or quote-bearing filename safely", async () => {
+    const name = 'отчет "q".pdf';
+    fs.writeFileSync(path.join(mediaDir, name), "x");
+    const res = await GET(request(path.join(mediaDir, name)));
+    const disposition = res.headers.get("Content-Disposition") ?? "";
+    expect(disposition).not.toContain('"q"');
+    expect(disposition).toContain(`filename*=UTF-8''${encodeURIComponent(name)}`);
+  });
+
+  it("forces a download of an inline type when asked", async () => {
+    const url = new URL("http://localhost/setup-api/chat/media");
+    url.searchParams.set("path", path.join(mediaDir, "cat.png"));
+    url.searchParams.set("download", "1");
+    const res = await GET(new NextRequest(url));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Disposition")).toMatch(/^attachment;/);
+  });
+
+  it("answers HEAD with the size and no body", async () => {
+    const { HEAD } = await import("@/app/setup-api/chat/media/route");
+    fs.writeFileSync(path.join(mediaDir, "data.zip"), Buffer.alloc(1234));
+    const res = await HEAD(request(path.join(mediaDir, "data.zip")));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Length")).toBe("1234");
+    expect((await HEAD(request(path.join(tmpHome, "nope.zip")))).status).toBe(404);
+  });
+
+  it("serves a file from the agent workspace but never a dot-path in it", async () => {
+    const workspace = path.join(tmpHome, ".openclaw", "workspace");
+    fs.mkdirSync(path.join(workspace, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(workspace, "report.pdf"), "%PDF");
+    fs.writeFileSync(path.join(workspace, ".env"), "SECRET=1");
+    fs.writeFileSync(path.join(workspace, ".git", "config"), "x");
+    expect((await GET(request(path.join(workspace, "report.pdf")))).status).toBe(200);
+    expect((await GET(request(path.join(workspace, ".env")))).status).toBe(404);
+    expect((await GET(request(path.join(workspace, ".git", "config")))).status).toBe(404);
+    expect((await GET(request("../openclaw.json"))).status).toBe(404);
+    // A link in the workspace pointing at a dotfile is resolved and refused.
+    fs.symlinkSync(path.join(workspace, ".env"), path.join(workspace, "innocent.txt"));
+    expect((await GET(request(path.join(workspace, "innocent.txt")))).status).toBe(404);
   });
 
   it("refuses a directory that happens to be named like an image", async () => {
@@ -283,14 +336,17 @@ describe("/setup-api/chat/media", () => {
     for (const name of ["secret.json", "document.pdf", "vector.svg"]) {
       const source = path.join(mediaDir, name);
       fs.writeFileSync(source, AUDIO);
-      expect((await GET(request(source, undefined, "audio/wav"))).status, name).toBe(415);
+      const res = await GET(request(source, undefined, "audio/wav"));
+      expect(res.headers.get("Content-Type"), name).toBe("application/octet-stream");
+      expect(res.headers.get("Content-Disposition"), name).toMatch(/^attachment;/);
     }
   });
 
-  it("still refuses a type it does not serve", async () => {
+  it("hands a type it does not render inline over as a download", async () => {
     fs.writeFileSync(path.join(mediaDir, "clip.mp4"), AUDIO);
     const res = await GET(request(path.join(mediaDir, "clip.mp4")));
-    expect(res.status).toBe(415);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/octet-stream");
   });
 
   it("applies the range only after the containment checks", async () => {

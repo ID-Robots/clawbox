@@ -65,7 +65,8 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, extractFileAttachments, boundedAudio, boundedFiles } from '@/lib/chat-media'
+import ChatFileCard from '@/components/ChatFileCard'
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import {
@@ -461,6 +462,10 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     // never appears. Declared here because this comparator is where a
     // late-arriving per-message field has to be named to survive a reconcile.
     if (x.model !== y.model || x.provider !== y.provider) return false
+    // A reply that gained a file between two reads must repaint its card.
+    const xf = x.files ?? [], yf = y.files ?? []
+    if (xf.length !== yf.length) return false
+    for (let j = 0; j < xf.length; j++) if (xf[j] !== yf[j]) return false
   }
   return true
 }
@@ -2623,7 +2628,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
             // text, not as a structured attachment — see lib/chat-media.ts.
-            const { text, images, audio: directiveAudio } = splitAssistantMedia(extractText(msg))
+            const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(extractText(msg))
+            // Any other file the agent sent — by directive or as a structured
+            // attachment — becomes a download card rather than vanishing.
+            const structuredFiles = extractFileAttachments(msg)
+            const images = [...new Set([...directiveImages, ...structuredFiles.images])]
+            const files = boundedFiles(directiveFiles, structuredFiles.files)
             // A spoken reply is a structured attachment part, not a MEDIA:
             // line — see lib/chat-media.ts. Both are read; the harness uses
             // the first and image generation the second.
@@ -2640,15 +2650,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // harness delivers a spoken reply as its own message whose text is
             // a repeat of the one already on screen, and treating that as an
             // empty ack threw the recording away and refetched history instead.
-            const isAckOnly = (!text && images.length === 0 && audio.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            const isAckOnly = (!text && images.length === 0 && audio.length === 0 && files.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
             // The reconcile often wins the race now: `session.message` lands
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
             // the reply twice — once with the picture, once without.
             const latestShown = messagesRef.current[messagesRef.current.length - 1]
-            const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && text.length > 0 &&
+            const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && files.length === 0 && text.length > 0 &&
               latestShown?.role === 'assistant' && latestShown.text === text &&
-              ((latestShown.images?.length ?? 0) > 0 || (latestShown.audio?.length ?? 0) > 0)
+              ((latestShown.images?.length ?? 0) > 0 || (latestShown.audio?.length ?? 0) > 0 || (latestShown.files?.length ?? 0) > 0)
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
@@ -2662,7 +2672,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // the audio is folded into the bubble it belongs to when the
                 // text matches and that bubble has none yet.
                 const last = prev[prev.length - 1]
-                if (text.length > 0 && audio.length > 0 && !images.length && last && last.role === 'assistant'
+                if (text.length > 0 && audio.length > 0 && !images.length && !files.length && last && last.role === 'assistant'
                     && last.text === text) {
                   const mergedAudio = boundedAudio(last.audio ?? [], audio)
                   if (last.audio?.length === mergedAudio.length
@@ -2675,6 +2685,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   timestamp: finiteMessageTimestamp(msg) ?? Date.now(),
                   images,
                   audio,
+                  ...(files.length ? { files } : {}),
                 }]
               })
               // The picture reached us over the socket after all — nothing
@@ -6372,6 +6383,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   >
                     {userExpanded ? t("chat.showLess") : t("chat.showMore")}
                   </button>
+                )}
+                {msg.files && msg.files.length > 0 && (
+                  // Files the agent sent that no bubble can render inline: one
+                  // download card each (name, size, button). Keyed by URL.
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
+                    {msg.files.map(src => <ChatFileCard key={src} src={src} />)}
+                  </div>
                 )}
                 {msg.audio && msg.audio.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
