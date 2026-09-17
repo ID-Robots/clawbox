@@ -267,6 +267,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.askUser.expired": "Nobody answered in time — the assistant carried on without one.",
     "chat.askUser.failed": "That answer did not reach the assistant.",
     "chat.askUser.unreadable": "The box could not tell what happened. Try again.",
+    "chat.detailsSummary": "Details",
     "chat.emailBatch.title": "Email waiting for your approval",
     "chat.emailBatch.summaryOne": "The assistant wrote this message and wants to send it from your account. Read it — nothing goes out until you approve.",
     "chat.emailBatch.summaryMany": "The assistant wrote {count} messages and wants to send them from your account. Read them — nothing goes out until you approve.",

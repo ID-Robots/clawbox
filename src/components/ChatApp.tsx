@@ -1319,7 +1319,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   ))}
                 </div>
               )}
-              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
+              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
               {files.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
                   {files.map(src => <ChatFileCard key={src} src={src} />)}
@@ -1384,7 +1384,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   still agree, which is the property that matters; there is no
                   `dropUnfinishedDirective` equivalent for media, and the
                   mascot chat accepts the same token. */}
-              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"))}
+              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"), t("chat.detailsSummary"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>

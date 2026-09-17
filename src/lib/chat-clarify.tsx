@@ -2,6 +2,21 @@ import { useCallback, useId, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { plainTextForLabel } from "@/lib/chat-markdown";
 import type { ClarifyQuestion } from "@/lib/harness/transport";
+// The shared card palette — the same six colours the approval and gateway
+// question cards draw with, so the three cannot drift apart. Same values.
+import {
+  BODY_FG,
+  CARD_BG,
+  CARD_BORDER,
+  CHOICE_BG,
+  CHOICE_BORDER,
+  ERROR_FG,
+  INPUT_BG,
+  MUTED_FG,
+  PRIMARY_BG,
+  PRIMARY_BORDER,
+  TITLE_FG,
+} from "@/lib/chat-card-style";
 
 // ── The agent asking the customer a question, mid-turn ───────────────────────
 //
@@ -32,15 +47,7 @@ import type { ClarifyQuestion } from "@/lib/harness/transport";
 // of the message list could reshuffle a half-filled form.
 
 /** Amber, the palette this chat already uses for "the box is waiting". */
-const CARD_BG = "rgba(249,115,22,0.10)";
-const CARD_BORDER = "1px solid rgba(249,115,22,0.28)";
-const QUESTION_FG = "#fed7aa";
-const BODY_FG = "rgba(255,255,255,0.72)";
-const MUTED_FG = "rgba(255,255,255,0.5)";
-const CHOICE_BG = "rgba(255,255,255,0.06)";
-const CHOICE_BORDER = "1px solid rgba(255,255,255,0.16)";
-const INPUT_BG = "rgba(0,0,0,0.25)";
-const ERROR_FG = "#f87171";
+const QUESTION_FG = TITLE_FG;
 
 /**
  * One live clarify, as the surface holds it.
@@ -495,8 +502,8 @@ export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
             alignSelf: "flex-start",
             padding: "5px 12px",
             borderRadius: 8,
-            background: "rgba(249,115,22,0.22)",
-            border: "1px solid rgba(249,115,22,0.4)",
+            background: PRIMARY_BG,
+            border: PRIMARY_BORDER,
             color: QUESTION_FG,
             fontSize: 12.5,
             fontWeight: 500,

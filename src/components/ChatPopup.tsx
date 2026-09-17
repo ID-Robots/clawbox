@@ -6703,7 +6703,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     })}
                   </div>
                 )}
-                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"))) : null}
+                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
                 {isLongUser && (
                   <button
                     type="button"
@@ -6955,7 +6955,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }}>
               {/* Lifted out HERE, not on the way into state, so an interrupted
                   turn keeps the directive and can still become cards. */}
-              {renderText(streamingEmailRefsText(streaming), t("chat.table"))}
+              {renderText(streamingEmailRefsText(streaming), t("chat.table"), t("chat.detailsSummary"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
               <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
             </div>
