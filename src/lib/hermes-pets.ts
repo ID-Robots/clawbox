@@ -18,6 +18,13 @@
 // and the mascot follow a harness swap without a restart. With no pet picked
 // an OpenClaw box keeps the crab; a Hermes box wears the egg (see Mascot.tsx).
 //
+// Since 2026-09-17 THE CRAB IS A PET. `vibrant-clawd` — ClawBox's own artwork,
+// shipped in `public/pets/` (src/lib/pet-builtin.ts) — is what an OpenClaw or
+// dual box wears with nothing picked, resolved by `brandPetSlug()` and rendered
+// by the same `PetSprite` every other pet uses. So there is one mascot renderer
+// on this device rather than two, the still PNG is the fail-open body, and a
+// box that has never had a network still gets nine animated states.
+//
 // Two deliberate non-choices:
 //
 //   - We do NOT speak the gateway's `pet.*` JSON-RPC. Those methods are
@@ -28,17 +35,18 @@
 //     every 2 s and every other surface follows it. A second store would drift
 //     the moment someone typed `hermes pets select boba` in the in-UI terminal.
 //
-// No sprite bytes are bundled — see src/lib/pet-curated.ts for why that is a
-// hard constraint and not a preference.
+// No PETDEX sprite bytes are bundled — see src/lib/pet-curated.ts for why that
+// is a hard constraint and not a preference. Our own are, and only our own.
 
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
-import { DATA_DIR, get as getConfig, set as setConfig } from "@/lib/config-store";
-import { hasHermesHarness } from "@/lib/edition-source";
+import { CONFIG_ROOT, DATA_DIR, get as getConfig, set as setConfig } from "@/lib/config-store";
+import { hasHermesHarness, readEdition } from "@/lib/edition-source";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 import { PETDEX_ASSET_HOSTS, petdexSheetUrl } from "@/lib/petdex-manifest";
+import { BUILTIN_PETS, isBuiltinPet, VIBRANT_CLAWD_SLUG } from "@/lib/pet-builtin";
 import { curatedPet } from "@/lib/pet-curated";
 import {
   FRAME_H,
@@ -70,6 +78,44 @@ export const MASCOT_PET_KEY = "mascot_pet";
 export function petsDir(): string {
   return hasHermesHarness() ? path.join(hermesHome(), "pets") : path.join(DATA_DIR, "pets");
 }
+
+/**
+ * Where the pets ClawBox SHIPS live: `public/pets/<slug>/`.
+ *
+ * `public/` rather than a new asset root because that directory is already the
+ * one place a bundled sprite sheet is known to survive the build — it is what
+ * `public/pet-egg-sheet.png` uses, and `scripts/postbuild.sh` copies the whole
+ * of it next to the standalone entry. Nothing had to be added to Next's file
+ * tracing, no route downloads anything, and both editions read the same bytes
+ * off the same disk. The pet is served through the ORDINARY sprite route, not
+ * as a static `/pets/...` URL, so the auth gate, the `{mtime}:{size}` cache
+ * buster and the measured geometry cache all keep working unchanged.
+ *
+ * Resolved PER CALL against two roots and never memoised: the tests move
+ * `CLAWBOX_ROOT`, a dev server runs from the checkout, and the production
+ * server runs from `.next/standalone` — where postbuild put a second copy of
+ * `public/`. A root probed once at import is the exact shape of this repo's
+ * "probe-once" defect, and here it would silently leave the desktop crab-less.
+ */
+function builtinPetsRoots(): string[] {
+  return [path.join(CONFIG_ROOT, "public", "pets"), path.join(process.cwd(), "public", "pets")];
+}
+
+/** The on-disk directory of a bundled pet, or null when this build has none. */
+export function builtinPetDir(rawSlug: string): string | null {
+  const slug = safePetSlug(rawSlug);
+  if (!slug || !isBuiltinPet(slug)) return null;
+  for (const root of builtinPetsRoots()) {
+    const dir = path.join(root, slug);
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir;
+    } catch {
+      // Not this root. A missing copy is not an error until every root misses.
+    }
+  }
+  return null;
+}
+
 /** ClawBox-owned scratch space. Never written into a pet's own directory. */
 function cacheDir(): string {
   return hasHermesHarness() ? path.join(hermesHome(), "cache", "clawbox-pets") : path.join(DATA_DIR, "pets-cache");
@@ -88,6 +134,8 @@ export interface InstalledPet {
   /** `{mtimeMs}:{size}` — mirrors the gateway's `_pet_sheet_revision`. */
   revision: string;
   createdBy: string;
+  /** Loaded from `public/pets/` — shipped with ClawBox, never downloaded. */
+  builtin: boolean;
 }
 
 export interface PetGeometry {
@@ -108,6 +156,16 @@ export interface PetDescriptor extends PetGeometry {
   displayName: string;
   submittedBy: string;
   revision: string;
+  /**
+   * This is ClawBox's OWN crab wearing the mascot, not a pet the owner picked.
+   *
+   * The body is identical — the same sheet through the same renderer — but two
+   * things follow the brand rather than the sprite: the mascot keeps calling
+   * itself `data-mascot="crab"`, and it keeps the crab's voice. Filtering
+   * crab-literal lines out of the CRAB would be the filter firing on the one
+   * body it was written to protect.
+   */
+  brand: boolean;
 }
 
 /**
@@ -161,7 +219,11 @@ function resolveSheet(dir: string, meta: Record<string, unknown>): string | null
 export function loadPet(rawSlug: string): InstalledPet | null {
   const slug = safePetSlug(rawSlug);
   if (!slug) return null;
-  const dir = path.join(petsDir(), slug);
+  // The owner's own store first, the shipped pack second: a slug the owner
+  // installed or generated himself must keep winning over a bundled one of the
+  // same name, exactly as it would over a curated one.
+  const ownDir = path.join(petsDir(), slug);
+  const dir = fs.existsSync(ownDir) ? ownDir : (builtinPetDir(slug) ?? ownDir);
   let meta: Record<string, unknown> = {};
   try {
     if (!fs.statSync(dir).isDirectory()) return null;
@@ -181,6 +243,10 @@ export function loadPet(rawSlug: string): InstalledPet | null {
     sheetPath,
     revision: sheetRevision(sheetPath),
     createdBy: String(meta.createdBy || ""),
+    // A property of the SLUG, not of the directory it happened to load from:
+    // the Hermes arm copies the pack into its own store when the pet is picked
+    // (see selectPet), and that copy is still the pet ClawBox ships.
+    builtin: isBuiltinPet(slug),
   };
 }
 
@@ -201,6 +267,29 @@ export function installedPets(): InstalledPet[] {
 }
 
 /**
+ * The packs this build ships, as installed pets.
+ *
+ * Deliberately NOT folded into `installedPets()`. That function mirrors
+ * upstream's `installed_pets()` — what is in the harness's OWN store — and two
+ * of its readers depend on exactly that meaning: `resolveActivePet`, whose
+ * alphabetical fallback would otherwise hand a Hermes box the ClawBox crab the
+ * moment its own pet went missing, and `selectPet`, which asks the store
+ * whether it still has to install something. The gallery is the caller that
+ * wants both lists, and it asks for both.
+ *
+ * A bundled pet the owner has ALSO installed under the same slug is returned
+ * once, from his own copy — `loadPet` prefers it.
+ */
+export function builtinInstalledPets(): InstalledPet[] {
+  const out: InstalledPet[] = [];
+  for (const { slug } of BUILTIN_PETS) {
+    const pet = loadPet(slug);
+    if (pet) out.push(pet);
+  }
+  return out;
+}
+
+/**
  * Which pet to display: the configured slug if installed, else the first
  * installed alphabetically, else none. Mirrors `resolve_active_pet`.
  */
@@ -210,6 +299,42 @@ export function resolveActivePet(configuredSlug: string): InstalledPet | null {
     if (pet) return pet;
   }
   return installedPets()[0] ?? null;
+}
+
+/**
+ * What the desktop wears with NO pet picked.
+ *
+ * The crab wherever ClawBox's own harness runs (`openclaw`, `dual`), the egg on
+ * a Hermes-only box — the crab is ClawBox's brand and is not a stand-in on
+ * someone else's harness. The EDITION decides, not the active harness: a dual
+ * box is a ClawBox whichever harness it is running at the moment.
+ *
+ * One function rather than the literal the route carried, because the brand
+ * body below has to agree with the `placeholder` that route reports: two copies
+ * of that ternary is how a box ends up telling the picker "crab" while the
+ * mascot resolves nothing.
+ */
+export function mascotPlaceholder(): "crab" | "egg" {
+  return readEdition() === "hermes" ? "egg" : "crab";
+}
+
+/**
+ * The slug the crab placeholder is DRAWN FROM, or null where there is no crab.
+ *
+ * Since 2026-09-17 the ClawBox crab is not a still PNG on the desktop: it is
+ * `vibrant-clawd`, a nine-state pack shipped in this repo, rendered by the same
+ * `PetSprite` every other pet uses. So "the crab" and "a pet" stopped being two
+ * renderers — there is one, and this names which sheet the brand wears.
+ */
+export function brandPetSlug(): string | null {
+  return mascotPlaceholder() === "crab" ? VIBRANT_CLAWD_SLUG : null;
+}
+
+/** The brand body as an installed pet, or null (Hermes, or a build whose
+ *  bundled pack is missing — in which case the still PNG crab is drawn). */
+function brandPet(): InstalledPet | null {
+  const slug = brandPetSlug();
+  return slug ? loadPet(slug) : null;
 }
 
 export interface PetConfig {
@@ -391,8 +516,10 @@ export async function activePetDescriptor(
 ): Promise<PetDescriptor | null> {
   try {
     const config = await readPetConfig();
-    if (!config.enabled) return null;
-    const pet = resolveActivePet(config.slug);
+    // The owner's pick, then — where the crab is the placeholder — the brand
+    // body. "Pets off" lands here too, and that is the point: turning the pet
+    // off puts the ClawBox crab back, and the ClawBox crab IS `vibrant-clawd`.
+    const pet = (config.enabled ? resolveActivePet(config.slug) : null) ?? brandPet();
     if (!pet) return null;
     const geometry = await readPetGeometry(pet);
     return {
@@ -401,6 +528,9 @@ export async function activePetDescriptor(
       displayName: pet.displayName,
       submittedBy: submittedBy(pet.slug),
       revision: pet.revision,
+      // The BODY, not how it was reached: picking the crab from the gallery
+      // and landing on it by default must read the same to the mascot.
+      brand: pet.slug === VIBRANT_CLAWD_SLUG,
     };
   } catch (err) {
     console.warn("[pets] could not resolve the active pet:", err);
@@ -409,17 +539,22 @@ export async function activePetDescriptor(
 }
 
 /**
- * Is a pet wearing the mascot's body right now?
+ * Is SOMEONE ELSE'S pet wearing the mascot's body right now?
  *
  * The cheap half of `activePetDescriptor`: the config memo plus a directory
  * listing, with none of sharp's geometry work. Callers that only need "crab or
  * pet?" — the phrase route, for one — should use this.
+ *
+ * `vibrant-clawd` answers FALSE, picked or not. It is the crab: running the
+ * crab-literal phrases through the pet filter would strip "claws", "shell" and
+ * "crab" out of the voice of the one body they were written for.
  */
 export async function isPetActive(): Promise<boolean> {
   try {
     const config = await readPetConfig();
     if (!config.enabled) return false;
-    return resolveActivePet(config.slug) !== null;
+    const pet = resolveActivePet(config.slug);
+    return pet !== null && pet.slug !== VIBRANT_CLAWD_SLUG;
   } catch {
     return false;
   }
@@ -467,6 +602,11 @@ const MAX_SHEET_REDIRECTS = 3;
  * temp name and is renamed, so a torn download never counts as installed.
  */
 async function installPetDirect(slug: string): Promise<boolean> {
+  // A pet we ship is never downloaded. If `loadPet` could not find it the
+  // bundled copy is missing from this build, and reaching Petdex for a slug
+  // Petdex has never heard of would 404 slowly and then write someone else's
+  // art under our name if it ever stopped 404ing.
+  if (isBuiltinPet(slug)) return false;
   const curated = curatedPet(slug);
   if (!curated) return false;
   let url: string | null = null;
@@ -559,6 +699,39 @@ async function installPetDirect(slug: string): Promise<boolean> {
 }
 
 /**
+ * Copy a bundled pack into the harness's OWN pets directory.
+ *
+ * Only the Hermes arm needs this. `hermes pets select` refuses a slug that is
+ * not in `$HERMES_HOME/pets` — it has no idea ClawBox ships one — so a pet the
+ * owner picks has to exist there before the CLI is asked. Copied, never
+ * downloaded, and the copy is what makes the TUI and the upstream desktop app
+ * show the same pet as this desktop.
+ *
+ * The directory lands under a dot-prefixed temp name and is renamed, so a torn
+ * copy is never mistaken for an installed pet (`installedPets` skips dot names
+ * only by way of `loadPet`'s slug charset, which forbids a leading dot).
+ */
+async function materialiseBuiltinPet(slug: string): Promise<boolean> {
+  const src = builtinPetDir(slug);
+  if (!src) return false;
+  const dest = path.join(petsDir(), slug);
+  const tmp = path.join(petsDir(), `.${slug}.copy`);
+  try {
+    await fsp.mkdir(petsDir(), { recursive: true });
+    await fsp.rm(tmp, { recursive: true, force: true });
+    await fsp.cp(src, tmp, { recursive: true });
+    await fsp.rename(tmp, dest);
+    return loadPet(slug) !== null;
+  } catch (err) {
+    console.warn(`[pets] could not copy the bundled pack for ${slug}:`, err instanceof Error ? err.message : String(err));
+    await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    // A rename that lost a race with another writer is still a success for the
+    // caller: what matters is that the pet is readable now, not who wrote it.
+    return loadPet(slug) !== null;
+  }
+}
+
+/**
  * Install a pet if it is not already on disk, then make it active.
  *
  * `hermes pets select` refuses a slug that is not installed, so the two steps
@@ -582,6 +755,17 @@ export async function selectPet(slug: string): Promise<PetCliOutcome> {
       return cliFailure("select-failed", `select ${safe}`, err instanceof Error ? err.message : String(err));
     }
     return { ok: true };
+  }
+
+  // A pack we ship is copied into the Hermes store rather than installed: the
+  // CLI resolves every install through petdex.dev, which has never heard of
+  // `vibrant-clawd`. `loadPet` would find the bundled copy and skip the install
+  // entirely, and `pets select` would then refuse a slug that is not in ITS
+  // store — a false success ending in a pet nothing can activate.
+  if (isBuiltinPet(safe) && !fs.existsSync(path.join(petsDir(), safe))) {
+    if (!(await materialiseBuiltinPet(safe))) {
+      return cliFailure("install-failed", `install ${safe}`, "could not copy the bundled pack into the harness store");
+    }
   }
 
   if (!loadPet(safe)) {

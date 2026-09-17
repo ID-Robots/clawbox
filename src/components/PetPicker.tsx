@@ -21,7 +21,9 @@ import { announcePetChanged } from '@/lib/pet-client'
 //
 // The tiles show `by <author>`: Petdex art stays credited to whoever submitted
 // it, and the footer says plainly where the sprites come from and that they
-// download to this device rather than shipping with ClawBox.
+// download to this device rather than shipping with ClawBox. The one exception
+// is ClawBox's own `vibrant-clawd`, which is bundled and wears a "Built in"
+// badge instead — and is what the first tile's crab is drawn from.
 
 interface GalleryPet {
   slug: string
@@ -29,6 +31,9 @@ interface GalleryPet {
   kind: string
   submittedBy: string
   curated: boolean
+  /** Ships with ClawBox: no download, works offline, cannot be removed.
+   *  Absent from a server that predates the bundled pack. */
+  builtin?: boolean
   installed: boolean
 }
 
@@ -163,9 +168,12 @@ export default function PetPicker() {
                   </span>
                 )}
               </span>
-              {p.curated && !selected && (
+              {/* "Built in" outranks "Curated": both are true of a pet we ship,
+                  and which one the owner needs to know is that this one is
+                  already on the device and needs no internet. */}
+              {(p.builtin || p.curated) && !selected && (
                 <span className="absolute top-1 left-1 text-[8px] px-1 py-[1px] rounded bg-white/10 text-white/60">
-                  {t('settings.mascot.petCurated')}
+                  {p.builtin ? t('settings.mascot.petBuiltin') : t('settings.mascot.petCurated')}
                 </span>
               )}
               {selected && (
