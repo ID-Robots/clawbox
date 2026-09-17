@@ -12,6 +12,7 @@ import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
@@ -395,6 +396,7 @@ interface SetupWizardProps {
 
 function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const { t, locale, setLocale } = useT();
+  const tr = useTr();
   // Hold a live reference to t so the completion effect can translate without
   // re-running (and re-POSTing) on every locale change.
   const tRef = useRef(t);
@@ -633,7 +635,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="spinner" role="status" aria-label="Loading" />
+        <div className="spinner" role="status" aria-label={t("loading")} />
       </div>
     );
   }
@@ -690,7 +692,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <button
                 type="button"
                 onClick={() => { setShowHelp((v) => !v); setShowPower(false); setShowLang(false); }}
-                aria-label="Need help?"
+                aria-label={t("wizard.needHelp")}
                 aria-expanded={showHelp}
                 className="setup-icon-btn"
               >
@@ -706,7 +708,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <button
                 type="button"
                 onClick={() => { setShowPower((v) => !v); setShowHelp(false); setShowLang(false); }}
-                aria-label="Power options"
+                aria-label={t("wizard.powerOptions")}
                 aria-expanded={showPower}
                 className="setup-icon-btn"
               >
@@ -789,7 +791,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <AIModelsStep
                 providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "llamacpp"]}
                 defaultProviderId="clawai"
-                title="Connect AI Provider"
+                title={tr("settings.aiConnectTitle", "Connect AI Provider")}
                 description={t("ai.description")}
                 onNext={() => goToStep(5)}
               />

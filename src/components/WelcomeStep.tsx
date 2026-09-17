@@ -1,10 +1,14 @@
+"use client";
+
 import ClawIcon from "./ClawIcon";
+import { useTr } from "@/lib/i18n-floor";
 
 interface WelcomeStepProps {
   onNext: () => void;
 }
 
 export default function WelcomeStep({ onNext }: WelcomeStepProps) {
+  const tr = useTr();
   return (
     <div className="w-full max-w-[520px]">
       <div className="card-surface rounded-2xl p-8">
@@ -16,8 +20,10 @@ export default function WelcomeStep({ onNext }: WelcomeStepProps) {
           </h1>
         </div>
         <p className="text-[var(--text-secondary)] mb-6 leading-relaxed text-center">
-          Your personal AI assistant is almost ready. This wizard will help you
-          get set up in just a few minutes.
+          {tr(
+            "wizard.welcomeBody",
+            "Your personal AI assistant is almost ready. This wizard will help you get set up in just a few minutes.",
+          )}
         </p>
         <div className="flex justify-center">
           <button
@@ -25,7 +31,7 @@ export default function WelcomeStep({ onNext }: WelcomeStepProps) {
             onClick={onNext}
             className="px-8 py-3 btn-gradient text-white rounded-lg font-semibold text-sm transition transform hover:scale-105 cursor-pointer"
           >
-            Get Started
+            {tr("wizard.getStarted", "Get Started")}
           </button>
         </div>
       </div>

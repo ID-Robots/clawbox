@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useTr } from "@/lib/i18n-floor";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -141,14 +142,16 @@ function StatRow({ label, value }: { label: string; value: React.ReactNode }) {
 // ─── Section: Overview ────────────────────────────────────────────────────────
 
 function OverviewSection({ data }: { data: OverviewStats }) {
+  const tr = useTr();
   return (
-    <Card title="Overview" icon={<OverviewIcon />}>
-      <StatRow label="Hostname" value={data.hostname} />
+    <Card title={tr("settings.sysOverview", "Overview")} icon={<OverviewIcon />}>
+      <StatRow label={tr("settings.hostname", "Hostname")} value={data.hostname} />
+      {/* "OS" is the same three letters in every locale this ships in. */}
       <StatRow label="OS" value={data.os} />
-      <StatRow label="Kernel" value={data.kernel} />
-      <StatRow label="Architecture" value={data.arch} />
+      <StatRow label={tr("settings.kernel", "Kernel")} value={data.kernel} />
+      <StatRow label={tr("settings.sysArchitecture", "Architecture")} value={data.arch} />
       <StatRow
-        label="Uptime"
+        label={tr("settings.sysUptime", "Uptime")}
         value={
           <span style={{ color: "#06b6d4" }} className="font-semibold">
             {data.uptime}
@@ -162,12 +165,13 @@ function OverviewSection({ data }: { data: OverviewStats }) {
 // ─── Section: CPU ─────────────────────────────────────────────────────────────
 
 function CpuSection({ data }: { data: CpuStats }) {
+  const tr = useTr();
   return (
     <Card title="CPU" icon={<CpuIcon />}>
       <div className="mb-3">
         <div className="flex justify-between items-center mb-1">
           <span className="text-xs" style={{ color: "#a0a0b0" }}>
-            Usage
+            {tr("settings.sysCpuUsage", "Usage")}
           </span>
           <span
             className="text-lg font-bold font-mono"
@@ -178,12 +182,12 @@ function CpuSection({ data }: { data: CpuStats }) {
         </div>
         <ProgressBar value={data.usage} animated />
       </div>
-      <StatRow label="Model" value={<span className="text-[10px]">{data.model}</span>} />
-      <StatRow label="Cores" value={data.cores} />
-      <StatRow label="Speed" value={`${data.speed} MHz`} />
+      <StatRow label={tr("settings.sysModel", "Model")} value={<span className="text-[10px]">{data.model}</span>} />
+      <StatRow label={tr("settings.sysCores", "Cores")} value={data.cores} />
+      <StatRow label={tr("settings.sysSpeed", "Speed")} value={`${data.speed} MHz`} />
       <div className="mt-2 pt-2 border-t border-white/5">
         <p className="text-xs mb-1" style={{ color: "#a0a0b0" }}>
-          Load Average
+          {tr("settings.sysLoadAverage", "Load Average")}
         </p>
         <div className="flex gap-3">
           {["1m", "5m", "15m"].map((label, i) => (
@@ -205,12 +209,13 @@ function CpuSection({ data }: { data: CpuStats }) {
 // ─── Section: Memory ─────────────────────────────────────────────────────────
 
 function MemorySection({ data }: { data: MemoryStats }) {
+  const tr = useTr();
   return (
-    <Card title="Memory" icon={<MemoryIcon />}>
+    <Card title={tr("settings.memory", "Memory")} icon={<MemoryIcon />}>
       <div className="mb-3">
         <div className="flex justify-between items-center mb-1">
           <span className="text-xs" style={{ color: "#a0a0b0" }}>
-            RAM Usage
+            {tr("settings.sysRamUsage", "RAM Usage")}
           </span>
           <span className="text-xs font-mono" style={{ color: "#e0e0e0" }}>
             {formatBytes(data.used)} / {formatBytes(data.total)}
@@ -218,14 +223,17 @@ function MemorySection({ data }: { data: MemoryStats }) {
         </div>
         <ProgressBar value={data.usedPercent} animated />
         <div className="mt-1 text-right text-[10px]" style={{ color: "#a0a0b0" }}>
-          {data.usedPercent}% used · {formatBytes(data.free)} free
+          {tr("settings.sysUsedFree", "{percent}% used · {free} free", {
+            percent: data.usedPercent,
+            free: formatBytes(data.free),
+          })}
         </div>
       </div>
       {data.swap.total > 0 && (
         <div>
           <div className="flex justify-between items-center mb-1">
             <span className="text-xs" style={{ color: "#a0a0b0" }}>
-              Swap
+              {tr("settings.swap", "Swap")}
             </span>
             <span className="text-xs font-mono" style={{ color: "#e0e0e0" }}>
               {formatBytes(data.swap.used)} / {formatBytes(data.swap.total)}
@@ -233,7 +241,7 @@ function MemorySection({ data }: { data: MemoryStats }) {
           </div>
           <ProgressBar value={data.swap.percent} color="#a855f7" animated />
           <div className="mt-1 text-right text-[10px]" style={{ color: "#a0a0b0" }}>
-            {data.swap.percent}% used
+            {tr("settings.sysPercentUsed", "{percent}% used", { percent: data.swap.percent })}
           </div>
         </div>
       )}
@@ -244,11 +252,12 @@ function MemorySection({ data }: { data: MemoryStats }) {
 // ─── Section: Storage ────────────────────────────────────────────────────────
 
 function StorageSection({ data }: { data: DiskMount[] }) {
+  const tr = useTr();
   return (
-    <Card title="Storage" icon={<StorageIcon />}>
+    <Card title={tr("settings.storage", "Storage")} icon={<StorageIcon />}>
       {data.length === 0 ? (
         <p className="text-xs" style={{ color: "#a0a0b0" }}>
-          No mounts found
+          {tr("settings.sysNoMounts", "No mounts found")}
         </p>
       ) : (
         <div className="space-y-3">
@@ -265,7 +274,7 @@ function StorageSection({ data }: { data: DiskMount[] }) {
               <ProgressBar value={mount.usePercent} animated />
               <div className="mt-0.5 flex justify-between text-[10px]" style={{ color: "#a0a0b0" }}>
                 <span>{mount.filesystem}</span>
-                <span>{mount.usePercent}% · {mount.avail} free</span>
+                <span>{tr("settings.sysDiskFree", "{percent}% · {avail} free", { percent: mount.usePercent, avail: mount.avail })}</span>
               </div>
             </div>
           ))}
@@ -278,11 +287,12 @@ function StorageSection({ data }: { data: DiskMount[] }) {
 // ─── Section: Network ────────────────────────────────────────────────────────
 
 function NetworkSection({ data }: { data: NetworkInterface[] }) {
+  const tr = useTr();
   return (
-    <Card title="Network" icon={<NetworkIcon />}>
+    <Card title={tr("settings.network", "Network")} icon={<NetworkIcon />}>
       {data.length === 0 ? (
         <p className="text-xs" style={{ color: "#a0a0b0" }}>
-          No interfaces found
+          {tr("settings.sysNoInterfaces", "No interfaces found")}
         </p>
       ) : (
         <div className="space-y-3">
@@ -298,7 +308,7 @@ function NetworkSection({ data }: { data: NetworkInterface[] }) {
                   </span>
                 ) : (
                   <span className="text-[10px]" style={{ color: "#a0a0b0" }}>
-                    no IP
+                    {tr("settings.sysNoIp", "no IP")}
                   </span>
                 )}
               </div>
@@ -323,6 +333,7 @@ function NetworkSection({ data }: { data: NetworkInterface[] }) {
 type SortKey = "cpu" | "mem" | "pid";
 
 function ProcessesSection({ data }: { data: ProcessEntry[] }) {
+  const tr = useTr();
   const [sortBy, setSortBy] = useState<SortKey>("cpu");
   const [expanded, setExpanded] = useState(false);
 
@@ -330,7 +341,7 @@ function ProcessesSection({ data }: { data: ProcessEntry[] }) {
   const topProcs = expanded ? sorted : sorted.slice(0, 5);
 
   return (
-    <Card title="Processes" icon={<ProcessIcon />}>
+    <Card title={tr("settings.sysProcesses", "Processes")} icon={<ProcessIcon />}>
       <div className="flex items-center justify-between mb-2">
         <div className="flex gap-1">
           {(["cpu", "mem", "pid"] as SortKey[]).map((key) => (
@@ -353,7 +364,9 @@ function ProcessesSection({ data }: { data: ProcessEntry[] }) {
           className="text-[10px] px-2 py-0.5 rounded transition-colors hover:bg-white/10"
           style={{ color: "#06b6d4" }}
         >
-          {expanded ? "Show less" : `All (${sorted.length})`}
+          {expanded
+            ? tr("settings.sysShowLess", "Show less")
+            : tr("settings.sysShowAll", "All ({count})", { count: sorted.length })}
         </button>
       </div>
       <div className="overflow-x-auto" style={{ maxHeight: expanded ? 300 : undefined, overflowY: expanded ? "auto" : undefined }}>
@@ -413,6 +426,7 @@ function ProcessIcon() { return <MIcon name="list" />; }
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function SystemApp() {
+  const tr = useTr();
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -427,11 +441,11 @@ export default function SystemApp() {
       setError(null);
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load stats");
+      setError(err instanceof Error ? err.message : tr("settings.sysLoadFailed", "Failed to load stats"));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tr]);
 
   useEffect(() => {
     fetchStats();
@@ -452,19 +466,19 @@ export default function SystemApp() {
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: "#06b6d4" }} />
           <span className="text-sm font-semibold" style={{ color: "#e0e0e0" }}>
-            System Monitor
+            {tr("settings.sysTitle", "System Monitor")}
           </span>
         </div>
         <div className="flex items-center gap-3">
           {lastUpdated && (
             <span className="text-[10px]" style={{ color: "#a0a0b0" }}>
-              Updated {lastUpdated}
+              {tr("settings.sysUpdated", "Updated {time}", { time: lastUpdated })}
             </span>
           )}
           <button
             onClick={fetchStats}
             className="p-1 rounded hover:bg-white/10 transition-colors"
-            title="Refresh now"
+            title={tr("settings.sysRefresh", "Refresh now")}
           >
             <span className="material-symbols-rounded" style={{ fontSize: 14, color: "#06b6d4" }}>refresh</span>
           </button>
@@ -480,7 +494,7 @@ export default function SystemApp() {
               style={{ borderColor: "#06b6d4", borderTopColor: "transparent" }}
             />
             <span className="text-sm" style={{ color: "#a0a0b0" }}>
-              Loading system stats…
+              {tr("settings.sysLoading", "Loading system stats…")}
             </span>
           </div>
         )}

@@ -2282,7 +2282,7 @@ export default function AIModelsStep({
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
-                    aria-label={showKey ? "Hide key" : "Show key"}
+                    aria-label={showKey ? t("login.hideKey") : t("login.showKey")}
                     className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>{showKey ? "visibility_off" : "visibility"}</span>
@@ -2375,7 +2375,7 @@ export default function AIModelsStep({
                         saveModel();
                       }
                     }}
-                    placeholder="Paste your portal token"
+                    placeholder={t("ai.pastePortalToken")}
                     spellCheck={false}
                     autoComplete="off"
                     className="w-full min-h-[48px] px-4 py-3 pr-12 text-[length:var(--t-4)] bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[var(--text-primary)] outline-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] focus:border-[var(--coral-bright)] placeholder:text-[var(--text-muted)]"
@@ -2383,7 +2383,7 @@ export default function AIModelsStep({
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
-                    aria-label={showKey ? "Hide token" : "Show token"}
+                    aria-label={showKey ? t("login.hideToken") : t("login.showToken")}
                     className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
@@ -2392,7 +2392,7 @@ export default function AIModelsStep({
                   </button>
                 </div>
                 <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
-                  Issue a token in the <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] underline">ClawBox portal</a> and paste it here.
+                  {t("ai.issueTokenPrefix")} <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] underline">{t("ai.clawboxPortal")}</a> {t("ai.issueTokenSuffix")}
                 </p>
               </div>
             )}

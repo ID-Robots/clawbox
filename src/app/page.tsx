@@ -2506,8 +2506,8 @@ function ChromeDesktopInner() {
         <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
             <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
-            <span className="text-lg font-semibold text-white">Drop files to upload</span>
-            <span className="text-sm text-white/50">Files will be saved to Downloads</span>
+            <span className="text-lg font-semibold text-white">{t("files.dropToUpload")}</span>
+            <span className="text-sm text-white/50">{t("desktop.dropHint")}</span>
           </div>
         </div>
       )}
@@ -2613,22 +2613,22 @@ function ChromeDesktopInner() {
                   </span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-white">Free backup with ClawBox AI</div>
+                  <div className="text-sm font-semibold text-white">{t("desktop.clawAiOfferTitle")}</div>
                   <div className="text-xs leading-relaxed text-white/60 mt-0.5">
-                    Add ClawBox AI as your free desktop backup and keep a ready-to-use provider one click away.
+                    {t("desktop.clawAiOfferBody")}
                   </div>
                 </div>
                 <button
                   onClick={() => setShowClawAiOfferNotification(false)}
                   className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
-                  aria-label="Dismiss ClawBox AI offer"
+                  aria-label={t("desktop.clawAiOfferDismiss")}
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
                 </button>
               </div>
               <div className="px-4 pb-2">
                 <div className="rounded-lg border border-green-400/15 bg-green-500/10 px-3 py-2 text-[11px] leading-relaxed text-green-50/90">
-                  We’ll open AI Provider settings with ClawBox AI already selected so you can log in right away.
+                  {t("desktop.clawAiOfferNote")}
                 </div>
               </div>
               <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
@@ -2636,13 +2636,13 @@ function ChromeDesktopInner() {
                   onClick={openClawAiProviderSettings}
                   className="flex-1 px-3 py-1.5 rounded-md bg-green-500 hover:bg-green-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
                 >
-                  Login with ClawBox AI
+                  {t("desktop.clawAiOfferLogin")}
                 </button>
                 <button
                   onClick={() => setShowClawAiOfferNotification(false)}
                   className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
                 >
-                  Later
+                  {t("updateNotification.later")}
                 </button>
               </div>
             </div>
@@ -2720,15 +2720,15 @@ function ChromeDesktopInner() {
                     <span className="material-symbols-rounded text-[#5eb8e6]" style={{ fontSize: 20 }}>person_add</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-white">New Telegram access request</div>
-                    <div className="text-xs text-white/60 mt-0.5 truncate">{label} wants to chat with your bot.</div>
+                    <div className="text-sm font-semibold text-white">{t("desktop.telegramRequestTitle")}</div>
+                    <div className="text-xs text-white/60 mt-0.5 truncate">{t("desktop.telegramRequestBody", { name: label })}</div>
                     {req.id && <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">id {req.id}</div>}
                   </div>
                   <button
                     type="button"
                     onClick={() => dismissPairingRequest(code)}
                     className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
-                    aria-label="Dismiss"
+                    aria-label={t("desktop.toast.dismiss")}
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
                   </button>

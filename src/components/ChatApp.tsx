@@ -1168,7 +1168,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               }}>
                 <button
                   type="button"
-                  aria-label="Dismiss"
+                  aria-label={t('chat.portalWelcomeDismiss')}
                   onClick={dismissWelcome}
                   style={{
                     position: 'absolute', top: 6, right: 8,
@@ -1176,9 +1176,9 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                     fontSize: 14, lineHeight: 1, cursor: 'pointer', padding: 4,
                   }}
                 >×</button>
-                <div style={{ fontWeight: 600, color: '#fff', marginBottom: 4 }}>👋 Welcome to ClawBox</div>
+                <div style={{ fontWeight: 600, color: '#fff', marginBottom: 4 }}>{t('chat.portalWelcomeTitle')}</div>
                 <div style={{ marginBottom: 10 }}>
-                  Sign in to the ClawBox portal to unlock all features — Remote Control, ClawKeep cloud backups, and more.
+                  {t('chat.portalWelcomeBody')}
                 </div>
                 <a
                   href={PORTAL_LOGIN_URL}
@@ -1191,7 +1191,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                     color: '#fff', fontWeight: 600, textDecoration: 'none', fontSize: 12.5,
                   }}
                 >
-                  Open ClawBox Portal →
+                  {t('chat.portalWelcomeCta')}
                 </a>
               </div>
             )}

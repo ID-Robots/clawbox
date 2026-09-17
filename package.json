@@ -25,7 +25,8 @@
     "test:e2e:coverage": "rm -f coverage/e2e-summary.json coverage/e2e-bundles.json && playwright test && node scripts/e2e-coverage-report.mjs",
     "test:e2e:ui": "playwright test --ui",
     "verify:build-identity": "bash scripts/verify-build-identity.sh",
-    "check:sudoers": "bash scripts/check-sudoers-coverage.sh"
+    "check:sudoers": "bash scripts/check-sudoers-coverage.sh",
+    "i18n:scan": "bun run scripts/i18n-scan.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

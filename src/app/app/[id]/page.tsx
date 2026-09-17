@@ -324,6 +324,22 @@ function StandaloneTitle({ nameKey, literal }: { nameKey?: string; literal?: str
  * the desktop catalogue yet, and a raw key on screen would be worse than the
  * English it replaces.
  */
+/**
+ * Its own component for the same reason the two above are: the page body sits
+ * ABOVE `I18nProvider`, so a `t()` called while building this JSX would echo
+ * the key. Rendered as an element, it reads the provider like any other child.
+ */
+function AppNotFound({ id }: { id: string }) {
+  const { t } = useT();
+  const hit = t("app.notFound");
+  const text = hit === "app.notFound" ? `App not found: ${id}` : hit.replaceAll("{id}", id);
+  return (
+    <div className="h-full flex items-center justify-center text-white/50 text-sm">
+      {text}
+    </div>
+  );
+}
+
 function BackToDesktopLabel() {
   const { t } = useT();
   const hit = t("app.backToDesktop");
@@ -424,11 +440,7 @@ export default function StandaloneAppPage() {
       <span className="text-white/40 text-sm">Loading…</span>
     </div>
   );
-  const notFound = (
-    <div className="h-full flex items-center justify-center text-white/50 text-sm">
-      App not found: {id}
-    </div>
-  );
+  const notFound = <AppNotFound id={id ?? ""} />;
 
   const renderInstalledApp = (appId: string) => {
     if (!installedMeta) return loading;
@@ -485,11 +497,7 @@ export default function StandaloneAppPage() {
       if (!harness) return loading;
       // An unknown harness hides BOTH sets — fail closed.
       if (hiddenAppIdsForHarness(harness).includes(appId)) {
-        return (
-          <div className="h-full flex items-center justify-center text-white/50 text-sm">
-            App not found: {appId}
-          </div>
-        );
+        return <AppNotFound id={appId} />;
       }
     }
     switch (id) {

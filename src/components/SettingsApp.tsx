@@ -12,6 +12,7 @@ import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
+import { useTr } from "@/lib/i18n-floor";
 import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
@@ -3739,9 +3740,13 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5">
                   <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }}>warning</span>
                   <div className="text-[11px] text-amber-100/90 leading-relaxed">
-                    Hotspot is not broadcasting{hotspotBlockedBy ? ` because this device is connected to "${hotspotBlockedBy}" over WiFi` : ""}.
-                    The Jetson has a single WiFi radio, so the hotspot can only run when WiFi is disconnected or the device is on Ethernet.
-                    Saved settings will apply automatically the next time the AP starts.
+                    {/* This file's `tr` takes no params (see its definition),
+                        so the one slot is filled here rather than by the
+                        helper — the placeholder is identical in every locale. */}
+                    {hotspotBlockedBy
+                      ? tr("settings.hotspotNotBroadcastingWifi", "Hotspot is not broadcasting because this device is connected to “{ssid}” over WiFi.").replaceAll("{ssid}", hotspotBlockedBy)
+                      : tr("settings.hotspotNotBroadcasting", "Hotspot is not broadcasting.")}{" "}
+                    {tr("settings.hotspotSingleRadioNote", "The Jetson has a single WiFi radio, so the hotspot can only run when WiFi is disconnected or the device is on Ethernet. Saved settings will apply automatically the next time the AP starts.")}
                   </div>
                 </div>
               )}
@@ -3777,7 +3782,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         type={hotspotPasswordShow ? "text" : "password"}
                         value={hotspotPassword}
                         onChange={e => { setHotspotPassword(e.target.value); setHotspotPasswordStatus(null); }}
-                        placeholder={hotspotHasPassword ? "••••••••" : "At least 8 characters"}
+                        placeholder={hotspotHasPassword ? "••••••••" : tr("settings.minEightChars", "At least 8 characters")}
                         maxLength={63}
                         className="flex-1 min-w-0 px-3.5 py-2.5 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/15"
                       />
@@ -3863,12 +3868,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                           <div className="px-4 pb-3 pt-1 border-t border-white/[0.04]">
                             <div className="flex items-stretch gap-2 mt-2">
                               <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                                <input type={savedShowPassword ? "text" : "password"} value={savedNewPassword} onChange={e => { setSavedNewPassword(e.target.value); setSavedStatus(null); }} placeholder="New password" maxLength={63} className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20" />
+                                <input type={savedShowPassword ? "text" : "password"} value={savedNewPassword} onChange={e => { setSavedNewPassword(e.target.value); setSavedStatus(null); }} placeholder={t("settings.security.newPassword")} maxLength={63} className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20" />
                                 <button type="button" onClick={() => setSavedShowPassword(v => !v)} className="px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer">
                                   <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{savedShowPassword ? "visibility_off" : "visibility"}</span>
                                 </button>
                               </div>
-                              <button onClick={() => updateSavedPassword(net.name)} disabled={savedBusy === net.name || savedNewPassword.length < 8} className="px-3 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-xs font-semibold cursor-pointer border-none">Save</button>
+                              <button onClick={() => updateSavedPassword(net.name)} disabled={savedBusy === net.name || savedNewPassword.length < 8} className="px-3 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-xs font-semibold cursor-pointer border-none">{t("save")}</button>
                             </div>
                           </div>
                         )}
@@ -4503,21 +4508,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   </div>
                   <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
                     <li>
-                      Scan the QR or open{" "}
+                      {tr("telegram.step1Prefix", "Scan the QR or open")}{" "}
                       <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline">
                         @BotFather
                       </a>{" "}
-                      in Telegram
+                      {t("telegram.step1Suffix")}
                     </li>
                     <li>
                       Send{" "}
                       <code className="bg-white/[0.06] px-1.5 py-0.5 rounded text-xs text-[var(--coral-bright)]">
                         /newbot
                       </code>{" "}
-                      and follow the prompts
+                      {t("telegram.step2Suffix")}
                     </li>
                     <li>
-                      Copy the <strong className="text-[var(--text-primary)]">Bot Token</strong> and paste below
+                      {tr("telegram.step3Prefix", "Copy the")} <strong className="text-[var(--text-primary)]">{t("telegram.step3bold")}</strong> {tr("telegram.step3Suffix", "and paste below")}
                     </li>
                   </ol>
                 </div>
@@ -6709,13 +6714,13 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       {hotspotConfirmEnable && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Enable hotspot?</h3>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
-              The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>. You&apos;ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.
+              {tr("settings.hotspotConfirmPrefix", "The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from")} <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>{tr("settings.hotspotConfirmSuffix", ". You’ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.")}
             </p>
             <div className="flex gap-3">
               <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
-              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">{tr("credentials.enableHotspot", "Enable hotspot")}</button>
             </div>
           </div>
         </div>
@@ -6733,7 +6738,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               <div className="flex items-start gap-2">
                 <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
                 <div>
-                  After reboot you&apos;ll need to reconnect at:
+                  {tr("settings.hostnameReconnectAt", "After reboot you’ll need to reconnect at:")}
                   <div className="mt-1 font-mono text-amber-50 break-all">http://{hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local/</div>
                 </div>
               </div>
@@ -6825,7 +6830,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               <div className="flex items-start gap-2">
                 <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
                 <div>
-                  After reboot you&apos;ll need to reconnect at:
+                  {tr("settings.hostnameReconnectAt", "After reboot you’ll need to reconnect at:")}
                   <div className="mt-1 font-mono text-amber-50 break-all">http://{hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local/</div>
                 </div>
               </div>
@@ -6846,13 +6851,13 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       {hotspotConfirmEnable && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Enable hotspot?</h3>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
-              The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>. You&apos;ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.
+              {tr("settings.hotspotConfirmPrefix", "The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from")} <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>{tr("settings.hotspotConfirmSuffix", ". You’ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.")}
             </p>
             <div className="flex gap-3">
               <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
-              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">{tr("credentials.enableHotspot", "Enable hotspot")}</button>
             </div>
           </div>
         </div>
@@ -6872,14 +6877,14 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
             <div className="space-y-2">
               <h2 id="hostname-reboot-title" className="text-xl font-semibold text-white">Restarting device…</h2>
               <p className="text-sm text-white/60 leading-relaxed">
-                The Jetson is rebooting with its new name.<br/>You&apos;ll be redirected automatically when it&apos;s back online.
+                {tr("settings.hostnameRebootBody", "The Jetson is rebooting with its new name.")}<br/>{tr("settings.hostnameRebootRedirect", "You’ll be redirected automatically when it’s back online.")}
               </p>
             </div>
             <a href={hostnameRebootTo} className="text-xs text-[#fe6e00] hover:text-[#ff8b1a] font-mono underline-offset-2 hover:underline break-all">
               {hostnameRebootTo}
             </a>
             <p className="text-[11px] text-white/30">
-              This usually takes 30–60 seconds. If your browser doesn&apos;t redirect, click the link above.
+              {tr("settings.hostnameRebootWait", "This usually takes 30–60 seconds. If your browser doesn’t redirect, click the link above.")}
             </p>
           </div>
         </div>,
@@ -6893,6 +6898,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 }
 
 function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
+  const tr = useTr();
   return (
     <div className="max-w-xl">
       <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 flex flex-col items-center text-center gap-4">
@@ -6904,9 +6910,9 @@ function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
           className="select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
         />
         <div>
-          <h3 className="text-base font-semibold text-[var(--text-primary)] mb-1">Sign in to use Remote Control</h3>
+          <h3 className="text-base font-semibold text-[var(--text-primary)] mb-1">{tr("remoteControl.signInTitle", "Sign in to use Remote Control")}</h3>
           <p className="text-sm text-[var(--text-muted)] leading-relaxed">
-            Remote Control needs your ClawBox account so the portal can publish a secure tunnel back to this device.
+            {tr("remoteControl.signInBody", "Remote Control needs your ClawBox account so the portal can publish a secure tunnel back to this device.")}
           </p>
         </div>
         <button
@@ -6915,7 +6921,7 @@ function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
           className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl btn-gradient text-sm font-medium text-white cursor-pointer"
         >
           <span className="material-symbols-rounded" style={{ fontSize: 18 }}>open_in_new</span>
-          Open ClawBox Portal
+          {tr("login.openPortal", "Open ClawBox Portal")}
         </button>
       </div>
     </div>
