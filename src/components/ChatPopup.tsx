@@ -2464,28 +2464,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               if (wasProviderChange) {
                 const pendingModelSwitch = pendingModelSwitchResetRef.current
                 pendingModelSwitchResetRef.current = null
-                if (pendingModelSwitch && !pendingModelSwitch.automatic) {
-                  try {
-                    // The fresh chat belongs to MAIN — the pre-tabs contract,
-                    // and the session every other surface shares. With a side
-                    // tab bound, resetting "the current session" would wipe
-                    // the conversation under the owner's cursor and leave
-                    // main carrying the old model's transcript — the exact
-                    // leak the banner below claims was prevented.
-                    if (sessionKeyRef.current === mainSessionKeyRef.current) {
-                      await resetSessionRef.current()
-                    } else {
-                      await wsRequest('sessions.reset', { key: mainSessionKeyRef.current, reason: 'new' })
-                    }
-                  } catch (err) {
-                    setMessages(prev => [...prev, {
-                      role: 'system',
-                      text: `Switched chat to ${pendingModelSwitch.model}, but could not start a fresh chat: ${err instanceof Error ? err.message : 'unknown error'}`,
-                      timestamp: Date.now(),
-                      variant: 'error',
-                    }])
-                  }
-                }
+                // The conversation CONTINUES on the new model. It used to be
+                // reset here "so the previous model's transcript does not leak
+                // into this model" — but the core carries a session across
+                // providers on its own (its `/model` command switches in
+                // place, and its transport transforms the history for the
+                // provider that reads it next), and the owner asked for the
+                // thread to stay (2026-09-17): a switch mid-task that wiped
+                // the task was the leak.
                 try {
                   const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
                   const state = await res.json() as ChatModelState
@@ -2494,9 +2480,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
                   setMessages(prev => [...prev, {
                     role: 'system',
-                    text: pendingModelSwitch
-                      ? `Switched chat to ${label}. Started a fresh chat so the previous model's transcript does not leak into this model.`
-                      : `Switched chat to ${label}.`,
+                    text: `Switched chat to ${label}.`,
                     timestamp: Date.now(),
                     variant: 'success',
                   }])
