@@ -22,6 +22,9 @@ import {
   type HistoryMessage,
   type HistoryOptions,
   type HistoryPage,
+  type ProgressCard,
+  type ProgressStep,
+  type ProgressStepStatus,
   type TurnEvent,
   type TurnRequest,
   type TurnResult,
@@ -246,6 +249,77 @@ export function projectGatewayHistory(
 }
 
 /**
+ * How many steps of one plan may be rendered.
+ *
+ * The store's own cap, mirrored rather than trusted. It is not a display
+ * preference: a row off the wire is JSON like any other, and a payload
+ * claiming ten thousand steps would be laid out before anyone could decide it
+ * was wrong. Bounding the COUNT is enough — the step TEXT is left exactly as
+ * the agent wrote it, because truncating the words of a plan is how a surface
+ * starts disagreeing with the agent it is supposed to be showing.
+ */
+export const MAX_PROGRESS_STEPS = 50;
+
+function isProgressStepStatus(value: unknown): value is ProgressStepStatus {
+  return value === "pending" || value === "in_progress" || value === "completed";
+}
+
+/**
+ * One `progressCard.get` payload, re-validated rather than trusted.
+ *
+ * The same posture the Hermes adapter keeps over its own history rows, and for
+ * the same reason: this is the last gate before a value becomes a rendered
+ * card. A step with no text, or with a status this surface has no branch for,
+ * is DROPPED rather than drawn — an unlabelled checkbox and a step in a state
+ * nothing renders are both worse than a shorter list.
+ *
+ * Answers `null` for anything that is not a card, and for a card with nothing
+ * in it. The store already returns `null` in that last case; asking again here
+ * costs a line and means a gateway that ever answered `{ markdown: "" }`
+ * cannot put an empty shell on screen.
+ *
+ * Pure, and exported for the same reason `projectGatewayHistory` is: the shape
+ * decisions are what a test should be able to pin without a socket.
+ */
+export function parseProgressCard(payload: unknown): ProgressCard | null {
+  if (!payload || typeof payload !== "object") return null;
+  const row = (payload as { card?: unknown }).card;
+  if (!row || typeof row !== "object") return null;
+  const card = row as Record<string, unknown>;
+  const sessionKey = typeof card.sessionKey === "string" ? card.sessionKey : "";
+  const revision = typeof card.revision === "number" && Number.isFinite(card.revision) ? card.revision : 0;
+  // Never a guessed `Date.now()`: the header prints "just now" from this, and a
+  // card whose store forgot to stamp it would then claim to have been written
+  // at the moment it was READ. Zero is the honest value and the renderer knows
+  // to print no time at all for it.
+  const updatedAt =
+    typeof card.updatedAt === "number" && Number.isFinite(card.updatedAt) && card.updatedAt > 0
+      ? card.updatedAt
+      : 0;
+  const markdown = typeof card.markdown === "string" ? card.markdown.trim() : "";
+  const steps: ProgressStep[] = [];
+  if (Array.isArray(card.steps)) {
+    for (const entry of card.steps) {
+      if (steps.length >= MAX_PROGRESS_STEPS) break;
+      if (!entry || typeof entry !== "object") continue;
+      const step = entry as Record<string, unknown>;
+      const text = typeof step.step === "string" ? step.step.trim() : "";
+      if (!text) continue;
+      if (!isProgressStepStatus(step.status)) continue;
+      steps.push({ step: text, status: step.status });
+    }
+  }
+  if (!markdown && steps.length === 0) return null;
+  return {
+    sessionKey,
+    revision,
+    updatedAt,
+    ...(markdown ? { markdown } : {}),
+    ...(steps.length ? { steps } : {}),
+  };
+}
+
+/**
  * The socket, as the adapter needs to see it.
  *
  * Narrow on purpose: an adapter that could reach the WebSocket object would
@@ -425,6 +499,31 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     }
     const msgs = (result.messages as unknown[]) || [];
     return projectGatewayHistory(msgs, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
+  }
+
+  /**
+   * The agent's own plan for this session, straight off the store.
+   *
+   * `progressCard.get` is an `operator.read` on the socket this chat already
+   * holds, so the card needs no route of its own and inherits the session gate
+   * the rest of the surface rests on. The key is the link's — see the note on
+   * the interface for why nothing may pass one in.
+   *
+   * Resolves `null` on ANY failure, deliberately, and the contract says so out
+   * loud so no caller invents its own `catch`: a socket that dropped between
+   * the change event and this read, a gateway too old to know the method, a
+   * row that is not a card — on screen every one of them means "there is no
+   * plan to show", and none of them is worth taking the transcript down for.
+   */
+  async loadProgressCard(): Promise<ProgressCard | null> {
+    try {
+      const payload = await this.link.request("progressCard.get", {
+        sessionKey: this.link.sessionKey(),
+      });
+      return parseProgressCard(payload);
+    } catch {
+      return null;
+    }
   }
 
   async patchSessionDefaults(patch: { thinkingLevel?: string | null; model?: string | null }): Promise<void> {

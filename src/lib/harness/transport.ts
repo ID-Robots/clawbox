@@ -115,6 +115,20 @@ export interface HarnessCapabilities {
    * needs no edit at all for that to happen. One expression decides it.
    */
   readonly imageGenerationTrigger: "agent" | "composer" | null;
+  /**
+   * The agent keeps a PLAN for this session that the surface may show — the
+   * task-progress card.
+   *
+   * A capability rather than a harness check because the two editions differ in
+   * kind, not in wiring: OpenClaw's gateway owns a progress-card store the
+   * agent writes into and `progressCard.get` reads back, and Hermes has no such
+   * store at all. It is deliberately NOT "the chat can show a checklist" — a
+   * surface could always draw one by scraping tool events, and that is exactly
+   * the parallel tracker this flag exists to make unnecessary. What it promises
+   * is that there is an AUTHORITATIVE plan to ask for, so a card on screen is
+   * the agent's own record and never the surface's guess at it.
+   */
+  readonly canShowProgressCard: boolean;
   /** Replies can be spoken back (TTS). */
   readonly canSpeakReplies: boolean;
   /**
@@ -400,6 +414,52 @@ export interface HistoryPage {
   readonly imageGenerationFailed: boolean;
 }
 
+/**
+ * Where one step of the agent's plan has got to.
+ *
+ * The three values the store itself records, and no more. A surface that wants
+ * a fourth state — "this step was in progress when the run stopped" — derives
+ * it from the RUN, which is the only thing that knows; inventing a `stopped`
+ * status here would mean writing into the card a value the agent never wrote.
+ */
+export type ProgressStepStatus = "pending" | "in_progress" | "completed";
+
+export interface ProgressStep {
+  /** What the step says, in the agent's own words. */
+  readonly step: string;
+  readonly status: ProgressStepStatus;
+}
+
+/**
+ * The agent's own plan for one session, as the harness stores it.
+ *
+ * Declared here for the reason `ClarifyQuestion` is: the renderer is a client
+ * component, the wire shape is small and stable, and the alternative is
+ * dragging the store that produces it into the browser bundle.
+ *
+ * It is a READ of an authoritative record, never a reconstruction. The agent
+ * writes the card; this surface shows it. That distinction is the whole point
+ * of the feature — a checklist assembled from tool events would disagree with
+ * the agent's own plan the first time the agent revised it, and the customer
+ * would have no way to tell which of the two was lying.
+ *
+ * `markdown` and `steps` are both optional and a card carries at least one of
+ * them: a record with neither reads as no card at all (`loadProgressCard`
+ * answers `null`), because an empty card on screen is a promise of progress
+ * that nothing is behind.
+ */
+export interface ProgressCard {
+  /** The session this plan belongs to. Never rendered against another one. */
+  readonly sessionKey: string;
+  /** Bumped by the store on every write; the identity of one version. */
+  readonly revision: number;
+  /** ms epoch, or 0 when the store did not say — never a guessed "now". */
+  readonly updatedAt: number;
+  readonly markdown?: string;
+  /** In the agent's own order, which is the order a reader must see. */
+  readonly steps?: readonly ProgressStep[];
+}
+
 export type HarnessStatus = "idle" | "connecting" | "connected" | "error";
 
 /**
@@ -479,6 +539,31 @@ export interface HarnessAdapter {
    * Precondition: `capabilities.canListHistory`.
    */
   loadHistory(options?: HistoryOptions): Promise<HistoryPage>;
+
+  /**
+   * The agent's plan for the session this transport is bound to, or `null`
+   * when it has none.
+   *
+   * Precondition: `capabilities.canShowProgressCard`. An adapter whose
+   * capability is false rejects with `HarnessError('unsupported')`, per this
+   * interface's rule — there is no store to read and answering `null` would
+   * make a missing feature indistinguishable from an agent that has not
+   * planned anything yet.
+   *
+   * Every OTHER failure resolves `null` rather than rejecting, and that is a
+   * deliberate exception to the "adapters reject with a HarnessError" posture
+   * next door. This card is decoration over a transcript that must keep
+   * working: a socket that dropped between the event and the read, a gateway
+   * that has not learned the method, a malformed row — none of them is
+   * something the customer can act on, and all of them mean the same thing on
+   * screen, which is that there is no plan to show. A caller therefore never
+   * has to wrap this in a `catch` to keep the chat alive.
+   *
+   * The card is read for the session the transport names ITSELF. Nothing may
+   * pass a key in: the socket is session-gated and the surface's isolation
+   * rests on the two never disagreeing.
+   */
+  loadProgressCard(): Promise<ProgressCard | null>;
 
   /**
    * Push a sticky per-session default.

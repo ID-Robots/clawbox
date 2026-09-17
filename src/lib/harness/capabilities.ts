@@ -222,6 +222,19 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // What was true is that ClawBox had not wired any of it up. So the flag
       // follows the box's ACTUAL speech config now, the same way
       // `hermesAgentDrawsImages` follows its image backend.
+      // There is no progress-card store on this harness — not an empty one, no
+      // store at all — so there is nothing authoritative to read and nothing
+      // for a card to be a view OF. False outright rather than probed, because
+      // this is a property of the harness rather than of the box: no
+      // configuration, credential or version of Hermes makes one appear.
+      //
+      // The tempting alternative is to assemble a checklist from the tool
+      // events this surface already receives. That is precisely what must not
+      // happen: it would look identical to the OpenClaw card and be a guess,
+      // and the first time the agent revised its own plan the two editions
+      // would show different work with no way for a customer to tell which was
+      // real. An honestly absent card is the better answer.
+      canShowProgressCard: false,
       canSpeakReplies: facts.hermesSpeaksReplies,
       // WHO speaks it. Hermes has no gateway to append an audio part on its
       // own, so the ClawBox chat route asks Hermes to speak the finished reply
@@ -274,6 +287,13 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     // nothing for the composer to render. See the type's own note: this is the
     // flag that keeps `generateImage` honest about rejecting here.
     imageGenerationTrigger: facts.hasClawaiToken ? "agent" : null,
+    // The gateway keeps the store and serves it on the socket this chat is
+    // already holding (`progressCard.get`, scope `operator.read`), so the card
+    // costs no new route and no second authentication. True for every box on
+    // this edition: the store is part of the gateway rather than something an
+    // owner configures, and a session whose agent has written no plan reads as
+    // "no card" — which is the empty case, not the unsupported one.
+    canShowProgressCard: true,
     canSpeakReplies: true,
     // WHO speaks it, and the answer is NOT the gateway — which is what left
     // this feature dead on the edition it was written for.

@@ -697,6 +697,25 @@ export class HermesAdapter implements HarnessAdapter {
     return { media };
   }
 
+  /**
+   * Never called, and correct to refuse.
+   *
+   * There is no progress-card store on this harness — see
+   * `canShowProgressCard`, which is false here, so the chat never asks. The
+   * refusal is `unsupported` rather than a resolved `null` because the two say
+   * different things: `null` is "this agent has not planned anything yet",
+   * which a surface may draw nothing for and move on, while reaching this line
+   * at all means a caller ignored the capability. Answering `null` would hide
+   * that bug behind a screen that merely looks empty.
+   *
+   * The one thing this must not do is assemble a plan from the turn's tool
+   * events so the card appears on both editions. It would be a guess wearing
+   * the clothes of the agent's own record.
+   */
+  async loadProgressCard(): Promise<null> {
+    throw new HarnessError("unsupported", "This harness keeps no task-progress card.");
+  }
+
   async patchSessionDefaults(_patch: { thinkingLevel?: string | null }): Promise<void> {
     void _patch;
     // Hermes carries its reasoning level on the turn itself

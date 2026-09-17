@@ -17,6 +17,7 @@ import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
+import { TaskProgressCard } from '@/lib/chat-progress'
 import {
   APPROVAL_SESSION_EVENT,
   approvalsAfterReplay,
@@ -64,7 +65,7 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
-import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
+import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter, type ProgressCard } from '@/lib/harness/transport'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, extractFileAttachments, boundedAudio, boundedFiles } from '@/lib/chat-media'
 import ChatFileCard from '@/components/ChatFileCard'
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
@@ -1130,6 +1131,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // our own: the harness owns the queue, its expiry and its first-answer-wins
   // resolution, and the next subscribe replays whatever is still open.
   const [approvals, setApprovals] = useState<ApprovalCard[]>([])
+  // The agent's plan for THIS conversation — the task-progress card.
+  //
+  // Read whole from the harness's own store and never merged with anything
+  // this surface knows: the transcript, the tool pills and this card are three
+  // views of the same run, and only one of them is the agent's own record of
+  // what it means to do. It is re-read on the store's own change event rather
+  // than accumulated from those pills, so a plan the agent REVISED (a step
+  // dropped, a step reworded) replaces the old one instead of growing beside
+  // it. `null` is both "no plan yet" and "we could not read one", because on
+  // screen they are the same thing — see `loadProgressCard`.
+  const [progressCard, setProgressCard] = useState<ProgressCard | null>(null)
   // The clock the cards judge their own window against.
   //
   // A pending approval's window closes on its own, and the card has to stop
@@ -2021,6 +2033,65 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } =
     useHarnessAdapter(harnessWiring)
   useEffect(() => { adapterRef.current = adapter }, [adapter])
+  /**
+   * Re-read the agent's plan for the conversation on screen.
+   *
+   * Three guards, and each of them is about the same thing — that a card on
+   * screen belongs to the conversation under it:
+   *
+   *  1. the harness must HAVE a store to read (`canShowProgressCard`), else
+   *     the adapter is right to reject and there is nothing to draw;
+   *  2. the key is captured before the round trip and checked after it, because
+   *     a tab switch mid-read would otherwise paint one conversation's plan
+   *     over another's;
+   *  3. the card names its own session, and a card that names a different one
+   *     is dropped rather than rendered — the gateway answers for the key the
+   *     link gave it, so this can only be a skew, and a plan attributed to the
+   *     wrong conversation is worse than no plan.
+   *
+   * Never throws. A failed read is a card-shaped `null`, which is the same
+   * thing on screen as an agent that has not planned anything — see the
+   * adapter, which is where that decision is made and documented.
+   */
+  const refreshProgressCard = useCallback(async () => {
+    const active = adapterRef.current
+    const key = sessionKeyRef.current
+    if (!active?.capabilities.canShowProgressCard || !key) {
+      setProgressCard(null)
+      return
+    }
+    let card: ProgressCard | null = null
+    try {
+      card = await active.loadProgressCard()
+    } catch {
+      // Only `unsupported` reaches here, and only if the capability check
+      // above ever disagreed with the adapter. Nothing to say to the customer.
+      card = null
+    }
+    if (sessionKeyRef.current !== key) return
+    if (card && card.sessionKey && card.sessionKey !== key) return
+    setProgressCard(card)
+  }, [])
+  // The socket handler is built once and reaches this through a ref, exactly
+  // as it reaches the transcript reconcile — adding a dependency to `connect`
+  // would tear the socket down and rebuild it.
+  const refreshProgressCardRef = useRef(refreshProgressCard)
+  useEffect(() => { refreshProgressCardRef.current = refreshProgressCard }, [refreshProgressCard])
+  /**
+   * The first read: once there is a socket and a session key to name.
+   *
+   * `sessionEpoch` is in the deps because a tab switch is a different
+   * conversation with a different plan, and it is the one signal this
+   * component already bumps for exactly that.
+   */
+  useEffect(() => {
+    if (!caps.canShowProgressCard) {
+      setProgressCard(null)
+      return
+    }
+    if (status !== 'connected') return
+    void refreshProgressCard()
+  }, [caps.canShowProgressCard, status, sessionEpoch, refreshProgressCard])
   // The gateway's status is produced by the socket handlers below; publish it
   // so the adapter's subscribers see one stream whichever harness is running.
   useEffect(() => {
@@ -2587,6 +2658,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           return
         }
 
+        // The agent rewrote its plan. A SIGNAL, not the new card: the event
+        // carries only the session and the revision, and the store is the one
+        // thing allowed to say what the plan now is — so this re-reads rather
+        // than patching what is on screen from an event payload. The same
+        // posture as `session.message` above, for the same reason.
+        //
+        // No debounce, deliberately: the store broadcasts on a WRITE, which is
+        // the agent deciding something, not on a token — the bursts
+        // `session.message` coalesces do not happen here.
+        if (eventName === 'progressCard.changed') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          if (!payload) return
+          // Another conversation's plan changed. Nothing to do: this popup
+          // shows one session, and the tab that is showing the other one will
+          // read it when it is switched to.
+          if (payload.sessionKey !== sessionKeyRef.current) return
+          void refreshProgressCardRef.current()
+          return
+        }
+
         if (eventName === 'chat') {
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
@@ -3093,6 +3184,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // The approvals belong to the session that is going away. The gateway
     // still holds them; the next subscribe replays whatever is still open.
     setApprovals([])
+    // And the plan, which belongs to the conversation being blanked. Taken
+    // away HERE rather than left to the re-read that follows: the read is a
+    // round trip, and for its duration the old session's checklist would sit
+    // above the composer of a conversation it has nothing to do with. The
+    // store still holds it — a tab switched back to reads the same card again.
+    setProgressCard(null)
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
