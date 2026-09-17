@@ -7547,3 +7547,130 @@ PY_LANG
   # --- end clawbox language re-apply ---
 fi
 # --- end guide seeding ---
+
+# ── Report the installed Claude Code to Anthropic ─────────────────────────
+#
+# On the subscription (OAuth) path the core presents itself to Anthropic as
+# Claude Code — `user-agent: claude-cli/<version>` — with a version string
+# HARD-CODED in its bundle (`ANTHROPIC_CLAUDE_CODE_VERSION`, 2.1.75 on
+# 2026.9.3 and still on 2026.9.4). Anthropic gates its newest models on that
+# number: Fable 5.1 answered every turn with HTTP 400 "Claude Code 2.1.75
+# does not support this model; version 2.1.251 or newer is required" on a
+# box that has Claude Code 2.1.273 installed (2026-09-17). Hermes on the same
+# login works because its adapter runs `claude --version` and reports what is
+# installed, falling back to a fixed number only when nothing is.
+#
+# This does the same for the core, on disk, once per boot: when a Claude Code
+# is installed and NEWER than the number the bundle carries, the bundle's
+# constant is rewritten to the installed version. Nothing is claimed that is
+# not on the box — the version reported is one `claude --version` prints
+# here. An older or absent Claude Code leaves the core alone (a downgrade
+# would be the lie), a core built without the constant is left alone, and a
+# core update puts the old number back until the next boot re-applies this.
+# Never fails the boot: a failed rewrite means the old number and a chat that
+# says so, which is where the box was.
+
+clawbox_installed_claude_code_version() {
+  # The unit's PATH is systemd's; the coding agent installs `claude` under the
+  # user's own bin dirs, so those are looked in explicitly.
+  local candidate out version
+  for candidate in claude "$HOME/.local/bin/claude" "$HOME/.npm-global/bin/claude" claude-code; do
+    case "$candidate" in
+      */*) [ -x "$candidate" ] || continue ;;
+      *) command -v "$candidate" >/dev/null 2>&1 || continue ;;
+    esac
+    out="$(timeout 5 "$candidate" --version 2>/dev/null | head -n 1)" || continue
+    version="${out%% *}"
+    if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf '%s\n' "$version"
+      return 0
+    fi
+  done
+  return 1
+}
+
+clawbox_report_installed_claude_code_version() {
+  local dist="$1" installed="$2"
+  [ -d "$dist" ] || { echo "  Anthropic client version: no core package at $dist; nothing to report"; return 0; }
+  python3 - "$dist" "$installed" <<'PY'
+import os, re, sys, tempfile
+
+dist, installed = sys.argv[1], sys.argv[2]
+# Two copies on a 2026.9.3 box: `dist/worker/worker.mjs` (backtick, minified)
+# and `node_modules/@openclaw/ai/dist/host-*.mjs` (double-quoted, the copy the
+# Anthropic extension actually imports). Both are rewritten, or the request
+# still says 2.1.75 while the worker file says otherwise (seen on a box).
+pattern = re.compile(r"ANTHROPIC_CLAUDE_CODE_VERSION(\s*=\s*)([`\"'])(\d+\.\d+\.\d+)\2")
+
+def tuple_of(v):
+    return tuple(int(part) for part in v.split("."))
+
+installed_t = tuple_of(installed)
+touched, kept, found = [], [], False
+for root, dirs, files in os.walk(dist):
+    # Only the core's own code and its @openclaw/* packages carry the constant;
+    # the rest of node_modules is hundreds of megabytes nobody needs to read.
+    rel_root = os.path.relpath(root, dist)
+    if rel_root == "node_modules":
+        dirs[:] = [d for d in dirs if d == "@openclaw"]
+    elif os.path.basename(root) != "@openclaw" and "node_modules" in rel_root.split(os.sep)[2:]:
+        dirs[:] = []
+    for name in files:
+        if not (name.endswith(".js") or name.endswith(".mjs")):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+                text = f.read()
+        except OSError:
+            continue
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+        found = True
+        current = matches[0].group(3)
+        if current == installed:
+            continue
+        if tuple_of(current) >= installed_t:
+            kept.append((os.path.relpath(path, dist), current))
+            continue
+        rewritten = pattern.sub(lambda m: f"ANTHROPIC_CLAUDE_CODE_VERSION{m.group(1)}{m.group(2)}{installed}{m.group(2)}", text)
+        mode = os.stat(path).st_mode & 0o777
+        fd, tmp = tempfile.mkstemp(dir=root, prefix=f".{name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(rewritten)
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        touched.append((os.path.relpath(path, dist), current))
+
+if not found:
+    print("  Anthropic client version: the core carries no Claude Code version constant; nothing to report")
+for rel, current in touched:
+    print(f"  Anthropic client version: the core said Claude Code {current}; now reporting the installed {installed} ({rel})")
+for rel, current in kept:
+    print(f"  Anthropic client version: the core's Claude Code {current} is not older than the installed {installed}; kept ({rel})")
+if found and not touched and not kept:
+    print(f"  Anthropic client version: already reporting the installed Claude Code {installed}")
+PY
+}
+
+# The whole package, not `dist/` alone: the Anthropic extension imports
+# `@openclaw/ai` from the package's own node_modules, and that bundle carries
+# its own copy of the constant.
+CLAWBOX_CORE_DIST="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw"
+if CLAWBOX_INSTALLED_CLAUDE_CODE="$(clawbox_installed_claude_code_version)"; then
+  if ! clawbox_report_installed_claude_code_version "$CLAWBOX_CORE_DIST" "$CLAWBOX_INSTALLED_CLAUDE_CODE"; then
+    echo "  WARN: could not rewrite the core's Claude Code version — Anthropic keeps seeing the core's own number" >&2
+  fi
+else
+  echo "  Anthropic client version: no Claude Code on this box; the core's own number is kept"
+fi
+
+# ── End of pre-start ────────────────────────────────────────────────────────
