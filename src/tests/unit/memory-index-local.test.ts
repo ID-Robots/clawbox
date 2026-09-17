@@ -253,6 +253,62 @@ describe("indexing the owner's folders", () => {
     }
   });
 
+  it("still forgets a deleted note in a folder whose only PDF was too large to read", async () => {
+    // The derived folder is NAMED as soon as a source holds one extractable
+    // document and WRITTEN only when a conversion is about to be put in it. A
+    // folder whose every extractable document was passed over first — one over
+    // MAX_DOCUMENT_BYTES here — therefore names a folder that is not there, and
+    // failing to walk it used to be charged to the OWNER'S folder: a failure
+    // they cannot act on, and — because `unreadableSources` protects a whole
+    // source from the delete pass — a document they deleted that stayed in the
+    // index and went on being found, on every later pass, for ever.
+    const { MAX_DOCUMENT_BYTES } = await import("@/lib/memory-extract");
+    write("keep.md", "A bicycle is stored in the basement.");
+    const gone = write("gone.md", "The deposit is two months' rent.");
+    // Sparse, so this costs no disk: the extractor stats it and steps over it.
+    fs.truncateSync(write("scan.pdf", ""), MAX_DOCUMENT_BYTES + 1);
+
+    const built = await runLocalIndexPass("full");
+    expect(built.files).toBe(2);
+    // One failure, and only one: the PDF the extractor could not read. The
+    // owner's folder was read perfectly.
+    expect(built.failures, "the owner's folder must not be counted as unreadable").toBe(1);
+
+    fs.rmSync(gone);
+    const after = await runLocalIndexPass("incremental");
+    expect(after.files, "the deleted note must leave the index").toBe(1);
+    expect(after.failures).toBe(1);
+
+    _resetLocalMemoryCacheForTests();
+    const hits = await searchLocalMemory("deposit", 5);
+    expect(hits.map((h) => h.path).join(" ")).not.toContain("gone.md");
+  });
+
+  it("still protects a source whose derived folder IS there and cannot be read", async () => {
+    // The other half of the rule above: a derived folder that exists and will
+    // not open is a real shortfall — its rows may only LOOK stale — so the
+    // source keeps every row it has.
+    const { derivedFolderFor } = await import("@/lib/memory-extract");
+    write("keep.md", "A bicycle is stored in the basement.");
+    // A .txt is extractable, so the folder is really written and really walked.
+    write("lease.txt", "The deposit is two months' rent.");
+    const built = await runLocalIndexPass("full");
+    expect(built.files).toBe(2);
+
+    fs.chmodSync(derivedFolderFor(source), 0o000);
+    let after: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      after = await runLocalIndexPass("incremental");
+    } finally {
+      fs.chmodSync(derivedFolderFor(source), 0o755);
+    }
+    // Running as root in some CI images makes the chmod moot; only assert the
+    // contract when the folder really did become unreadable.
+    if (after.failures > 0) {
+      expect(after.files, "a derived folder that will not open keeps its rows").toBe(2);
+    }
+  });
+
   it("can still shrink and still take new work after it has hit its ceiling", async () => {
     // Skipping the delete pass while capped wedged the index for good: the
     // chunks of deleted files were never reclaimed, so every later pass hit the

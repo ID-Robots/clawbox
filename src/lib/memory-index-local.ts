@@ -600,6 +600,23 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * from a folder the owner emptied. Only the caller knows that difference is the
  * difference between "delete this source's index" and "leave it exactly alone".
  */
+/**
+ * Is there a directory there at all?
+ *
+ * Only ClawBox's own derived folder is asked. "Not there" and "could not be
+ * opened" are one silence to `walkFiles`, and for the OWNER'S folder that is
+ * exactly right — an unplugged drive must never look like an emptied one. For
+ * the derived folder they are different facts, and only one of them is a fault:
+ * see the caller.
+ */
+async function directoryPresent(dir: string): Promise<boolean> {
+  try {
+    return (await fs.stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function indexableFilesUnder(root: string): Promise<{ files: string[]; complete: boolean }> {
   const files: string[] = [];
   const budget = newWalkBudget();
@@ -1066,7 +1083,22 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
       console.warn(`[memory-index] extracting documents from a source failed: ${errorText(err)}`);
       unreadableSources.add(source);
     }
-    for (const root of derived ? [source, derived] : [source]) {
+    // The derived folder is named EAGERLY and written LAZILY: `extractDocuments`
+    // answers one as soon as the folder holds a single extractable document,
+    // and creates it only when it is about to write a conversion into it. So a
+    // source whose every extractable document was passed over before that point
+    // — one over MAX_DOCUMENT_BYTES, one that vanished between the walk and the
+    // stat — is handed a derived folder that is not there, and walking it
+    // charged "could not be read" to the OWNER'S folder. That is the worst
+    // wrong answer this module has: the pass counts a failure the owner cannot
+    // act on, and `unreadableSources` then disables the stale delete for the
+    // WHOLE source, so a document they deleted stays in the index and goes on
+    // coming back in search results on every later pass, for ever. Nothing was
+    // looked at and nothing is unknown — a derived folder that does not exist
+    // is an extraction that wrote nothing, which `skipped` has already counted.
+    const roots = [source];
+    if (derived && await directoryPresent(derived)) roots.push(derived);
+    for (const root of roots) {
       const found = await indexableFilesUnder(root);
       if (!found.complete) unreadableSources.add(source);
       for (const file of found.files) {
