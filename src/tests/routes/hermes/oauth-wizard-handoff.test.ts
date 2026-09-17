@@ -50,6 +50,17 @@ vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(async () => "hermes"),
 }));
 
+// The CLI-driven branch (Anthropic, Copilot) has its own suite; here every
+// provider is one the dashboard runs itself.
+vi.mock("@/lib/hermes-cli-login", () => ({
+  cliLoginDriverFor: () => null,
+  cliLoginAvailable: async () => false,
+  startCliLogin: vi.fn(),
+  submitCliLoginCode: vi.fn(),
+  readCliLogin: vi.fn(),
+  cancelCliLogin: () => false,
+}));
+
 vi.mock("@/lib/hermes-dashboard-auth", () => ({
   dashboardFetch: vi.fn(async () => new Response(
     JSON.stringify({ session_id: "0f6c1c2e-1111-2222-3333-444455556666", flow: "pkce" }),

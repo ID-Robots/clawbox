@@ -211,24 +211,24 @@ describe("Settings → System against a server that predates the new figures", (
   });
 });
 
-describe("the two set-once cards moved to Harness", () => {
+describe("where the set-once cards live", () => {
   beforeEach(() => serve(statsResponse()));
 
-  it("puts the box's password and the Desktop & power card on Harness", async () => {
-    await openSection("harness");
-    // By its accessible name, the way the mobile-overlay e2e drives it: the
-    // move must not disturb the labels that test selects on.
-    expect(await screen.findByPlaceholderText("Current password")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Verify" })).toBeInTheDocument();
-    // Awaited, not read: the card returns null until its own two status fetches
-    // land, which is after the password inputs are already on screen.
-    expect(await screen.findByText("Desktop & power")).toBeInTheDocument();
-  });
-
-  it("leaves neither of them on System", async () => {
+  it("puts the box's password on System — it is about the box, not the assistant (owner, 2026-09-16)", async () => {
     await openSection("system");
     await screen.findByTestId("settings-processes");
-    expect(screen.queryByPlaceholderText("Current password")).toBeNull();
+    // By its accessible name, the way the mobile-overlay e2e drives it: the
+    // move must not disturb the labels that test selects on.
+    expect(screen.getByPlaceholderText("Current password")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify" })).toBeInTheDocument();
     expect(screen.queryByText("Desktop & power")).toBeNull();
+  });
+
+  it("keeps the Desktop & power card on Harness, and the password off it", async () => {
+    await openSection("harness");
+    // Awaited, not read: the card returns null until its own two status fetches
+    // land.
+    expect(await screen.findByText("Desktop & power")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Current password")).toBeNull();
   });
 });

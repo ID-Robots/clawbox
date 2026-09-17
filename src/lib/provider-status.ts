@@ -26,6 +26,7 @@ import {
   hermesProviderLabel,
 } from "@/lib/hermes-providers";
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
+import { runHermesCli } from "@/lib/hermes-cli";
 import {
   pluginHasSettingsRow,
   readPluginRepairs,
@@ -297,7 +298,10 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
 
   // Asked once, outside the loop: it reads config and the config store, and the
   // answer is the same for every row that consults it.
-  const clawaiLinked = await hasClawaiToken();
+  const [clawaiLinked, clawaiKeyInHarness] = await Promise.all([
+    hasClawaiToken(),
+    clawaiKeyInHarnessStore(),
+  ]);
   const clawaiRefused = clawaiTokenRefused();
 
   // Did the live dashboard actually answer? `stale` is set on every fallback
@@ -325,26 +329,37 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   const providers = ids.map((id) => {
     const isDefault = id === defaultProvider;
     const reported = byId.get(id)?.authenticated ?? null;
-    // ClawBox AI is judged like every other provider — by what the dashboard
-    // reports — and falls back to OUR credential only when the dashboard has no
-    // opinion (no clawai row yet, or a catalogue read that could not say).
+    // ClawBox AI's row is decided by the CREDENTIAL, in either of its homes:
+    // ClawBox's own store (`hasClawaiToken`) or the harness's
+    // `providers.clawai.api_key`. The dashboard's `authenticated` flag cannot
+    // decide it — Hermes sets that flag for any user-defined provider whose
+    // block has a base_url, key or no key, and the block outlives the token.
     //
-    // It used to read the credential FIRST, and that was wrong in the one
-    // direction that matters: `resolveClawaiToken` looks in ClawBox's own
-    // stores, so on a Hermes box whose token Hermes holds — the dashboard
-    // reporting `authenticated: true`, `providers.clawai.base_url` set, chat
-    // working — the strip called the box's ACTIVE provider "Needs sign-in".
-    // Caught on a live linked device. The fallback is kept because it is the
-    // honest direction: a held credential is evidence of a link, while the
-    // absence of one is not evidence of its absence.
+    // Both homes matter, and the history says why. Reading only OUR store once
+    // called a live linked box "Needs sign-in" (its token was Hermes' to hold;
+    // caught on a device). Trusting only the dashboard's flag then called a
+    // box whose token had been removed "Connected" (seen on a device too). The
+    // harness's own key is the read that reconciles the two.
     //
-    // BUT a linked-token-absent-AND-dashboard-silent ClawBox AI is not
-    // "unknown", it is simply NOT CONNECTED — provided the dashboard actually
-    // answered. Reporting "Unknown" over a box that has plainly never linked
-    // ClawBox AI (its own state a mid-setup owner is looking straight at) is
-    // the confusing lie this reserves for a genuine probe failure.
+    // A harness read that FAILED (timeout, killed CLI) is `null`, never "no
+    // key": that row goes to "unknown", not to a "Needs sign-in" over a box
+    // whose chat may be working. A box that plainly never linked ClawBox AI —
+    // no credential anywhere, and the dashboard answered — is NOT CONNECTED,
+    // not "unknown"; that word is reserved for a probe that could not say.
+    // Hermes answers `authenticated: true` for ANY user-defined provider whose
+    // block has a base_url — it never checks for a key. `providers.clawai` is
+    // exactly such a block, and it outlives the credential: a box whose token
+    // was removed kept reading "ClawBox AI: Connected" while `hasToken` was
+    // false one route over. So for our own row the credential is the answer —
+    // ours in the store or the harness's in `providers.clawai.api_key` — and
+    // Hermes' flag only decides between "disconnected" and "unknown" while
+    // the probe has not answered.
     const credentialed = id === CLAWAI_PROVIDER
-      ? (reported ?? (clawaiLinked ? true : (probeAnswered ? false : null)))
+      ? (clawaiLinked || clawaiKeyInHarness === true
+        ? true
+        : clawaiKeyInHarness === null
+          ? null
+          : (probeAnswered || reported !== null ? false : null))
       : reported;
     return {
       id,
@@ -451,6 +466,34 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
   });
 
   return { harness: "openclaw", providers, defaultProvider, degraded: false };
+}
+
+/**
+ * Does the harness hold a ClawBox AI key in its own store?
+ *
+ * `true` / `false` / `null` (could not ask). Asked with the CLI directly rather
+ * than through `hermes-config-cache`: that cache memoises VALUES for the life
+ * of the file, and this value is a credential — the rest of the codebase keeps
+ * that stdout away from every log and dump, and a memo would be one more copy.
+ * Only the boolean is kept, and only for a short while, because the strip is
+ * polled and the CLI costs ~600 ms per ask.
+ */
+let clawaiKeyProbe: { at: number; value: boolean | null } | null = null;
+const CLAWAI_KEY_PROBE_TTL_MS = 30_000;
+async function clawaiKeyInHarnessStore(): Promise<boolean | null> {
+  if (clawaiKeyProbe && Date.now() - clawaiKeyProbe.at < CLAWAI_KEY_PROBE_TTL_MS) return clawaiKeyProbe.value;
+  let value: boolean | null;
+  try {
+    const res = await runHermesCli(["config", "get", `providers.${CLAWAI_PROVIDER}.api_key`], { timeoutMs: 10_000 });
+    if (res.code === 0) value = res.stdout.trim().length > 0;
+    // `hermes config get` on an unset key: "Config key not set: …", non-zero.
+    else if (/not set/i.test(`${res.stdout}\n${res.stderr}`)) value = false;
+    else value = null;
+  } catch {
+    value = null;
+  }
+  clawaiKeyProbe = { at: Date.now(), value };
+  return value;
 }
 
 /**

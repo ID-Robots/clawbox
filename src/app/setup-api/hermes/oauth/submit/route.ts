@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
+import { readCliLogin, submitCliLoginCode } from "@/lib/hermes-cli-login";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
@@ -49,6 +50,23 @@ export async function POST(request: Request) {
   // ahead of `hermes auth add`: after it, the answer already includes the
   // provider that just connected and no change can be seen.
   const providersBefore = await readUsableProviderIds();
+
+  // The session id says whose login this is: one minted here is a CLI login,
+  // anything else belongs to the dashboard.
+  if (readCliLogin(body.sessionId)) {
+    const session = await submitCliLoginCode(body.sessionId, code);
+    if (!session) return NextResponse.json({ error: "Unknown session" }, { status: 404 });
+    if (session.status === "approved") {
+      invalidateModelOptions();
+      await forgetProviderVerified(body.providerId);
+      await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
+      return NextResponse.json({ ok: true, status: "approved" });
+    }
+    return NextResponse.json(
+      { ok: false, status: session.status, message: session.error || undefined, code: "code_rejected" },
+      { status: 400 },
+    );
+  }
 
   try {
     const res = await dashboardFetch(`/api/providers/oauth/${body.providerId}/submit`, {

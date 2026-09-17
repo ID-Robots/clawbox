@@ -100,8 +100,6 @@ export const it: Record<string, string> = {
   "hermesProvider.intro":
     "Questo dispositivo funziona con Hermes. Collega i provider e scegli quello predefinito: stato, accesso e cambio sono tutti qui.",
   "hermesProvider.hero.nativeSwitch": "cambia in modo nativo tramite Hermes",
-  "hermesProvider.continue": "Continua",
-  "hermesProvider.connected.affirmation": "Connesso",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ modelli con un'unica chiave API",
@@ -126,12 +124,19 @@ export const it: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Accedi con {provider}",
   "hermesProvider.oauth.connectedDesc": "Connesso. Credenziali OAuth attive.",
-  "hermesProvider.oauth.cliOnlyDesc": "Con questo provider l'accesso avviene tramite Hermes CLI.",
+  "hermesProvider.oauth.attendedDesc": "Usa il tuo abbonamento {provider}. Il box apre la pagina di accesso e tu la approvi.",
+  "hermesProvider.oauth.cliMissingDesc": "{provider} accede tramite un proprio strumento a riga di comando, non ancora installato su questo box.",
+  "hermesProvider.oauth.tabSignIn": "Accedi",
+  "hermesProvider.oauth.tabApiKey": "Chiave API",
+  "hermesProvider.oauth.stepPress": "Premi «Accedi con {provider}»: il box avvia l'accesso.",
+  "hermesProvider.oauth.stepApprove": "Approva nella pagina di {provider} che si apre.",
+  "hermesProvider.oauth.stepPasteCode": "Incolla il codice che {provider} ti mostra. Il box termina con la schermata di avanzamento.",
+  "hermesProvider.oauth.stepEnterCode": "Apri il link e inserisci il codice mostrato qui. Il box termina da solo.",
+  "hermesProvider.oauth.learnMore": "Scopri di più",
   "hermesProvider.oauth.availableDesc": "OAuth tramite Hermes (non serve alcuna chiave API).",
   "hermesProvider.oauth.connectedBadge": "Connesso",
   "hermesProvider.oauth.signIn": "Accedi",
   "hermesProvider.oauth.tryAgain": "Riprova",
-  "hermesProvider.oauth.cliInstructions": "Esegui questo comando nel terminale del dispositivo, poi riapri questo pannello:",
   "hermesProvider.oauth.starting": "Avvio dell'accesso con {provider}...",
   "hermesProvider.oauth.pkceInstructions":
     "Si è aperta una scheda di accesso a {provider}. Autorizza l'accesso lì, copia il codice che compare e incollalo qui.",
@@ -146,7 +151,6 @@ export const it: Record<string, string> = {
   "hermesProvider.oauth.copied": "Copiato",
   "hermesProvider.oauth.openVerificationPage": "Apri la pagina di verifica",
   "hermesProvider.oauth.waitingApproval": "In attesa dell'approvazione...",
-  "hermesProvider.oauth.orPasteKey": "…oppure incolla qui sotto una chiave API.",
   "hermesProvider.oauth.advancedLabel": "Avanzate:",
   "hermesProvider.oauth.dashboardLink": "Dashboard di Hermes (solo in LAN)",
 
@@ -160,7 +164,6 @@ export const it: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Modello predefinito",
   "hermesProvider.model.loading": "Caricamento…",
-  "hermesProvider.model.noCredentials": "Ancora nessuna credenziale per questo provider",
   "hermesProvider.model.noModels": "Nessun modello disponibile",
   "hermesProvider.model.savedElsewherePrefix": "Al momento questo dispositivo sta usando",
   "hermesProvider.model.savedElsewhereSuffix": ". Se salvi, passerà a {provider}.",

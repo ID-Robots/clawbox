@@ -91,8 +91,6 @@ export const ja: Record<string, string> = {
   "hermesProvider.intro":
     "このデバイスは Hermes で動作します。プロバイダーを接続して既定を選んでください。状態の確認、サインイン、切り替えはすべてここで行えます。",
   "hermesProvider.hero.nativeSwitch": "Hermes を通じてネイティブに切り替わります",
-  "hermesProvider.continue": "次へ",
-  "hermesProvider.connected.affirmation": "接続しました",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "API キー 1 つで 300 以上のモデル",
@@ -117,12 +115,19 @@ export const ja: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "{provider} でログイン",
   "hermesProvider.oauth.connectedDesc": "接続済みです。OAuth の認証情報が有効です。",
-  "hermesProvider.oauth.cliOnlyDesc": "このプロバイダーへは Hermes CLI からログインします。",
+  "hermesProvider.oauth.attendedDesc": "{provider} のサブスクリプションを使います。ボックスがサインインページを開くので、承認してください。",
+  "hermesProvider.oauth.cliMissingDesc": "{provider} は専用のコマンドラインツールでサインインしますが、このボックスにはまだインストールされていません。",
+  "hermesProvider.oauth.tabSignIn": "サインイン",
+  "hermesProvider.oauth.tabApiKey": "API キー",
+  "hermesProvider.oauth.stepPress": "「{provider} でサインイン」を押すと、ボックスがサインインを開始します。",
+  "hermesProvider.oauth.stepApprove": "開いた {provider} のページで承認します。",
+  "hermesProvider.oauth.stepPasteCode": "{provider} に表示されたコードを貼り付けます。ボックスは進行画面で完了します。",
+  "hermesProvider.oauth.stepEnterCode": "リンクを開き、ここに表示されたコードを入力します。ボックスは自動で完了します。",
+  "hermesProvider.oauth.learnMore": "詳しく見る",
   "hermesProvider.oauth.availableDesc": "Hermes 経由の OAuth（API キーは不要）。",
   "hermesProvider.oauth.connectedBadge": "接続済み",
   "hermesProvider.oauth.signIn": "ログイン",
   "hermesProvider.oauth.tryAgain": "再試行",
-  "hermesProvider.oauth.cliInstructions": "デバイスのターミナルで次を実行し、このパネルを開き直してください:",
   "hermesProvider.oauth.starting": "{provider} でのログインを開始しています...",
   "hermesProvider.oauth.pkceInstructions":
     "{provider} のログインタブが開きました。そこでアクセスを承認し、表示されたコードをコピーしてここに貼り付けてください。",
@@ -137,7 +142,6 @@ export const ja: Record<string, string> = {
   "hermesProvider.oauth.copied": "コピーしました",
   "hermesProvider.oauth.openVerificationPage": "確認ページを開く",
   "hermesProvider.oauth.waitingApproval": "承認を待っています...",
-  "hermesProvider.oauth.orPasteKey": "…または、代わりに下へ API キーを貼り付けてください。",
   "hermesProvider.oauth.advancedLabel": "詳細:",
   "hermesProvider.oauth.dashboardLink": "Hermes ダッシュボード（LAN のみ）",
 
@@ -151,7 +155,6 @@ export const ja: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "既定のモデル",
   "hermesProvider.model.loading": "読み込み中…",
-  "hermesProvider.model.noCredentials": "このプロバイダーの認証情報はまだありません",
   "hermesProvider.model.noModels": "利用できるモデルがありません",
   "hermesProvider.model.savedElsewherePrefix": "このデバイスは現在",
   "hermesProvider.model.savedElsewhereSuffix": " を使用しています。保存すると {provider} に切り替わります。",

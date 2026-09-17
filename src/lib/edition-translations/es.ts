@@ -84,8 +84,6 @@ export const es: Record<string, string> = {
   "hermesProvider.intro":
     "Este dispositivo funciona con Hermes. Conecta proveedores y elige el predeterminado: el estado, el inicio de sesión y el cambio están todos aquí.",
   "hermesProvider.hero.nativeSwitch": "cambia de forma nativa a través de Hermes",
-  "hermesProvider.continue": "Continuar",
-  "hermesProvider.connected.affirmation": "Conectado",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "Más de 300 modelos con una sola clave API",
@@ -110,12 +108,19 @@ export const es: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Iniciar sesión con {provider}",
   "hermesProvider.oauth.connectedDesc": "Conectado. Credenciales OAuth activas.",
-  "hermesProvider.oauth.cliOnlyDesc": "En este proveedor la sesión se inicia desde Hermes CLI.",
+  "hermesProvider.oauth.attendedDesc": "Usa tu suscripción de {provider}. La caja abre la página de inicio de sesión y tú la apruebas.",
+  "hermesProvider.oauth.cliMissingDesc": "{provider} inicia sesión con su propia herramienta de línea de comandos, que aún no está instalada en esta caja.",
+  "hermesProvider.oauth.tabSignIn": "Iniciar sesión",
+  "hermesProvider.oauth.tabApiKey": "Clave API",
+  "hermesProvider.oauth.stepPress": "Pulsa «Iniciar sesión con {provider}»: la caja inicia el proceso.",
+  "hermesProvider.oauth.stepApprove": "Aprueba en la página de {provider} que se abre.",
+  "hermesProvider.oauth.stepPasteCode": "Pega el código que te muestra {provider}. La caja termina con la pantalla de progreso.",
+  "hermesProvider.oauth.stepEnterCode": "Abre el enlace e introduce el código que aparece aquí. La caja termina sola.",
+  "hermesProvider.oauth.learnMore": "Más información",
   "hermesProvider.oauth.availableDesc": "OAuth mediante Hermes (no se necesita clave API).",
   "hermesProvider.oauth.connectedBadge": "Conectado",
   "hermesProvider.oauth.signIn": "Iniciar sesión",
   "hermesProvider.oauth.tryAgain": "Reintentar",
-  "hermesProvider.oauth.cliInstructions": "Ejecuta esto en el terminal del dispositivo y vuelve a abrir este panel:",
   "hermesProvider.oauth.starting": "Iniciando sesión con {provider}...",
   "hermesProvider.oauth.pkceInstructions":
     "Se ha abierto una pestaña de inicio de sesión de {provider}. Aprueba el acceso ahí, copia el código que te muestre y pégalo aquí.",
@@ -130,7 +135,6 @@ export const es: Record<string, string> = {
   "hermesProvider.oauth.copied": "Copiado",
   "hermesProvider.oauth.openVerificationPage": "Abrir la página de verificación",
   "hermesProvider.oauth.waitingApproval": "Esperando aprobación...",
-  "hermesProvider.oauth.orPasteKey": "…o, en su lugar, pega abajo una clave API.",
   "hermesProvider.oauth.advancedLabel": "Avanzado:",
   "hermesProvider.oauth.dashboardLink": "Panel de Hermes (solo en la LAN)",
 
@@ -144,7 +148,6 @@ export const es: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Modelo por defecto",
   "hermesProvider.model.loading": "Cargando…",
-  "hermesProvider.model.noCredentials": "Aún no hay credenciales para este proveedor",
   "hermesProvider.model.noModels": "No hay modelos disponibles",
   "hermesProvider.model.savedElsewherePrefix": "Este dispositivo usa actualmente",
   "hermesProvider.model.savedElsewhereSuffix": ". Al guardar, cambiará a {provider}.",

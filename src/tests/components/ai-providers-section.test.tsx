@@ -19,9 +19,12 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
 // Hermes' (hermesProvider.*) and the connection vocabulary is the edition-
 // neutral one the removed strip already had translated (settings.providers.*).
 vi.mock("@/lib/i18n", async () => {
+  const { translations } = await import("@/lib/translations");
   const { providerEn } = await import("@/lib/edition-translations/en-provider");
   const { desktopTranslations } = await import("@/lib/desktop-translations");
-  const table: Record<string, string> = { ...desktopTranslations.en, ...providerEn };
+  // The wizard shell strings ("Show more providers…", the local-only skip) live
+  // in the base table; the provider panel's own strings in the other two.
+  const table: Record<string, string> = { ...translations.en, ...desktopTranslations.en, ...providerEn };
   return {
     I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
     useT: () => ({
@@ -392,11 +395,17 @@ describe("staying live", () => {
   });
 });
 
+/** The wizard opens on ClawBox AI alone; the other providers sit behind one tap. */
+async function expandWizardProviders() {
+  fireEvent.click(await screen.findByRole("button", { name: /Show more providers/i }));
+}
+
 describe("in the setup wizard (not embedded)", () => {
   // The wizard passes an onNext and NO `embedded`; Settings passes `embedded`
   // and no onNext. That one prop is the whole surface distinction.
   it("hides the default-model dropdown that Settings shows for the same provider", async () => {
     const { unmount } = render(<HermesProviderConfig testId="hermes-wizard" onNext={vi.fn()} />);
+    await expandWizardProviders();
     fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
     // Give the row's scoped controls a beat to render.
     await new Promise((r) => setTimeout(r, 50));
@@ -418,6 +427,7 @@ describe("in the setup wizard (not embedded)", () => {
     const onNext = vi.fn();
     render(<HermesProviderConfig testId="hermes-wizard" onNext={onNext} />);
 
+    await expandWizardProviders();
     fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
 
@@ -425,19 +435,23 @@ describe("in the setup wizard (not embedded)", () => {
     fireEvent.change(codeInput, { target: { value: "auth-code-abc123" } });
     fireEvent.click(screen.getByRole("button", { name: "Submit code" }));
 
-    // The success beat draws before the jump.
-    expect(await screen.findByTestId("hermes-connected-affirmation")).toBeInTheDocument();
+    // The connect runs behind the same progress overlay the OpenClaw step
+    // shows, and the wizard only moves on after its DONE beat.
+    expect(await screen.findByText("Setting up Anthropic")).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
     // The just-connected provider is pinned as the device default with its OWN
     // recommended model (no `model` field → the server picks it), so chat works.
     await waitFor(() => expect(modelsPostCalls()).toContainEqual({ provider: "anthropic" }));
-    // …and the wizard advances after the affirmation.
-    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2500 });
-  });
+    // …and the wizard advances after the overlay's DONE beat.
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
+  }, 10_000);
 
   it("also finishes the step when a provider is connected with an API key", async () => {
     const onNext = vi.fn();
     render(<HermesProviderConfig testId="hermes-wizard" onNext={onNext} />);
 
+    await expandWizardProviders();
     fireEvent.click(await screen.findByRole("radio", { name: /OpenRouter/ }));
     fireEvent.change(
       await screen.findByLabelText(/OpenRouter API key/i),
@@ -445,11 +459,29 @@ describe("in the setup wizard (not embedded)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Save model & provider" }));
 
-    expect(await screen.findByTestId("hermes-connected-affirmation")).toBeInTheDocument();
-    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2500 });
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
+  }, 10_000);
+
+  it("runs an OAuth sign-in in Settings behind the overlay too, and stays put", { timeout: 10_000 }, async () => {
+    vi.stubGlobal("open", vi.fn());
+    const onNext = vi.fn();
+    render(<HermesProviderConfig embedded testId="hermes-settings" onNext={onNext} />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    const codeInput = await screen.findByPlaceholderText(/Paste the code/i);
+    fireEvent.change(codeInput, { target: { value: "auth-code-abc123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit code" }));
+
+    expect(await screen.findByText("Setting up Anthropic")).toBeInTheDocument();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    await waitFor(() => expect(screen.queryByText("Connected!")).toBeNull(), { timeout: 2_500 });
+    expect(onNext).not.toHaveBeenCalled();
   });
 
-  it("does NOT auto-advance in Settings — there is nowhere to go", async () => {
+  it("does NOT auto-advance in Settings — there is nowhere to go", { timeout: 10_000 }, async () => {
     const onNext = vi.fn();
     // Settings embeds the same panel; a connect there must not navigate.
     render(<HermesProviderConfig embedded testId="hermes-settings" onNext={onNext} />);
@@ -461,8 +493,13 @@ describe("in the setup wizard (not embedded)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Save model & provider" }));
 
-    await new Promise((r) => setTimeout(r, 1200));
+    // Settings shows the same progress overlay the wizard does…
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
+    await screen.findByText("Connected!", {}, { timeout: 4_000 });
+    // …then returns to the panel instead of navigating anywhere.
+    await waitFor(() => expect(screen.queryByText("Connected!")).toBeNull(), { timeout: 2_500 });
+    expect(screen.queryByText(/Setting up/)).toBeNull();
     expect(onNext).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("hermes-connected-affirmation")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save model & provider" })).toBeInTheDocument();
   });
 });

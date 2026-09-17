@@ -76,8 +76,6 @@ export const bg: Record<string, string> = {
   "hermesProvider.intro":
     "Това устройство работи с Hermes. Свържете доставчици и изберете основния — състояние, вход и превключване са тук.",
   "hermesProvider.hero.nativeSwitch": "превключва се директно през Hermes",
-  "hermesProvider.continue": "Продължи",
-  "hermesProvider.connected.affirmation": "Свързано",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ модела с един API ключ",
@@ -102,12 +100,19 @@ export const bg: Record<string, string> = {
   // === Provider sign-in (Hermes-native OAuth) ===
   "hermesProvider.oauth.signInWith": "Влез с {provider}",
   "hermesProvider.oauth.connectedDesc": "Свързан. OAuth данните за достъп са активни.",
-  "hermesProvider.oauth.cliOnlyDesc": "При този доставчик влизането става през Hermes CLI.",
+  "hermesProvider.oauth.attendedDesc": "Използва абонамента ви за {provider}. Устройството отваря страницата за вход, а вие я одобрявате.",
+  "hermesProvider.oauth.cliMissingDesc": "{provider} влиза през собствен инструмент за команден ред, който още не е инсталиран на това устройство.",
+  "hermesProvider.oauth.tabSignIn": "Вход",
+  "hermesProvider.oauth.tabApiKey": "API ключ",
+  "hermesProvider.oauth.stepPress": "Натиснете „Вход с {provider}“ — устройството стартира влизането.",
+  "hermesProvider.oauth.stepApprove": "Одобрете на страницата на {provider}, която се отваря.",
+  "hermesProvider.oauth.stepPasteCode": "Поставете кода, който {provider} ви показва. Устройството завършва с екрана за напредък.",
+  "hermesProvider.oauth.stepEnterCode": "Отворете връзката и въведете показания тук код. Устройството завършва само.",
+  "hermesProvider.oauth.learnMore": "Научете повече",
   "hermesProvider.oauth.availableDesc": "OAuth през Hermes (не е нужен API ключ).",
   "hermesProvider.oauth.connectedBadge": "Свързан",
   "hermesProvider.oauth.signIn": "Влез",
   "hermesProvider.oauth.tryAgain": "Опитай отново",
-  "hermesProvider.oauth.cliInstructions": "Изпълнете това в терминала на устройството и отворете този панел отново:",
   "hermesProvider.oauth.starting": "Стартиране на влизането с {provider}...",
   "hermesProvider.oauth.pkceInstructions":
     "Отвори се раздел за влизане в {provider}. Одобрете достъпа там, копирайте показания код и го поставете тук.",
@@ -122,7 +127,6 @@ export const bg: Record<string, string> = {
   "hermesProvider.oauth.copied": "Копирано",
   "hermesProvider.oauth.openVerificationPage": "Отвори страницата за потвърждение",
   "hermesProvider.oauth.waitingApproval": "Изчакване на одобрение...",
-  "hermesProvider.oauth.orPasteKey": "…или вместо това поставете API ключ по-долу.",
   "hermesProvider.oauth.advancedLabel": "Разширени:",
   "hermesProvider.oauth.dashboardLink": "Табло на Hermes (само в LAN)",
 
@@ -136,7 +140,6 @@ export const bg: Record<string, string> = {
   // === Model picker ===
   "hermesProvider.model.label": "Модел по подразбиране",
   "hermesProvider.model.loading": "Зареждане…",
-  "hermesProvider.model.noCredentials": "Още няма данни за достъп до този доставчик",
   "hermesProvider.model.noModels": "Няма налични модели",
   "hermesProvider.model.savedElsewherePrefix": "Това устройство в момента използва",
   "hermesProvider.model.savedElsewhereSuffix": ". Запазването ще го превключи към {provider}.",

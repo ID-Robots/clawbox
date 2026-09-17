@@ -349,15 +349,15 @@ describe("HermesProviderConfig inline OAuth", () => {
     expect(writeText).toHaveBeenCalledWith("ABCD-1234");
   });
 
-  it("shows the CLI command instead of a Sign in button for an external-flow provider", async () => {
+  it("says the provider's own tool is missing — no raw command, no Sign in button — for an external-flow provider the box cannot drive", async () => {
     stubFetch();
 
     render(<HermesProviderConfig embedded testId="hermes-ai" />);
 
     fireEvent.click(await screen.findByRole("radio", { name: /GitHub Copilot/ }));
 
-    await screen.findByText("hermes auth login copilot");
-    expect(screen.getByText("This provider signs in through the Hermes CLI.")).toBeInTheDocument();
+    await screen.findByText(/command-line tool, which is not installed on this box yet/);
+    expect(screen.queryByText("hermes auth login copilot")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Sign in$/ })).not.toBeInTheDocument();
   });
 

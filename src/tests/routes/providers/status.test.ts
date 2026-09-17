@@ -11,6 +11,9 @@ vi.mock("@/lib/hermes-model-options", () => ({
   probeStillOwed: vi.fn(),
 }));
 vi.mock("@/lib/clawbox-ai-portal-tier", () => ({ clawaiTokenRejectedByPortal: vi.fn() }));
+// The harness's own copy of the ClawBox AI key (`providers.clawai.api_key`);
+// empty unless a test says otherwise.
+vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: vi.fn(async () => ({ code: 1, stdout: "", stderr: "Config key not set: providers.clawai.api_key" })) }));
 
 let GET: () => Promise<Response>;
 let getActiveHarness: Mock;
@@ -20,6 +23,7 @@ let getConfigValue: Mock;
 let getModelOptions: Mock;
 let probeStillOwed: Mock;
 let clawaiTokenRejectedByPortal: Mock;
+let runHermesCli: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -35,6 +39,8 @@ beforeEach(async () => {
   ({ clawaiTokenRejectedByPortal } = (await import("@/lib/clawbox-ai-portal-tier")) as unknown as {
     clawaiTokenRejectedByPortal: Mock;
   });
+  ({ runHermesCli } = (await import("@/lib/hermes-cli")) as unknown as { runHermesCli: Mock });
+  runHermesCli.mockResolvedValue({ code: 1, stdout: "", stderr: "Config key not set: providers.clawai.api_key" });
   getConfigValue.mockResolvedValue(null);
   hasClawaiToken.mockResolvedValue(false);
   // Nobody has asked the portal yet: the cold answer, and beta's behaviour.
@@ -133,11 +139,31 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     expect(rowFor(body, "clawai")!.state).toBe("connected");
   });
 
-  it("believes the dashboard about ClawBox AI even when we hold no token", async () => {
-    // The live regression this replaced: on a linked Hermes box the token is
-    // Hermes' to hold, so `hasClawaiToken` is false while the dashboard reports
-    // the provider authenticated and chat works through it. Reading the
-    // credential first called the box's ACTIVE provider "Needs sign-in".
+  it("trusts the key Hermes holds in providers.clawai even when our store has none", async () => {
+    // The live regression this guards: on a linked Hermes box the token is
+    // Hermes' to hold, so `hasClawaiToken` is false while chat works through
+    // it. Reading only our store called the box's ACTIVE provider "Needs
+    // sign-in". The key in the harness's own block is the second home.
+    getModelOptions.mockResolvedValue(hermesPayload({
+      providers: [
+        ...hermesPayload().providers,
+        { id: "clawai", name: "clawai", authenticated: true, isUserDefined: true, source: "d", total: 2, models: [] },
+      ],
+      current: { provider: "clawai", model: "deepseek-v4-flash" },
+    }));
+    hasClawaiToken.mockResolvedValue(false);
+    runHermesCli.mockResolvedValue({ code: 0, stdout: "claw_" + "k".repeat(40) + "\n", stderr: "" });
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "clawai")!.state).toBe("connected");
+    expect(rowFor(body, "clawai")!.isDefault).toBe(true);
+  });
+
+  it("does NOT believe the dashboard's `authenticated` for ClawBox AI when no key exists anywhere", async () => {
+    // Hermes flags every user-defined provider with a base_url as
+    // authenticated without looking for a key, and `providers.clawai` outlives
+    // the credential. A box whose token was removed read "Connected" on the
+    // wizard's provider card with "Get device code" underneath.
     getModelOptions.mockResolvedValue(hermesPayload({
       providers: [
         ...hermesPayload().providers,
@@ -148,8 +174,7 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     hasClawaiToken.mockResolvedValue(false);
     const body = await (await GET()).json();
 
-    expect(rowFor(body, "clawai")!.state).toBe("connected");
-    expect(rowFor(body, "clawai")!.isDefault).toBe(true);
+    expect(rowFor(body, "clawai")!.state).toBe("needs-reauth");
   });
 
   it("says NOT CONNECTED for ClawBox AI when the dashboard answered and it is simply unlinked", async () => {
