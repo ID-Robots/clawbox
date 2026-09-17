@@ -16,6 +16,21 @@ import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
+import { QuestionPrompt } from '@/lib/chat-question'
+import {
+  QUESTION_REQUESTED_EVENT,
+  QUESTION_RESOLVED_EVENT,
+  markQuestionBusy,
+  mergeQuestionCard,
+  questionBelongsToSession,
+  questionResolveParams,
+  questionSkipParams,
+  questionsAfterList,
+  questionsAfterResolve,
+  questionsAfterResolvedEvent,
+  readQuestionRecord,
+  type QuestionCard as GatewayQuestionCard,
+} from '@/lib/gateway-questions'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
 import {
   APPROVAL_SESSION_EVENT,
@@ -1130,6 +1145,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // our own: the harness owns the queue, its expiry and its first-answer-wins
   // resolution, and the next subscribe replays whatever is still open.
   const [approvals, setApprovals] = useState<ApprovalCard[]>([])
+
+  // The agent's own questions (`ask_user`), as the gateway's question records.
+  // Not the transcript: a question record is live for as long as the run is
+  // parked on it and meaningless afterwards, which is why it is rendered beside
+  // the turn and never written into a message — the same rule the clarify card
+  // above follows. The gateway holds them; `question.list` on every hello and
+  // every tab switch is what makes one survive a reload.
+  const [questions, setQuestions] = useState<GatewayQuestionCard[]>([])
   // The clock the cards judge their own window against.
   //
   // A pending approval's window closes on its own, and the card has to stop
@@ -1979,6 +2002,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     })
   }, [])
 
+  /**
+   * Re-read the questions this conversation is parked on.
+   *
+   * Called on every hello and on every tab switch, because the socket is not
+   * the only way one arrives: a question raised while the page was closed, or
+   * while the socket was down, has no `question.requested` left to replay, and
+   * `question.list` is the gateway's own answer to "what is still open". The
+   * key travels WITH the answer — this call is not cancelled when the owner
+   * switches conversation, so a slow list for the tab they left could otherwise
+   * land its cards under the tab they are looking at.
+   *
+   * Never throws: a gateway too old to know the method, or a socket that has
+   * gone, leaves the chat exactly as it was.
+   */
+  const refreshQuestions = useCallback(async (key: string) => {
+    try {
+      // Stamped BEFORE the call: the answer describes the gateway at the moment
+      // it read the list, and a question raised while this was in flight must
+      // not be dropped by it. See questionsAfterList.
+      const requestedAtMs = Date.now()
+      const payload = await wsRequest('question.list', {})
+      if (key !== sessionKeyRef.current) return
+      setQuestions(prev => questionsAfterList(prev, payload, key, requestedAtMs))
+    } catch {
+      // No question surface on this gateway, or the socket went away first.
+    }
+  }, [wsRequest])
+  // Behind a ref for the reason `resetSession` is: both call sites live inside
+  // callbacks whose dependency lists are load-bearing, and adding this one
+  // would re-create the socket every time its identity changed.
+  const refreshQuestionsRef = useRef(refreshQuestions)
+  useEffect(() => { refreshQuestionsRef.current = refreshQuestions }, [refreshQuestions])
+
   // ── The one transport ───────────────────────────────────────────────────
   //
   // The socket lifecycle (handshake, retry ladder, event stream) still lives in
@@ -2313,6 +2369,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (forKey !== sessionKeyRef.current) return
             setApprovals(prev => approvalsAfterReplay(prev, replay))
           })
+          // And the questions the agent is parked on. `question.requested` is
+          // broadcast once and never replayed, so without this a reload during
+          // the fifteen minutes a question waits would show a chat with nothing
+          // on it and an agent that never answers.
+          void refreshQuestionsRef.current(boundKey)
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
           // socket. A skill change no longer does either, so it never raises
@@ -2802,6 +2863,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (card) setApprovals(prev => mergeApprovalCard(prev, card))
           return
         }
+
+        // The agent has stopped and is waiting for an answer. THE PAYLOAD IS
+        // THE RECORD, not an envelope around it — `question.ts` broadcasts
+        // `context.broadcast("question.requested", record)` — which is the one
+        // thing this differs from the approval event next door in.
+        //
+        // Filtered on the bound session the way every other session event here
+        // is: a question raised in the conversation the owner has just left
+        // must not appear, answerable, under the one they are looking at. A
+        // record with no session key at all belongs to no conversation on
+        // screen (a standalone attached MCP client) and is left to the Control
+        // UI, which can say where it came from.
+        if (eventName === QUESTION_REQUESTED_EVENT) {
+          const card = readQuestionRecord(data.payload)
+          if (!card || !questionBelongsToSession(card, sessionKeyRef.current)) return
+          setQuestions(prev => mergeQuestionCard(prev, card))
+          return
+        }
+
+        // Answered, skipped or expired — by this chat, by the Control UI, by a
+        // phone, or by the clock. NOT filtered on the session: the event
+        // carries only `{id, status, answers?}`, and the id is enough to find
+        // the card, which by construction is one this surface adopted.
+        if (eventName === QUESTION_RESOLVED_EVENT) {
+          setQuestions(prev => questionsAfterResolvedEvent(prev, data.payload))
+          return
+        }
       }
     }
 
@@ -3093,6 +3181,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // The approvals belong to the session that is going away. The gateway
     // still holds them; the next subscribe replays whatever is still open.
     setApprovals([])
+    // Same for the questions, and `question.list` is what brings back whatever
+    // the new conversation is genuinely still parked on.
+    setQuestions([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
@@ -3197,6 +3288,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (forKey !== sessionKeyRef.current) return
       setApprovals(prev => approvalsAfterReplay(prev, replay))
     })
+    // The questions belong to the conversation, not to the socket: the tab the
+    // owner just opened may have been parked on one since before this page was.
+    void refreshQuestionsRef.current(key)
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
     const stash = tabStashRef.current.get(key)
@@ -4382,6 +4476,42 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setApprovals(prev => approvalsAfterResolve(prev, card.id, result))
     } catch (err) {
       setApprovals(prev => approvalsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
+  /**
+   * Answer one question through the gateway's own resolver.
+   *
+   * The whole record at once — `question.resolve` validates EVERY question in
+   * it and refuses a partial answer — and the recorded outcome is folded back
+   * in rather than the answer that was sent: another surface may have answered
+   * first, and this is how the card says so instead of showing an error over a
+   * question that is genuinely settled.
+   */
+  const submitQuestion = useCallback(async (card: GatewayQuestionCard, answers: Record<string, string[]>) => {
+    setQuestions(prev => markQuestionBusy(prev, card.id, 'submit'))
+    try {
+      const result = await wsRequest('question.resolve', questionResolveParams(card.id, answers))
+      setQuestions(prev => questionsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setQuestions(prev => questionsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
+  /**
+   * Skip it — `question.resolve{cancel:true}`, which is the protocol's ONLY
+   * skip. An empty answer is not one: the gateway's own validator refuses a
+   * question with no value ("requires an answer"), so a Skip built that way
+   * would come back as an error with the agent still parked. Cancelled makes
+   * the tool return `no_answer`, and the agent continues on its own judgment.
+   */
+  const skipQuestion = useCallback(async (card: GatewayQuestionCard) => {
+    setQuestions(prev => markQuestionBusy(prev, card.id, 'skip'))
+    try {
+      const result = await wsRequest('question.resolve', questionSkipParams(card.id))
+      setQuestions(prev => questionsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setQuestions(prev => questionsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
     }
   }, [wsRequest])
 
@@ -6363,7 +6493,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     })}
                   </div>
                 )}
-                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"))) : null}
+                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
                 {isLongUser && (
                   <button
                     type="button"
@@ -6533,6 +6663,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <ClarifyPrompt key={card.requestId} card={card} onAnswer={answerClarify} />
         ))}
 
+        {/* The same moment on the OTHER edition: an OpenClaw agent parked on
+            `ask_user`. Beside the clarify card rather than merged with it — see
+            the note in chat-question.tsx for why one component cannot be both —
+            and never persisted, for the same reason a clarify is not. */}
+        {!reloadingSkill && questions.map(card => (
+          <QuestionPrompt
+            key={card.id}
+            card={card}
+            onSubmit={submitQuestion}
+            onSkip={skipQuestion}
+          />
+        ))}
+
         {/* Outgoing mail, one card per batch. Below the clarifies and above the
             image banner, i.e. at the bottom of the transcript where the turn
             that produced it just ended — this is a decision about what the
@@ -6605,7 +6748,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }}>
               {/* Lifted out HERE, not on the way into state, so an interrupted
                   turn keeps the directive and can still become cards. */}
-              {renderText(streamingEmailRefsText(streaming), t("chat.table"))}
+              {renderText(streamingEmailRefsText(streaming), t("chat.table"), t("chat.detailsSummary"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
               <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
             </div>

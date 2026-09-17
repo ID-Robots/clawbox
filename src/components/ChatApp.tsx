@@ -19,6 +19,25 @@ import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+// The agent's own question (`ask_user`), on the gateway's native question
+// protocol. The same card the mascot chat draws, from the same module: this
+// surface is the one a phone lands on, and a question that could only be
+// answered on the desktop would be a question the owner never sees.
+import { QuestionPrompt } from '@/lib/chat-question'
+import {
+  QUESTION_REQUESTED_EVENT,
+  QUESTION_RESOLVED_EVENT,
+  markQuestionBusy,
+  mergeQuestionCard,
+  questionBelongsToSession,
+  questionResolveParams,
+  questionSkipParams,
+  questionsAfterList,
+  questionsAfterResolve,
+  questionsAfterResolvedEvent,
+  readQuestionRecord,
+  type QuestionCard as GatewayQuestionCard,
+} from '@/lib/gateway-questions'
 import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 // The card and the viewer come from the mascot chat's own modules: this surface
 // rendered `EMAIL:<uid>` as text because only one of the two chats had learned
@@ -230,6 +249,53 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     })
   }, [])
 
+  /**
+   * The questions this conversation is parked on, as gateway records.
+   *
+   * Live state, never transcript: a question record matters only while the run
+   * is waiting on it. See lib/gateway-questions.ts for the protocol.
+   */
+  const [questions, setQuestions] = useState<GatewayQuestionCard[]>([])
+
+  /** Whatever is still open on this session — the reload path. Never throws. */
+  const refreshQuestions = useCallback(async (key: string) => {
+    try {
+      // Stamped BEFORE the call: the answer describes the gateway at the moment
+      // it read the list, and a question raised while this was in flight must
+      // not be dropped by it. See questionsAfterList.
+      const requestedAtMs = Date.now()
+      const payload = await wsRequest('question.list', {})
+      if (key !== sessionKeyRef.current) return
+      setQuestions(prev => questionsAfterList(prev, payload, key, requestedAtMs))
+    } catch {
+      // No question surface on this gateway, or the socket went away first.
+    }
+  }, [wsRequest])
+  const refreshQuestionsRef = useRef(refreshQuestions)
+  useEffect(() => { refreshQuestionsRef.current = refreshQuestions }, [refreshQuestions])
+
+  /** Answer the whole record at once — the gateway validates every question. */
+  const submitQuestion = useCallback(async (card: GatewayQuestionCard, answers: Record<string, string[]>) => {
+    setQuestions(prev => markQuestionBusy(prev, card.id, 'submit'))
+    try {
+      const result = await wsRequest('question.resolve', questionResolveParams(card.id, answers))
+      setQuestions(prev => questionsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setQuestions(prev => questionsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
+  /** `cancel: true` — the protocol's only skip; an empty answer is refused. */
+  const skipQuestion = useCallback(async (card: GatewayQuestionCard) => {
+    setQuestions(prev => markQuestionBusy(prev, card.id, 'skip'))
+    try {
+      const result = await wsRequest('question.resolve', questionSkipParams(card.id))
+      setQuestions(prev => questionsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setQuestions(prev => questionsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
   // Reject everything still waiting on the socket. `connect` clears the map
   // outright; the transport's `close` has to TELL its callers, or a history read
   // or a send in flight when the link goes away never settles at all.
@@ -440,6 +506,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
           loadHistory()
+          // `question.requested` is broadcast once and never replayed, so a
+          // reload during the fifteen minutes a question waits would otherwise
+          // show a chat with nothing on it and an agent that never answers.
+          void refreshQuestionsRef.current(mainSessionKey)
         },
         reject: (err: Error) => {
           setStatus('error')
@@ -521,6 +591,23 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           if (payload.stream === 'tool') {
             applyToolEvent(payload.data as Record<string, unknown> | undefined)
           }
+          return
+        }
+
+        // The agent has stopped and is waiting for an answer. The payload IS
+        // the question record (see lib/gateway-questions.ts), filtered on the
+        // bound session the way every other session event here is.
+        if (eventName === QUESTION_REQUESTED_EVENT) {
+          const card = readQuestionRecord(data.payload)
+          if (!card || !questionBelongsToSession(card, sessionKeyRef.current)) return
+          setQuestions(prev => mergeQuestionCard(prev, card))
+          return
+        }
+
+        // Answered, skipped or expired — here, in the Control UI, on a phone,
+        // or by the clock. The id is enough; the card is one this surface has.
+        if (eventName === QUESTION_RESOLVED_EVENT) {
+          setQuestions(prev => questionsAfterResolvedEvent(prev, data.payload))
           return
         }
 
@@ -1247,7 +1334,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   ))}
                 </div>
               )}
-              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
+              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
               {files.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
                   {files.map(src => <ChatFileCard key={src} src={src} />)}
@@ -1288,6 +1375,16 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
 
+        {/* Beside the pills, where the turn that raised it is still running. */}
+        {questions.map(card => (
+          <QuestionPrompt
+            key={card.id}
+            card={card}
+            onSubmit={submitQuestion}
+            onSkip={skipQuestion}
+          />
+        ))}
+
         {streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
@@ -1312,7 +1409,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   still agree, which is the property that matters; there is no
                   `dropUnfinishedDirective` equivalent for media, and the
                   mascot chat accepts the same token. */}
-              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"))}
+              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"), t("chat.detailsSummary"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>
