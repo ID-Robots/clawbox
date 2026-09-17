@@ -1396,4 +1396,15 @@ export const fr: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "En pause : le pic sur 5 heures de ClawBox AI est atteint.",
   "codingAgent.pausedAllowanceEmbeddings": "En pause : le quota hebdomadaire ClawBox AI d'indexation de la mémoire est épuisé.",
   "codingAgent.pausedAllowanceFreesUp": "Il se libère à {time}.",
+
+  // === Réglages → Fournisseurs : l'offre ClawBox AI sur une box non reliée ===
+  "settings.clawaiPitch.title": "Utilisez ClawBox AI pour la meilleure expérience",
+  "settings.clawaiPitch.body":
+    "Un abonnement ClawBox AI fait tourner le chat, la voix, la transcription et la recherche mémoire sur des modèles bien plus grands que ce que cette box peut contenir, et les configure tous pour vous. C'est ce qu'utilise par défaut la box d'un abonné.",
+  "settings.clawaiPitch.connect": "Connecter ClawBox AI",
+  "settings.clawaiPitch.plans": "Voir les formules et les tarifs",
+  "settings.clawaiPitch.localTitle": "Vous préférez que tout reste sur cette box ?",
+  "settings.clawaiPitch.localBody":
+    "ClawBox peut à la place faire tourner ses propres modèles sur l'appareil, si bien que rien n'en sort. Ils sont plus petits et plus lents que ceux du cloud, et c'est vous qui les choisissez et les installez.",
+  "settings.clawaiPitch.localAction": "Configurer l'IA locale",
 };

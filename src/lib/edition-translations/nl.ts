@@ -1396,4 +1396,15 @@ export const nl: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "Gepauzeerd: de piek van 5 uur van ClawBox AI is bereikt.",
   "codingAgent.pausedAllowanceEmbeddings": "Gepauzeerd: het wekelijkse tegoed van ClawBox AI voor geheugenindexering is op.",
   "codingAgent.pausedAllowanceFreesUp": "Het komt vrij om {time}.",
+
+  // === Instellingen → Providers: het ClawBox AI-aanbod op een niet-gekoppelde box ===
+  "settings.clawaiPitch.title": "Gebruik ClawBox AI voor de beste ervaring",
+  "settings.clawaiPitch.body":
+    "Een ClawBox AI-abonnement laat de chat, de stem, transcriptie en het geheugen zoeken draaien op modellen die veel groter zijn dan op deze box passen, en richt ze allemaal voor je in. Dit is wat de box van een abonnee standaard gebruikt.",
+  "settings.clawaiPitch.connect": "ClawBox AI verbinden",
+  "settings.clawaiPitch.plans": "Abonnementen en prijzen bekijken",
+  "settings.clawaiPitch.localTitle": "Wil je liever dat alles op deze box blijft?",
+  "settings.clawaiPitch.localBody":
+    "ClawBox kan in plaats daarvan zijn eigen modellen op het apparaat draaien, zodat er niets vanaf gaat. Ze zijn kleiner en trager dan die in de cloud, en je kiest en installeert ze zelf.",
+  "settings.clawaiPitch.localAction": "Lokale AI instellen",
 };

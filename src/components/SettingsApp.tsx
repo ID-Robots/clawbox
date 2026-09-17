@@ -23,6 +23,7 @@ import LocalAiPanel from "./LocalAiPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
+import ClawboxAiPitchCard from "./ClawboxAiPitchCard";
 import { copyToClipboard } from "@/lib/clipboard";
 // The ending vocabulary and the gesture table, from the module that owns the
 // outcome shape — never a second copy of either. Both are plain functions on a
@@ -4022,6 +4023,20 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Providers: the cloud sign-ins, the owner's connected ones listed first ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
+            {/* The offer, first, and only on a box that holds NO ClawBox AI
+                credential (the owner's decision of 2026-09-15). An EXPLICIT
+                false: the status is null until the first read answers, and a
+                falsy test would flash a subscribe pitch at a subscriber every
+                time this page opened. A refused credential is still a
+                configured one and is the connect panel's to fix, not this
+                card's to pitch over. */}
+            {aiProvider?.clawaiConfigured === false && (
+              <ClawboxAiPitchCard
+                onConnect={() => setOpenClawAIOfferRequest((current) => current + 1)}
+                onLocalAi={() => setSectionGated("localAi")}
+              />
+            )}
+
             <AiProviderList />
 
             {/* No status card here. The AI Providers panel below opens with the

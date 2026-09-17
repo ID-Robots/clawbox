@@ -1397,4 +1397,14 @@ export const ja: Record<string, string> = {
   "codingAgent.pausedAllowanceBurst": "一時停止中: ClawBox AI の 5 時間のバースト枠に達しました。",
   "codingAgent.pausedAllowanceEmbeddings": "一時停止中: ClawBox AI の今週のメモリのインデックス作成枠を使い切りました。",
   "codingAgent.pausedAllowanceFreesUp": "{time} に空きます。",
+
+  // === 設定 → プロバイダー: 未連携のボックスに出す ClawBox AI の案内 ===
+  "settings.clawaiPitch.title": "最高の体験には ClawBox AI をご利用ください",
+  "settings.clawaiPitch.body":
+    "ClawBox AI のサブスクリプションは、チャット・音声・文字起こし・メモリ検索を、このボックスに収まらないほど大きなモデルで動かし、そのすべてを自動で設定します。契約済みのボックスが既定で使うのがこれです。",
+  "settings.clawaiPitch.connect": "ClawBox AI に接続",
+  "settings.clawaiPitch.plans": "プランと料金を見る",
+  "settings.clawaiPitch.localTitle": "すべてをこのボックスに留めたいですか？",
+  "settings.clawaiPitch.localBody": "ClawBox は代わりに自前のモデルを端末上で動かせるので、データは外に出ません。クラウドのものより小さく遅く、選んで導入するのはご自身です。",
+  "settings.clawaiPitch.localAction": "ローカル AI を設定",
 };

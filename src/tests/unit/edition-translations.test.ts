@@ -11,6 +11,7 @@ import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
 import { improvementEn } from "@/lib/edition-translations/en-improvement";
 import { paidGateEn } from "@/lib/edition-translations/en-paid-gate";
 import { clawaiUsageEn } from "@/lib/edition-translations/en-clawai-usage";
+import { clawaiPitchEn } from "@/lib/edition-translations/en-clawai-pitch";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -60,6 +61,11 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // ClawBox Improvement Program. The card IS the consent — an owner who cannot
   // read what is sent and what never is has not been asked anything.
   { name: "Improvement Program card", matches: (k) => k.startsWith("improvement.") },
+  // The ClawBox AI pitch an unlinked box shows on Settings → Providers. It is
+  // the only thing on the device that offers the subscription in words, and
+  // the only thing that points an owner who wants to stay local at the tab
+  // that sets that up — an owner who cannot read it has been offered neither.
+  { name: "ClawBox AI pitch", matches: (k) => k.startsWith("settings.clawaiPitch.") },
 ];
 
 /**
@@ -137,6 +143,7 @@ describe("edition-translations (TASK-458)", () => {
       ["paidGateEn", paidGateEn, (k) => k.startsWith("paidGate.")],
       // The usage card, and the chat's sentence for the same allowances.
       ["clawaiUsageEn", clawaiUsageEn, (k) => k.startsWith("clawaiUsage.") || k.startsWith("chat.allowance")],
+      ["clawaiPitchEn", clawaiPitchEn, (k) => k.startsWith("settings.clawaiPitch.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {
