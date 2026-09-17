@@ -41,6 +41,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 import {
+  CLAWBOX_ACCOUNT_HOME,
   clearFactoryGitIdentity,
   FACTORY_GIT_IDENTITY,
   FACTORY_IDENTITY_BUDGET_MS,
@@ -308,6 +309,27 @@ describe("the budget boot waits on", () => {
     expect(globalValues(home, "user.email")).toEqual([FACTORY_GIT_IDENTITY.email]);
   });
 
+  it("never starts a write it cannot afford to let finish", async () => {
+    // A read cut short answered nothing; a WRITE cut short is different in
+    // kind. `git config` rewrites through `~/.gitconfig.lock` and runChild ends
+    // an overrun child with SIGKILL, which runs no cleanup — and measured, a
+    // stale `.gitconfig.lock` makes every later unset fail with "could not lock
+    // config file" and exit 255, so the factory identity would be permanently
+    // unremovable on that box. A budget too small for the write's own timeout
+    // must therefore leave the file completely alone.
+    const home = flashedHome();
+    const before = fs.readFileSync(path.join(home, ".gitconfig"), "utf-8");
+
+    const result = await clearFactoryGitIdentity({ home, budgetMs: 500, log: () => {} });
+
+    expect(result.removed).toEqual([]);
+    expect(result.outcomes).toEqual({ "user.name": "failed", "user.email": "failed" });
+    // Untouched, and no lock left beside it.
+    expect(fs.readFileSync(path.join(home, ".gitconfig"), "utf-8")).toBe(before);
+    expect(fs.existsSync(path.join(home, ".gitconfig.lock"))).toBe(false);
+    expect(globalValues(home, "user.name")).toEqual([FACTORY_GIT_IDENTITY.name]);
+  });
+
   it("finishes a real box's cleanup well inside it", async () => {
     const home = flashedHome();
     const started = Date.now();
@@ -384,6 +406,17 @@ describe("boot clears the factory identity before anything can commit", () => {
     expect(call).toBeGreaterThan(-1);
     const tryStart = source.lastIndexOf("try {", call);
     expect(source.slice(tryStart, call)).toMatch(/require\(['"]\.\/lib\/coding-git-factory-identity['"]\)/);
+  });
+
+  it("runs it ONLY on the device's own account", () => {
+    // This hook runs under `bun run dev` too, and the job removes keys from
+    // whatever ~/.gitconfig it is pointed at. Ungated it would delete a
+    // developer's own git identity — and the identity it matches belongs to the
+    // person most likely to be running it.
+    expect(source.slice(source.lastIndexOf("try {", call), call)).toMatch(
+      /if \(process\.env\.HOME === CLAWBOX_ACCOUNT_HOME\)\s*$/,
+    );
+    expect(CLAWBOX_ACCOUNT_HOME).toBe("/home/clawbox");
   });
 
   it("comes before the coding runs are reconciled and resumed", () => {
