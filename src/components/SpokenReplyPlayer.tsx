@@ -379,8 +379,9 @@ export default function SpokenReplyPlayer({
   // The chat's automatic playback is a detached `new Audio(src)` of its own,
   // not this element. It claims the document's one speaker for THIS clip (see
   // lib/spoken-reply-playback.ts), and while it holds it this transport follows
-  // that element instead — so a reply playing on its own reads "pause", its
-  // bar moves, and it has a Stop control on the bubble it belongs to.
+  // that element instead — so a reply playing on its own moves this bar and
+  // offers Stop on the bubble it belongs to, rather than reading "play" over a
+  // clip the box is audibly speaking.
   const external = useSyncExternalStore(subscribeSpokenReply, currentSpokenReply, () => null)
   // Our own element holding the speaker lands here too; the effects below
   // then simply follow it, and the callbacks tell the two apart.
