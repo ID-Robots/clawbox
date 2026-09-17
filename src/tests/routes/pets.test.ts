@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { BUILTIN_PETS } from "@/lib/pet-builtin";
 import { CURATED_PETS } from "@/lib/pet-curated";
+
+/** Every tile the gallery offers: the packs ClawBox ships plus the shortlist. */
+const GALLERY_SIZE = BUILTIN_PETS.length + CURATED_PETS.length;
 
 let tmpHome: string;
 let petsDir: string;
@@ -93,8 +97,10 @@ describe("GET /setup-api/pets — edition gating", () => {
     const body = await res.json();
     expect(body.supported).toBe(true);
     expect(body.placeholder).toBe("crab");
-    expect(body.active).toBeNull();
-    expect(body.pets.length).toBe(CURATED_PETS.length);
+    // "No pet" is no longer "no body": since 2026-09-17 the crab that
+    // placeholder names IS a pet, the bundled `vibrant-clawd`, flagged `brand`.
+    expect(body.active).toMatchObject({ slug: "vibrant-clawd", brand: true });
+    expect(body.pets.length).toBe(GALLERY_SIZE);
     // No Hermes CLI was asked for anything on the way.
     expect(cliCalls).toEqual([]);
   });
@@ -111,7 +117,7 @@ describe("GET /setup-api/pets — edition gating", () => {
     const res = await (await getRoute())(new Request("http://localhost/setup-api/pets?gallery=1"));
     const body = await res.json();
     expect(body.supported).toBe(true);
-    expect(body.pets.length).toBe(CURATED_PETS.length);
+    expect(body.pets.length).toBe(GALLERY_SIZE);
     expect(body.pets.every((p: { curated: boolean }) => p.curated)).toBe(true);
     // Attribution travels with every tile — Petdex asks that pets keep credit.
     expect(body.pets.every((p: { submittedBy: string }) => p.submittedBy.length > 0)).toBe(true);
@@ -147,7 +153,7 @@ describe("GET /setup-api/pets — edition gating", () => {
     // without needing the fallback.
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const res = await (await getRoute())(new Request("http://localhost/setup-api/pets?gallery=1"));
-    expect((await res.json()).pets.length).toBe(CURATED_PETS.length);
+    expect((await res.json()).pets.length).toBe(GALLERY_SIZE);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

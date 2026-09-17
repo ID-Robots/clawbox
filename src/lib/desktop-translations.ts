@@ -716,6 +716,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.mascot.petCrab": "ClawBox crab",
     "settings.mascot.petBy": "by {author}",
     "settings.mascot.petCurated": "Curated",
+    "settings.mascot.petBuiltin": "Built in",
     "settings.mascot.petInstalling": "Downloading…",
     "settings.mascot.petInstallFailed": "Could not set that pet up. Check the connection and try again.",
     "settings.mascot.petAttribution": "Pet art comes from the Petdex community and stays credited to its authors. Sprites download to this device when you pick one.",
