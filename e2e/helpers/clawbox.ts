@@ -1504,7 +1504,10 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     if (path === "/setup-api/stt") {
       const cloudConfigured = setupState.ai_model_configured;
       await fulfillJson(route, {
-        primary: "cloud",
+        // And the engine named as primary is one the box could use, which is
+        // what the real route resolves (`resolveSttPrimary`): the cloud is the
+        // default for a LINKED box, never for one holding no credential for it.
+        primary: cloudConfigured ? "cloud" : "local",
         engines: {
           cloud: { configured: cloudConfigured, label: "ClawBox cloud" },
           local: { installed: false, label: "On this box", detail: "The on-box transcriber is not installed." },
