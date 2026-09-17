@@ -173,6 +173,17 @@ describe("ClawBox AI usage card — weekly payload, paid monthly plan", () => {
     expect(screen.getByTestId("clawai-usage-credits-balance")).toHaveTextContent("Not available right now");
   });
 
+  it("draws no percentage, bar or clock beside a window that is not in the plan", async () => {
+    const answer = weeklyAnswer("pro");
+    answer.usage.burst = { ...answer.usage.burst, limit: 0, percentUsed: 40 };
+    stubUsage(answer);
+    render(<ClawboxAiUsageCard />);
+    const burst = await screen.findByTestId("clawai-usage-burst");
+    expect(burst).toHaveTextContent("Not in your plan");
+    expect(within(burst).queryByRole("progressbar")).toBeNull();
+    expect(burst).not.toHaveTextContent("Frees up");
+  });
+
   it("writes the numbers and the clock in the owner's language", async () => {
     lang.locale = "de";
     stubUsage(weeklyAnswer("pro"));

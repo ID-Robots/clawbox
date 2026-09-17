@@ -188,8 +188,9 @@ export default function ClawboxAiUsageCard() {
     return time ? t("clawaiUsage.freesUpAt", { time }) : null;
   };
 
-  const weeklyFreesUp = freesUp(usage.weekly);
-  const burstFreesUp = usage.burst ? freesUp(usage.burst) : null;
+  // A window with no limit is "Not in your plan": no percentage, bar or clock beside it.
+  const weeklyFreesUp = usage.weekly.limit > 0 ? freesUp(usage.weekly) : null;
+  const burstFreesUp = usage.burst && usage.burst.limit > 0 ? freesUp(usage.burst) : null;
   const meters = CLAWAI_USAGE_METERS.filter((meter) => usage.meters[meter]);
 
   return (
@@ -200,13 +201,13 @@ export default function ClawboxAiUsageCard() {
       <section className="mt-4 space-y-2" data-testid="clawai-usage-weekly">
         <div className="flex items-baseline justify-between gap-3">
           <span className="text-sm font-medium text-[var(--text-primary)]">{t("clawaiUsage.weeklyTitle")}</span>
-          {!usage.weekly.unavailable && (
+          {!usage.weekly.unavailable && usage.weekly.limit > 0 && (
             <span className="text-xs text-[var(--text-secondary)] tabular-nums">
               {t("clawaiUsage.percentUsed", { percent: usage.weekly.percentUsed })}
             </span>
           )}
         </div>
-        {!usage.weekly.unavailable && (
+        {!usage.weekly.unavailable && usage.weekly.limit > 0 && (
           <UsageBar percent={usage.weekly.percentUsed} over={usage.weekly.isOverLimit} size="lg" label={t("clawaiUsage.weeklyTitle")} />
         )}
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
@@ -222,7 +223,7 @@ export default function ClawboxAiUsageCard() {
             <span className="font-medium text-[var(--text-secondary)]">{t("clawaiUsage.burstTitle")}</span>
             <span className="text-[var(--text-muted)] tabular-nums">{valueFor("tokens", usage.burst)}</span>
           </div>
-          {!usage.burst.unavailable && (
+          {!usage.burst.unavailable && usage.burst.limit > 0 && (
             <UsageBar percent={usage.burst.percentUsed} over={usage.burst.isOverLimit} size="sm" label={t("clawaiUsage.burstTitle")} />
           )}
           {burstFreesUp && <p className="text-[11px] text-[var(--text-muted)]">{burstFreesUp}</p>}

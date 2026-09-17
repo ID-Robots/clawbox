@@ -150,4 +150,17 @@ describe("/setup-api/ai-models/usage", () => {
     expect(fetchSpy.mock.calls[0][0]).toBe("http://127.0.0.1:9/usage");
     delete process.env.CLAWBOX_AI_USAGE_URL;
   });
+
+  it("will not send the credential in cleartext, or to an address it cannot read", async () => {
+    mockToken.mockResolvedValue("claw_box_token");
+    fetchSpy.mockResolvedValue(jsonResponse(200, WEEKLY_BODY));
+    for (const unsafe of ["http://portal.example/usage", "ftp://clawbox.com/usage", "not a url"]) {
+      process.env.CLAWBOX_AI_USAGE_URL = unsafe;
+      (await import("@/lib/clawai-usage-portal"))._resetClawaiUsageCache();
+      expect(await (await GET()).json(), unsafe).toEqual({ available: false, reason: "unreachable" });
+    }
+    // Refused, not quietly swapped for the default address.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    delete process.env.CLAWBOX_AI_USAGE_URL;
+  });
 });

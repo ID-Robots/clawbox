@@ -18,8 +18,30 @@ export type ClawaiUsageAnswer =
   | { available: true; usage: ClawaiUsage }
   | { available: false; reason: ClawaiUsageUnavailable };
 
+const DEFAULT_USAGE_URL = "https://clawbox.com/api/portal/usage";
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * The portal address, or a throw for an override the credential must not be
+ * sent to: anything but HTTPS, except plain HTTP to this machine (a test
+ * portal). An unsafe explicit override is refused rather than quietly replaced
+ * by the default — a box configured to talk to one place must not talk to
+ * another — and `askPortal` answers the throw as `unreachable`.
+ */
 function usageUrl(): string {
-  return process.env.CLAWBOX_AI_USAGE_URL?.trim() || "https://clawbox.com/api/portal/usage";
+  const override = process.env.CLAWBOX_AI_USAGE_URL?.trim();
+  if (!override) return DEFAULT_USAGE_URL;
+  let url: URL;
+  try {
+    url = new URL(override);
+  } catch {
+    throw new Error("CLAWBOX_AI_USAGE_URL is not a URL");
+  }
+  if (url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) {
+    return url.toString();
+  }
+  throw new Error("CLAWBOX_AI_USAGE_URL must be https, or http to this machine");
 }
 
 /** On the render path of a Settings card; a slow portal must not hold it. */
