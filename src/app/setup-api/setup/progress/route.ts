@@ -2,15 +2,17 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { getAll, set } from "@/lib/config-store";
+import { parseSetupProgressStep } from "@/lib/setup-progress";
 
-const MIN_STEP = 1;
-const MAX_STEP = 6;
-
-function parseStoredStep(value: unknown): number | null {
-  const step = typeof value === "number" ? value : Number(value);
-  if (!Number.isInteger(step)) return null;
-  if (step < MIN_STEP || step > MAX_STEP) return null;
-  return step;
+/**
+ * What a caller may send: a step outside this wizard is a bad request.
+ *
+ * The value already on disk is read WITHOUT that bound (`parseSetupProgressStep`
+ * on its own below), because a step persisted by a build with more screens than
+ * this one is a box to be read, not one whose progress is rewound.
+ */
+function parseRequestedStep(value: unknown): number | null {
+  return parseSetupProgressStep(value, true);
 }
 
 export async function POST(request: Request) {
@@ -21,14 +23,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const requestedStep = parseStoredStep(body.step);
+  const requestedStep = parseRequestedStep(body.step);
   if (requestedStep === null) {
     return NextResponse.json({ error: "Invalid setup step" }, { status: 400 });
   }
 
   try {
     const config = await getAll();
-    const existingStep = parseStoredStep(config.setup_progress_step);
+    const existingStep = parseSetupProgressStep(config.setup_progress_step);
     const nextStep = existingStep === null ? requestedStep : Math.max(existingStep, requestedStep);
     await set("setup_progress_step", nextStep);
     return NextResponse.json({ success: true, step: nextStep });
