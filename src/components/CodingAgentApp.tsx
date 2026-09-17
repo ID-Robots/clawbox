@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { holdsResumableSession, isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { holdsResumableSession, isHeld, isLive, isRollingPauseMeter, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { formatFreesUpAt } from "@/lib/clawai-allowance";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import type { Deliverable, DeliverableVerdict, RunAttempt } from "@/lib/coding-deliverable";
 import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
@@ -540,10 +541,13 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
 const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
   images: "codingAgent.pausedAllowanceImages",
   speech: "codingAgent.pausedAllowanceSpeech",
+  weekly: "codingAgent.pausedAllowanceWeekly",
+  burst: "codingAgent.pausedAllowanceBurst",
+  embeddings: "codingAgent.pausedAllowanceEmbeddings",
 };
 
 export default function CodingAgentApp() {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2480,6 +2484,14 @@ export default function CodingAgentApp() {
                       {t(PAUSE_METER_KEY[run.pauseReason.meter])}
                       {" "}
                       {(() => {
+                        // ClawBox AI's rolling allowances free up as old usage
+                        // ages out, possibly days from now: said in the owner's
+                        // clock with the day in front. The per-day meters keep
+                        // the UTC hour they are counted in.
+                        if (isRollingPauseMeter(run.pauseReason.meter)) {
+                          const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
+                          return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");
+                        }
                         const clock = pauseResetClock(run.pauseReason.resetsAt);
                         // No reset time means the far side never said when —
                         // so the card says "when it is back" rather than

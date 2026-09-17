@@ -854,8 +854,13 @@ function emailRefusalSentence(rows: unknown[]): string {
 }
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
-  const { t } = useT()
+  const { t, locale } = useT()
   const tr = useTr()
+  // The words a failed turn is said in. A ref, because the gateway's event
+  // handlers outlive the render that created them and must still speak the
+  // owner's current language.
+  const failureWordsRef = useRef({ t, locale })
+  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   // A PHONE never draws the docked panel. Its geometry is a desktop one — a
   // column anchored to the right edge at a width chosen on a big screen — which
@@ -2610,7 +2615,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // error branch below never runs for a background session, and a
           // history reload cannot recreate what was never stored.
           if (state === 'final' || state === 'aborted' || state === 'error') {
-            settleRun(sk, state === 'error' ? describeChatFailure(payload.errorMessage) : undefined)
+            settleRun(sk, state === 'error' ? describeChatFailure(payload.errorMessage, failureWordsRef.current) : undefined)
           }
           if (sk !== sessionKeyRef.current) return
 
@@ -2779,7 +2784,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureWordsRef.current), timestamp: Date.now() }])
             }
           }
         }
@@ -4631,7 +4636,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // now, so this is the only gate left.
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined)
+        : describeChatFailure(err instanceof Error ? err.message : undefined, failureWordsRef.current)
       settleRun(keyAtSend, failure)
       // It failed in a tab the owner has left: the composer, the caret and
       // the pills on screen belong to the tab they are looking at now, and

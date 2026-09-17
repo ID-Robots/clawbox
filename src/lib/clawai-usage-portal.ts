@@ -1,0 +1,78 @@
+import { normalizeClawaiUsage, type ClawaiUsage } from "@/lib/clawai-usage";
+
+/**
+ * Asking the portal for this box's ClawBox AI usage. SERVER ONLY — it is handed
+ * the device credential, which never reaches a browser.
+ *
+ * Every "no" is a state the usage card draws rather than an error it throws:
+ *  - `refused`     — the portal answered 401/403/404: it does not hand usage to
+ *                    this credential. The card points at the portal instead.
+ *  - `unreachable` — offline, timed out, 5xx, or `metering_unavailable`: a
+ *                    moment, not a verdict. The card says so and asks again.
+ *  - `invalid`     — a 200 that is not a usage payload (an interception page).
+ */
+
+export type ClawaiUsageUnavailable = "not_connected" | "refused" | "unreachable" | "invalid";
+
+export type ClawaiUsageAnswer =
+  | { available: true; usage: ClawaiUsage }
+  | { available: false; reason: ClawaiUsageUnavailable };
+
+function usageUrl(): string {
+  return process.env.CLAWBOX_AI_USAGE_URL?.trim() || "https://clawbox.com/api/portal/usage";
+}
+
+/** On the render path of a Settings card; a slow portal must not hold it. */
+const FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * The card polls once a minute and more than one tab can have Settings open.
+ * Thirty seconds keeps that to one portal read per half-minute per credential
+ * without the bars visibly lagging a chat turn the owner just sent.
+ */
+export const CLAWAI_USAGE_CACHE_TTL_MS = 30_000;
+
+let cache: { token: string; until: number; answer: ClawaiUsageAnswer } | null = null;
+
+/** Tests only. */
+export function _resetClawaiUsageCache(): void {
+  cache = null;
+}
+
+async function askPortal(token: string): Promise<ClawaiUsageAnswer> {
+  let res: Response;
+  try {
+    res = await fetch(usageUrl(), {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-ClawBox-Token": token,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { available: false, reason: "unreachable" };
+  }
+  if (res.status === 401 || res.status === 403 || res.status === 404) {
+    return { available: false, reason: "refused" };
+  }
+  if (!res.ok) return { available: false, reason: "unreachable" };
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { available: false, reason: "invalid" };
+  }
+  const usage = normalizeClawaiUsage(body);
+  return usage ? { available: true, usage } : { available: false, reason: "invalid" };
+}
+
+/** The usage answer for this credential, from a half-minute cache when one is fresh. */
+export async function fetchClawaiUsage(token: string): Promise<ClawaiUsageAnswer> {
+  const now = Date.now();
+  if (cache && cache.token === token && cache.until > now) return cache.answer;
+  const answer = await askPortal(token);
+  cache = { token, until: now + CLAWAI_USAGE_CACHE_TTL_MS, answer };
+  return answer;
+}

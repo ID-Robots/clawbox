@@ -10,6 +10,7 @@ import { codingAgentEn } from "@/lib/edition-translations/en-coding-agent";
 import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
 import { improvementEn } from "@/lib/edition-translations/en-improvement";
 import { paidGateEn } from "@/lib/edition-translations/en-paid-gate";
+import { clawaiUsageEn } from "@/lib/edition-translations/en-clawai-usage";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -134,6 +135,8 @@ describe("edition-translations (TASK-458)", () => {
       ["shellScanEn", shellScanEn, (k) => k.startsWith("shellScan.")],
       ["improvementEn", improvementEn, (k) => k.startsWith("improvement.")],
       ["paidGateEn", paidGateEn, (k) => k.startsWith("paidGate.")],
+      // The usage card, and the chat's sentence for the same allowances.
+      ["clawaiUsageEn", clawaiUsageEn, (k) => k.startsWith("clawaiUsage.") || k.startsWith("chat.allowance")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

@@ -19,6 +19,11 @@
 // What is different about a chat turn is that the customer can *do* something
 // about it — send it again — so the fallback says that rather than apologising.
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
+import {
+  formatFreesUpAt,
+  parseClawaiAllowanceRefusal,
+  type ClawaiAllowanceKind,
+} from "@/lib/clawai-allowance";
 
 /**
  * The failure OpenClaw reports when the session file changes under a running
@@ -108,16 +113,73 @@ const CREDENTIAL_REJECTED = "That message did not go through — the AI provider
 const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
 
 /**
+ * A ClawBox AI allowance is spent. Each window gets its own sentence because
+ * each has its own remedy: the weekly pool and the memory-indexing meter come
+ * back as the week rolls on, while the burst ceiling comes back within hours
+ * and the weekly pool still has room — a customer told "the weekly allowance is
+ * used up" after a burst refusal would stop for a week over a five-hour wait.
+ *
+ * The English here is the floor for a caller with no translator; the chat
+ * surfaces pass theirs, and the catalogue carries the same keys in every locale.
+ */
+const ALLOWANCE_KEY: Record<ClawaiAllowanceKind, string> = {
+  weekly: "chat.allowanceWeekly",
+  burst: "chat.allowanceBurst",
+  embeddings: "chat.allowanceEmbeddings",
+};
+
+const ALLOWANCE_EN: Record<string, string> = {
+  "chat.allowanceWeekly": "That message did not go through — this week's ClawBox AI chat allowance is used up.",
+  "chat.allowanceBurst": "That message did not go through — the ClawBox AI 5-hour burst limit is reached. Your weekly allowance still has room.",
+  "chat.allowanceEmbeddings": "That did not go through — this week's ClawBox AI memory indexing allowance is used up.",
+  "chat.allowanceFreesUpAt": "It frees up at {time}.",
+  "chat.allowanceFreesUpLater": "It frees up as older usage leaves the rolling window.",
+  "chat.allowanceSeeUsage": "Your usage is in Settings, under Providers.",
+};
+
+/** What a chat surface hands in so the sentence comes out in the owner's language and clock. */
+export interface ChatFailureWords {
+  t: (key: string, params?: Record<string, string | number>) => string;
+  locale: string;
+  /** The zone "frees up at" is read in; the browser's own when absent. */
+  timeZone?: string | null;
+}
+
+function allowanceSentence(raw: string, words: ChatFailureWords | undefined): string | null {
+  const refusal = parseClawaiAllowanceRefusal(raw);
+  if (!refusal) return null;
+  // A translator that does not know a key answers the key itself (and, with no
+  // provider above it, ignores the params) — the English floor covers both.
+  const say = (key: string, params?: Record<string, string | number>): string => {
+    const hit = words?.t(key, params);
+    let out = hit && hit !== key ? hit : ALLOWANCE_EN[key];
+    for (const [name, value] of Object.entries(params ?? {})) out = out.replaceAll(`{${name}}`, String(value));
+    return out;
+  };
+  const time = formatFreesUpAt(refusal.resetAt, { locale: words?.locale ?? "en", timeZone: words?.timeZone ?? null });
+  return [
+    say(ALLOWANCE_KEY[refusal.kind]),
+    time ? say("chat.allowanceFreesUpAt", { time }) : say("chat.allowanceFreesUpLater"),
+    say("chat.allowanceSeeUsage"),
+  ].join(" ");
+}
+
+/**
  * Customer-facing text for a chat turn that ended in `state: "error"`.
  *
  * Always returns something. A silent failure — a turn that just stops with no
  * bubble — is worse than a vague one, because the customer cannot tell whether
  * the box is thinking or dead.
  */
-export function describeChatFailure(raw: unknown): string {
+export function describeChatFailure(raw: unknown, words?: ChatFailureWords): string {
   const text = typeof raw === "string" ? raw.trim() : "";
   if (!text) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
+  // Ahead of the rate limit: a spent allowance also arrives as a 429, and the
+  // generic "wait a minute" is exactly the wrong advice for a window that frees
+  // up days from now. The refusal names which allowance and when, so say that.
+  const allowance = allowanceSentence(text, words);
+  if (allowance) return allowance;
   // Before the sanitizer: the raw rate-limit wording would itself pass the leak
   // rules ("API rate limit reached…" carries no path or handle), so without
   // this the customer would get that bare operator line instead of the calm,
