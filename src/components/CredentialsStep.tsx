@@ -645,7 +645,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
             <button
               type="button"
               onClick={() => setShowPassword((v) => !v)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
               className={REVEAL}
             >
               {showPassword ? EyeClosed : EyeOpen}
@@ -672,7 +672,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
             <button
               type="button"
               onClick={() => setShowConfirm((v) => !v)}
-              aria-label={showConfirm ? "Hide password" : "Show password"}
+              aria-label={showConfirm ? t("login.hidePassword") : t("login.showPassword")}
               className={REVEAL}
             >
               {showConfirm ? EyeClosed : EyeOpen}
@@ -724,7 +724,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               type="button"
               role="switch"
               aria-checked={hotspotEnabled}
-              aria-label="Enable hotspot"
+              aria-label={t("credentials.enableHotspot")}
               onClick={() => setHotspotEnabled((v) => !v)}
               className="grid place-items-center shrink-0 h-12 px-[var(--s-1)] bg-transparent border-none cursor-pointer"
             >
@@ -848,7 +848,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                 <button
                   type="button"
                   onClick={() => setShowHotspotPassword((v) => !v)}
-                  aria-label={showHotspotPassword ? "Hide password" : "Show password"}
+                  aria-label={showHotspotPassword ? t("login.hidePassword") : t("login.showPassword")}
                   className={REVEAL}
                 >
                   {showHotspotPassword ? EyeClosed : EyeOpen}
@@ -875,7 +875,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                   <button
                     type="button"
                     onClick={() => setShowConfirmHotspot((v) => !v)}
-                    aria-label={showConfirmHotspot ? "Hide password" : "Show password"}
+                    aria-label={showConfirmHotspot ? t("login.hidePassword") : t("login.showPassword")}
                     className={REVEAL}
                   >
                     {showConfirmHotspot ? EyeClosed : EyeOpen}

@@ -57,6 +57,23 @@ jobs:
       - name: Existing x64 desktop integration fixtures
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
 
+      # The i18n scan: a locale short of a key, and an English literal in
+      # src/components or src/app that never reaches t()/tr(). BLOCKING, and
+      # ahead of the suite for the same reason the sudoers check is — it takes
+      # seconds, and its failure is a list of strings to fix rather than
+      # something a reviewer has to interpret.
+      #
+      # It runs here AS WELL AS in vitest (src/tests/unit/i18n-scan.test.ts).
+      # That is deliberate, not duplication: the test is what a developer hits
+      # locally in the run they were making anyway, and this step is what keeps
+      # the guard on the build if the suite is ever narrowed or the file
+      # renamed — the same hole the sudoers check was pulled out of vitest to
+      # close. The third question it asks — a non-English value identical to
+      # the English one — is a judgement call and does NOT set the exit code;
+      # it prints for a reader and is answered in scripts/i18n-allowlist.json.
+      - name: i18n scan
+        run: bun run scripts/i18n-scan.ts
+
       # The MCP server's tree is EXCLUDED from the root tsconfig (see its
       # `exclude`), so `tsc --noEmit` — wherever it runs — has never covered
       # mcp/**, and no workflow ran this project. Three errors sat on beta

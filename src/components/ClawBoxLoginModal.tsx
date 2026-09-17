@@ -2,6 +2,7 @@
 
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
+import { useTr } from "@/lib/i18n-floor";
 
 // Reusable "Sign in to ClawBox" modal. Surfaced when a user tries to use a
 // feature that requires a ClawBox AI account (Remote Control, ClawKeep, etc.)
@@ -44,6 +45,7 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
   // practice: Tab walked straight out of the modal onto the page behind it, so
   // a keyboard user could not reliably get back to "Open ClawBox Portal".
   const dialogRef = useModalDialog<HTMLDivElement>({ open, onClose });
+  const tr = useTr();
 
   if (!open) return null;
 
@@ -91,18 +93,18 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl btn-gradient text-sm font-medium text-white cursor-pointer"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 18 }}>open_in_new</span>
-            Open ClawBox Portal
+            {tr("login.openPortal", "Open ClawBox Portal")}
           </a>
           <button
             type="button"
             onClick={onClose}
             className="px-4 py-2 rounded-xl text-sm text-white/60 hover:text-white/85 hover:bg-white/[0.04] cursor-pointer"
           >
-            Maybe later
+            {tr("login.maybeLater", "Maybe later")}
           </button>
         </div>
         <p className="mt-4 text-[11px] text-white/35 text-center">
-          Already signed in elsewhere? The device will detect your account on its next status poll (~5s).
+          {tr("login.alreadySignedIn", "Already signed in elsewhere? The device will detect your account on its next status poll (~5s).")}
         </p>
       </div>
     </div>

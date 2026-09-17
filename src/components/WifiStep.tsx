@@ -462,7 +462,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   />
                   <button
                     type="button" onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{showPassword ? "visibility_off" : "visibility"}</span>

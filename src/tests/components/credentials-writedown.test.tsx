@@ -22,6 +22,9 @@ const STRINGS: Record<string, string> = {
   "credentials.newPassword": "New Password",
   "credentials.confirmPassword": "Confirm Password",
   "credentials.hotspotSettings": "Hotspot Settings",
+  // The switch's accessible NAME, and the only handle `fillForm` has on it —
+  // it was a hard-coded English aria-label until the i18n scan found it.
+  "credentials.enableHotspot": "Enable hotspot",
   "credentials.hotspotPassword": "Hotspot Password",
   "credentials.confirmHotspotPassword": "Confirm Hotspot Password",
   "credentials.minChars": "Minimum 8 characters",

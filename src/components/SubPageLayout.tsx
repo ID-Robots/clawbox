@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ReactNode } from "react";
+import { useTr } from "@/lib/i18n-floor";
 
 interface SubPageLayoutProps {
   title: string;
@@ -13,6 +14,7 @@ interface SubPageLayoutProps {
 
 export default function SubPageLayout({ title, children, fullPage = false }: SubPageLayoutProps) {
   const router = useRouter();
+  const tr = useTr();
 
   const handleBack = () => {
     router.push("/setup");
@@ -27,7 +29,7 @@ export default function SubPageLayout({ title, children, fullPage = false }: Sub
           <button
             onClick={handleBack}
             className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--surface-card-strong)] border border-[var(--border-subtle)] backdrop-blur-xl transition-all duration-200 hover:border-[var(--coral-bright)] hover:shadow-[0_0_12px_var(--shadow-coral-mid)] active:scale-95"
-            aria-label="Go back to home"
+            aria-label={tr("desktop.goBackHome", "Go back to home")}
           >
             <span className="material-symbols-rounded" style={{ fontSize: 18, color: "var(--text-secondary)" }}>arrow_back</span>
             <span className="text-sm text-[var(--text-secondary)]">{title}</span>
@@ -42,7 +44,7 @@ export default function SubPageLayout({ title, children, fullPage = false }: Sub
           <Link
             href="/setup"
             className="pointer-events-auto w-32 h-1.5 rounded-full bg-white/20 hover:bg-white/40 transition-all duration-200 hover:w-36 active:scale-95"
-            aria-label="Go to home screen"
+            aria-label={tr("desktop.goHomeScreen", "Go to home screen")}
           />
         </div>
       </div>
@@ -61,7 +63,7 @@ export default function SubPageLayout({ title, children, fullPage = false }: Sub
         <button
           onClick={handleBack}
           className="flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] transition-all duration-200 hover:border-[var(--coral-bright)] hover:shadow-[0_0_12px_var(--shadow-coral-mid)] active:scale-95"
-          aria-label="Go back to home"
+          aria-label={tr("desktop.goBackHome", "Go back to home")}
         >
           <span className="material-symbols-rounded transition-colors" style={{ fontSize: 20, color: "var(--text-secondary)" }}>arrow_back</span>
         </button>
@@ -80,7 +82,7 @@ export default function SubPageLayout({ title, children, fullPage = false }: Sub
         <Link
           href="/setup"
           className="pointer-events-auto w-32 h-1.5 rounded-full bg-white/20 hover:bg-white/40 transition-all duration-200 hover:w-36 active:scale-95"
-          aria-label="Go to home screen"
+          aria-label={tr("desktop.goHomeScreen", "Go to home screen")}
         />
       </div>
     </div>

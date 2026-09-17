@@ -143,7 +143,7 @@ export default function OllamaModelPanel({
         <h4 className="text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
           {t("ollama.downloadModel")}
         </h4>
-        <div role="radiogroup" aria-label="Download a model" className="space-y-1">
+        <div role="radiogroup" aria-label={t("ollama.downloadModel")} className="space-y-1">
           {PRESET_MODELS.map((m) => (
             <label
               key={m.id}

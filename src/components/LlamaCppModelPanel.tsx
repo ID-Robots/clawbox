@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
+import { useTr } from "@/lib/i18n-floor";
 
 interface LlamaCppModelPanelProps {
   llamaCppRunning: boolean;
@@ -42,6 +43,7 @@ export default function LlamaCppModelPanel({
   buttonClassName = DEFAULT_BUTTON_CLASS,
   buttonSpinner = DEFAULT_SPINNER,
 }: LlamaCppModelPanelProps) {
+  const tr = useTr();
   useEffect(() => {
     if (selectedLlamaCppModel) return;
     setSelectedLlamaCppModel(getDefaultLlamaCppModel());
@@ -80,7 +82,7 @@ export default function LlamaCppModelPanel({
           <div>
             <div className="text-base font-semibold text-gray-100">Gemma 4</div>
             <p className="text-sm text-[var(--text-secondary)]">
-              Private on-device AI for ClawBox.
+              {tr("localModels.gemmaTagline", "Private on-device AI for ClawBox.")}
             </p>
           </div>
         </div>

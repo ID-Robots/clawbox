@@ -353,7 +353,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
           <button
             type="button"
             onClick={() => setShowToken((v) => !v)}
-            aria-label={showToken ? "Hide token" : "Show token"}
+            aria-label={showToken ? t("login.hideToken") : t("login.showToken")}
             aria-controls="telegram-bot-token"
             className="absolute right-[var(--s-1)] top-1/2 -translate-y-1/2 grid place-items-center w-10 h-10 rounded-[var(--r-1)] bg-transparent border-none cursor-pointer text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)]"
             style={{ transition: CONTROL_TRANSITION }}

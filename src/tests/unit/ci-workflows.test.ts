@@ -175,6 +175,19 @@ describe("the checks CI runs, and their blocking status", () => {
     runsBlocking("bun run check:sudoers");
   });
 
+  it("runs the i18n scan, blocking", () => {
+    // Two facts a locale cannot argue with — a key it does not carry, and an
+    // English literal in src/components or src/app that never reaches
+    // t()/tr() — so the scan is safe to gate a build on. (Its third question,
+    // a value identical to the English one, is a judgement and deliberately
+    // does not set the exit code; see scripts/i18n-scan.ts.)
+    //
+    // It is pinned here as well as run by vitest for the reason the sudoers
+    // check is: a guard that reaches CI only as a side effect of one test file
+    // comes off the build the day that file is renamed, with nothing saying so.
+    runsBlocking("bun run scripts/i18n-scan.ts");
+  });
+
   it("runs eslint, and says out loud that it is advisory", () => {
     // eslint reports errors on beta today, so it cannot be blocking without
     // being fixed first. `continue-on-error` is the mechanism that says so out
@@ -241,7 +254,7 @@ describe("the checks CI runs, and their blocking status", () => {
         return next ? fromRun.slice(0, key[0].length + next.index) : fromRun;
       });
 
-    for (const command of ["bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint"]) {
+    for (const command of ["bun run typecheck:mcp", "bun run check:mcp-tools", "bun run scripts/i18n-scan.ts", "bun run lint"]) {
       expect(runsOfEachStep.some((body) => body.includes(command)),
         `${command} is not run by any step of the test job`).toBe(true);
     }
