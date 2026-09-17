@@ -430,7 +430,7 @@ export const ja: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "そのモデルを変更できませんでした。",
-  "localModels.error.configBusy": "ボックスが設定を保存していたため、切り替えが完了しませんでした。少し待ってからもう一度お試しください。",
+  "localModels.error.configBusy": "ボックスが設定を保存していたため、変更が完了しませんでした。少し待ってからもう一度お試しください。",
   "localModels.error.unreachable": "本体に接続できなかったため、そのモデルを変更できませんでした。",
   "localModels.notice.voiceFallback": "Kokoro をメインの声にできなかったため、既定の声のままです。",
   "localModels.notice.voiceReleased": "Kokoro はこの本体の声でしたが、今は既定の声が話します。",

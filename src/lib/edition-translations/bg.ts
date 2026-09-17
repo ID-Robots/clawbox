@@ -415,7 +415,7 @@ export const bg: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Моделът не можа да бъде променен.",
-  "localModels.error.configBusy": "Кутията записваше настройките си, затова превключването не завърши. Опитайте пак след малко.",
+  "localModels.error.configBusy": "Кутията записваше настройките си, затова промяната не завърши. Опитайте пак след малко.",
   "localModels.error.unreachable": "Кутията не отговори, за да бъде променен моделът.",
   "localModels.notice.voiceFallback": "Kokoro не можа да стане основен глас, затова остава гласът по подразбиране.",
   "localModels.notice.voiceReleased": "Kokoro беше гласът на тази кутия; сега говори гласът по подразбиране.",

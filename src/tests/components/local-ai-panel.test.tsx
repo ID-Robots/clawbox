@@ -340,7 +340,7 @@ describe("LocalAiPanel", () => {
     const CLI_SENTENCE =
       "The config file changed while this command was writing (config changed since last load), "
       + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
-    const BUSY_COPY = "The box was saving its settings, so the switch did not finish. Try again in a moment.";
+    const BUSY_COPY = "The box was saving its settings, so that change did not finish. Try again in a moment.";
 
     /** Refuse the local-only flip with `body`, and read the banner. */
     async function flipAndReadBanner(body: unknown, status: number) {
@@ -389,6 +389,33 @@ describe("LocalAiPanel", () => {
 
       expect(alert).toHaveTextContent("The local model is not ready yet.");
       expect(alert.textContent).not.toContain(BUSY_COPY);
+    });
+
+    it("names no switch when a ROW action hits the race", async () => {
+      // The banner is shared by the Local-only switch and the row actions, and
+      // `providers/default` forwards `chat/model`'s config_busy answer
+      // verbatim — so "Use as fallback" reaches this copy on a row that has no
+      // switch on it. The sentence has to be true of both.
+      const json = (payload: unknown, code: number) =>
+        new Response(JSON.stringify(payload), { status: code, headers: { "content-type": "application/json" } });
+      stubFetch({
+        llmDefault: true,
+        post: (url) => (url === "/setup-api/providers/default"
+          // The body `chat/model` answers a conflict with, forwarded as-is.
+          ? json({
+            error: "The box was saving its settings at the same moment, so nothing was changed. Try again in a moment.",
+            code: "config_busy",
+          }, 409)
+          : undefined),
+      });
+      renderPanel();
+      await screen.findByText(/AI that runs on this box/);
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(BUSY_COPY);
+      expect(alert.textContent).not.toMatch(/switch/i);
     });
   });
 

@@ -439,7 +439,7 @@ export const it: Record<string, string> = {
 
   // === Errors ===
   "localModels.error.changeFailed": "Non è stato possibile modificare quel modello.",
-  "localModels.error.configBusy": "Il box stava salvando le sue impostazioni, quindi il passaggio non è stato completato. Riprova tra un momento.",
+  "localModels.error.configBusy": "Il box stava salvando le sue impostazioni, quindi la modifica non è stata completata. Riprova tra un momento.",
   "localModels.error.unreachable": "Non è stato possibile raggiungere il box per modificare quel modello.",
   "localModels.notice.voiceFallback": "Kokoro non è potuta diventare la voce principale, quindi resta la voce predefinita.",
   "localModels.notice.voiceReleased": "Kokoro era la voce di questa scatola; ora parla la voce predefinita.",
