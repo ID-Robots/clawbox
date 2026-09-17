@@ -58,6 +58,7 @@ vi.mock("@/lib/config-store", () => {
 vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 
 import { get, set, setMany } from "@/lib/config-store";
+import * as childProcess from "child_process";
 import * as updater from "@/lib/updater";
 
 const mockGet = vi.mocked(get);
@@ -72,6 +73,7 @@ function diskState({
   interruptedAt,
   holder,
   detail,
+  warnings,
 }: {
   locked: boolean;
   continuation?: string;
@@ -81,6 +83,8 @@ function diskState({
   holder?: { pid: number; bootId: string | null; startedTicks?: string | null; at?: string; step?: string };
   /** How and where the last run was cut short, as the verdict records it beside the stamp. */
   detail?: { cause: "reboot" | "replaced" | "unknown"; step?: string };
+  /** The drift warnings the interrupted run persisted before its first step. */
+  warnings?: { code: string; message: string }[];
 }) {
   mockGet.mockImplementation(async (key: string) => {
     if (key === "update_in_progress") return locked ? true : undefined;
@@ -89,8 +93,29 @@ function diskState({
     if (key === "update_interrupted_at") return interruptedAt;
     if (key === "update_interrupted_detail") return detail;
     if (key === "update_lock_holder") return holder;
+    if (key === "update_warnings") return warnings ? JSON.stringify(warnings) : undefined;
     return undefined;
   });
+}
+
+/**
+ * The network probe answers, and every other command parks for ever: a
+ * resumed run then positions itself and waits on its first root step, which
+ * is the state these cases read. The probe is `ping`, then an HTTPS HEAD.
+ */
+function networkAnswers(reachable: boolean) {
+  vi.mocked(childProcess.execFile).mockImplementation(((...args: unknown[]) => {
+    const cb = args[args.length - 1];
+    if (args[0] === "ping" && typeof cb === "function") {
+      if (reachable) cb(null, "", "");
+      else cb(new Error("ping: unreachable"), "", "");
+    }
+    return undefined as never;
+  }) as never);
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    if (reachable) return { ok: true, status: 200 } as Response;
+    throw new Error("offline");
+  }));
 }
 
 /** This boot, as `update-lock.ts` reads it. A box without one is not Linux. */
@@ -114,6 +139,8 @@ beforeEach(() => {
 afterEach(() => {
   updater.resetUpdateState();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.mocked(childProcess.execFile).mockReset();
 });
 
 describe("an update whose process was replaced is reported, not forgotten", () => {
@@ -371,7 +398,7 @@ describe("an interrupted run says which step died and what took the box, and res
     expect(state.error).not.toMatch(/web server was replaced/);
     expect(state.error, "the step is named").toContain('"Updating OpenClaw"');
     expect(state.error, "that step takes the core apart, so the owner is told").toMatch(/assistant may be unavailable/);
-    expect(state.error, "and Try again is a resume").toMatch(/Try again continues from that step/);
+    expect(state.error, "and the panel's Resume is what continues it").toMatch(/Resume continues the update from there/);
     // The step list shows WHERE it stopped, not thirteen pending steps.
     expect(state.steps.slice(0, index).every((s) => s.status === "completed")).toBe(true);
     expect(state.steps[index].status).toBe("failed");
@@ -458,27 +485,79 @@ describe("an interrupted run says which step died and what took the box, and res
     expect(state.error).toBe(updater.INTERRUPTED_MESSAGE);
   });
 
-  it("Try again continues from the interrupted step rather than from the top", async () => {
+  it("Resume continues from the interrupted step — no later than the power-profile step, which unpins the clocks", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" } });
-    const index = stepIndex("openclaw_install");
-    expect(index).toBeGreaterThan(0);
+    networkAnswers(true);
+    const warnings = [{ code: "checkout-behind-pin", message: "The checkout was 71 commits behind its pin." }];
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" }, warnings });
+    const died = stepIndex("openclaw_install");
+    const unpin = stepIndex("performance_mode");
+    expect(died).toBeGreaterThan(unpin);
+    expect(unpin).toBeGreaterThan(0);
 
     expect(updater.startUpdate()).toEqual({ started: true });
 
-    // The run parks on its (mocked, never-settling) internet probe right after
-    // it has positioned itself — which is all this case needs to see.
-    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(index));
+    // A power-cycled box boots with clawbox-performance.service pinning the
+    // clocks again; a resume that skipped `performance_mode` would run the
+    // npm install pinned — the very thing that step unpins under an update.
+    // So the run picks up THERE, and parks on that step's (never-settling)
+    // root dispatch — which is the state this case reads.
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(unpin));
     const state = updater.getUpdateState();
     expect(state.phase).toBe("running");
-    expect(state.steps.slice(0, index).every((s) => s.status === "completed")).toBe(true);
-    expect(state.steps[index].status).not.toBe("completed");
+    expect(state.steps.slice(0, unpin).every((s) => s.status === "completed")).toBe(true);
+    expect(state.steps[unpin].status).not.toBe("completed");
+    expect(state.steps[died].status).toBe("pending");
+    // The interrupted run's own diagnosis travels with the resume.
+    expect(state.warnings).toEqual(warnings);
     // The record is consumed by the prologue, so a run that dies AGAIN is
     // resumed from wherever that one died, never from a stale step.
     await vi.waitFor(() =>
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_interrupted_at: undefined, update_interrupted_detail: undefined }),
       ));
+  });
+
+  it("resumes at the recorded step itself when it is before the power-profile step", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(true);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "replaced", step: "apt_update" } });
+    const index = stepIndex("apt_update");
+    expect(index).toBeGreaterThan(0);
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(index));
+  });
+
+  it("keeps its position when a resume is refused for want of a network", async () => {
+    // These boxes are on WiFi and the desktop is reachable seconds after boot.
+    // A resume that failed its probe used to have cleared the record first, so
+    // the NEXT press started from step 1 over a box with no core.
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(false);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" } });
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+    expect(updater.getUpdateState().error).toMatch(/No internet connection/);
+    // The lock is released, the record is NOT.
+    expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_in_progress: undefined }));
+    expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_detail: undefined }));
+    expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_at: undefined }));
+  });
+
+  it("names the assistant for a run cut short before the gateway was started again", async () => {
+    // `openclaw_install` stops the gateway and LEAVES it stopped; `gateway_setup`
+    // restarts it. A run that died between the two has an intact core and no
+    // assistant, so that step carries the sentence too.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "gateway_setup" } });
+
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().error).toMatch(/assistant may be unavailable/);
   });
 
   it("starts from the top when the record names no step, or there is no stamp", async () => {

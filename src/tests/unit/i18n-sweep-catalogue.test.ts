@@ -41,7 +41,8 @@ const UPDATE_KEYS = [
   "update.betaConfirmAction", "update.betaConfirmBody", "update.forceConfirmTitle",
   "update.forceConfirmAction", "update.forceConfirmBody", "update.forceConfirmReboot",
   "update.cancel", "update.progressFinished", "update.progressStopped",
-  "update.progressRunning", "update.dismiss", "update.connecting", "update.unknownError",
+  "update.progressRunning", "update.dismiss", "update.resume", "update.startAgain",
+  "update.connecting", "update.unknownError",
   "update.reloadOnRestart",
   // The /updating screen, the one page guaranteed to be open while the box is
   // offline.

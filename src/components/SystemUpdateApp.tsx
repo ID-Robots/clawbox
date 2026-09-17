@@ -6,7 +6,7 @@ import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
 import type { RemoteReachability, StepStatus, UpdateState } from "@/lib/updater";
-import { RESTART_STEP_ID } from "@/lib/update-constants";
+import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
 
@@ -640,6 +640,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               error={updateError}
               status={status}
               onDismiss={dismissResult}
+              // A run the box lost (a restart, a power cut, a replaced web
+              // server) is RESUMED from the step it died on by a fresh run —
+              // the verdict's own sentence says so — and this is the control
+              // that starts one. Dismiss forgets the position; the hero's
+              // update button is hidden while a run is settled, so without
+              // this the resume was reachable by no gesture at all.
+              onResume={updateState?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX) ? () => void triggerUpdate() : undefined}
             />
           )}
 
@@ -1041,11 +1048,14 @@ function UpdateProgressCard({
   error,
   status,
   onDismiss,
+  onResume,
 }: {
   state: UpdateState | null;
   error: string | null;
   status: Status;
   onDismiss: () => void;
+  /** Present only for an interrupted run: starts the fresh run that resumes it. */
+  onResume?: () => void;
 }) {
   const tr = useTr();
   const failedSteps = state?.steps.filter((s) => s.status === "failed") ?? [];
@@ -1063,13 +1073,28 @@ function UpdateProgressCard({
             : status === "failed" ? tr("update.progressStopped", "Update stopped") : tr("update.progressRunning", "In progress")}
         </h2>
         {(status === "completed" || status === "failed") && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="px-3 py-1 rounded-md text-xs font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
-          >
-            {tr("update.dismiss", "Dismiss")}
-          </button>
+          <div className="flex items-center gap-2">
+            {status === "failed" && onResume && (
+              <button
+                type="button"
+                onClick={onResume}
+                className="px-3 py-1 rounded-md text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black cursor-pointer"
+              >
+                {/* The step is known when one is marked failed: the run picks
+                    up there. With none known a fresh run is what "again" means. */}
+                {failedSteps.length > 0
+                  ? tr("update.resume", "Resume update")
+                  : tr("update.startAgain", "Start the update again")}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="px-3 py-1 rounded-md text-xs font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
+            >
+              {tr("update.dismiss", "Dismiss")}
+            </button>
+          </div>
         )}
       </div>
 

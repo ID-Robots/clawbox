@@ -65,15 +65,16 @@ export interface InterruptionDetail {
   /** Its label, for the sentence — resolved by the reader that has the list. */
   stepLabel?: string;
   /**
-   * The step takes the OpenClaw core apart before it puts it back (an npm
-   * install removes the old tree first), so a run cut short there may have
-   * left the box with no assistant until the step runs again.
+   * A run cut short on this step leaves the box without its assistant until
+   * the step runs again: the two that replace the core on disk, and the one
+   * that starts the gateway back up after them (`openclaw_install` stops it
+   * and LEAVES it stopped; `gateway_setup` is what restarts it).
    */
   assistantAtRisk?: boolean;
 }
 
-/** The steps that replace the OpenClaw core on disk. */
-export const CORE_REPLACING_STEP_IDS: ReadonlySet<string> = new Set(["openclaw_install", "openclaw_patch"]);
+/** The steps between "the gateway is stopped for the core swap" and "it is up again". */
+export const ASSISTANT_DOWN_STEP_IDS: ReadonlySet<string> = new Set(["openclaw_install", "openclaw_patch", "gateway_setup"]);
 
 /**
  * Each cause in the words the evidence supports and no more: a lock holder
@@ -93,8 +94,10 @@ function interruptionCauseText(cause: InterruptionCause): string {
  *
  * With nothing known it is exactly `INTERRUPTED_MESSAGE`, so a box that
  * predates the holder record reads as it always did. With the step known the
- * sentence names it and says that "Try again" continues from it — because it
- * does: `runUpdate` resumes a fresh run from the recorded step. On 2026-09-16
+ * sentence names it and says that Resume continues from there — because it
+ * does: `runUpdate` resumes a fresh run from the recorded step (or from the
+ * power-profile step before it, which unpins the clocks for the rest of the
+ * update), and the failed panel's Resume button is what starts one. On 2026-09-16
  * three field boxes went dark mid `openclaw_install`, and the verdict blamed a
  * replaced web server and offered a fresh start over a box with no core.
  */
@@ -104,7 +107,7 @@ export function interruptedMessage(detail: InterruptionDetail): string {
     : "";
   if (detail.stepLabel) {
     return `${INTERRUPTED_MESSAGE_PREFIX}: ${interruptionCauseText(detail.cause)} while "${detail.stepLabel}" was running. `
-      + `Nothing was rolled back — Try again continues from that step.${risk}`;
+      + `Nothing was rolled back — Resume continues the update from there.${risk}`;
   }
   if (detail.cause !== "reboot") return INTERRUPTED_MESSAGE;
   return `${INTERRUPTED_MESSAGE_PREFIX}: ${interruptionCauseText(detail.cause)} while it ran, `

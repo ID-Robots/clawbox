@@ -63,7 +63,7 @@ const UPDATE_INTERRUPTED_DETAIL_KEY = "update_interrupted_detail";
 export { INTERRUPTED_MESSAGE } from "./update-constants";
 import {
   INTERRUPTED_MESSAGE_PREFIX,
-  CORE_REPLACING_STEP_IDS,
+  ASSISTANT_DOWN_STEP_IDS,
   interruptedMessage,
   interruptedStepError,
   type InterruptionCause,
@@ -4066,7 +4066,7 @@ function describeInterruption(
   if (index >= 0) {
     detail.step = steps[index].id;
     detail.stepLabel = steps[index].label;
-    detail.assistantAtRisk = CORE_REPLACING_STEP_IDS.has(steps[index].id);
+    detail.assistantAtRisk = ASSISTANT_DOWN_STEP_IDS.has(steps[index].id);
   }
   return { detail, index };
 }
@@ -4109,7 +4109,15 @@ async function interruptedStepIndex(steps: UpdateStepDef[]): Promise<number> {
     const record = detail.known ? parseInterruptionRecord(detail.value) : null;
     if (!record?.step) return 0;
     const index = steps.findIndex((s) => s.id === record.step);
-    return index > 0 ? index : 0;
+    if (index <= 0) return 0;
+    // Never past the power-profile step. A box that died and was power-cycled
+    // boots with clawbox-performance.service pinning the clocks again, and a
+    // resume that skipped `performance_mode` would run the npm install and the
+    // rebuild pinned — the very condition that step unpins under an update
+    // (install.sh step_performance_mode). The steps between it and the recorded
+    // one are cheap, idempotent no-ops on a box they already ran on.
+    const unpin = steps.findIndex((s) => s.id === "performance_mode");
+    return unpin > 0 && index > unpin ? unpin : index;
   } catch {
     return 0;
   }
@@ -4611,10 +4619,25 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     if (options.resumeFromInterruption && startFrom === 0) {
       const at = await interruptedStepIndex(steps);
       if (at > 0) {
+        // The network FIRST, while the record is still on disk: these boxes
+        // are on WiFi and the desktop is reachable seconds after boot, and a
+        // resume refused for want of a network must not forfeit its position —
+        // the next press has to land on the same step, not on step 1.
+        if (!(await checkInternet())) {
+          runtime.state.phase = "failed";
+          runtime.state.error = "No internet connection. Check your WiFi and try again.";
+          runtime.state.currentStepIndex = -1;
+          await clearUpdateLock();
+          return;
+        }
         startFrom = at;
         resumed = true;
         for (let i = 0; i < at; i++) runtime.state.steps[i].status = "completed";
         runtime.state.currentStepIndex = at;
+        // The interrupted run's own diagnosis (the drift warnings it persisted
+        // before its first step) travels with the resume, the way it travels
+        // across the reboot: `captureDriftBaseline` below is a fresh run's.
+        runtime.state.warnings = await restoreWarnings();
         console.log(`[Updater] Continuing the interrupted update from step ${at + 1}: ${steps[at].label}`);
       }
     }
@@ -4655,9 +4678,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     }
   }
 
-  // A resumed run needs the network as much as a fresh one — the step it
-  // continues from is the npm install more often than not.
-  if ((startFrom === 0 || resumed) && !(await checkInternet())) {
+  // (A resumed run made this check above, before the record it resumes from
+  // was cleared.)
+  if (startFrom === 0 && !(await checkInternet())) {
     runtime.state.phase = "failed";
     runtime.state.error = "No internet connection. Check your WiFi and try again.";
     runtime.state.currentStepIndex = -1;
