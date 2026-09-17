@@ -107,6 +107,38 @@ function ok(...fields) {
   };
 }
 
+/**
+ * The desktop's UI language — which a box may legitimately never have stored.
+ *
+ * A freshly flashed device has no `pref:ui_language`: the desktop resolves its
+ * language from the browser (`detectLocale` in src/lib/i18n.tsx) until the
+ * owner picks one, and `/setup-api/preferences?keys=ui_language` then answers
+ * `{}` — the route working, not the route broken. Checked with the plain
+ * `ok("ui_language")` this was `missing field \`ui_language\` in {}` on every
+ * clean box, which is the kind of red that teaches an operator to re-run a
+ * sweep until it goes green.
+ *
+ * So: a stored language is a PASS, no stored language is `unproven`, and the
+ * failures that matter are still failures — a route that does not answer 200,
+ * one that answers something other than JSON (the anonymous-read carve-out
+ * regressing into a `/login` redirect body), and a value that is not a
+ * language, which `sanitizePreferences` would have dropped on the way out.
+ */
+export function uiLanguageReadsBack(res) {
+  if (res.status !== 200) return `expected 200, got ${res.status} ${truncate(res.text)}`;
+  if (res.json === null || typeof res.json !== "object" || Array.isArray(res.json)) {
+    return `expected a JSON object, got ${truncate(res.text)}`;
+  }
+  const value = res.json.ui_language;
+  if (value === undefined || value === null) {
+    return { unproven: "no language has ever been chosen on this box, so there is none to read back: the desktop takes its language from the browser until the owner picks one" };
+  }
+  if (typeof value !== "string" || value === "") {
+    return `ui_language came back as ${truncate(JSON.stringify(value) ?? String(value), 60)}`;
+  }
+  return true;
+}
+
 /** A specific refusal: the status, and the stable code the route promises. */
 function refuses(status, code) {
   return (res) => {
@@ -225,7 +257,7 @@ const AREAS = [
     { name: "the device's own bearer is accepted", path: "/setup-api/system/info", expect: ok("hostname") },
   ]],
   ["preferences", [
-    { name: "the UI language reads back", path: "/setup-api/preferences?keys=ui_language", expect: ok("ui_language") },
+    { name: "the UI language reads back", path: "/setup-api/preferences?keys=ui_language", expect: uiLanguageReadsBack },
     { name: "the agent cannot write installed_apps", path: "/setup-api/preferences", method: "POST", body: { installed_apps: "\u0001" }, expect: ownerOnly() },
   ]],
   ["kv", [
