@@ -168,6 +168,13 @@ const VOICE_TRANSCRIBE_TIMEOUT_MS = 180_000
 // extend the retry budget to quadruple so the chat reconnects automatically
 // once it comes back instead of forcing the user to click Try again.
 const SKILL_INSTALL_MAX_RETRIES = MAX_RETRIES * 4
+/** How often an open, visible popup re-reads which model the box runs.
+ *  One a minute: the read is a route handler plus two file reads on a Jetson,
+ *  per open popup per visible tab, and it is a backstop behind the
+ *  `onProvidersChanged` signal rather than the primary path — the 20 s it
+ *  started at was three of them a minute for a change that almost never
+ *  happens between ticks. */
+const MODEL_STATE_POLL_MS = 60_000
 const RETRY_DELAY = 3000
 // When the gateway closes the socket with an auth rejection (it rate-limits a
 // client after too many failed auth attempts), retrying on the fast RETRY_DELAY
@@ -2376,6 +2383,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (!isCurrent()) return
           clearDeadlineTimer()
           setStatus('connected')
+          // A reconnect follows every restart, and a restart follows some model
+          // switches made elsewhere: what the box runs may have changed. The
+          // first handshake is not a reconnect; the open effect already read it.
+          if (hasEverConnectedRef.current) refreshChatModelState()
           connectedOnceRef.current = true
           hasEverConnectedRef.current = true
 
@@ -3118,6 +3129,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (!isOpen) return
     return onProvidersChanged(() => { refreshChatModelState() })
+  }, [isOpen, refreshChatModelState])
+
+  // The header names the model the BOX runs, and the box can be told to run
+  // another one from outside this tab: the Settings page in a second window,
+  // the same chat on the phone, an operator on the CLI, a channel command.
+  // Seen on a box (2026-09-17): the model changed under an open popup and its
+  // header kept the old name until a reload. The signal above only spans this
+  // tab, and the gateway's heartbeat does not carry the model — so the popup
+  // re-reads it whenever the owner comes back to the tab, and on a slow tick
+  // while the tab is on screen. The read is two file reads on the box, and the
+  // tick is one a minute (MODEL_STATE_POLL_MS) — the visibility and focus
+  // handlers above are what make a change the owner is actually looking at
+  // appear at once, so the tick only has to catch the case where nothing was
+  // touched in this tab at all.
+  useEffect(() => {
+    if (!isOpen) return
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshChatModelState() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    const tick = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshChatModelState()
+    }, MODEL_STATE_POLL_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+      clearInterval(tick)
+    }
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, and open the first conversation on a box that has an
