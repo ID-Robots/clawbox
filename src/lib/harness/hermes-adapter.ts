@@ -1,5 +1,6 @@
 import { splitAssistantMedia } from "@/lib/chat-media";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
+import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
 import { transcriptKeyIsSafe } from "./transcript-key";
 import {
@@ -51,6 +52,18 @@ export interface HermesTurnContext {
 const CHAT_ROUTE = "/setup-api/hermes/chat";
 const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
 const IMAGES_ROUTE = "/setup-api/chat/images";
+const COMMANDS_ROUTE = "/setup-api/hermes/commands";
+
+/**
+ * How long the command catalogue may take.
+ *
+ * Shorter than the transcript's, because the whole point of a completion menu
+ * is that it is there by the time the second character is typed. The catalogue
+ * is read from the dashboard's memory, so a box that has not answered in this
+ * long is a box whose dashboard is not going to — and the composer's answer to
+ * that is simply no popover, which costs the owner nothing but a menu.
+ */
+const COMMANDS_TIMEOUT_MS = 6_000;
 
 /**
  * How long a transcript call may take before it is abandoned.
@@ -622,6 +635,40 @@ export class HermesAdapter implements HarnessAdapter {
         // Hermes equivalent, so the honest answer is always "no verdict".
         imageGenerationFailed: false,
       };
+    } catch (err) {
+      throw asHarnessError(err, "upstream");
+    }
+  }
+
+  /**
+   * Hermes' own command catalogue, through the box's route.
+   *
+   * The normalising already happened server-side (the route reads
+   * `commands.catalog` off the dashboard socket and hands back rows), so this
+   * is a read and a shape check — but it IS a shape check, because the rows are
+   * about to be rendered and a route can be reached by anything that has the
+   * owner's cookie.
+   *
+   * Rejects when the route itself failed, and answers `[]` for a box whose
+   * dashboard is down — which the route reports as `available: false` beside
+   * that empty list. The flag is deliberately NOT read here: the composer's
+   * answer to both is no popover, and the catalogue is re-asked on the next
+   * connect either way, so a caller acting on the difference would be acting on
+   * a distinction it has nothing to do with. It is on the route because that is
+   * where the two are actually told apart.
+   */
+  async listCommands(): Promise<readonly SlashCommand[]> {
+    try {
+      const res = await this.fetchImpl(COMMANDS_ROUTE, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(COMMANDS_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        throw new HarnessError("upstream", "Could not read the command list.");
+      }
+      const data = await res.json();
+      const rows = Array.isArray(data?.commands) ? data.commands : [];
+      return rows.filter(isSlashCommand);
     } catch (err) {
       throw asHarnessError(err, "upstream");
     }

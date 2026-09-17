@@ -80,6 +80,12 @@ export interface HermesBox {
    * apart answers differently per key.
    */
   sessionIdFor: (sessionKey: string) => string;
+  /**
+   * What `/setup-api/hermes/commands` answers — the rows the route builds from
+   * Hermes' own `commands.catalog`. Empty by default, so a test that says
+   * nothing about commands gets no popover and is unaffected.
+   */
+  commandRows: { id: string; usage: string; description: string; source: "harness" }[];
   /** Prompts POSTed to the images route, in order. */
   imagePrompts: string[];
   /**
@@ -117,6 +123,7 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
     deletedKeys: [],
     historyReads: [],
     historyDelayMs: {},
+    commandRows: [],
     chatResponse: null,
     sessionIdFor: () => HERMES_SESSION,
     imagePrompts: [],
@@ -208,6 +215,12 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         const delay = box.historyDelayMs[key] ?? 0;
         if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
         return { ok: true, json: async () => ({ messages }) };
+      }
+      if (url.includes("/setup-api/hermes/commands")) {
+        return {
+          ok: true,
+          json: async () => ({ commands: box.commandRows, available: true }),
+        };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;

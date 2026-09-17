@@ -38,6 +38,8 @@ import {
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
+import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
+import { runHermesSlashCommand } from "@/lib/hermes-slash-exec";
 import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
@@ -1230,6 +1232,53 @@ export async function POST(request: Request) {
     timestamp: Date.now(),
     ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
   }, sessionKey);
+
+  // ── A slash command ─────────────────────────────────────────────────────
+  //
+  // `/status` is not a prompt. Down the ordinary paths — `prompt.submit`, or
+  // `hermes chat -q "/status"` — the text reaches the MODEL, which answers with
+  // its opinion of the word rather than the session's status: the composer's
+  // popover would offer the harness's own commands and then none of them would
+  // do anything. Hermes runs a command through `slash.exec`, which is what
+  // `runHermesSlashCommand` opens, and which is the same door this route's
+  // sibling already uses for the internal `/model … --session` switch.
+  //
+  // Placed AFTER the question is recorded and BEFORE both transports, because
+  // it replaces them rather than layering on one: a command has no streaming to
+  // do (the output arrives whole) and nothing for `--image` to carry.
+  //
+  // Null means the dashboard could not be reached, and the turn falls through
+  // to the CLI below exactly as any other turn on such a box does. That is a
+  // deliberate fall-through and not a silent failure: what the owner then gets
+  // is the model's answer, which is what they got before this branch existed.
+  // The popover, for its part, is fed by the same dashboard and is already
+  // absent on a box where it is down.
+  //
+  // A turn CARRYING A PICTURE is left to the ordinary transports even when its
+  // text is command-shaped: `runHermesSlashCommand` has nowhere to put an
+  // attachment, the user turn above has already been recorded WITH its media,
+  // and a branch that ran the command and dropped the file would show the owner
+  // their screenshot in the transcript over an answer that never saw it.
+  if (imagePaths.length === 0 && isSlashCommandMessage(message)) {
+    const ran = await runHermesSlashCommand({
+      command: message.trim(),
+      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+      ...(rawModel ? { model: rawModel } : {}),
+      ...(wantsProvider ? { provider: rawProvider } : {}),
+      signal: request.signal,
+    });
+    if (ran) {
+      await appendTranscript(
+        { role: "assistant", text: ran.output, timestamp: Date.now() },
+        sessionKey,
+      );
+      return NextResponse.json({
+        text: ran.output,
+        harness: "hermes",
+        sessionId: ran.sessionId,
+      } satisfies TurnPayload);
+    }
+  }
 
   const args = ["chat", "-q", promptWithImages, "-Q"];
   if (firstImage) args.push("--image", firstImage);
