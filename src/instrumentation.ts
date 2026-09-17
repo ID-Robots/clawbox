@@ -239,9 +239,16 @@ export async function register() {
     //
     // Never rejects — see its own docblock — and wrapped anyway: a box must
     // boot whatever git says, and the next boot tries again.
+    //
+    // ONLY on the device's own account. This hook runs under `bun run dev` on a
+    // developer's laptop as well, and the job removes keys from whatever
+    // ~/.gitconfig it is pointed at — so ungated it would silently delete a
+    // developer's own git identity, and the identity it matches belongs to the
+    // person most likely to be running it, at every restart.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { clearFactoryGitIdentity } = require('./lib/coding-git-factory-identity')
-    await clearFactoryGitIdentity()
+    const { CLAWBOX_ACCOUNT_HOME, clearFactoryGitIdentity } = require('./lib/coding-git-factory-identity')
+    if (process.env.HOME === CLAWBOX_ACCOUNT_HOME) await clearFactoryGitIdentity()
+    else console.log(`[instrumentation] Not the ${CLAWBOX_ACCOUNT_HOME} account: leaving the global git identity alone`)
   } catch (err) {
     console.error('[instrumentation] Could not clear the factory git identity:', err instanceof Error ? err.message : err)
   }

@@ -55,6 +55,23 @@ export const FACTORY_GIT_IDENTITY = Object.freeze({
   email: "yanko@idrobots.com",
 });
 
+/**
+ * The device account this job is for.
+ *
+ * The web server runs as that user (`config/clawbox-setup.service`:
+ * `User=clawbox`, `ExecStart=/usr/bin/node /home/clawbox/clawbox/…`), and the
+ * identity resolver already floors its HOME at the same path. It is exported
+ * because the BOOT CALL checks it: `register()` runs under `bun run dev` on a
+ * developer's laptop too, and this job removes keys from whatever `~/.gitconfig`
+ * it is pointed at. Ungated, a developer starting the dev server would silently
+ * lose their own global git identity — and the identity it matches belongs to
+ * the person most likely to be running it, who would lose it again at every
+ * restart. The library stays willing to clean any home it is handed, which is
+ * what the tests drive; deciding WHOSE config may be touched is the boot
+ * wiring's business, and it is made there.
+ */
+export const CLAWBOX_ACCOUNT_HOME = "/home/clawbox";
+
 /** The two keys this job looks at, and nothing else in the file. */
 export type FactoryIdentityKey = "user.name" | "user.email";
 
@@ -211,13 +228,14 @@ export function factoryIdentityRemovedLine(key: FactoryIdentityKey, value: strin
  *
  * `budgetMs` bounds the WHOLE call, not each command in it — see
  * FACTORY_IDENTITY_BUDGET_MS. It returns inside that budget with no child of
- * its own still running: every command is awaited, and each is given only what
- * is left, so none can outlive the deadline and none is abandoned.
+ * its own still running: every command is awaited, a READ is given whatever is
+ * left of the budget, and a WRITE is given its full timeout or is not started
+ * at all, so nothing is abandoned and no git is killed mid-rewrite.
  */
 export async function clearFactoryGitIdentity(
   options: { home?: string; log?: (message: string) => void; budgetMs?: number } = {},
 ): Promise<FactoryGitIdentityCleanup> {
-  const home = options.home ?? process.env.HOME ?? "/home/clawbox";
+  const home = options.home ?? process.env.HOME ?? CLAWBOX_ACCOUNT_HOME;
   const log = options.log ?? ((message: string) => console.log(message));
   const budget: Budget = { deadlineAt: Date.now() + (options.budgetMs ?? FACTORY_IDENTITY_BUDGET_MS) };
   const outcomes = {} as Record<FactoryIdentityKey, FactoryIdentityOutcome>;
@@ -247,11 +265,25 @@ export async function clearFactoryGitIdentity(
       continue;
     }
     const value = probe.values[probe.values.length - 1];
-    // Checked BEFORE the write, never in the middle of one: a budget that ran
-    // out is a reason not to start git, and never a reason to walk away from a
-    // `~/.gitconfig` that is being rewritten.
-    const leftToUnset = budgetLeft(budget);
-    if (leftToUnset <= 0) {
+    // A WRITE IS NEVER GIVEN A SHORT TIMEOUT. It gets the whole of
+    // GIT_CONFIG_TIMEOUT_MS or it is not started at all — so the budget can
+    // stop this job, but it can never kill a git that is part-way through
+    // rewriting the file.
+    //
+    // A read cut short is a read that answered nothing; a WRITE cut short is
+    // different in kind. `git config` rewrites through `~/.gitconfig.lock` and
+    // renames it into place, and `runChild` ends an overrun child with SIGKILL,
+    // which runs no cleanup. The rename is atomic so the config itself survives
+    // — but the lock file does too, and measured: with a stale `.gitconfig.lock`
+    // beside it, `git config --global --unset-all user.name` fails with
+    // "could not lock config file" and exit 255, FOREVER. The next boot's retry
+    // hits the same wall. A budget meant to protect boot would have made the
+    // factory identity permanently unremovable on that box.
+    //
+    // Reserving the full slice keeps the bound honest rather than trading it
+    // away: the write only begins when its own timeout still fits inside what
+    // is left, so the call still returns within the budget.
+    if (budgetLeft(budget) < GIT_CONFIG_TIMEOUT_MS) {
       outcomes[key] = "failed";
       const detail = outOfBudgetDetail(key);
       failures.push(detail);
@@ -262,7 +294,7 @@ export async function clearFactoryGitIdentity(
     // ("has multiple values") and would leave the factory identity in place on
     // precisely the config that needs it removed most.
     const unset = await runChild("git", ["config", "--global", "--unset-all", key], {
-      timeoutMs: Math.min(GIT_CONFIG_TIMEOUT_MS, leftToUnset),
+      timeoutMs: GIT_CONFIG_TIMEOUT_MS,
       env: gitEnv(home),
     });
     if (unset.code !== 0 && unset.code !== GIT_NOTHING_TO_UNSET) {
