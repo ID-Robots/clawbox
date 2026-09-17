@@ -223,6 +223,28 @@ export async function register() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { ensureVoiceAutoReplyMode } = require('./lib/voice-reply')
   startTerminalServer()
+  try {
+    // The factory git identity the golden flash image ships in the clawbox
+    // user's own ~/.gitconfig (`yalexx <yanko@idrobots.com>`). Left there, git
+    // layers it under every project that has no identity of its own and the
+    // coding agent's first commit on a freshly flashed box is authored as a
+    // member of staff — see src/lib/coding-git-factory-identity.ts.
+    //
+    // HERE, and AWAITED, for one reason: Next awaits `register()` before this
+    // server answers its first request, and the coding agent lives in this
+    // server — so there is no run, and no commit, that can reach git before the
+    // value is gone. It is two `git config` reads on a box that is already
+    // clean, which is every boot after the first. It runs on every update too,
+    // because an update restarts clawbox-setup.service.
+    //
+    // Never rejects — see its own docblock — and wrapped anyway: a box must
+    // boot whatever git says, and the next boot tries again.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { clearFactoryGitIdentity } = require('./lib/coding-git-factory-identity')
+    await clearFactoryGitIdentity()
+  } catch (err) {
+    console.error('[instrumentation] Could not clear the factory git identity:', err instanceof Error ? err.message : err)
+  }
   // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
   // for why they must not run together. Never awaited: boot goes on. Never
   // rejects: every step inside catches for itself.
