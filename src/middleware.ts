@@ -9,6 +9,7 @@ import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 import { isSetupApiPath } from "@/lib/clawbox-namespaces";
 import { UPDATE_LOCK_HEADER, UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
+import { isAllowedRequestHost, misdirectedRequestBody, requestHostHeader } from "@/lib/host-guard";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -450,6 +451,48 @@ export async function middleware(request: NextRequest) {
     return new NextResponse(
       "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
       { status: 200, headers: { "Content-Type": "text/html" } }
+    );
+  }
+
+  // 1a. The Host allow-list — DNS rebinding (TASK-809).
+  //
+  // Everything below authenticates a request; nothing below asks what NAME it
+  // was addressed to. A page on `evil.example` that re-points its own DNS at
+  // this box gets the box's ORIGIN the moment the browser re-resolves. It does
+  // NOT get the owner's session — `clawbox_session` carries no `Domain`, so it
+  // is host-only and the browser keeps sending it to the name the owner typed.
+  // What it gets is same-origin READ of everything served without a cookie —
+  // the bootstrap `/setup-api` window on an unfinished or freshly reset box,
+  // the public gateway assets, a public webapp, an `/apps/<id>/` proxy — and
+  // `isSameOriginRequest()`, which compares Origin against this very Host and
+  // so cannot tell the rebound page from ours. src/lib/host-guard.ts holds the
+  // one allow-list (shared with the gateway proxy's reflection decision, and
+  // wider than it) and the `HOST_GUARD=off` recovery escape.
+  //
+  // AFTER the captive-portal block above, and only after it. A current box runs
+  // no DNS hijack — scripts/start-ap.sh answers only `clawbox.local` and
+  // install.sh's step_captive_portal_dns REMOVES the catch-all because it broke
+  // internet for hotspot clients — so a probe for a foreign name does not reach
+  // this box today, and the guard does not break the SoftAP wizard (a client on
+  // the AP arrives on `clawbox.local` or the AP address, both admitted). The
+  // ordering is defensive: if the hijack is ever restored, those probes are the
+  // one class of request that arrives with a foreign Host BY DESIGN and must
+  // still be answered with the portal redirect. Everything else that reaches
+  // here on a name the box does not know is misdirected, and 421 is the status
+  // that says exactly that.
+  if (!isAllowedRequestHost(request.headers, request.nextUrl.host)) {
+    return new NextResponse(
+      misdirectedRequestBody(requestHostHeader(request.headers, request.nextUrl.host)),
+      {
+        status: 421,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+          // The body echoes a caller-supplied name; never let a browser sniff
+          // it into anything but text.
+          "X-Content-Type-Options": "nosniff",
+        },
+      }
     );
   }
 

@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasOwnerSession } from "./owner-session";
 import fs from "fs/promises";
-import os from "os";
-import net from "net";
 import crypto from "crypto";
-import { statSync } from "node:fs";
 import { envPort } from "./port-probe";
 import {
-  loadConfiguredOrigins,
-  normalizeOrigin,
-  resolveOriginsPath,
-} from "./control-ui-origins";
+  CANONICAL_ORIGIN,
+  isConfiguredOrigin,
+  isReflectableHost,
+  requestProto,
+} from "./host-guard";
 import { controlUiEmailDirectiveScript, controlUiLocale } from "./control-ui-email-directives";
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
@@ -20,117 +18,16 @@ const OPENCLAW_CONFIG_PATH = `${
   || `${process.env.HOME ?? "/home/clawbox"}/.openclaw`
 }/openclaw.json`;
 
-const ALLOWED_PROTOS = new Set(["http", "https"]);
-const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";
-const ALLOWED_HOSTS = new Set(
-  (process.env.ALLOWED_HOSTS || "clawbox.local,10.42.0.1,10.43.0.1,localhost")
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter(Boolean)
-);
-
-// Single hostname label — letters/digits/hyphens, no dots, no leading/trailing
-// hyphen. It validates the nodename's first label below, and we append `.local`
-// to that ourselves; allowing dots in the input would let a host header like
-// `evil..local` slip through host comparison. Same regex as MDNS_LABEL_RE in
-// scripts/hermes-dashboard-proxy.js, and as HOSTNAME_RE in the rename route, so
-// every name a rename can produce is a label all three accept.
-const MDNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-
-// The names this box calls itself, from the kernel's nodename: the BARE hostname
-// and its `<label>.local` form. The bare one is what this missed — a router that
-// registers the DHCP hostname, or a LAN with a DNS search domain, serves the
-// desktop on `http://clawbox/`, and reflecting `clawbox.local` at that browser
-// is the same dead end the rename case was. TASK-808. The LAN-domain form
-// (`clawbox.lan`) is deliberately not derived, for the reason written out beside
-// systemHostname() in scripts/hermes-dashboard-proxy.js: the DHCP search domain
-// is not ours to trust. Reflection here also stays narrower than that proxy's
-// guard — this box's two names or a configured origin, never any `<label>.local`.
-//
-// Read per call, never cached for the process lifetime: a rename applies
-// `hostnamectl set-hostname` without restarting this server, so a name captured
-// at first use would reflect the old one for the rest of the process's life.
-function systemHostnames(): string[] {
-  let label: string;
-  try {
-    // A nodename carrying a domain (`clawbox.lan`) still yields `clawbox`.
-    label = os.hostname().trim().toLowerCase().split(".")[0];
-  } catch {
-    return [];
-  }
-  if (!MDNS_LABEL_RE.test(label)) return [];
-  return [label, `${label}.local`];
-}
-
-// Without renamed-host support, ALLOWED_HOSTS was frozen to `clawbox.local`
-// at install time, so any rename bounced the user to a NXDOMAIN page when
-// the gateway was busy and we fell back to CANONICAL_ORIGIN.
-function isReflectableHost(rawHost: string): boolean {
-  if (ALLOWED_HOSTS.has(rawHost)) return true;
-  if (net.isIPv4(rawHost)) return true;
-  // Last, so a listed name or a LAN IP is answered without the uname(2) call.
-  if (systemHostnames().includes(rawHost)) return true;
-  return false;
-}
-
-// Trusted control UI origins — a narrow escape hatch for genuinely
-// cross-origin/custom-origin deployments (see control-ui-origins.ts and
-// README). Unlike isReflectableHost() above (host-only, scheme/port-
-// agnostic), a configured origin must match EXACTLY: scheme, host, and
-// port (including a non-default port) all have to agree with an entry in
-// the configured list. A configured hostname does not get reflected on a
-// different scheme or port than what was configured.
-interface ConfiguredOriginState {
-  origins: Set<string>;
-  hosts: Set<string>;
-}
-
-let cachedConfiguredOrigins: ConfiguredOriginState | undefined;
-let cachedConfiguredOriginsSignature: string | undefined;
-
-function configuredOriginsSignature(path: string): string {
-  try {
-    const stat = statSync(path, { bigint: true });
-    return `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-  } catch {
-    return `${path}:missing`;
-  }
-}
-
-function getConfiguredOrigins(): ConfiguredOriginState {
-  const path = resolveOriginsPath();
-  const signature = configuredOriginsSignature(path);
-  if (
-    cachedConfiguredOrigins !== undefined &&
-    cachedConfiguredOriginsSignature === signature
-  ) {
-    return cachedConfiguredOrigins;
-  }
-
-  const { origins, warnings } = loadConfiguredOrigins(path);
-  for (const warning of warnings) {
-    console.warn(`[gateway-proxy] ${warning}`);
-  }
-  cachedConfiguredOrigins = {
-    origins: new Set(origins),
-    hosts: new Set(origins.map((origin) => new URL(origin).hostname.toLowerCase())),
-  };
-  cachedConfiguredOriginsSignature = signature;
-  return cachedConfiguredOrigins;
-}
-
-function isConfiguredOrigin(proto: string, hostHeader: string): boolean {
-  const { origin } = normalizeOrigin(`${proto}://${hostHeader}`);
-  return origin !== null && getConfiguredOrigins().origins.has(origin);
-}
+// Which hosts this proxy will REFLECT back into a redirect, the trusted
+// control-UI origins beside them and CANONICAL_ORIGIN itself all live in
+// src/lib/host-guard.ts — one guard, shared with src/middleware.ts, which
+// refuses every other Host outright (TASK-809). The policy here is unchanged: a
+// listed host, a LAN IPv4 or this box's own name reflects on any scheme and
+// port, while a configured origin has to match scheme + host + port EXACTLY.
+// The middleware's own list is WIDER than this one — see host-guard.ts.
 
 export function redirectToSetup(request: NextRequest): NextResponse {
-  const rawProto = request.headers.get("x-forwarded-proto");
-  const proto =
-    rawProto
-      ?.split(",")
-      .map((t) => t.trim().toLowerCase())
-      .find((t) => ALLOWED_PROTOS.has(t)) ?? "http";
+  const proto = requestProto(request.headers);
   const hostHeader = request.headers.get("host");
   const rawHost = hostHeader?.toLowerCase().replace(/:\d+$/, "");
   const exactConfiguredMatch =

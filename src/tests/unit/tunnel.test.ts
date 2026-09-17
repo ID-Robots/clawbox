@@ -33,11 +33,13 @@ vi.mock("child_process", () => ({
 const serviceStateMock = vi.fn(async () => "inactive");
 const unitUrlMock = vi.fn(async () => null as string | null);
 const journalUrlMock = vi.fn(async () => null as string | null);
+const recordRecoveredMock = vi.fn(async (url: string) => void url);
 
 vi.mock("@/lib/cloudflared", () => ({
   getTunnelServiceState: () => serviceStateMock(),
   readTunnelUrl: () => unitUrlMock(),
   readTunnelUrlFromJournal: () => journalUrlMock(),
+  recordRecoveredTunnelUrl: (url: string) => recordRecoveredMock(url),
 }));
 
 let tunnel: typeof import("@/lib/tunnel");
@@ -66,6 +68,7 @@ beforeEach(async () => {
   unitUrlMock.mockResolvedValue(null);
   journalUrlMock.mockReset();
   journalUrlMock.mockResolvedValue(null);
+  recordRecoveredMock.mockReset();
 });
 
 describe("tunnel — state persistence", () => {
@@ -260,6 +263,46 @@ describe("tunnel — getTunnelStatus", () => {
     const status = await tunnel.getTunnelStatus();
     expect(status.managedBy).toBe("spawned");
     expect(status.tunnelUrl).toBe("https://spawned.trycloudflare.com");
+  });
+});
+
+describe("tunnel — a hostname only the journal knows is written back (TASK-809)", () => {
+  /**
+   * `tunnel.url` is what src/lib/host-guard.ts reads to decide whether the box
+   * ANSWERS on the public hostname. scripts/run-tunnel.sh only captures a URL
+   * while that file is still empty, so a URL announced after a truncated write —
+   * or by a cloudflared started by hand — existed nowhere but the journal: the
+   * panel showed the owner an address the box then refused with a 421.
+   */
+  it("writes the recovered URL back to the file the rest of the box reads", async () => {
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue(null);
+    journalUrlMock.mockResolvedValue("https://recovered-name.trycloudflare.com");
+
+    const status = await tunnel.getTunnelStatus();
+
+    expect(status.tunnelUrl).toBe("https://recovered-name.trycloudflare.com");
+    expect(recordRecoveredMock).toHaveBeenCalledWith("https://recovered-name.trycloudflare.com");
+  });
+
+  it("does not rewrite the file when it already answered", async () => {
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue("https://from-the-file.trycloudflare.com");
+
+    const status = await tunnel.getTunnelStatus();
+
+    expect(status.tunnelUrl).toBe("https://from-the-file.trycloudflare.com");
+    expect(journalUrlMock).not.toHaveBeenCalled();
+    expect(recordRecoveredMock).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing while the unit is stopped, so a retired hostname stays refused", async () => {
+    serviceStateMock.mockResolvedValue("inactive");
+    journalUrlMock.mockResolvedValue("https://retired-name.trycloudflare.com");
+
+    await tunnel.getTunnelStatus();
+
+    expect(recordRecoveredMock).not.toHaveBeenCalled();
   });
 });
 

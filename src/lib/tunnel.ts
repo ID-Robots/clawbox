@@ -14,6 +14,7 @@ import {
   getTunnelServiceState,
   readTunnelUrl,
   readTunnelUrlFromJournal,
+  recordRecoveredTunnelUrl,
 } from "@/lib/cloudflared";
 
 const execAsync = promisify(exec);
@@ -29,7 +30,9 @@ const DATA_DIR =
   join(process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox", "data");
 const TUNNEL_STATE_FILE = join(DATA_DIR, "tunnel-state.json");
 const TUNNEL_PID_FILE = join(DATA_DIR, "tunnel.pid");
-const TUNNEL_URL_FILE = join(DATA_DIR, "tunnel-url.txt");
+/** The spawned tunnel's URL file. Exported so src/lib/host-guard.ts's copy of the
+ *  path cannot drift from it — see the drift test in src/tests/unit/host-guard.test.ts. */
+export const TUNNEL_URL_FILE = join(DATA_DIR, "tunnel-url.txt");
 
 export interface TunnelState {
   enabled: boolean;
@@ -143,7 +146,17 @@ export async function getTunnelStatus(): Promise<TunnelStatus> {
 
   let tunnelUrl: string | null = null;
   if (serviceRunning) {
-    tunnelUrl = (await readTunnelUrl()) ?? (await readTunnelUrlFromJournal());
+    tunnelUrl = await readTunnelUrl();
+    if (!tunnelUrl) {
+      tunnelUrl = await readTunnelUrlFromJournal();
+      // Heal the file the rest of the box reads. Until TASK-809 this only cost
+      // the status panel a slower answer; now src/lib/host-guard.ts decides
+      // whether the box ANSWERS on that hostname from the same file, so a live
+      // tunnel whose URL exists only in the journal would be shown to the owner
+      // and then refused with a 421. Fire-and-forget: the status is already
+      // correct without it.
+      if (tunnelUrl) void recordRecoveredTunnelUrl(tunnelUrl);
+    }
   }
   if (!tunnelUrl && spawnedRunning) tunnelUrl = await getTunnelUrl();
 

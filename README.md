@@ -303,13 +303,36 @@ bun run test             # Unit tests (Vitest)
 | `GATEWAY_PORT` | `18789` | OpenClaw gateway port |
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
 | `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
-| `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Trusted hostnames |
+| `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Names the box answers to (see below) |
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
 | `CLAWBOX_CONTROL_UI_ORIGINS_FILE` | `/home/clawbox/clawbox/data/control-ui-origins.json` | Extra trusted control UI origins (see below) |
 
 Additional options (OAuth client IDs, ClawBox AI, llama.cpp tuning) live in `.env.example`.
+
+#### Which names the box answers to
+
+`ALLOWED_HOSTS` is not only a reflection hint: a request whose `Host` header is
+not a name this box answers to is refused with **421 Misdirected Request**, so
+that a page which re-points its own DNS at the box cannot borrow the box's
+origin (DNS rebinding).
+
+Answered without any configuration: everything in `ALLOWED_HOSTS`, any IP
+address, the box's own hostname (bare and `<hostname>.local`, re-read on every
+request so a rename takes effect at once), a Tailscale `.ts.net` name, the
+`CANONICAL_ORIGIN` host, and the public `*.trycloudflare.com` hostname while
+Remote Access is on. Anything else needs an entry in
+`data/control-ui-origins.json` (below) or in `ALLOWED_HOSTS`.
+
+A name served only by a DHCP search domain (`clawbox.lan`, `clawbox.fritz.box`)
+is deliberately **not** answered: that name comes from the network's DHCP
+server, not from the box, so honouring it would let whoever runs the network
+nominate a rebind target. Use `clawbox.local`, the box's IP, or add the origin
+to `data/control-ui-origins.json`.
+
+If a device is ever unreachable because of this, the refusal page names the
+addresses that do work.
 
 #### Trusted control UI origins
 

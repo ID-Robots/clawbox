@@ -46,6 +46,34 @@ export async function readTunnelUrl(): Promise<string | null> {
   }
 }
 
+/**
+ * Write a recovered hostname back into `tunnel.url`.
+ *
+ * The file is the ONE place the rest of the app — and now the Host allow-list in
+ * src/lib/host-guard.ts, which decides whether the box answers on that name at
+ * all — reads the live public hostname from. `scripts/run-tunnel.sh` writes it
+ * on startup and only while it is still empty, so a URL the unit announced after
+ * a truncated write, or one from a cloudflared started by hand outside the
+ * script, never reaches it: the journal was the only record, and the box then
+ * refused the very address the Remote Access panel was showing.
+ *
+ * Called only when the unit is RUNNING and the file could not answer, so the
+ * "removed on stop" semantics that keep a retired hostname refused are intact.
+ * Never throws: this is a repair, not the caller's job.
+ */
+export async function recordRecoveredTunnelUrl(url: string): Promise<void> {
+  if (!TUNNEL_URL_PATTERN.test(url)) return;
+  try {
+    await fs.mkdir(CLOUDFLARED_DIR, { recursive: true });
+    await fs.writeFile(TUNNEL_URL_FILE, `${url.replace(/\/+$/, "")}\n`);
+  } catch (err) {
+    console.warn(
+      "[cloudflared] could not write the recovered tunnel URL to tunnel.url:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 export interface TunnelUrlRecord {
   /** ISO-8601 UTC timestamp of when the URL was published. */
   at: string;
