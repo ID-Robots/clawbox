@@ -69,7 +69,9 @@ import {
   CLAWBOX_AI_LEGACY_IMAGE_PROVIDER,
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
+  clawboxAiNonChatModelReason,
   isClawboxAiImageModelRef,
+  isClawboxAiNonChatModelRef,
   CLAWBOX_AI_VISION_MODEL_ID,
   clawboxAiVisionModelRef,
   CLAWBOX_AI_VISION_MODEL_LABEL,
@@ -2794,23 +2796,24 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
     }
 
-    // The ClawBox AI image entry, judged on the same settled value —
-    // `isClawboxAiImageModelRef` answers for the current ref AND the
-    // `openai/…` one every box in the field still carries. `isValidModelId` is
-    // shape-only, so `gpt-image-1-mini` typed into the OpenAI panel's
-    // custom-model field was written as `openai/gpt-image-1-mini` and every
-    // turn afterwards failed. The entry no longer declares a `models[]` row at
-    // all (see the docblock in src/lib/clawbox-ai-models.ts), so
-    // this door and /setup-api/chat/model's are the wall, not a backstop — and
-    // they are for ids that arrive ANY other way: typed here, or already
-    // pinned by an older build.
-    if (isClawboxAiImageModelRef(config.defaultModel)) {
+    // The ClawBox AI image LANE, judged on the same settled value —
+    // `isClawboxAiNonChatModelRef` answers for the image ref on the current
+    // AND the legacy provider id, and for any other model on the current one.
+    // `isValidModelId` is shape-only, so `gpt-image-1-mini` typed into the
+    // OpenAI panel's custom-model field was written as
+    // `openai/gpt-image-1-mini` and every turn afterwards failed. The entry
+    // declares no `models[]` row of its own, but the bundled litellm plugin
+    // ships a chat catalog on that id whatever we write (see the docblock in
+    // src/lib/clawbox-ai-models.ts), so this door and /setup-api/chat/model's
+    // are ClawBox's whole wall — for ids that arrive ANY way: typed here,
+    // pinned by an older build, or picked from OpenClaw's own surfaces.
+    if (isClawboxAiNonChatModelRef(config.defaultModel)) {
       // Names the fix, not just the refusal: this id can reach here from a box
       // an older build pinned to it, and an owner who never typed it needs to
       // be told which control to change.
       return NextResponse.json(
         {
-          error: `${settledModelId} is the ClawBox AI image model, not a chat model. Pick a chat model from the Model list and save again.`,
+          error: `${clawboxAiNonChatModelReason(config.defaultModel)} Pick a chat model from the Model list and save again.`,
         },
         { status: 400 },
       );

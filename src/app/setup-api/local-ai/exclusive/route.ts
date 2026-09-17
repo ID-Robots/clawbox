@@ -23,7 +23,7 @@ import {
 import { CONFIG_BUSY_ERROR_CODE, isConfigMutationConflict } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
-import { isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
+import { clawboxAiNonChatModelReason, isClawboxAiNonChatModelRef } from "@/lib/clawbox-ai-models";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
@@ -467,26 +467,30 @@ export async function POST(request: Request) {
       // enables for every provider the restore names ride first, in the same
       // batch, and a refused batch leaves the flag and both lists as they were
       // (src/lib/provider-plugin-ops.ts).
-      // The ClawBox AI image entry can never be a chat model, and this route is
+      // The ClawBox AI image LANE can never be a chat model, and this route is
       // the THIRD writer of agents.defaults.model.primary — the one that
       // passes through neither guarded door. A box mis-pinned to it that
       // toggles Local-only on, recovers, then toggles Local-only off was
       // re-pinned from this snapshot, silently undoing the repair. Dropped on
       // the way out rather than on the way in, so a snapshot already on disk
-      // is covered too.
-      const restorablePrimary = savedPrimary && !isClawboxAiImageModelRef(savedPrimary) ? savedPrimary : undefined;
+      // is covered too — including one taken while the box was pinned to a
+      // `litellm/*` chat row OpenClaw's own picker offered.
+      const restorablePrimary = savedPrimary && !isClawboxAiNonChatModelRef(savedPrimary) ? savedPrimary : undefined;
       if (savedPrimary && !restorablePrimary) {
         // Dropping it is right; reporting the toggle as a plain success is
         // not. With no primary op the box stays on the local model while the
         // panel paints the switch off, and the owner believes cloud routing
         // is back — the same "claiming a state it does not have" this
         // handler's 503 branch below exists to avoid.
+        // The reason comes from the one place that words it, so a snapshot
+        // holding the image model and one holding another row on the image
+        // lane's provider are each named for what they are.
         warnings.push(
-          "The saved provider could not be restored (it was the ClawBox AI image model, which cannot chat) — the box is still on the local model. Pick a chat model in Settings.",
+          `The saved provider could not be restored — ${clawboxAiNonChatModelReason(savedPrimary)} The box is still on the local model. Pick a chat model in Settings.`,
         );
       }
       const keptFallbacks = Array.isArray(savedFallbacks)
-        ? savedFallbacks.filter((ref) => !isClawboxAiImageModelRef(ref))
+        ? savedFallbacks.filter((ref) => !isClawboxAiNonChatModelRef(ref))
         : savedFallbacks;
       const restoreFallbacks = Array.isArray(keptFallbacks) && keptFallbacks.length > 0 ? keptFallbacks : null;
       const restoreOps: OpenclawConfigSetArgs[] = [

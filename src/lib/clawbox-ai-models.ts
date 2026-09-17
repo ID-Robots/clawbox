@@ -363,10 +363,18 @@ export function portalDeniesClawboxAiModel(
  *
  * `litellm` is a BUNDLED overlay id (`isBuiltInModelProviderOverlayId`), so the
  * entry does not have to declare `models[]` the way a custom provider id would
- * — and deliberately does not: a `models[]` row here would put
- * `litellm/gpt-image-1-mini` into the core's own chat pickers, which is the
- * exposure the `openai` row already had and the one thing this move gets to
- * drop for free.
+ * — and deliberately does not: a `models[]` row here would be a SECOND chat row
+ * on this id, on top of the one the plugin ships (see the note below).
+ *
+ * WHY THIS ID AND NOT ANOTHER. It is the only bundled image-generation provider
+ * on 2026.9.3 that is a generic OpenAI-compatible endpoint taking an explicit
+ * `baseUrl`. Every other one registers an image provider with an API shape of
+ * its own — `comfy` runs a ComfyUI workflow, `vydra` its own generation call,
+ * `fal`, `openrouter`, `google`, `xai`, `deepinfra`, `minimax` and
+ * `microsoft-foundry` each their own — and none of them posts
+ * `{baseUrl}/images/generations` with `req.model` passed through, which is what
+ * the ClawBox AI proxy serves. So there is no chat-free id to move to; the
+ * residual below is the price of the only id that works.
  */
 export const CLAWBOX_AI_IMAGE_PROVIDER = "litellm" as const;
 
@@ -409,7 +417,7 @@ export const CLAWBOX_AI_IMAGE_MODEL = `${CLAWBOX_AI_IMAGE_PROVIDER}/${CLAWBOX_AI
 export const CLAWBOX_AI_LEGACY_IMAGE_MODEL = `${CLAWBOX_AI_LEGACY_IMAGE_PROVIDER}/${CLAWBOX_AI_IMAGE_MODEL_ID}`;
 
 /*
- * WHERE THE CHAT-PICKER EXPOSURE WENT.
+ * THE CHAT-PICKER EXPOSURE: STILL OPEN, ON A NEW PROVIDER ID.
  *
  * Until this build the image model was a `models.providers.openai.models[]` row
  * with a per-model `baseUrl`, and that row was offerable as a CHAT model by
@@ -426,15 +434,49 @@ export const CLAWBOX_AI_LEGACY_IMAGE_MODEL = `${CLAWBOX_AI_LEGACY_IMAGE_PROVIDER
  * openai/gpt-image-1-mini` was accepted. Nor was there a flag to close it — the
  * row schema is `.strict()` with no status/disabled field.
  *
- * The `litellm` entry writes NO row at all (the generic OpenAI-compatible image
- * provider takes the provider-level `baseUrl` and passes `req.model` through),
- * so there is no configured key to be exempt and nothing for a picker to offer.
- * ClawBox's own refusals stay where they are — the chat dropdown's row builder
- * skips this id and all three writers of `agents.defaults.model.primary` refuse
- * it, for BOTH refs — because a box carries the old ref until its migration has
- * run, and because an id can still be typed into a custom-model field.
+ * The `litellm` entry writes no row of its own, but that does NOT close the
+ * exposure — it moves it, and the move is lateral. The bundled plugin registers
+ * a CHAT provider as well as an image one, from a single `register()`
+ * (`extensions/litellm/index.ts` at v2026.9.3:
+ * `api.registerProvider({ id: "litellm", catalog: …, staticCatalog: … })` AND
+ * `api.registerImageGenerationProvider(…)`), and its chat catalog needs no row
+ * from us because it ships its own: `buildLitellmProvider()` returns
+ * `{ baseUrl, api: "openai-completions", models: [buildLitellmModelDefinition()] }`,
+ * which is `claude-opus-4-6` / "Claude Opus 4.6" / 1M context / reasoning
+ * (`extensions/litellm/onboard.ts`). The catalog's bearer is
+ * `ctx.resolveProviderApiKey("litellm")` — the `claw_` portal token this build
+ * writes at `models.providers.litellm.apiKey` — so once the plugin is armed
+ * (naming `litellm/…` in `agents.defaults.mediaModels.image` is what arms it,
+ * `collectConfiguredGenerationProviderIds`), `openclaw models list`, the
+ * Control UI picker, `openclaw models set` and Telegram `/model` all offer
+ * `litellm/claude-opus-4-6` with `Auth: yes`, and live discovery POSTs
+ * `<baseUrl>/v1/models` with that token and registers whatever comes back as
+ * further `litellm/*` chat rows.
  *
- * The two predicates below are what those refusals are built from.
+ * HARNESS FINDING, recorded rather than described as closed — the same way the
+ * `openai` era's was. OpenClaw offers no flag that hides a provider from its own
+ * chat pickers while leaving its image half registered: the row schema is
+ * `.strict()` with no status/disabled field, a bundled plugin's catalog is
+ * declared in the plugin rather than in config, and the plugin cannot be
+ * disabled without disabling the image generation this entry exists for. So the
+ * residual is REAL: a model picked from one of OpenClaw's OWN surfaces can
+ * still point the box's chat at the ClawBox AI proxy asking for a model it does
+ * not serve.
+ *
+ * What ClawBox can do, and now does, is refuse it on every surface of its own —
+ * the chat dropdown's row builder and all three writers of
+ * `agents.defaults.model.primary` — and refuse it by PROVIDER ID rather than by
+ * this one image ref, because `litellm/claude-opus-4-6` and whatever discovery
+ * turns up are the same hazard as `litellm/gpt-image-1-mini`: on this box that
+ * id is the image lane, never a chat provider. The legacy `openai/…` ref stays
+ * an exact-ref refusal, since `openai` IS a chat provider here.
+ *
+ * NOT VERIFIED ON A BOX. The command that settles the residual is
+ * `openclaw models list --provider litellm --all --json` after the migration;
+ * no box was available when this was written (the owner's OpenClaw box was in
+ * factory state). The claims above are read from the core at v2026.9.3.
+ *
+ * The three predicates below are what those refusals are built from.
  */
 
 /**
@@ -495,6 +537,55 @@ export function isClawboxAiImageModelRef(ref: unknown): boolean {
     normalized === CLAWBOX_AI_IMAGE_MODEL.toLowerCase() ||
     normalized === CLAWBOX_AI_LEGACY_IMAGE_MODEL.toLowerCase()
   );
+}
+
+/**
+ * Is `ref` on the provider id ClawBox parks the image entry under?
+ *
+ * ANY model on it — `litellm/claude-opus-4-6` from the bundled plugin's own
+ * static catalog, anything its live discovery returns from
+ * `<baseUrl>/v1/models`, the image id itself. On this box that provider entry
+ * is the ClawBox AI image lane and nothing else: its `baseUrl` is the image
+ * proxy and its `apiKey` is the portal token, so a chat turn addressed there
+ * asks a picture endpoint for a conversation.
+ *
+ * Deliberately NOT applied to {@link CLAWBOX_AI_LEGACY_IMAGE_PROVIDER}
+ * (`openai`), which is a real chat provider on this box — that one stays an
+ * exact-ref question.
+ */
+export function isClawboxAiImageProviderRef(ref: unknown): boolean {
+  if (typeof ref !== "string") return false;
+  const prefix = `${CLAWBOX_AI_IMAGE_PROVIDER.toLowerCase()}/`;
+  const normalized = ref.trim().toLowerCase();
+  return normalized.startsWith(prefix) && normalized.length > prefix.length;
+}
+
+/**
+ * Is `ref` one ClawBox refuses to write into a CHAT slot?
+ *
+ * The REFUSAL predicate, as against {@link isClawboxAiImageModelRef}, which is
+ * the CLAIM one ("this slot is ours to move"). The two are different questions
+ * and must stay apart: the migration may only claim a slot it recognises as its
+ * own write, while a refusal has to cover every ref on the image lane's
+ * provider id — see the note above `CLAWBOX_AI_PROXY_URLS`.
+ */
+export function isClawboxAiNonChatModelRef(ref: unknown): boolean {
+  return isClawboxAiImageModelRef(ref) || isClawboxAiImageProviderRef(ref);
+}
+
+/**
+ * Why a ref was refused, in the customer's terms.
+ *
+ * Two sentences, because the two cases have different facts: the image model
+ * itself is "that is the picture model", while another row on the image lane's
+ * provider id is "that provider is not a chat provider on this box". One place,
+ * so the three writers and the picker cannot word the same refusal three ways.
+ */
+export function clawboxAiNonChatModelReason(ref: string): string {
+  const modelId = ref.includes("/") ? ref.slice(ref.indexOf("/") + 1) : ref;
+  return isClawboxAiImageModelRef(ref)
+    ? `${modelId} is the ClawBox AI image model, not a chat model.`
+    : `${CLAWBOX_AI_IMAGE_PROVIDER} is this box's ClawBox AI image provider, not a chat provider.`;
 }
 
 /* ---------------------------------------------------------------------------

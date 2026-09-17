@@ -2271,7 +2271,11 @@ CLAWBOX_IMAGE_MODEL_ID = "gpt-image-1-mini"
 # for the whole provider and filter every subscription profile out of it, so a
 # ChatGPT (Codex) sign-in on the same box is never even considered and its turns
 # 401 against api.openai.com. See CLAWBOX_AI_IMAGE_PROVIDER in
-# src/lib/clawbox-ai-models.ts for the measured chain.
+# src/lib/clawbox-ai-models.ts for the measured chain — and, above
+# CLAWBOX_AI_PROXY_URLS in the same file, the residual this move does NOT close:
+# the bundled litellm plugin publishes a chat catalog on this id too, so
+# OpenClaw's own pickers offer `litellm/*` as a chat model once the credential
+# here arms the plugin.
 CLAWBOX_IMAGE_PROVIDER = "litellm"
 CLAWBOX_LEGACY_IMAGE_PROVIDER = "openai"
 CLAWBOX_IMAGE_MODEL_REF = CLAWBOX_IMAGE_PROVIDER + "/" + CLAWBOX_IMAGE_MODEL_ID
@@ -2609,9 +2613,14 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             # Provider-level, not a per-model row: the generic OpenAI-compatible
             # image provider reads `models.providers.<id>.baseUrl` and passes
             # `req.model` through untouched, so the row the `openai` entry needed
-            # has no job here — and writing one would put
-            # `litellm/gpt-image-1-mini` into the core's own chat pickers, which
-            # is the exposure the old row had.
+            # has no job here, and writing one would add a SECOND chat row on an
+            # id that already carries one. Writing none does NOT close the
+            # chat-picker exposure — the bundled litellm plugin registers a chat
+            # provider beside the image one and ships its own catalog row
+            # (`claude-opus-4-6`), which the core's pickers offer with `Auth:
+            # yes` once this credential is here. See the residual recorded above
+            # CLAWBOX_AI_PROXY_URLS in src/lib/clawbox-ai-models.ts; ClawBox
+            # refuses the whole provider id on its own surfaces.
             if image_provider.get("baseUrl") != _image_base_url:
                 image_provider["baseUrl"] = _image_base_url
                 changed = True
@@ -2863,8 +2872,8 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         else:
             # Our own leftover rows from the `openai` era have no home on this
             # provider — the generic image provider reads the entry's baseUrl and
-            # never a row — and a row here would put `litellm/gpt-image-1-mini`
-            # into the core's own chat pickers. Ours only, by
+            # never a row — and a row here would be a second chat row on an id
+            # the bundled plugin already publishes one for. Ours only, by
             # `_is_our_image_row`; anything else on this entry was refused as a
             # foreign route long before here.
             _image_rows = image_provider.get("models")

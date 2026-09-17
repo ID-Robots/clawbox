@@ -46,7 +46,11 @@ import {
   forgetClawboxAiPickIfMovedOff,
   recordExplicitModelPick,
 } from "@/lib/explicit-model-pick";
-import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
+import {
+  clawboxAiNonChatModelReason,
+  isClawboxAiImageModelId,
+  isClawboxAiNonChatModelRef,
+} from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   CHATGPT_PROVIDER,
@@ -565,11 +569,15 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   ) => {
     const trimmedModel = typeof model === "string" ? canonicalChatModel(model.trim()) : "";
     if (!trimmedModel || isLocalModel(trimmedModel)) return;
-    // The ClawBox AI image entry, written as the primary by an older build,
-    // must not own the provider's row: the profile loop below then picks a
-    // model the box can chat with instead. Only the image id — a remembered
-    // chat model the curated list omits is still what the gateway runs.
-    if (isClawboxAiImageModelRef(trimmedModel)) return;
+    // The ClawBox AI image LANE, written as the primary by an older build or
+    // picked from one of OpenClaw's own surfaces, must not own a provider's
+    // row: the profile loop below then picks a model the box can chat with
+    // instead. The image ref on either provider id, and any other model on the
+    // image provider id — the bundled litellm plugin ships a chat catalog of
+    // its own on that id and the box cannot run a word of it (see
+    // `isClawboxAiImageProviderRef`). A remembered chat model the curated list
+    // omits is still what the gateway runs.
+    if (isClawboxAiNonChatModelRef(trimmedModel)) return;
     const provider = normalizeProvider(providerHint ?? uiProviderForModel(trimmedModel));
     if (!provider) return;
     if (configuredPrimaryOptions.has(provider)) return;
@@ -632,14 +640,14 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     );
 
     let model: string | null = null;
-    // `!isClawboxAiImageModelRef` matters here, not only in the filter above:
+    // `!isClawboxAiNonChatModelRef` matters here, not only in the filter above:
     // this branch wins whenever the primary belongs to this provider, so on
     // the very boxes the image guard exists for it took the image ref, handed
     // it to `rememberPrimaryOption`, and had it dropped there — leaving the
     // provider with no row until the hard-coded fallback far below invented
     // one. Treating an image-ref primary as "no active model for this
     // provider" is what lets the owner's configured rows be consulted.
-    if (activeModel && !isClawboxAiImageModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
+    if (activeModel && !isClawboxAiNonChatModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
       model = activeModel;
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
@@ -1042,12 +1050,15 @@ export async function POST(request: Request) {
           return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
         }
         // The door the picker does not stand in front of: the ClawBox AI
-        // image entry is a valid-SHAPED `openai/*` id on every paired box, and
-        // written as the primary it fails every chat turn. Only that id — this
-        // door deliberately takes chat ids the curated list omits.
-        if (isClawboxAiImageModelRef(requestedModel)) {
+        // image entry is a valid-SHAPED id on every paired box, and written as
+        // the primary it fails every chat turn. By PROVIDER for the image
+        // lane's own id, because OpenClaw's pickers offer the bundled litellm
+        // plugin's chat rows on it once the image half arms the plugin, and
+        // this door is where such a pick arrives. Nothing wider — it
+        // deliberately takes chat ids the curated list omits.
+        if (isClawboxAiNonChatModelRef(requestedModel)) {
           return NextResponse.json(
-            { error: `${parsed.modelId} is the ClawBox AI image model, not a chat model.` },
+            { error: clawboxAiNonChatModelReason(requestedModel) },
             { status: 400 },
           );
         }
@@ -1257,9 +1268,9 @@ export async function POST(request: Request) {
     // because `rememberPrimaryOption` and the `models[]` filter keep the ref
     // out of `state.options`, which is exactly the "guard that holds because
     // of a condition two functions away" this block was written to avoid.
-    if (isClawboxAiImageModelRef(targetModel)) {
+    if (isClawboxAiNonChatModelRef(targetModel)) {
       return NextResponse.json(
-        { error: `${resolvedParsed?.modelId ?? targetModel} is the ClawBox AI image model, not a chat model.` },
+        { error: clawboxAiNonChatModelReason(targetModel) },
         { status: 400 },
       );
     }

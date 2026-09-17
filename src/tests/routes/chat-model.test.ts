@@ -1277,6 +1277,31 @@ describe("/setup-api/chat/model", () => {
     expect(openai?.model).toBe("openai/gpt-5.4");
   });
 
+  it("never offers a row for the image lane's provider, whatever the box is pinned to", async () => {
+    // A box whose primary was set from OpenClaw's own picker to the litellm
+    // plugin's chat row. `rememberPrimaryOption` must drop it, or the chat
+    // dropdown offers a row whose every turn goes to the image proxy asking
+    // for a model it does not serve — and the header cannot name it.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: { litellm: { apiKey: "claw_redacted", baseUrl: "https://clawbox.com/api/ai" } },
+      },
+      agents: { defaults: { model: { primary: "litellm/claude-opus-4-6" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    expect(body.options.some((option: { provider: string }) => option.provider === "litellm")).toBe(false);
+    expect(body.options.some((option: { model: string | null }) => option.model?.startsWith("litellm/"))).toBe(false);
+    // The OpenAI credential still gets its own row, resolved from OpenAI's
+    // default rather than left owned by the refused primary.
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/gpt-5.4");
+  });
+
   it("keeps an owner's own openai row that the picker's curation list does not carry", async () => {
     // The catalog allowlist exists to curate a NOISY UPSTREAM catalog down for
     // a picker. `models.providers.openai.models[]` is not that catalog — it is
@@ -1336,6 +1361,58 @@ describe("/setup-api/chat/model", () => {
 
     const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
     expect(openai?.model).toBe("openai/llama-3.3-70b");
+  });
+
+  // H1 of the 2026-09-17 review. The `openai` → `litellm` image move did not
+  // close the chat-picker exposure, it moved it: the bundled litellm plugin
+  // registers a CHAT provider beside the image one and ships its own catalog
+  // row (`claude-opus-4-6`, 1M context, reasoning — extensions/litellm/onboard.ts
+  // at v2026.9.3), whose bearer is the same `models.providers.litellm.apiKey`
+  // this build writes. `openclaw models list`, the Control UI picker and
+  // Telegram `/model` all offer it; ClawBox's own refusals therefore have to
+  // cover the PROVIDER ID, not just the one image ref, or a model picked over
+  // there reaches `agents.defaults.model.primary` through this route.
+  it("refuses every model on the image provider id, not just the image ref", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    for (const model of [
+      // The bundled plugin's own static chat row.
+      "litellm/claude-opus-4-6",
+      // Whatever live discovery returned from `<baseUrl>/v1/models`.
+      "litellm/some-discovered-model",
+      // The image ref on the current provider id.
+      "litellm/gpt-image-1-mini",
+    ]) {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      }));
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatch(/not a chat (model|provider)/);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not widen the refusal to the LEGACY provider id, which is a real chat provider", async () => {
+    // `openai` hosts the image entry on every box provisioned before the move
+    // AND every OpenAI chat model. Refusing it by provider would take the
+    // owner's own GPT models away.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-5.5" }),
+    }));
+    expect(response.status).not.toBe(400);
   });
 
   it("refuses the image entry at the custom-model door, before any write", async () => {
