@@ -2802,9 +2802,21 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
 // answered from the bundled catalog whatever the plugin state, which is why
 // the order never mattered before). The OFF half stays AFTER the write on
 // purpose: a plugin whose model is the CURRENT primary is never switched off
-// underneath it. It is idempotent and non-fatal, and a plugin enabled by the
-// batch loads on the next gateway start ("Restart the gateway to apply"), so
-// the caller's restart has to follow.
+// underneath it. It is idempotent and non-fatal.
+//
+// NEITHER HALF NEEDS A GATEWAY RESTART. The CLI prints "Restart the gateway to
+// apply" after a `plugins.entries.*` write, and that sentence is what this
+// paragraph used to relay as an instruction to the caller. The core's own
+// reload table disagrees with it (docs/gateway/configuration.md, "What
+// hot-applies vs what needs a restart": `plugins.entries.*` → "No (reloads
+// plugin runtime)"), and a plugin flipped through the gateway's own
+// `config.patch` was measured applying in 400 ms with the process id unchanged
+// (a box, 2026-09-17). So `src/app/setup-api/chat/model/route.ts` restarts
+// nothing. The ONE caller that still does is
+// `src/app/setup-api/ai-models/configure/route.ts`, and not for this write:
+// that route also rewrites provider entries and auth profiles during a
+// first-run save, where one restart is cheaper than reasoning about which of
+// the keys in that batch hot-applies.
 
 /**
  * Does this box hold an Anthropic credential the owner has not switched off —

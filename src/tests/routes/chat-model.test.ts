@@ -377,28 +377,8 @@ describe("/setup-api/chat/model", () => {
     expect(body.activeLabel).toBe("Gemma 4 Local");
   });
 
-  it("restarts only when the switch flipped a provider plugin — the one change the core cannot hot-apply", async () => {
+  it("never restarts the gateway for a plugin flip — the core hot-applies plugins.entries", async () => {
     vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
-
-    const response = await POST(new Request("http://localhost/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
-    }));
-
-    expect(response.status).toBe(200);
-    expect(restartGateway).toHaveBeenCalledTimes(1);
-  });
-
-  it("answers 502 when a plugin flip's restart landed but the gateway did not come back", async () => {
-    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
-    // The primary is already written when the restart runs, so a gateway that
-    // never starts listening again is neither the 200 this route used to give
-    // (the box still answers on the OLD model) nor the 500 "Failed to switch
-    // chat model" the outer catch would give — that would be a false failure
-    // over a change that IS on disk.
-    vi.mocked(restartGateway).mockRejectedValue(new GatewayNotReadyError());
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
@@ -406,40 +386,14 @@ describe("/setup-api/chat/model", () => {
       body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
     }));
     const body = await response.json();
-    errorSpy.mockRestore();
 
-    expect(response.status).toBe(502);
-    expect(body.warning).toMatch(/did not come back/i);
-    // The switch still happened: the body describes the new model, not an error.
-    expect(body.error).toBeUndefined();
+    expect(response.status).toBe(200);
+    expect(body.warning).toBeUndefined();
+    expect(restartGateway).not.toHaveBeenCalled();
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
-  });
-
-  it("answers 502, not 500, when a plugin flip's restart is refused outright", async () => {
-    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
-    // A masked unit (an update in flight) or a denied sudo is still not a failed
-    // switch: the primary is on disk either way, and 500 "Failed to switch chat
-    // model" over a written model is the same false failure by another route.
-    // The warning distinguishes it, because the owner's next step differs.
-    vi.mocked(restartGateway).mockRejectedValue(new Error("Unit is masked"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    const response = await POST(new Request("http://localhost/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
-    }));
-    const body = await response.json();
-    errorSpy.mockRestore();
-
-    expect(response.status).toBe(502);
-    expect(body.warning).toMatch(/could not be restarted/i);
-    expect(body.error).toBeUndefined();
-    // Never the raw exec text: it carries unit and path internals.
-    expect(JSON.stringify(body)).not.toContain("Unit is masked");
   });
 
   it("does not arm the Codex runtime for a non-Codex model", async () => {
@@ -1155,7 +1109,7 @@ describe("/setup-api/chat/model", () => {
       },
       { skipUserTagged: false },
     );
-    expect(restartGateway).toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
@@ -1189,7 +1143,7 @@ describe("/setup-api/chat/model", () => {
         "agents.defaults.model.primary",
         `openai/${modelId}`,
       ]);
-      expect(restartGateway).toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
     },
   );
 
@@ -1224,7 +1178,7 @@ describe("/setup-api/chat/model", () => {
       'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id',
       "codex",
     ]);
-    expect(restartGateway).toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it("rejects a non-openrouter model that is not in state.options", async () => {
@@ -1655,7 +1609,7 @@ describe("/setup-api/chat/model", () => {
       });
     });
 
-    it("switches the plugin on in the SAME batch as the Anthropic primary, ahead of it, and restarts after", async () => {
+    it("switches the plugin on in the SAME batch as the Anthropic primary, ahead of it, with no restart", async () => {
       const response = await POST(new Request("http://localhost/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1671,8 +1625,7 @@ describe("/setup-api/chat/model", () => {
       ]);
       // A plugin enabled by the batch loads on the next gateway start, so the
       // restart that already follows the switch has to stay after it.
-      expect(orderOf(vi.mocked(runOpenclawConfigSetBatch), carriesPrimary)).toBeLessThan(orderOf(vi.mocked(restartGateway)));
-      expect(restartGateway).toHaveBeenCalledTimes(1);
+      expect(restartGateway).not.toHaveBeenCalled();
     });
 
     it("leaves the plugin and the gateway alone when the batch is refused", async () => {
@@ -1828,7 +1781,7 @@ describe("/setup-api/chat/model", () => {
       const writtenAt = orderOf(vi.mocked(runOpenclawConfigSetBatch), carriesPrimary);
       const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "llamacpp");
       expect(writtenAt).toBeLessThan(gatedAt);
-      expect(gatedAt).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+      expect(restartGateway).not.toHaveBeenCalled();
     });
   });
 

@@ -3,11 +3,9 @@ import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
 import {
-  GatewayNotReadyError,
   inferConfiguredLocalModel,
   readConfig,
   readConfigStrict,
-  restartGateway,
   repairClawboxAiFlashModelPolicy,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -1440,8 +1438,7 @@ export async function POST(request: Request) {
     //     separate spawn because a batch has no delete (see
     //     `disarmChatgptRuntime`). Its failure is carried in the answer.
     let disarmWarning: string | undefined;
-    const codexDisarmed = !chatgptRouted && chatgptRuntimeArmed(preloadedConfig, targetModel);
-    if (codexDisarmed) {
+    if (!chatgptRouted && chatgptRuntimeArmed(preloadedConfig, targetModel)) {
       disarmWarning = await disarmChatgptRuntime(targetModel);
     }
 
@@ -1469,13 +1466,12 @@ export async function POST(request: Request) {
         console.error("[chat/model] Failed to sweep session overrides:", err);
       }
     }
-    let flippedProvider: string | null = null;
     if (parsed) {
       // 3. The OFF half of the gate: switch the anthropic plugin off only
       //    when nothing on the box could use it — the primary is elsewhere
       //    AND no usable Anthropic credential remains (see setProviderPlugins).
       //    Other plugins stay where they are.
-      flippedProvider = await setProviderPlugins(parsed.provider);
+      const flippedProvider = await setProviderPlugins(parsed.provider);
       // A flipped plugin IS a provider-set change: switching anthropic off is
       // precisely what empties `openclaw models list --provider anthropic`.
       // Neither this route nor ChatPopup emitted anything for it, and the
@@ -1488,45 +1484,28 @@ export async function POST(request: Request) {
       if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
-    // A model switch is LIVE without a restart. The open sessions were patched
-    // above (`sessions.patchMany`, ~80 ms), and the gateway watches its own
-    // config file and hot-applies `agents.defaults.model.primary` for new
-    // sessions about a second after the write (`gateway.reload.mode` hybrid,
-    // the default; the journal says "[reload] config hot reload applied").
-    // Restarting anyway cost every switch ~20 s of "gateway starting" —
-    // eleven of them in the unit's pre-start before a process even existed —
-    // and every run in flight (seen on a box, 2026-09-17).
+    // Nothing here restarts the gateway. Every write this handler makes is
+    // one the pinned core hot-applies in its default `hybrid` reload mode —
+    // its own table (docs/gateway/configuration, "What hot-applies vs what
+    // needs a restart"): `agents.*` and `models.*` (the primary, the Codex
+    // runtime arm on `agents.defaults.models`, a provider's model list),
+    // `auth.*`, and `plugins.entries.*` (a provider plugin switched on or
+    // off, which reloads the plugin runtime in place). Proven on a box
+    // (2026-09-17): the arm hot-applied with the primary ("[reload] config
+    // hot reload applied (agents.defaults.model.primary,
+    // agents.defaults.models.openai/gpt-5.5)"), and a plugin flipped off and
+    // on through the gateway's own config.patch was applied in 400 ms with
+    // the process id unchanged. The restart this route kept for those two
+    // cases cost every provider switch 25 s — eleven in the unit's pre-start
+    // before a process existed — and every run in flight, for nothing.
     //
-    // The one change the core cannot hot-apply is a plugin switched on or off
-    // (`plugins.entries`, per its config docs), so a flip restarts: the
-    // anthropic plugin turned ON in the batch, or OFF by the gate. The Codex
-    // app-server runtime being armed or disarmed for the model restarts too —
-    // it is a runtime plugin, and whether the core re-binds it live is not
-    // proven; a restart there is the state this route always had. Then the
-    // model is already written and the restart is only what makes the plugin
-    // live, so NO restart failure is a failed switch — the outer catch's 500
-    // "Failed to switch chat model" would be a false failure over a change
-    // that IS on disk. Both answer 502 with the new state, and the warning
-    // says which, because the owner's next step differs: wait, or find out
-    // why the service refused.
-    const needsRestart = Boolean(flippedProvider) || Boolean(pluginSwitchedOn) || armOps.length > 0 || codexDisarmed;
-    let gatewayWarning: string | undefined;
-    if (needsRestart) {
-      try {
-        await restartGateway();
-      } catch (err) {
-        gatewayWarning = err instanceof GatewayNotReadyError
-          ? "Saved, but the gateway did not come back — the new model applies once it is serving again."
-          : "Saved, but the gateway could not be restarted — the new model applies at its next restart.";
-        console.error("[chat/model] gateway restart failed after the model switch:", err);
-      }
-    }
-
+    // The open sessions were patched above (`sessions.patchMany`, ~80 ms),
+    // and the gateway picks the new primary up for new sessions about a
+    // second after the write.
     const nextState = await loadChatModelState();
-    const warning = [disarmWarning, gatewayWarning].filter(Boolean).join(" ");
     return NextResponse.json(
-      { ...nextState, ...(warning ? { warning } : {}) },
-      { status: gatewayWarning ? 502 : 200, headers: { "Cache-Control": "no-store" } },
+      { ...nextState, ...(disarmWarning ? { warning: disarmWarning } : {}) },
+      { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
     // A config-mutation conflict is the box racing ITSELF, not a failed switch:
