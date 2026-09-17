@@ -126,8 +126,8 @@ export interface StageResult {
  * Not imported from there on purpose: that module pulls the gateway's session
  * store, the model patcher and the llama.cpp proxy in behind it, and this one
  * is a leaf the runner imports. The expression is three environment reads with
- * a documented fallback, and `openclaw-media-root.test.ts` pins the two
- * spellings against each other so they cannot drift.
+ * a documented fallback, and the inputs suite pins this answer against
+ * `OPENCLAW_HOME` itself so the two spellings cannot drift.
  */
 function openclawHome(): string {
   return process.env.CLAWBOX_OPENCLAW_HOME
@@ -343,25 +343,6 @@ export function removeRunInputs(runId: string): void {
   } catch (err) {
     console.error(`[coding-agent] could not remove the inputs of ${runId}:`, err instanceof Error ? err.message : err);
   }
-}
-
-/**
- * The sentence a run and the owner are both told: where files a run is allowed
- * to read live.
- *
- * ONE wording, because the two places it appears must not drift — the task
- * context the harness receives, and (through the catalogue) the refusal panel
- * on the run's page. English here; the owner-facing copy is worded from the
- * catalogue with the same two folders substituted in.
- */
-export function inputLocationsSentence(runId: string): string {
-  return `Files given to this run are in ${runInputsDir(runId)}; anything in ${sharedInputsDir()} is readable too.`
-    + " Those are the only folders outside your own that hold inputs; the assistant's own media folder is not readable by a run.";
-}
-
-/** The two folders, for a caller that words its own sentence (the UI). */
-export function inputLocations(runId: string): { run: string; shared: string } {
-  return { run: runInputsDir(runId), shared: sharedInputsDir() };
 }
 
 /**

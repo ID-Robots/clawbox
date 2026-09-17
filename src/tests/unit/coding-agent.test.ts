@@ -464,8 +464,13 @@ describe("a run", () => {
     expect(argv).not.toContain("--resume");
     // No positional task: it went over stdin — with one line about what the
     // folder holds, so a named file is Read and not first Globbed for
-    // (bench s-01, 2026-09-05: a discovery turn over a two-file folder).
-    expect(stdinText()).toBe("Add a dark mode toggle\n\n[ClawBox harness: this folder contains: index.html, project.json]");
+    // (bench s-01, 2026-09-05: a discovery turn over a two-file folder), and
+    // one clause about the files this run was handed, which for a run that was
+    // handed none is what stops it hunting for a picture on the disk.
+    expect(stdinText()).toBe(
+      "Add a dark mode toggle\n\n[ClawBox harness: this folder contains: index.html, project.json"
+      + ` no files were given to this run (${path.join(root, "data", "coding-agent-inputs", run.id)} is where any would be).]`,
+    );
 
     const env = Object.fromEntries(
       fs.readFileSync(envFile(), "utf-8").split("\n").filter((l) => l.includes("=")).map((l) => {

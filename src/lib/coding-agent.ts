@@ -77,7 +77,6 @@ import {
   type RunInputFile,
   MAX_RUN_INPUTS,
   ensureInputsDirs,
-  inputLocationsSentence,
   isInputRefusalCode,
   inputsRoot,
   listRunInputs,
@@ -6357,15 +6356,17 @@ export function runInputsNote(run: Pick<CodingRun, "id" | "inputs">): string {
     files = run.inputs?.files ?? [];
   }
   const refused = run.inputs?.refused ?? [];
-  const parts: string[] = [];
-  parts.push(files.length > 0
-    ? `Files given to you for this task are in ${runInputsDir(run.id)}: ${files.map((f) => f.name).join(", ")}.`
-    : `You were given no input files; ${runInputsDir(run.id)} is where any would be.`);
+  // SHORT on purpose. The standing facts — that the folder is readable, that
+  // the assistant's media tree is not — are in the brief, which every run gets;
+  // repeating them here would put four sentences of boilerplate in front of
+  // every task for the sake of the rare run that has inputs at all.
+  const parts: string[] = [files.length > 0
+    ? `given files, in ${runInputsDir(run.id)}: ${files.map((f) => f.name).join(", ")}`
+    : `no files were given to this run (${runInputsDir(run.id)} is where any would be)`];
   if (refused.length > 0) {
-    parts.push(`The device could not hand over ${refused.map((r) => `${r.name} (${r.code})`).join(", ")} — do not look for them elsewhere.`);
+    parts.push(`the device could not hand over ${refused.map((r) => `${r.name} (${r.code})`).join(", ")}, so do not look for them elsewhere`);
   }
-  parts.push(inputLocationsSentence(run.id));
-  return parts.join(" ");
+  return `${parts.join("; ")}.`;
 }
 
 /** One line of `--output-format stream-json`. */
