@@ -174,6 +174,60 @@ const RETRY_DELAY = 3000
 // so the cooldown can expire, then the next attempt succeeds without the user
 // having to reload.
 const AUTH_BACKOFF_DELAY = 30000
+
+/**
+ * The gateway's `details.reason` for a connect refused only because its startup
+ * sidecars are still coming up (`GATEWAY_STARTUP_UNAVAILABLE_REASON` in the
+ * core's `packages/gateway-protocol/src/startup-unavailable.ts`, v2026.9.3).
+ */
+const GATEWAY_STARTUP_UNAVAILABLE_REASON = 'startup-sidecars'
+
+/** The fields of an `error` frame this client keeps, so a refusal can be judged
+ *  on the gateway's own protocol rather than on its English. */
+export interface GatewayRefusal {
+  message?: string
+  code?: string
+  retryable?: boolean
+  details?: unknown
+}
+
+/** Build the rejection for an `ok: false` frame, carrying the structured
+ *  fields rather than dropping them for the message alone. */
+export function gatewayFrameError(error: Record<string, unknown> | undefined): Error & GatewayRefusal {
+  const err = new Error((error?.message as string) || 'Request failed') as Error & GatewayRefusal
+  if (typeof error?.code === 'string') err.code = error.code
+  if (typeof error?.retryable === 'boolean') err.retryable = error.retryable
+  if (error && 'details' in error) err.details = error.details
+  return err
+}
+
+/**
+ * Is this a connect the gateway refuses ONLY because it is not finished booting?
+ *
+ * The core answers that question in its own protocol, and this is its predicate
+ * (`isRetryableGatewayStartupUnavailableError`, same file as the reason above):
+ * `code === "UNAVAILABLE"` AND `retryable === true` AND
+ * `details.reason === "startup-sidecars"`. All three are needed — the gateway
+ * sends `UNAVAILABLE` for a Control-UI build mismatch (`retryable: false`) and
+ * for an unsupported socket receiver too, and retrying either is a loop.
+ *
+ * The prose test is the FALLBACK, for a gateway too old to send the details
+ * (and only then): it reads the sentence this build sends verbatim, "gateway
+ * starting; retry shortly". It is anchored on that wording rather than on a
+ * bare `starting`/`not ready`, because an unanchored match silently retries a
+ * refusal that will never change — which is the failure the structured test
+ * above exists to remove.
+ */
+export function isGatewayStartingRefusal(refusal: GatewayRefusal | string | undefined): boolean {
+  const err: GatewayRefusal = typeof refusal === 'string' ? { message: refusal } : refusal ?? {}
+  const reason = (err.details as { reason?: unknown } | undefined)?.reason
+  if (typeof err.code === 'string') {
+    return err.code === 'UNAVAILABLE'
+      && err.retryable === true
+      && reason === GATEWAY_STARTUP_UNAVAILABLE_REASON
+  }
+  return /\bgateway (is )?starting\b|\bretry shortly\b|\bstartup (is )?pending\b/i.test(err.message ?? '')
+}
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 // The status line's small sibling of SPINNER_STYLE.
 const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border: '2px solid rgba(249,115,22,0.25)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }
@@ -2457,6 +2511,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         reject: (err: Error) => {
           if (!isCurrent()) return
           clearDeadlineTimer()
+          // A gateway that is still BOOTING accepts the socket and refuses the
+          // connect frame with `UNAVAILABLE` / `retryable: true` /
+          // `details.reason: "startup-sidecars"` (its channels and sidecars are
+          // not up yet) — the state every restart passes through for ten to
+          // twenty seconds. That is not a failure to surface: it is the
+          // reconnect the close path already handles,
+          // so treat it the same — the restart overlay over a chat that was
+          // connected, the plain connecting state over one that never was —
+          // and try again on the same ladder. The error panel and its Retry
+          // button are for refusals that will not change on their own.
+          if (isGatewayStartingRefusal(err)) {
+            if (wsRef.current === ws) wsRef.current = null
+            try { ws.close() } catch { /* already closing */ }
+            if (connectedOnceRef.current && !skillInstalledRef.current) {
+              skillInstalledRef.current = true
+              reloadReasonRef.current = 'restart'
+              setReloadReason('restart')
+              setReloadingSkill(true)
+              setReloadProgress(0)
+              startReloadProgressTimer()
+            }
+            const budget = !hasEverConnectedRef.current
+              ? INITIAL_CONNECT_MAX_RETRIES
+              : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
+            if (retryCountRef.current < budget) {
+              retryCountRef.current++
+              if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+              retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
+              return
+            }
+          }
           // The fifth terminal-failure path, and it used to be the one that
           // forgot both halves. A gateway that REFUSES the connect frame
           // (protocol skew, a rejected device identity, a denied scope) keeps
@@ -2531,8 +2616,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (data.ok) {
             pending.resolve(data.payload)
           } else {
-            const err = data.error as Record<string, unknown> | undefined
-            pending.reject(new Error((err?.message as string) || 'Request failed'))
+            pending.reject(gatewayFrameError(data.error as Record<string, unknown> | undefined))
           }
         }
         return

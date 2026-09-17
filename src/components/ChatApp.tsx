@@ -82,6 +82,13 @@ import {
   type ChatAttachment,
   type StagingFailure,
 } from '@/lib/chat-attachments'
+import { gatewayFrameError, isGatewayStartingRefusal } from './ChatPopup'
+
+// The popup's ladder for a booting gateway, in the same units: a restart is
+// ten to twenty seconds, so forty tries three seconds apart outlasts a slow
+// one and still ends.
+const STARTING_RETRY_DELAY_MS = 3000
+const STARTING_MAX_RETRIES = 40
 
 
 interface ChatAppProps {
@@ -170,6 +177,17 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
+  // A connect the gateway refused only because it is still booting is
+  // retried on this ladder; reset once a connect lands.
+  const startingRetriesRef = useRef(0)
+  const startingRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Has this component gone? The starting-retry timer is the one deferred piece
+  // of work here that OPENS A SOCKET rather than touching state, so a pending
+  // one on an unmounted component is up to two minutes of sockets and ws-config
+  // fetches (STARTING_MAX_RETRIES × STARTING_RETRY_DELAY_MS) for a window the
+  // owner has already closed. ChatPopup gates every branch of its own ladder
+  // the same way, with `isCurrent()`.
+  const unmountedRef = useRef(false)
   // Sends queued while status is 'connecting'. Drained by a useEffect when
   // we transition to 'connected'. The optimistic user message is added to
   // `messages` immediately so the UI feels responsive even though the
@@ -439,6 +457,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         resolve: (hello: unknown) => {
           setStatus('connected')
           connectedOnceRef.current = true
+          startingRetriesRef.current = 0
           const h = hello as Record<string, unknown>
           const snapshot = h.snapshot as Record<string, unknown> | undefined
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
@@ -447,6 +466,29 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           loadHistory()
         },
         reject: (err: Error) => {
+          // A gateway that is still booting refuses the connect frame with the
+          // core's own retryable startup-sidecars shape — every restart does,
+          // for ten to twenty seconds. Not a refusal to park on: stay in the
+          // connecting state and try again, bounded, and keep the error panel
+          // for refusals that will not change on their own.
+          if (isGatewayStartingRefusal(err) && startingRetriesRef.current < STARTING_MAX_RETRIES) {
+            startingRetriesRef.current++
+            // THIS socket, not whatever `wsRef` happens to hold: a newer
+            // connect may already own the ref, and closing it here would tear
+            // down the attempt that is about to succeed.
+            try { ws.close() } catch { /* already closing */ }
+            if (wsRef.current === ws) wsRef.current = null
+            if (startingRetryTimerRef.current) clearTimeout(startingRetryTimerRef.current)
+            startingRetryTimerRef.current = setTimeout(() => {
+              startingRetryTimerRef.current = null
+              // The component may have gone in the three seconds this waited,
+              // and a newer connect may have taken the socket over; either way
+              // this attempt is stale and must not open another one.
+              if (unmountedRef.current || wsRef.current) return
+              void connectRef.current()
+            }, STARTING_RETRY_DELAY_MS)
+            return
+          }
           setStatus('error')
           setErrorMsg(err.message || 'Auth failed')
         },
@@ -500,8 +542,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           if (data.ok) {
             pending.resolve(data.payload)
           } else {
-            const err = data.error as Record<string, unknown> | undefined
-            pending.reject(new Error((err?.message as string) || 'Request failed'))
+            pending.reject(gatewayFrameError(data.error as Record<string, unknown> | undefined))
           }
         }
         return
@@ -1028,17 +1069,30 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
   // dependencies, so this is where the socket and the deferred refetch were
   // always released.
-  useEffect(() => () => {
-    // The adapter's own teardown — the gateway's closes the socket and rejects
-    // what was waiting on it; a harness that answers on a promise aborts the turn
-    // it was running. The direct close stays beside it because the socket is this
-    // component's to own whatever the adapter turns out to be.
-    adapterRef.current.disconnect()
-    wsRef.current?.close()
-    wsRef.current = null
-    if (ackOnlyHistoryTimerRef.current !== null) {
-      window.clearTimeout(ackOnlyHistoryTimerRef.current)
-      ackOnlyHistoryTimerRef.current = null
+  useEffect(() => {
+    // Set on every mount, not only declared once: React 19's StrictMode mounts,
+    // unmounts and mounts again, and a flag only ever set to true would leave
+    // the remounted component believing it was gone.
+    unmountedRef.current = false
+    return () => {
+      // The adapter's own teardown — the gateway's closes the socket and rejects
+      // what was waiting on it; a harness that answers on a promise aborts the
+      // turn it was running. The direct close stays beside it because the socket
+      // is this component's to own whatever the adapter turns out to be.
+      unmountedRef.current = true
+      adapterRef.current.disconnect()
+      wsRef.current?.close()
+      wsRef.current = null
+      if (ackOnlyHistoryTimerRef.current !== null) {
+        window.clearTimeout(ackOnlyHistoryTimerRef.current)
+        ackOnlyHistoryTimerRef.current = null
+      }
+      // The starting-retry ladder: cleared only by the NEXT retry until now, so
+      // a window closed inside the three-second wait went on reconnecting.
+      if (startingRetryTimerRef.current !== null) {
+        clearTimeout(startingRetryTimerRef.current)
+        startingRetryTimerRef.current = null
+      }
     }
   }, [])
 
