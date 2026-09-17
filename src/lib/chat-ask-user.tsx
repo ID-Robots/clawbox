@@ -248,7 +248,13 @@ export function AskUserPrompt({ card, nowMs, onAnswer }: AskUserPromptProps) {
                     // unrelated buttons with no idea which question they
                     // belong to. Named by the question's own element, so the
                     // name cannot drift from what is on screen.
-                    role={question.multiSelect ? "group" : "radiogroup"}
+                    // A radiogroup only when the options are a CHOICE the
+                    // card is still holding. On the one-click shape they are
+                    // submits — the answer is gone the instant one is pressed
+                    // and the card collapses — so a radio role would describe
+                    // a control that no longer exists. Same rule the clarify
+                    // card states for its own single-select choices.
+                    role={question.multiSelect || oneClick ? "group" : "radiogroup"}
                     aria-labelledby={labelId}
                     style={{ display: "flex", flexDirection: "column", gap: 6 }}
                   >
@@ -322,8 +328,7 @@ export function AskUserPrompt({ card, nowMs, onAnswer }: AskUserPromptProps) {
                           type="button"
                           data-testid="chat-ask-user-option"
                           data-option-label={option.label}
-                          role="radio"
-                          aria-checked={picked}
+                          {...(oneClick ? {} : { role: "radio", "aria-checked": picked })}
                           aria-disabled={!actionable}
                           onClick={() => {
                             if (!actionable) return;
