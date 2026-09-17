@@ -169,7 +169,12 @@ function readQuestion(raw: unknown): AskUserQuestion | null {
     for (const entry of record.options) {
       const option = asRecord(entry);
       const label = asText(option?.label);
-      if (!label) continue;
+      // An option this could not read is a CHOICE MISSING from the card, and
+      // the owner has no way to see that it is missing. Same rule as the
+      // partial request below: refuse the question rather than quietly offer
+      // three of the four answers the agent asked about. An empty `options`
+      // is a different thing entirely — that is a free-text question.
+      if (!label) return null;
       const description = asText(option?.description);
       options.push({ label, ...(description ? { description } : {}) });
     }

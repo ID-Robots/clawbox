@@ -109,6 +109,14 @@ describe("reading one question record", () => {
     expect(card!.questions[0].isOther).toBe(false);
   });
 
+  it("refuses a question whose options it could not all read", () => {
+    // An option this could not read is a CHOICE MISSING from the card, and the
+    // owner has no way to see that it is missing.
+    expect(
+      readQuestionCard(record({ questions: [question({ options: [{ label: "Staging" }, { label: "" }] })] })),
+    ).toBeNull();
+  });
+
   it("refuses a request whose question asks for a secret", () => {
     // This chat has no masked input. Rendering it as an ordinary text box
     // would put a credential in a visible field, in React state and in the
