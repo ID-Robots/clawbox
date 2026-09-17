@@ -115,6 +115,28 @@ describe("GET /setup-api/stt", () => {
     expect(body.chain).toEqual(["local"]);
   });
 
+  /**
+   * TASK-860. The engine named as primary has to be one this box could actually
+   * use. An unlinked box answered `primary: "cloud"` beside
+   * `engines.cloud.configured: false` — and `/setup-api/ai-cloud-defaults`, the
+   * card built on the same rule, said the target for that box was the engine on
+   * the box with reason `not_linked`. Two routes, one box, two answers.
+   */
+  it("names the box itself as primary while there is no cloud credential", async () => {
+    tokenMock.mockResolvedValue(null);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.primary).toBe("local");
+    expect(body.chain).toEqual(["local"]);
+  });
+
+  it("does not report a stored cloud pick as primary once the credential is gone", async () => {
+    tokenMock.mockResolvedValue(null);
+    store.set("stt_primary", "cloud");
+    const { GET } = await route();
+    expect((await (await GET()).json()).primary).toBe("local");
+  });
+
   it("shows a missing on-box engine as such and leaves it out of the chain", async () => {
     localInstalledMock.mockResolvedValue(MISSING);
     const { GET } = await route();
@@ -250,6 +272,25 @@ describe("POST /setup-api/stt — the write", () => {
     const models = JSON.parse(batchMock.mock.calls[0][0][1][1]);
     expect(models[0]).toEqual(CLOUD);
     expect(models[1].type).toBe("cli");
+  });
+
+  /**
+   * TASK-860. "Use as fallback" posts `{primary:"cloud"}` — it hands the
+   * capability back to the automatic default rather than naming an engine. On a
+   * box with no subscription that default is the engine on the box, so the
+   * channel list has to be written in THAT order: writing the cloud row first
+   * would make every voice note pay a refused round trip before the engine that
+   * can answer, and would disagree with the primary the same response reports.
+   */
+  it("writes the on-box row first when the cloud is handed back on an unlinked box", async () => {
+    tokenMock.mockResolvedValue(null);
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(200);
+    const models = JSON.parse(batchMock.mock.calls[0][0][1][1]);
+    expect(models[0].type).toBe("cli");
+    expect(models[1]).toEqual(CLOUD);
+    expect((await res.json()).primary).toBe("local");
   });
 
   it("leaves the on-box row out when that engine is not installed", async () => {
