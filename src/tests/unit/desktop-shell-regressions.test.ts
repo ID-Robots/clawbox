@@ -113,7 +113,7 @@ describe("the top-right notices", () => {
     // still lands on the chat's buttons.
     expect(src).toMatch(/const NOTICE_COLUMN_WIDTH = 320;/);
     expect(src).toMatch(/const NOTICE_MARGIN = 16;/);
-    expect(src).toMatch(/className="pointer-events-none fixed top-4 flex w-\[320px\] flex-col gap-3"/);
+    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed top-4 flex w-\[320px\] flex-col gap-3"/);
   });
 
   it("ask the chat where it is standing only while a card is up", () => {
@@ -162,7 +162,8 @@ describe("keyboard and screen-reader reach", () => {
     // The back chevron is the phone's only way out of an app and announced
     // nothing but "button"; "Switch app" was a hardcoded English title on a
     // shelf that speaks ten languages.
-    expect(src).toMatch(/aria-label=\{t\("window\.close"\)\}/);
+    // It walks up one in-app level before it closes the app (lib/mobile-back).
+    expect(src).toMatch(/aria-label=\{t\("back"\)\}/);
     expect(src).toMatch(/aria-label=\{tr\("window\.switchApp", "Switch app"\)\}/);
   });
 });
@@ -195,7 +196,7 @@ describe("the browser's Back button", () => {
     expect(() => nextWritesItsFields("clawbox")).toThrow(TypeError);
     expect(() => nextWritesItsFields({ clawbox: true })).not.toThrow();
     expect(src).not.toMatch(/pushState\("clawbox"/);
-    expect(src).toMatch(/window\.history\.pushState\(\{ clawbox: true \}, ""\)/);
+    expect(src).toMatch(/window\.history\.pushState\(\{ clawbox: true, clawboxDepth: d \}, ""\)/);
   });
 
   it("knows its own entry by the marker field, so a Back can close the top window", () => {
@@ -206,8 +207,10 @@ describe("the browser's Back button", () => {
     // object it is handed, so the entry is known by the marker, not compared
     // whole.
     expect(src).not.toMatch(/window\.history\.state !== "clawbox"/);
-    expect(src).toMatch(/\(state as \{ clawbox\?: unknown \}\)\.clawbox === true/);
-    expect(src).toMatch(/if \(!isDesktopEntry\(window\.history\.state\)\) \{\n\s+window\.history\.pushState\(\{ clawbox: true \}, ""\);/);
+    // One entry per thing Back can close, each carrying its depth: the entry
+    // a Back lands on says how many levels are still open.
+    expect(src).toMatch(/state && state\.clawbox === true && typeof state\.clawboxDepth === "number" \? state\.clawboxDepth : 0/);
+    expect(src).toMatch(/if \(runMobileBack\(\)\) return;/);
   });
 });
 

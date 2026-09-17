@@ -58,6 +58,7 @@ import {
 import { TOAST_EVENT } from "@/components/ToastHost";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
+import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import {
   layoutIcons,
   layoutsEqual,
@@ -1685,28 +1686,54 @@ function ChromeDesktopInner() {
   }, [syncSetupStatus]);
 
   // ─── Android back button / browser back handling ───
+  // One history entry per thing Back can close: the launcher, the tray, the
+  // phone's full-screen chat, every open window, and every in-app level a
+  // screen registered (src/lib/mobile-back.ts). Entries are pushed when the
+  // count GROWS, i.e. in the commit right after the tap that opened something,
+  // while that tap still counts as a user activation. The old scheme pushed a
+  // single entry at mount and re-pushed it from inside `popstate`, neither
+  // with an activation, and Chrome on Android skips such entries on the back
+  // gesture: the first Back closed an app, the second left ClawBox.
+  //
+  // Each entry is an OBJECT with a marker field, a fresh one per push — never
+  // a string: Next's app router patches `pushState` and, while the current
+  // entry is its own, writes its fields (`__NA`, its route tree) onto whatever
+  // is pushed. On a string that is a TypeError (it once replaced the desktop
+  // with Next's error page and made the back gesture do nothing at all).
+  const inAppBackDepth = useMobileBackDepth();
+  const visibleWindowCount = openWindows.filter(w => !w.minimized).length;
+  const backDepth = (launcherOpen ? 1 : 0) + (trayOpen ? 1 : 0) + (isMobile && chatOpen ? 1 : 0)
+    + visibleWindowCount + inAppBackDepth;
+  const historyDepthRef = useRef(0);
+  const ignoredPopsRef = useRef(0);
   useEffect(() => {
-    // Push a dummy history state so back button triggers popstate instead of
-    // leaving. An OBJECT with a marker field, a fresh one per push — never a
-    // string: Next's app router patches `pushState` and, while the current
-    // entry is its own, writes its fields (`__NA`, its route tree) onto
-    // whatever is pushed. On a string that is a TypeError, and it threw at
-    // mount on every client-side arrival at `/` ("Back to Desktop" handed the
-    // owner Next's error page instead of the desktop) and from `handleBack`
-    // on every browser Back after the first, so the window-closing code
-    // below never ran and the Android back gesture did nothing at all.
-    const isDesktopEntry = (state: unknown) =>
-      typeof state === "object" && state !== null && (state as { clawbox?: unknown }).clawbox === true;
-    const pushState = () => {
-      if (!isDesktopEntry(window.history.state)) {
-        window.history.pushState({ clawbox: true }, "");
+    const have = historyDepthRef.current;
+    if (backDepth > have) {
+      for (let d = have + 1; d <= backDepth; d++) {
+        window.history.pushState({ clawbox: true, clawboxDepth: d }, "");
       }
-    };
-    pushState();
+      historyDepthRef.current = backDepth;
+    } else if (backDepth < have) {
+      // Closed from the UI rather than by Back: drop the entries it no longer
+      // needs, so the next Back closes the next thing instead of nothing.
+      historyDepthRef.current = backDepth;
+      ignoredPopsRef.current += 1;
+      window.history.go(backDepth - have);
+    }
+  }, [backDepth]);
 
+  useEffect(() => {
     const handleBack = (e: PopStateEvent) => {
-      // Re-push state to stay on the page
-      pushState();
+      if (ignoredPopsRef.current > 0) { ignoredPopsRef.current -= 1; return; }
+      const state = e.state as { clawbox?: unknown; clawboxDepth?: unknown } | null;
+      const landed = state && state.clawbox === true && typeof state.clawboxDepth === "number" ? state.clawboxDepth : 0;
+      if (landed > historyDepthRef.current) {
+        // Forward: nothing to reopen, so step back to where the desktop is.
+        ignoredPopsRef.current += 1;
+        window.history.go(historyDepthRef.current - landed);
+        return;
+      }
+      historyDepthRef.current = landed;
 
       // Close things in priority order
       if (launcherOpen) { setLauncherOpen(false); return; }
@@ -1715,6 +1742,8 @@ function ChromeDesktopInner() {
       // the top thing Back can close — and closing it is how the phone gets
       // from the chat it opened in to the desktop behind it.
       if (isMobile && chatOpen) { setChatOpen(false); return; }
+      // A screen inside the top app with a level above it: go up one level.
+      if (runMobileBack()) return;
 
       // Close topmost non-minimized window
       const visible = openWindows.filter(w => !w.minimized);
@@ -2529,7 +2558,7 @@ function ChromeDesktopInner() {
       <PowerApprovalPrompt />
       {noticesUp && (
         <div
-          className="pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"
+          className="desktop-notice-stack pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"
           // Beside the chat — docked or floating — never on top of it. Both are
           // anchored to the top-right corner, and a notice at the top of the
           // stacking order covered the chat's tab row and its +, dock and close
@@ -2992,20 +3021,22 @@ function ChromeDesktopInner() {
           return (
             <div
               key={top.id}
-              className="fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
+              data-testid="mobile-app-window"
+              className="mobile-app-window fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
               style={{ paddingBottom: 'calc(56px + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
             >
               {/* Mobile window header */}
               <div className="flex items-center gap-3 px-3 py-2 bg-[#161b22] border-b border-white/[0.06] shrink-0">
                 <button
-                  onClick={() => { vibrate(10); closeWindow(top.id); }}
+                  onClick={() => { vibrate(10); if (!runMobileBack()) closeWindow(top.id); }}
                   // Icon-only, and it is the phone's ONLY way out of an app:
                   // unnamed, a screen reader announced nothing but "button".
-                  title={t("window.close")}
-                  aria-label={t("window.close")}
-                  className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+                  title={t("back")}
+                  aria-label={t("back")}
+                  data-testid="mobile-window-back"
+                  className="w-10 h-10 -ml-1 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/70 cursor-pointer"
                 >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
                 </button>
                 <div className="w-6 h-6 rounded flex items-center justify-center shrink-0" style={{ backgroundColor: app.color }}>
                   {/* `storeApp` — not `type === "installed"`. An installed WEB
@@ -3021,7 +3052,7 @@ function ChromeDesktopInner() {
                 {visible.length > 1 && (
                   <button
                     onClick={() => minimizeWindow(top.id)}
-                    className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+                    className="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
                     // Was an English `title` on a shelf that speaks ten
                     // languages, and no accessible name at all.
                     title={tr("window.switchApp", "Switch app")}

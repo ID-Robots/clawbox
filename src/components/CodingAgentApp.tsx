@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
 import { holdsResumableSession, isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
@@ -1187,6 +1188,20 @@ export default function CodingAgentApp() {
           ? { face: "project" as const, project: openProject }
           : { face: "home" as const };
 
+  // Back (the phone's gesture, the browser's button, the phone window's
+  // chevron) walks up the same ladder the breadcrumbs draw, one level per
+  // press, instead of closing the app from a run page. See lib/mobile-back.
+  // Phone layout only, like Files: on a desktop Back belongs to the top window.
+  const phoneLayout = usePhoneLayout();
+  const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
+  useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
+  useMobileBack(phoneLayout && page !== "settings" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
+  useMobileBack(phoneLayout && page !== "settings" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
+  useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
+  // Registered last so it sits on top: with the delete dialog open, Back
+  // closes the dialog rather than leaving the project underneath it.
+  useMobileBack(phoneLayout && deleteTarget !== null, () => setDeleteTarget(null));
+
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
   if (loading) return <div className={`h-full ${APP_GROUND}`} data-testid="coding-agent-panel" />;
@@ -1823,10 +1838,12 @@ export default function CodingAgentApp() {
             WIZARD has no rail at any width, so it keeps the row: without it
             a wide window on the wizard had no way to Settings at all. */}
         {(!wide || view.face === "wizard") && (
-        <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-1 border-b border-white/[0.06]">
+          {/* Wraps: in a phone-wide window the buttons drop under the title
+              instead of the title folding onto two lines behind them. */}
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
-            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
+            <h1 className="whitespace-nowrap text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
             {status && (
               <span
                 data-testid="coding-agent-state"

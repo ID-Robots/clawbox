@@ -183,7 +183,7 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
                 onMouseDown={(e) => e.preventDefault()}
                 // `detail === 0`: a click the keyboard made (Enter, Space).
                 onClick={(e) => { if (e.detail === 0) focusSelectedRef.current = true; onClose(tab.id); }}
-                className="my-1 mr-1.5 w-5 rounded flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 bg-transparent border-none cursor-pointer shrink-0"
+                className="terminal-tab-close my-1 mr-1.5 w-5 rounded flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 bg-transparent border-none cursor-pointer shrink-0"
               >
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">close</span>
               </button>

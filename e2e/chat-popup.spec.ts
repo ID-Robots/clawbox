@@ -345,6 +345,10 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
     });
   });
 
+  // On the phone layout the pills fold behind the composer's "tune" toggle.
+  const pickersToggle = page.getByTestId("chat-pickers-toggle");
+  if (await pickersToggle.isVisible()) await pickersToggle.click();
+
   const providerTrigger = page.getByRole("button", { name: "Chat provider" });
   await expect(providerTrigger).toBeInViewport();
   const triggerBox = await providerTrigger.boundingBox();
