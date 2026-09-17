@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
+import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
 
 /**
@@ -95,7 +96,12 @@ function openProviders() {
 }
 
 describe("Settings → Providers: the ClawBox AI pitch on an unlinked box", () => {
-  beforeEach(() => serve(false));
+  beforeEach(() => {
+    // The edition is cached for the module's life, and the Hermes case below
+    // must not inherit whichever edition an earlier case in this file settled.
+    resetHarnessCache();
+    serve(false);
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("pitches ClawBox AI, in the owner's language, with the subscribe path", async () => {
