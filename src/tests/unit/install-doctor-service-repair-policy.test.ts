@@ -104,6 +104,7 @@ const SHIPPED = [
   shellFunction("openclaw_version_is_v2"),
   shellFunction("openclaw_is_v2"),
   shellFunction("openclaw_migration_complete"),
+  shellFunction("recover_parked_openclaw_core"),
 ];
 
 const AMBIENT = [

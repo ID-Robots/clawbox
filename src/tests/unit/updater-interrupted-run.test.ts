@@ -58,6 +58,7 @@ vi.mock("@/lib/config-store", () => {
 vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 
 import { get, set, setMany } from "@/lib/config-store";
+import * as childProcess from "child_process";
 import * as updater from "@/lib/updater";
 
 const mockGet = vi.mocked(get);
@@ -71,22 +72,50 @@ function diskState({
   completed = false,
   interruptedAt,
   holder,
+  detail,
+  warnings,
 }: {
   locked: boolean;
   continuation?: string;
   completed?: boolean;
   interruptedAt?: string;
   /** Who took the lock, as `setUpdateLock` records it. */
-  holder?: { pid: number; bootId: string | null; startedTicks?: string | null; at?: string };
+  holder?: { pid: number; bootId: string | null; startedTicks?: string | null; at?: string; step?: string; failed?: string[] };
+  /** How and where the last run was cut short, as the verdict records it beside the stamp. */
+  detail?: { cause: "reboot" | "replaced" | "unknown"; step?: string; failed?: string[] };
+  /** The drift warnings the interrupted run persisted before its first step. */
+  warnings?: { code: string; message: string }[];
 }) {
   mockGet.mockImplementation(async (key: string) => {
     if (key === "update_in_progress") return locked ? true : undefined;
     if (key === "update_needs_continuation") return continuation;
     if (key === "update_completed") return completed ? true : undefined;
     if (key === "update_interrupted_at") return interruptedAt;
+    if (key === "update_interrupted_detail") return detail;
     if (key === "update_lock_holder") return holder;
+    if (key === "update_warnings") return warnings ? JSON.stringify(warnings) : undefined;
     return undefined;
   });
+}
+
+/**
+ * The network probe answers, and every other command parks for ever: a
+ * resumed run then positions itself and waits on its first root step, which
+ * is the state these cases read. The probe is `ping`, then an HTTPS HEAD.
+ */
+function networkAnswers(reachable: boolean) {
+  vi.mocked(childProcess.execFile).mockImplementation(((...args: unknown[]) => {
+    const cb = args[args.length - 1];
+    if (args[0] === "ping" && typeof cb === "function") {
+      if (reachable) cb(null, "", "");
+      else cb(new Error("ping: unreachable"), "", "");
+    }
+    return undefined as never;
+  }) as never);
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    if (reachable) return { ok: true, status: 200 } as Response;
+    throw new Error("offline");
+  }));
 }
 
 /** This boot, as `update-lock.ts` reads it. A box without one is not Linux. */
@@ -110,6 +139,8 @@ beforeEach(() => {
 afterEach(() => {
   updater.resetUpdateState();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.mocked(childProcess.execFile).mockReset();
 });
 
 describe("an update whose process was replaced is reported, not forgotten", () => {
@@ -328,5 +359,265 @@ describe("an update whose process was replaced is reported, not forgotten", () =
       updater.getUpdateState().phase,
       "the verdict must not be erased by the next poll, which finds a clean disk",
     ).toBe("failed");
+  });
+});
+
+/**
+ * 2026-09-16 — three field boxes died mid-update and the verdict above blamed
+ * the wrong thing. Each box went dark (no shutdown in any log, NUL-padded
+ * syslog and npm log) inside step 6, "Updating OpenClaw", seconds after `npm
+ * install -g openclaw@…` had finished — its files never reached the disk, so
+ * the box had no runnable core. On the next boot this branch found the lock held by a holder from
+ * ANOTHER boot with nothing to resume, released it, and reported "the web
+ * server was replaced while it ran … start the update again": wrong cause,
+ * thirteen grey dots, and a fresh start offered over a box with no assistant.
+ *
+ * The holder record has always carried the boot it was written on; it now
+ * carries the step too (update-lock.ts), so the verdict names both — and
+ * "Try again" continues from that step.
+ */
+describe("an interrupted run says which step died and what took the box, and resumes there", () => {
+  const STAMP = "2026-09-16T18:27:49.910Z";
+  const stepIndex = (id: string) => updater.getUpdateState().steps.findIndex((s) => s.id === id);
+
+  it("names the step and the restart when the holder is from another boot", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({
+      locked: true,
+      holder: { pid: 5567, bootId: "a-previous-boot", startedTicks: "1", at: STAMP, step: "openclaw_install" },
+    });
+
+    await updater.checkContinuation();
+
+    const state = updater.getUpdateState();
+    const index = stepIndex("openclaw_install");
+    expect(index).toBeGreaterThan(0);
+    expect(state.phase).toBe("failed");
+    expect(state.error).toMatch(/interrupted before it could finish/);
+    expect(state.error, "the cause is the restart, not a replaced web server").toMatch(/the box restarted — or lost power —/);
+    expect(state.error).not.toMatch(/web server was replaced/);
+    expect(state.error, "the step is named").toContain('"Updating OpenClaw"');
+    expect(state.error, "that step takes the core apart, so the owner is told").toMatch(/assistant may be unavailable/);
+    expect(state.error, "and the panel's Resume is what continues it").toMatch(/Resume continues the update from there/);
+    // The step list shows WHERE it stopped, not thirteen pending steps.
+    expect(state.steps.slice(0, index).every((s) => s.status === "completed")).toBe(true);
+    expect(state.steps[index].status).toBe("failed");
+    expect(state.steps[index].error).toMatch(/restarted — or lost power — while this step was running/);
+    expect(state.steps.slice(index + 1).every((s) => s.status === "pending")).toBe(true);
+    // The record beside the stamp, written BEFORE it, is what the next boot
+    // words the same verdict from — and what a resume starts from.
+    const detailAt = mockSet.mock.calls.findIndex(([k]) => k === "update_interrupted_detail");
+    const stampAt = mockSet.mock.calls.findIndex(([k]) => k === "update_interrupted_at");
+    expect(detailAt).toBeGreaterThanOrEqual(0);
+    expect(mockSet.mock.calls[detailAt][1]).toEqual({ cause: "reboot", step: "openclaw_install" });
+    expect(stampAt).toBeGreaterThan(detailAt);
+    expect(err.mock.calls.flat().join(" ")).toMatch(/restarted — or lost power —/);
+  });
+
+  it.skipIf(!thisBootId())("names the step and the replaced web server when the holder is from THIS boot", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({
+      locked: true,
+      holder: {
+        pid: 0x7ffffff0,
+        bootId: thisBootId()!,
+        startedTicks: "1",
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        step: "apt_update",
+      },
+    });
+
+    await updater.checkContinuation();
+
+    const state = updater.getUpdateState();
+    expect(state.phase).toBe("failed");
+    expect(state.error).toMatch(/the web server was replaced while "Updating system packages" was running/);
+    expect(state.error, "apt does not touch the core").not.toMatch(/assistant/);
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_detail", { cause: "replaced", step: "apt_update" });
+  });
+
+  it("words a holder with no step exactly as before", async () => {
+    // A lock taken by a build that predates the step field, or the prologue's
+    // own record: nothing new is known, so nothing new is claimed.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: true, holder: { pid: 5567, bootId: "a-previous-boot", startedTicks: "1", at: STAMP } });
+
+    await updater.checkContinuation();
+
+    const state = updater.getUpdateState();
+    expect(state.error).toMatch(/the box restarted — or lost power — while it ran/);
+    expect(state.error).toMatch(/start the update again/);
+    expect(state.steps.every((s) => s.status === "pending")).toBe(true);
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_detail", { cause: "reboot" });
+  });
+
+  it("words the same verdict from the record on the next boot", async () => {
+    // The process that decided the verdict may be gone; the record is what the
+    // next one reads, so the sentence and the step list must not degrade to
+    // the old wording on a reboot.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" } });
+
+    await updater.checkContinuation();
+
+    const state = updater.getUpdateState();
+    expect(state.phase).toBe("failed");
+    expect(state.error).toContain('"Updating OpenClaw"');
+    expect(state.error).toMatch(/the box restarted/);
+    expect(state.steps[stepIndex("openclaw_install")].status).toBe("failed");
+    expect(mockSet, "a remembered verdict is not re-stamped").not.toHaveBeenCalledWith("update_interrupted_at", expect.any(String));
+  });
+
+  it("ignores a record it does not recognise, and one whose step this list lacks", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "a_step_from_another_build" } });
+    await updater.checkContinuation();
+    let state = updater.getUpdateState();
+    expect(state.phase).toBe("failed");
+    expect(state.error).toMatch(/the box restarted — or lost power — while it ran/);
+    expect(state.steps.every((s) => s.status === "pending")).toBe(true);
+
+    updater.resetUpdateState();
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "later", step: 7 } as never });
+    await updater.checkContinuation();
+    state = updater.getUpdateState();
+    expect(state.phase).toBe("failed");
+    expect(state.error).toBe(updater.INTERRUPTED_MESSAGE);
+  });
+
+  it("Resume continues from the interrupted step — no later than the power-profile step, which unpins the clocks", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(true);
+    const warnings = [{ code: "checkout-behind-pin", message: "The checkout was 71 commits behind its pin." }];
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" }, warnings });
+    const died = stepIndex("openclaw_install");
+    const unpin = stepIndex("performance_mode");
+    expect(died).toBeGreaterThan(unpin);
+    expect(unpin).toBeGreaterThan(0);
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    // A power-cycled box boots with clawbox-performance.service pinning the
+    // clocks again; a resume that skipped `performance_mode` would run the
+    // npm install pinned — the very thing that step unpins under an update.
+    // So the run picks up THERE, and parks on that step's (never-settling)
+    // root dispatch — which is the state this case reads.
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(unpin));
+    const state = updater.getUpdateState();
+    expect(state.phase).toBe("running");
+    expect(state.steps.slice(0, unpin).every((s) => s.status === "completed")).toBe(true);
+    expect(state.steps[unpin].status).not.toBe("completed");
+    expect(state.steps[died].status).toBe("pending");
+    // The interrupted run's own diagnosis travels with the resume.
+    expect(state.warnings).toEqual(warnings);
+    // The record is consumed by the prologue, so a run that dies AGAIN is
+    // resumed from wherever that one died, never from a stale step.
+    await vi.waitFor(() =>
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_interrupted_at: undefined, update_interrupted_detail: undefined }),
+      ));
+  });
+
+  it("resumes at the power-profile step for a record on the step right after it", async () => {
+    // Since 2026-09-17 the power-profile step is step 2, ahead of apt: every
+    // resumable step is after it, so every resume passes through the unpin.
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(true);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "replaced", step: "apt_update" } });
+    const unpin = stepIndex("performance_mode");
+    expect(stepIndex("apt_update")).toBe(unpin + 1);
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(unpin));
+    expect(updater.getUpdateState().steps[stepIndex("apt_update")].status).toBe("pending");
+  });
+
+  it("keeps its position when a resume is refused for want of a network", async () => {
+    // These boxes are on WiFi and the desktop is reachable seconds after boot.
+    // A resume that failed its probe used to have cleared the record first, so
+    // the NEXT press started from step 1 over a box with no core.
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(false);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" } });
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+    expect(updater.getUpdateState().error).toMatch(/No internet connection/);
+    // The lock is released, the record is NOT.
+    expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_in_progress: undefined }));
+    expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_detail: undefined }));
+    expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_at: undefined }));
+  });
+
+  it("names the assistant for a run cut short before the gateway was started again", async () => {
+    // `openclaw_install` stops the gateway and LEAVES it stopped; `gateway_setup`
+    // restarts it. A run that died between the two has an intact core and no
+    // assistant, so that step carries the sentence too.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "gateway_setup" } });
+
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().error).toMatch(/assistant may be unavailable/);
+  });
+
+  it("starts from the top when there is no stamp, whatever the detail says", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(true);
+    diskState({ locked: false, detail: { cause: "reboot", step: "openclaw_install" } });
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    // The prologue has run (the markers were cleared) and the run went on
+    // from step 1: nothing before it painted completed, the position untouched.
+    await vi.waitFor(() =>
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_detail: undefined })));
+    const state = updater.getUpdateState();
+    expect(state.currentStepIndex).toBe(0);
+    expect(state.steps.every((s) => s.status !== "completed")).toBe(true);
+  });
+
+  it("keeps a step the run had already walked past as failed red, and resumes from it", async () => {
+    // A non-failFast step (apt_update here) failed and the run went on, as it
+    // does; then the box died on openclaw_install. Painting apt green and
+    // skipping it would end the resume in "Update finished" over a failure
+    // nobody was told about — so it stays red, and the resume starts there.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    diskState({
+      locked: true,
+      holder: { pid: 5567, bootId: "a-previous-boot", startedTicks: "1", at: STAMP, step: "openclaw_install", failed: ["apt_update"] },
+    });
+    await updater.checkContinuation();
+    const verdict = updater.getUpdateState();
+    const apt = stepIndex("apt_update");
+    expect(apt).toBeGreaterThan(0);
+    expect(verdict.steps[apt].status).toBe("failed");
+    expect(verdict.steps[apt].error).toMatch(/had failed before the update was cut short/);
+    expect(verdict.steps[stepIndex("openclaw_install")].status).toBe("failed");
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_detail", { cause: "reboot", step: "openclaw_install", failed: ["apt_update"] });
+
+    // The resume, from the record the verdict wrote.
+    updater.resetUpdateState();
+    networkAnswers(true);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install", failed: ["apt_update"] } });
+    expect(updater.startUpdate()).toEqual({ started: true });
+    const resumeAt = Math.min(apt, stepIndex("performance_mode"));
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(resumeAt));
+  });
+
+  it("Dismiss takes the step record with the stamp, so the next update starts from the top", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" } });
+    await updater.checkContinuation();
+    expect(updater.getUpdateState().phase).toBe("failed");
+
+    expect(await updater.dismissSettledUpdate()).toEqual({ dismissed: true });
+
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_at", undefined);
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_detail", undefined);
+    expect(updater.getUpdateState().phase).toBe("idle");
   });
 });

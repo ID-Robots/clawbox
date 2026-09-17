@@ -36,5 +36,90 @@ export const UPDATE_LOCK_HEADER = "x-clawbox-update-lock";
  * would go on passing while the real gate stopped matching.
  */
 export const INTERRUPTED_MESSAGE =
-  "The update was interrupted before it could finish: the web server was replaced while it ran, "
+  "The update was interrupted before it could finish: the process running it went away while it ran, "
   + "and no step is left to resume. Nothing was rolled back — start the update again.";
+
+/**
+ * The opening every interruption verdict shares — and what `isInterruptedVerdict`
+ * recognises the verdict BY. The sentence names the step and the cause when the
+ * lock holder recorded them (update-lock.ts), so the whole string is no longer
+ * one constant to compare against; the opening is.
+ */
+export const INTERRUPTED_MESSAGE_PREFIX = "The update was interrupted before it could finish";
+
+/**
+ * How a run was cut short, as the lock holder's record tells it.
+ *
+ * `reboot` — the holder was written on ANOTHER boot: the box restarted, or lost
+ * power, under the run. `replaced` — the same boot, so the web server was
+ * replaced under it. `unknown` — a lock from a build that predates the holder
+ * record, or a record that could not be read.
+ */
+export type InterruptionCause = "reboot" | "replaced" | "unknown";
+
+/** What the box knows about an interrupted run, resolved against the step list. */
+export interface InterruptionDetail {
+  cause: InterruptionCause;
+  /** The id of the step the run was on, when the holder recorded one. */
+  step?: string;
+  /** Its label, for the sentence — resolved by the reader that has the list. */
+  stepLabel?: string;
+  /**
+   * A run cut short on this step leaves the box without its assistant until
+   * the step runs again: the two that replace the core on disk, and the one
+   * that starts the gateway back up after them (`openclaw_install` stops it
+   * and LEAVES it stopped; `gateway_setup` is what restarts it).
+   */
+  assistantAtRisk?: boolean;
+}
+
+/** The steps between "the gateway is stopped for the core swap" and "it is up again". */
+export const ASSISTANT_DOWN_STEP_IDS: ReadonlySet<string> = new Set(["openclaw_install", "openclaw_patch", "gateway_setup"]);
+
+/**
+ * Each cause in the words the evidence supports and no more: a lock holder
+ * from another boot proves a restart, one from this boot proves a replaced
+ * web server, and no holder proves only that the process went away — which
+ * is what the no-record sentence (`INTERRUPTED_MESSAGE`) says too, so a box
+ * that predates the record is never told a cause nobody measured.
+ */
+function interruptionCauseText(cause: InterruptionCause): string {
+  if (cause === "reboot") return "the box restarted — or lost power —";
+  if (cause === "replaced") return "the web server was replaced";
+  return "the process running it went away";
+}
+
+/**
+ * Word the verdict from what is known.
+ *
+ * With nothing known it is exactly `INTERRUPTED_MESSAGE`, so a box that
+ * predates the holder record reads as it always did. With the step known the
+ * sentence names it and says that Resume continues from there — because it
+ * does: `runUpdate` resumes a fresh run from the recorded step (or from the
+ * power-profile step before it, which unpins the clocks for the rest of the
+ * update), and the failed panel's Resume button is what starts one. On 2026-09-16
+ * three field boxes went dark mid `openclaw_install`, and the verdict blamed a
+ * replaced web server and offered a fresh start over a box with no core.
+ */
+export function interruptedMessage(detail: InterruptionDetail): string {
+  const risk = detail.assistantAtRisk
+    ? " The assistant may be unavailable until the update finishes."
+    : "";
+  if (detail.stepLabel) {
+    return `${INTERRUPTED_MESSAGE_PREFIX}: ${interruptionCauseText(detail.cause)} while "${detail.stepLabel}" was running. `
+      + `Nothing was rolled back — Resume continues the update from there.${risk}`;
+  }
+  if (detail.cause !== "reboot") return INTERRUPTED_MESSAGE;
+  return `${INTERRUPTED_MESSAGE_PREFIX}: ${interruptionCauseText(detail.cause)} while it ran, `
+    + "and no step is left to resume. Nothing was rolled back — start the update again.";
+}
+
+/** The sentence on the step itself, in the step list. */
+export function interruptedStepError(detail: InterruptionDetail): string {
+  const cause = detail.cause === "reboot"
+    ? "The box restarted — or lost power —"
+    : detail.cause === "replaced"
+      ? "The web server was replaced"
+      : "The process running the update went away";
+  return `${cause} while this step was running.`;
+}

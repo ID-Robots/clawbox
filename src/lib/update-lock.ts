@@ -45,7 +45,7 @@ export const UPDATE_LOCK_KEY = "update_in_progress";
  */
 export const UPDATE_LOCK_HOLDER_KEY = "update_lock_holder";
 
-interface UpdateLockHolder {
+export interface UpdateLockHolder {
   pid: number;
   /** `/proc/sys/kernel/random/boot_id`, or null where it cannot be read. */
   bootId: string | null;
@@ -67,6 +67,22 @@ interface UpdateLockHolder {
    * process is moving it.
    */
   at: string;
+  /**
+   * The id of the step the run was on when this record was written — absent on
+   * the prologue's record and on one from a build that predates the field. It
+   * is what lets the successor of a dead run say WHICH step it died on and
+   * continue there, instead of "start the update again" over a box whose core
+   * that step had already taken apart (the three field boxes of 2026-09-16,
+   * dead mid `openclaw_install` with no assistant left).
+   */
+  step?: string;
+  /**
+   * The ids of the steps that had already FAILED (and been walked past — the
+   * non-failFast ones) when this record was written. A successor that resumes
+   * the run must not paint them green and skip them: it starts no later than
+   * the first of them.
+   */
+  failed?: string[];
 }
 
 function currentBootId(): string | null {
@@ -79,13 +95,16 @@ function currentBootId(): string | null {
 
 function parseHolder(value: unknown): UpdateLockHolder | null {
   if (!value || typeof value !== "object") return null;
-  const raw = value as { pid?: unknown; bootId?: unknown; startedTicks?: unknown; at?: unknown };
+  const raw = value as { pid?: unknown; bootId?: unknown; startedTicks?: unknown; at?: unknown; step?: unknown; failed?: unknown };
   if (typeof raw.pid !== "number" || !Number.isInteger(raw.pid) || raw.pid <= 0) return null;
+  const failed = Array.isArray(raw.failed) ? raw.failed.filter((id): id is string => typeof id === "string" && id !== "") : [];
   return {
     pid: raw.pid,
     bootId: typeof raw.bootId === "string" ? raw.bootId : null,
     startedTicks: typeof raw.startedTicks === "string" ? raw.startedTicks : null,
     at: typeof raw.at === "string" ? raw.at : "",
+    ...(typeof raw.step === "string" && raw.step ? { step: raw.step } : {}),
+    ...(failed.length ? { failed } : {}),
   };
 }
 
@@ -134,13 +153,17 @@ export { UPDATING_PAGE, UPDATE_LOCK_HEADER } from "./update-constants";
  * silently running an update with the desktop unlocked is not something anyone
  * should have to infer from behaviour.
  */
-export async function setUpdateLock(): Promise<boolean> {
+export async function setUpdateLock(step?: string, failed?: readonly string[]): Promise<boolean> {
   try {
     // The holder rides with the flag, in one read-modify-write — of THIS
     // process. install.sh and gateway-pre-start.sh write the same file
     // unlocked, so the pair can still be split by a cross-process interleave;
     // when it is, the reader finds no holder and falls back to the behaviour it
     // had before this record existed, which is the safe direction.
+    //
+    // `step` is the id of the step about to run, from the loop's re-assertion;
+    // the prologue passes none, and a re-assertion with none records none — a
+    // stale step must never be carried forward onto a record it is not about.
     await setMany({
       [UPDATE_LOCK_KEY]: true,
       [UPDATE_LOCK_HOLDER_KEY]: {
@@ -148,6 +171,8 @@ export async function setUpdateLock(): Promise<boolean> {
         bootId: currentBootId(),
         startedTicks: processStartTicks(process.pid),
         at: new Date().toISOString(),
+        ...(step ? { step } : {}),
+        ...(failed && failed.length ? { failed: [...failed] } : {}),
       },
     });
     return true;
@@ -232,4 +257,29 @@ export async function updateLockHeldByLiveProcess(): Promise<boolean> {
   // whose process started at a different time is a different process.
   if (!holder.startedTicks || !ticks) return false;
   return holder.startedTicks === ticks;
+}
+
+/**
+ * The holder record as it is on disk, or null when there is none or the store
+ * could not be read. For the successor of a dead run, which reads it BEFORE it
+ * releases the lock — the release takes the record with it.
+ */
+export async function readUpdateLockHolder(): Promise<UpdateLockHolder | null> {
+  try {
+    return parseHolder(await get(UPDATE_LOCK_HOLDER_KEY));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Was this record written on another boot than the one asking? True means the
+ * box restarted, or lost power, under the run that held the lock; false means
+ * the same boot, so it was the web server that was replaced. Null where either
+ * boot id is unknown, which is never read as either.
+ */
+export function holderFromAnotherBoot(holder: UpdateLockHolder): boolean | null {
+  const boot = currentBootId();
+  if (!boot || !holder.bootId) return null;
+  return boot !== holder.bootId;
 }

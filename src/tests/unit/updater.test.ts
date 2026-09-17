@@ -2991,8 +2991,8 @@ describe("updater", () => {
 
       expect(ids).toEqual([
         "bootstrap_updater",
-        "apt_update",
         "performance_mode",
+        "apt_update",
         "chromium_install",
         "vnc_install",
         "restart",
@@ -3028,8 +3028,8 @@ describe("updater", () => {
 
       expect(ids).toEqual([
         "bootstrap_updater",
-        "apt_update",
         "performance_mode",
+        "apt_update",
         "chromium_install",
         "vnc_install",
         "openclaw_install",
