@@ -1198,6 +1198,9 @@ export default function CodingAgentApp() {
   useMobileBack(phoneLayout && page !== "settings" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
   useMobileBack(phoneLayout && page !== "settings" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
   useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
+  // Registered last so it sits on top: with the delete dialog open, Back
+  // closes the dialog rather than leaving the project underneath it.
+  useMobileBack(phoneLayout && deleteTarget !== null, () => setDeleteTarget(null));
 
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.

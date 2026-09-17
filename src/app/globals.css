@@ -2156,8 +2156,8 @@ input[type="range"].appearance-none::-moz-range-track {
  * their own under it, each pill an equal share. `display: contents` on the
  * tail lets the pills and Send be ordered as members of the row itself. */
 @media (max-width: 767px) {
-  [data-chat-mobile] .chat-voice-large { width: 56px; height: 56px; flex-basis: 56px; }
-  [data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 30px !important; }
+  [data-chat-mobile] .chat-voice-large { width: 64px; height: 64px; flex-basis: 64px; }
+  [data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 32px !important; }
   [data-chat-mobile] .chat-composer-row { flex-wrap: wrap; gap: 8px; }
   [data-chat-mobile] .chat-composer-tail { display: contents; }
   [data-chat-mobile] .chat-composer-row > button,

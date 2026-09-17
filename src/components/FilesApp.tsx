@@ -260,7 +260,8 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
     void load(parts.join("/"));
   }, folderDepth);
   useMobileBack(phoneLayout && narrow && sidebarOpen, () => setSidebarOpen(false));
-  useMobileBack(phoneLayout && viewer !== null, () => setViewer(null));
+  // An open file claims Back inside FileViewer, through its own attemptClose,
+  // so unsaved edits get the discard prompt instead of being dropped.
 
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1310,6 +1311,14 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
     if (dirty) setConfirmDiscard(true);
     else onClose();
   }, [dirty, onClose]);
+
+  // Phone Back closes the file the same way the X does; with the discard
+  // prompt up, it dismisses the prompt first.
+  const phoneLayout = usePhoneLayout();
+  useMobileBack(phoneLayout, () => {
+    if (confirmDiscard) setConfirmDiscard(false);
+    else attemptClose();
+  });
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // While the discard confirmation is up, keep keys scoped to it — Escape
