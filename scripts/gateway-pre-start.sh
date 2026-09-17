@@ -1009,7 +1009,7 @@ export CLAWBOX_EXTRA_ORIGINS
 export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
-import json, os, sys, tempfile, secrets, shutil, time
+import json, os, re, sys, tempfile, secrets, shutil, time
 
 # OpenClaw 2 config homes — see the bash block that computes this.
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
@@ -1811,19 +1811,33 @@ if _codex_refs or agents_models:
 # gateway start so updated devices re-secure themselves without needing
 # a bot-token reconfigure or factory reset. No-op on already-safe configs.
 #
-# Discord gets the same treatment for the same reason: ClawBox never writes
-# those keys for it either, and one out-of-schema value in ANY channel block
-# invalidates the whole config — a Discord misconfiguration would take a
-# working Telegram bot down with it.
+# Discord gets the same treatment for the same reason, with one difference:
+# ClawBox now writes `channels.discord.allowFrom` itself, holding ONLY the
+# numeric ids of the servers' owners (setDiscordToken/setDiscordAccess), so the
+# person who connected the bot can DM it without a pairing code. Those specific
+# ids survive; "*", names and every other shape are still stripped, and
+# dmPolicy is still removed so the pairing default stands for everyone else.
 channels = cfg.get("channels")
 if isinstance(channels, dict):
     for _channel_name in ("telegram", "discord"):
         _channel = channels.get(_channel_name)
         if not isinstance(_channel, dict):
             continue
-        for k in ("dmPolicy", "allowFrom"):
-            if k in _channel:
-                del _channel[k]
+        if "dmPolicy" in _channel:
+            del _channel["dmPolicy"]
+            changed = True
+        if "allowFrom" in _channel:
+            _kept = []
+            if _channel_name == "discord" and isinstance(_channel["allowFrom"], list):
+                _kept = [
+                    _id for _id in _channel["allowFrom"]
+                    if isinstance(_id, str) and re.fullmatch(r"[0-9]{15,25}", _id)
+                ]
+            if not _kept:
+                del _channel["allowFrom"]
+                changed = True
+            elif _kept != _channel["allowFrom"]:
+                _channel["allowFrom"] = _kept
                 changed = True
         # Config-validity migration: a bot set up on an older OpenClaw can carry
         # a channels.<name>.groupPolicy value the current schema no longer

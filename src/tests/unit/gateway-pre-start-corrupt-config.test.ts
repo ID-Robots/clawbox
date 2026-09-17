@@ -169,7 +169,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh config load block", () => {
   // The block runs with the script's own imports; a change there must move here.
   it("needs only what the script imports", () => {
     const src = readFileSync(SCRIPT, "utf-8");
-    expect(src).toMatch(/^import json, os, sys, tempfile, secrets, shutil, time$/m);
+    expect(src).toMatch(/^import json, os, re, sys, tempfile, secrets, shutil, time$/m);
   });
 });
 

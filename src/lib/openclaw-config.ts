@@ -14,7 +14,7 @@ import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasonin
 import { get as getConfigStoreValue } from "@/lib/config-store";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
-import { isSafeDiscordToken } from "@/lib/discord-api";
+import { isDiscordSnowflake, isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
@@ -2320,15 +2320,104 @@ export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
 }
 
 /**
+ * What the box learned about a bot from Discord itself, written beside the
+ * token so the channel works the moment the gateway starts — the three things
+ * an owner otherwise had to say to the agent in the chat before the bot did
+ * anything:
+ *
+ *   * `applicationId` — OpenClaw resolves it at startup with a REST call when
+ *     it is absent, and a refused or rate-limited lookup keeps the whole
+ *     Discord monitor down ("Failed to resolve Discord application id").
+ *   * `guilds` — the default `groupPolicy` is `allowlist`, so a server that is
+ *     not listed is ignored however the bot was invited.
+ *   * the owners — each guild's owner goes on that guild's `users` and on the
+ *     channel's `allowFrom`, so the person who set the bot up can talk to it in
+ *     the server and in a DM without a pairing code.
+ */
+export interface DiscordOpenclawAccess {
+  applicationId?: string | null;
+  guilds?: ReadonlyArray<{ id: string; ownerId: string | null }>;
+}
+
+/**
+ * Only specific numeric ids ever come out of this: never `"*"`, never a name,
+ * never `dmPolicy` — the pairing default stays in force for everyone else.
+ */
+function numericIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (isDiscordSnowflake(entry) && !ids.includes(entry)) ids.push(entry);
+  }
+  return ids;
+}
+
+function withDiscordAccess(
+  block: Record<string, unknown>,
+  previousAllowFrom: unknown,
+  access: DiscordOpenclawAccess,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...block };
+  if (isDiscordSnowflake(access.applicationId)) next.applicationId = access.applicationId;
+
+  const allowFrom = numericIds(previousAllowFrom);
+  const guildList = (access.guilds ?? []).filter((g) => isDiscordSnowflake(g.id));
+  if (guildList.length > 0) {
+    const guilds = isPlainObject(next.guilds) ? { ...next.guilds } : {};
+    for (const guild of guildList) {
+      const owner = isDiscordSnowflake(guild.ownerId) ? guild.ownerId : null;
+      const existing = guilds[guild.id];
+      if (isPlainObject(existing)) {
+        // A guild the owner already tuned keeps its settings; the owner is only
+        // added when a `users` list exists and leaves them out.
+        const users = numericIds(existing.users);
+        if (owner && Array.isArray(existing.users) && !users.includes(owner)) {
+          guilds[guild.id] = { ...existing, users: [...users, owner] };
+        }
+      } else {
+        // requireMention false: on the owner's own server the bot answers in
+        // every channel it can see, the way the chat on the box answers.
+        guilds[guild.id] = owner ? { requireMention: false, users: [owner] } : { requireMention: false };
+      }
+      if (owner && !allowFrom.includes(owner)) allowFrom.push(owner);
+    }
+    next.guilds = guilds;
+  }
+  if (allowFrom.length > 0) next.allowFrom = allowFrom;
+  return next;
+}
+
+/**
+ * Write the access half alone — a bot that was invited to a server AFTER its
+ * token was saved. Refuses a config with no Discord channel in it: nothing here
+ * may create one without a token behind it.
+ */
+export async function setDiscordAccess(access: DiscordOpenclawAccess): Promise<boolean> {
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const existing = channels[DISCORD_CHANNEL_ID];
+  if (!isPlainObject(existing)) return false;
+  const { allowFrom: previousAllowFrom, ...rest } = existing;
+  const next = withDiscordAccess(rest, previousAllowFrom, access);
+  if (isDeepStrictEqual(next, existing)) return false;
+  channels[DISCORD_CHANNEL_ID] = next;
+  trustChannelPlugin(config, DISCORD_CHANNEL_ID);
+  await writeConfig(config);
+  return true;
+}
+
+/**
  * Register the Discord channel with the OpenClaw gateway.
  *
  * Deliberately writes the smallest config that can work:
- *   * `enabled` + the env-reference `token`, and nothing else. OpenClaw refuses
- *     to start on an unknown key or an out-of-schema value, and a refusal takes
- *     the WHOLE config down — including a working Telegram bot. Every optional
- *     knob we could write here (groupPolicy, guilds, commands, streaming) is a
- *     value we would be guessing at, so we let OpenClaw's own defaults stand.
- *   * `dmPolicy`/`allowFrom` are STRIPPED, never written. OpenClaw defaults to
+ *   * `enabled` + the env-reference `token`, plus what Discord itself told us
+ *     about the bot (`DiscordOpenclawAccess`: `applicationId`, the guilds it is
+ *     in and their owners). Every key is checked against the
+ *     `@openclaw/discord` schema; OpenClaw refuses to start on an unknown key
+ *     and a refusal takes the WHOLE config down — including a working Telegram
+ *     bot — so nothing is guessed (no groupPolicy, commands, streaming).
+ *   * `dmPolicy` is STRIPPED, never written, and `allowFrom` only ever holds
+ *     specific numeric ids — the guild owners. OpenClaw defaults to
  *     `dmPolicy: "pairing"`, i.e. the owner approves each new sender. Writing
  *     "open"/["*"] would expose the agent's shell/file/system_power tools to
  *     anyone who finds the bot — the exact bug the Telegram path carries a boot-
@@ -2378,22 +2467,29 @@ export function trustChannelPlugin(config: OpenClawConfig, channelId: string): v
   entries[channelId] = { ...(isPlainObject(existing) ? existing : {}), enabled: true };
 }
 
-export async function setDiscordToken(botToken: string): Promise<void> {
+export async function setDiscordToken(
+  botToken: string,
+  access: DiscordOpenclawAccess = {},
+): Promise<void> {
   const config = await readConfigForWrite();
   const channels = ensurePlainObject(asBag(config), "channels");
   const {
     dmPolicy: _dmPolicy,
-    allowFrom: _allowFrom,
+    allowFrom: previousAllowFrom,
     botToken: _legacyLiteralToken,
     ...rest
   } = existingChannelBlock(channels, DISCORD_CHANNEL_ID);
-  channels[DISCORD_CHANNEL_ID] = {
-    ...rest,
-    enabled: true,
-    // envSecretRef also installs `secrets.providers.default`, without which
-    // this reference is unresolvable at runtime — see its doc comment.
-    token: envSecretRef(config, DISCORD_TOKEN_ENV_VAR),
-  };
+  channels[DISCORD_CHANNEL_ID] = withDiscordAccess(
+    {
+      ...rest,
+      enabled: true,
+      // envSecretRef also installs `secrets.providers.default`, without which
+      // this reference is unresolvable at runtime — see its doc comment.
+      token: envSecretRef(config, DISCORD_TOKEN_ENV_VAR),
+    },
+    previousAllowFrom,
+    access,
+  );
   // Same write, deliberately: an installed-but-untrusted plugin is a channel
   // the gateway refuses, and leaving the entry to survive on its own is what
   // let a later read-modify-write silently take Discord back down.

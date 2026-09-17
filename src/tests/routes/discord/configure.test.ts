@@ -206,7 +206,7 @@ describe("POST /setup-api/discord/configure", () => {
 
       expect(res.status).toBe(200);
       expect(mockSet).toHaveBeenCalledWith("discord_bot_token", TOKEN);
-      expect(mockSetDiscordToken).toHaveBeenCalledWith(TOKEN);
+      expect(mockSetDiscordToken).toHaveBeenCalledWith(TOKEN, expect.any(Object));
       expect(mockRestartGateway).toHaveBeenCalled();
       expect(await res.json()).toMatchObject({ success: true, restarted: true });
       expect(mockSetHermesToken).not.toHaveBeenCalled();

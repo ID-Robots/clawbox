@@ -271,9 +271,59 @@ export async function fetchDiscordIntents(
   token: string,
   signal?: AbortSignal,
 ): Promise<DiscordIntents> {
+  return (await fetchDiscordApplication(token, signal)).intents;
+}
+
+export interface DiscordApplication {
+  /**
+   * The application (client) id — what the invite link and OpenClaw's
+   * `applicationId` carry. `null` when Discord's answer had none that is a
+   * snowflake: the intents are still worth having without it.
+   */
+  id: string | null;
+  intents: DiscordIntents;
+}
+
+const SNOWFLAKE_RE = /^\d{15,25}$/;
+
+/** A Discord snowflake id: digits only, in the length every published id has. */
+export function isDiscordSnowflake(value: unknown): value is string {
+  return typeof value === "string" && SNOWFLAKE_RE.test(value);
+}
+
+/**
+ * The application behind this bot token: its id and its privileged intents,
+ * from ONE `GET /applications/@me`.
+ *
+ * The id is why the owner no longer types an Application ID anywhere: the
+ * token already answers for it, so the box builds the invite link and writes
+ * `channels.discord.applicationId` itself.
+ */
+export async function fetchDiscordApplication(
+  token: string,
+  signal?: AbortSignal,
+): Promise<DiscordApplication> {
   const app = await discordGet(token, "/applications/@me", signal);
   if (!isRecord(app) || typeof app.flags !== "number") throw new DiscordUnavailableError();
-  return intentsFromApplicationFlags(app.flags);
+  return {
+    id: isDiscordSnowflake(app.id) ? app.id : null,
+    intents: intentsFromApplicationFlags(app.flags),
+  };
+}
+
+// 274878286912 = view channels + send messages + read history + attach files
+// + embed links + send in threads + add reactions: what the agent needs to
+// hold a conversation, and nothing that can moderate or manage a server.
+export const DISCORD_INVITE_PERMISSIONS = "274878286912";
+
+/**
+ * The OAuth2 link that adds this bot to a server, or null for an id that is
+ * not a snowflake — so only digits behind a literal https://discord.com/
+ * prefix ever reach an href.
+ */
+export function discordInviteUrl(applicationId: string | null | undefined): string | null {
+  if (!isDiscordSnowflake(applicationId)) return null;
+  return `https://discord.com/oauth2/authorize?client_id=${applicationId}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`;
 }
 
 // ── Guilds and members, for the allowlist picker ────────────────────────────

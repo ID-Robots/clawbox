@@ -3,19 +3,23 @@ import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import {
   DiscordAuthError,
+  type DiscordApplication,
   type DiscordBotInfo,
   type DiscordGuildMembers,
   type DiscordIntents,
   DiscordUnavailableError,
+  discordInviteUrl,
+  fetchDiscordApplication,
   fetchDiscordBotInfo,
   fetchDiscordGuildMembers,
-  fetchDiscordIntents,
   isSafeDiscordToken,
 } from "@/lib/discord-api";
 import {
+  type DiscordOpenclawAccess,
   EnvSecretProviderConflictError,
   GatewayNotReadyError,
   restartGateway,
+  setDiscordAccess,
   setDiscordToken,
 } from "@/lib/openclaw-config";
 import {
@@ -29,6 +33,7 @@ import {
   DiscordEmptyAllowlistError,
   ensureHermesGateway,
   normalizeDiscordUserId,
+  readHermesDiscordAccess,
   setHermesDiscordAllowlist,
   setHermesDiscordToken,
 } from "@/lib/hermes-discord";
@@ -78,6 +83,12 @@ function scrub(err: unknown, secret: string): string {
 
 interface ConfigureBody {
   botToken?: unknown;
+  /**
+   * Finish a saved bot's setup with the servers it is in NOW — posted by the
+   * panel while it waits for the owner to invite the bot, and harmless to
+   * repeat: nothing is written or restarted when nothing changed.
+   */
+  sync?: unknown;
   /** Numeric member ids from the picker. Absent on a first save. */
   allowedUserIds?: unknown;
 }
@@ -102,6 +113,17 @@ function readUserIds(value: unknown): { ids: string[] } | { error: string } {
     ids.push(id);
   }
   return { ids };
+}
+
+/** The guilds and their owners, in the shape the OpenClaw writer takes. */
+function openclawAccess(
+  application: DiscordApplication | null,
+  directory: DiscordGuildMembers | null,
+): DiscordOpenclawAccess {
+  return {
+    applicationId: application?.id ?? null,
+    guilds: (directory?.guilds ?? []).map((g) => ({ id: g.id, ownerId: g.ownerId })),
+  };
 }
 
 /** Members the picker offers, plus the ids selected by default. */
@@ -222,6 +244,77 @@ async function applyRestart(harness: string, secret: string): Promise<boolean> {
   }
 }
 
+/**
+ * `{sync:true}`: the bot's token is already saved; read the servers it is in
+ * now and give their owners access. Returns `needsInvite` while it is in none.
+ */
+async function syncGuilds(harness: string): Promise<NextResponse> {
+  const token = await get("discord_bot_token");
+  if (!token || typeof token !== "string") {
+    return NextResponse.json({ error: "Bot token is required" }, { status: 400 });
+  }
+  let application: DiscordApplication | null = null;
+  let directory: DiscordGuildMembers;
+  try {
+    [application, directory] = await Promise.all([
+      fetchDiscordApplication(token).catch((err) => {
+        if (err instanceof DiscordAuthError) throw err;
+        return null;
+      }),
+      fetchDiscordGuildMembers(token),
+    ]);
+  } catch (err) {
+    if (err instanceof DiscordAuthError) {
+      return NextResponse.json({ error: "token_rejected", code: "token_rejected" }, { status: 400 });
+    }
+    return NextResponse.json({ error: "discord_unavailable", code: "discord_unavailable" }, { status: 502 });
+  }
+
+  if (directory.guilds.length === 0) {
+    return NextResponse.json({ success: true, needsInvite: true, changed: false });
+  }
+
+  let changed = false;
+  if (harness === "hermes") {
+    // Only fill an allowlist nobody has chosen yet — never override a pick.
+    const access = await readHermesDiscordAccess();
+    if (!access.authorized) {
+      const allowlist = await applyAllowlist(harness, defaultSelection(directory));
+      changed = allowlist.changedKeys.length > 0;
+    }
+  } else {
+    try {
+      changed = await setDiscordAccess(openclawAccess(application, directory));
+    } catch (err) {
+      if (err instanceof EnvSecretProviderConflictError) changed = false;
+      else throw err;
+    }
+  }
+
+  let restarted = false;
+  let liveStatus: ChannelStatus | null = null;
+  if (changed) {
+    restarted = await applyRestart(harness, token);
+    if (harness !== "hermes" && restarted) {
+      liveStatus = await waitForChannelConnected(DISCORD_CHANNEL_ID, {
+        attempts: CHANNEL_VERIFY_ATTEMPTS,
+        delayMs: CHANNEL_VERIFY_DELAY_MS,
+      });
+    }
+    if (harness !== "hermes") invalidateChannelStatus(DISCORD_CHANNEL_ID);
+  }
+
+  return NextResponse.json({
+    success: true,
+    needsInvite: false,
+    changed,
+    restarted,
+    guilds: directory.guilds,
+    connected: liveStatus ? liveStatus.connected === true : null,
+    warning: changed && !restarted ? "restart_pending" : undefined,
+  });
+}
+
 export async function POST(request: Request) {
   // Kept out of the try so the outer catch can scrub it from anything it logs.
   let tokenForScrub = "";
@@ -243,6 +336,10 @@ export async function POST(request: Request) {
     }
 
     const rawToken = typeof body.botToken === "string" ? body.botToken.trim() : "";
+
+    if (!rawToken && body.sync === true) {
+      return await syncGuilds(harness);
+    }
 
     // ── Allowlist-only save: the picker changed, the token did not ──────────
     if (!rawToken) {
@@ -340,12 +437,16 @@ export async function POST(request: Request) {
     // Intents preflight. `null` means we could not read them — treated as
     // "unknown" and never as "they are off", because blocking a save on a
     // network blip is the same dishonesty pointing the other way.
-    let intents: DiscordIntents | null = null;
+    let application: DiscordApplication | null = null;
     try {
-      intents = await fetchDiscordIntents(rawToken, request.signal);
+      application = await fetchDiscordApplication(rawToken, request.signal);
     } catch (err) {
       if (err instanceof DiscordAuthError) throw err;
     }
+    const intents: DiscordIntents | null = application?.intents ?? null;
+    // The bot's user id IS its application id for every bot the Developer
+    // Portal creates, so the invite link survives an unreadable application.
+    const inviteUrl = discordInviteUrl(application?.id ?? bot.id);
 
     if (intents && !intents.messageContent) {
       // Nothing is written. Saving here would produce the exact state this
@@ -360,6 +461,7 @@ export async function POST(request: Request) {
             ...(intents.serverMembers ? [] : ["SERVER MEMBERS INTENT"]),
           ],
           portalUrl: DEVELOPER_PORTAL_URL,
+          inviteUrl,
         },
         { status: 400 },
       );
@@ -408,7 +510,7 @@ export async function POST(request: Request) {
       // OpenClaw: channel config + the EnvironmentFile the gateway resolves
       // `channels.discord.token` from.
       try {
-        await setDiscordToken(rawToken);
+        await setDiscordToken(rawToken, openclawAccess(application, directory));
       } catch (err) {
         if (err instanceof EnvSecretProviderConflictError) {
           // Nothing was written — the writer refuses a reference it knows the
@@ -502,6 +604,10 @@ export async function POST(request: Request) {
       allowedUserIds: allowlist.allowedUsers,
       allowlistSupported: harness === "hermes",
       portalUrl: DEVELOPER_PORTAL_URL,
+      inviteUrl,
+      // Not in any server yet: the panel shows the invite button and posts
+      // `{sync:true}` until the bot has been added, which finishes the setup.
+      needsInvite: directory !== null && directory.guilds.length === 0,
       warning,
     });
   } catch (err) {

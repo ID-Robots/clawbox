@@ -4,6 +4,7 @@ import { getActiveHarness } from "@/lib/harness";
 import {
   DiscordAuthError,
   type DiscordBotInfo,
+  discordInviteUrl,
   fetchDiscordBotInfo,
 } from "@/lib/discord-api";
 import {
@@ -238,6 +239,9 @@ export async function GET() {
         allowlistSupported: true,
         username: bot.info?.displayName,
         botId: bot.info?.id,
+        // A bot's user id is its application id, so the panel can offer "Add to
+        // a server" without ever asking the owner for one.
+        inviteUrl: discordInviteUrl(bot.info?.id),
       });
     }
 
@@ -287,6 +291,7 @@ export async function GET() {
       // back to. See readChannelRow() for why we do not pay for `--probe`.
       username: bot.info?.displayName,
       botId: bot.info?.id,
+      inviteUrl: discordInviteUrl(bot.info?.id),
     });
   } catch (err) {
     console.error("[discord/status] failed:", err);
