@@ -274,6 +274,26 @@ describe("the phone chat's microphone", () => {
     expect(await screen.findByTestId("voice-record")).toHaveAttribute("data-size", "large");
   });
 
+  it("names the attach button for assistive technology instead of its icon glyph", async () => {
+    installFetch("hello");
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+    // The paperclip is a Material Symbols ligature: its text content is the
+    // glyph name, which a screen reader would otherwise announce verbatim.
+    const attach = screen.getByTestId("chat-attach");
+    expect(attach).toHaveAccessibleName("Attach file");
+    expect(attach.querySelector(".material-symbols-rounded")).toHaveAttribute("aria-hidden", "true");
+    // On a phone it sits in the primary row beside the text box.
+    expect(attach.parentElement).toContainElement(screen.getByRole("textbox"));
+    unmount();
+
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await readyToRecord();
+    const desktopAttach = screen.getByTestId("chat-attach");
+    expect(desktopAttach).toHaveAccessibleName("Attach file");
+    expect(screen.getByTestId("chat-composer-row")).toContainElement(desktopAttach);
+  });
+
   it("keeps the compact button in the composer row on a big screen", async () => {
     installFetch("hello");
     render(<ChatPopup isOpen onClose={() => {}} />);

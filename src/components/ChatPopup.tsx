@@ -5688,6 +5688,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         onClick={() => fileInputRef.current?.click()}
         disabled={status !== 'connected'}
         title={tr('chat.attachFile', 'Attach file')}
+        aria-label={tr('chat.attachFile', 'Attach file')}
+        data-testid="chat-attach"
         style={{
           width: 36, height: 36, borderRadius: 10, border: 'none',
           background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
@@ -5698,7 +5700,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         onMouseEnter={(e) => { if (status === 'connected') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
         onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
       >
-        <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
+        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>attach_file</span>
       </button>
     )
   )
