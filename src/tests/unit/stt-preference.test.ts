@@ -26,7 +26,9 @@ let lib: Lib;
 let originalHome: string | undefined;
 
 const HOME = "/home/testbox";
-const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", capabilities: ["audio"] };
+// The cloud row names the ClawBox AI auth profile: the transcription credential
+// no longer rides on the openai provider entry (it shadowed the ChatGPT sign-in).
+const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", profile: "deepseek:default", capabilities: ["audio"] };
 const LOCAL = {
   type: "cli",
   command: "/usr/bin/python3",

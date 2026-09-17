@@ -6,7 +6,9 @@ import { EventEmitter } from "events";
 import {
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
-  CLAWBOX_AI_IMAGE_MODEL_LABEL,
+  CLAWBOX_AI_IMAGE_PROVIDER,
+  CLAWBOX_AI_LEGACY_IMAGE_MODEL,
+  CLAWBOX_AI_LEGACY_IMAGE_PROVIDER,
 } from "@/lib/clawbox-ai-models";
 
 // The ClawBox AI image-provider half of POST /setup-api/ai-models/configure
@@ -154,6 +156,7 @@ import {
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
@@ -167,6 +170,7 @@ const mockReadConfig = vi.mocked(readConfig);
 const mockReadConfigStrict = vi.mocked(readConfigStrict);
 const mockRunOpenclawConfigSet = vi.mocked(runOpenclawConfigSet);
 const mockRunOpenclawConfigSetBatch = vi.mocked(runOpenclawConfigSetBatch);
+const mockRunOpenclawConfigUnset = vi.mocked(runOpenclawConfigUnset);
 const mockFs = vi.mocked(fsp);
 
 function createSuccessfulChildProcess(): ChildProcess {
@@ -184,6 +188,12 @@ const PROXY_URL = "https://clawbox.com/api/ai";
 
 describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", () => {
   let configurePost: (req: Request) => Promise<Response>;
+
+  // The two config paths this feature is about: where the image credential
+  // lives now, and where every box in the field still has it.
+  const IMAGE_KEY = `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey`;
+  const IMAGE_BASE_URL = `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.baseUrl`;
+  const LEGACY_PROVIDER = `models.providers.${CLAWBOX_AI_LEGACY_IMAGE_PROVIDER}`;
 
   function jsonRequest(body: unknown): Request {
     return new Request("http://localhost/test", {
@@ -206,6 +216,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     return configSetCalls().find((args) => args[0] === path);
   }
 
+  /** Every `openclaw config unset <path>` the route ran. */
+  function unsetPaths(): string[] {
+    return mockRunOpenclawConfigUnset.mock.calls.map((call) => String(call[0]));
+  }
+
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -226,6 +241,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     mockRunOpenclawConfigSet.mockResolvedValue(undefined);
     mockRunOpenclawConfigSetBatch.mockResolvedValue(undefined);
+    mockRunOpenclawConfigUnset.mockResolvedValue(undefined);
     vi.mocked(unpairLocal).mockResolvedValue(undefined);
     vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     vi.mocked(parseFullyQualifiedModel).mockImplementation(parseFullyQualifiedModelImpl);
@@ -247,72 +263,70 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
   }
 
   describe("provisioning", () => {
-    it("points the openai image provider at the ClawBox AI proxy", async () => {
+    it("points the ClawBox AI image provider at the proxy, on its own provider id", async () => {
       await connectClawai();
 
-      expect(callFor("models.providers.openai.apiKey")).toEqual([
-        "models.providers.openai.apiKey",
-        CLAWAI_TOKEN,
-      ]);
-
-      const modelsCall = callFor("models.providers.openai.models");
-      expect(modelsCall?.[2]).toBe("--json");
-      expect(JSON.parse(modelsCall?.[1] ?? "null")).toEqual([
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
+      expect(callFor(IMAGE_KEY)).toEqual([IMAGE_KEY, CLAWAI_TOKEN]);
+      expect(callFor(IMAGE_BASE_URL)).toEqual([IMAGE_BASE_URL, PROXY_URL]);
     });
 
-    it("writes leaf paths, never the whole provider object", async () => {
-      // `config set models.providers.openai <blob>` would drop every other
-      // openai setting the box carries.
+    it("never puts the ClawBox AI token on the openai provider's auth", async () => {
+      // THE DEFECT this change exists for. On the pinned core a literal
+      // `models.providers.openai.apiKey` makes `prepareAgentRuntimeAuth` infer
+      // an api-key route requirement for the WHOLE provider — with no
+      // `auth: "api-key"` field anywhere — and `selectProviderModelRouteAuth`
+      // then keeps only profiles whose mode maps to that requirement. An OAuth
+      // profile maps to `subscription`, so a ChatGPT (Codex) sign-in is
+      // filtered out of its own provider and the portal token is sent to
+      // api.openai.com: 401 on every turn, then a silent failover.
       await connectClawai();
 
       const paths = configSetCalls().map((args) => args[0]);
-      expect(paths).not.toContain("models.providers.openai");
-      expect(paths).toContain("models.providers.openai.apiKey");
-      expect(paths).toContain("models.providers.openai.models");
+      expect(paths).not.toContain(`${LEGACY_PROVIDER}.apiKey`);
+      expect(paths).not.toContain(`${LEGACY_PROVIDER}.models`);
+      expect(paths.filter((path) => path.startsWith(`${LEGACY_PROVIDER}.`))).toEqual([]);
     });
 
-    it("omits `api` so the image model stays out of the chat picker", async () => {
-      // With `api` present the entry is offered by `openclaw models list` as a
-      // conversational model that fails on every turn. The image path reads raw
-      // config, so it does not need one.
+    it("writes leaf paths, never the whole provider object", async () => {
+      // `config set models.providers.<id> <blob>` would drop every other
+      // setting the box carries under that id.
       await connectClawai();
 
-      const entry = JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "[]")[0];
-      expect(entry).not.toHaveProperty("api");
-      expect(Object.keys(entry).sort()).toEqual(["baseUrl", "id", "name"]);
+      const paths = configSetCalls().map((args) => args[0]);
+      expect(paths).not.toContain(`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}`);
+      expect(paths).toContain(IMAGE_KEY);
+      expect(paths).toContain(IMAGE_BASE_URL);
     });
 
-    it("carries the `name` OpenClaw's schema requires", async () => {
-      // A models[] entry without one fails config validation and the gateway
-      // refuses to start.
+    it("writes no models[] row at all", async () => {
+      // A configured row is exempt from the core's picker hide rule, so the
+      // `openai` row this replaces stayed offerable as a chat model in
+      // OpenClaw's own surfaces whatever ClawBox did. The generic
+      // OpenAI-compatible image provider reads the provider-level baseUrl and
+      // passes `req.model` straight through, so the row has no job left.
       await connectClawai();
 
-      const entry = JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "[]")[0];
-      expect(entry.name).toBe(CLAWBOX_AI_IMAGE_MODEL_LABEL);
-      expect(String(entry.name).trim()).not.toBe("");
+      expect(callFor(`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.models`)).toBeUndefined();
     });
 
     it("sets agents.defaults.mediaModels.image — the write that makes the tool appear", async () => {
-      // Not `imageModel`: that is a separate key selecting the vision model.
+      // It is also what enables the bundled image plugin at gateway start:
+      // `collectConfiguredGenerationProviderIds` reads the provider id out of
+      // this slot. Not `imageModel`: that is a separate key selecting vision.
       await connectClawai();
 
       const call = callFor("agents.defaults.mediaModels.image");
       expect(call?.[2]).toBe("--json");
       expect(JSON.parse(call?.[1] ?? "null")).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
-      // The route also writes `imageModel` — the vision key, from a different
-      // function (TASK-417). What must never happen is the two aliasing: the
-      // image-generation slot has to name the image model and nothing else.
       const visionCall = callFor("agents.defaults.imageModel");
       expect(JSON.parse(visionCall?.[1] ?? "null")).not.toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     });
 
-    it("names the same model the boot migration writes", async () => {
+    it("names the model under the provider whose entry it just wrote", async () => {
       await connectClawai();
 
-      const entry = JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "[]")[0];
-      expect(`openai/${entry.id}`).toBe(CLAWBOX_AI_IMAGE_MODEL);
+      const slot = JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null");
+      expect(slot.primary).toBe(`${CLAWBOX_AI_IMAGE_PROVIDER}/${CLAWBOX_AI_IMAGE_MODEL_ID}`);
     });
 
     it("provisions images on the fallback path too", async () => {
@@ -324,23 +338,249 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-key" }));
 
       expect(res.status).toBe(200);
-      expect(callFor("models.providers.openai.apiKey")).toBeDefined();
+      expect(callFor(IMAGE_KEY)).toBeDefined();
       expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
     });
 
-    it("does not touch the openai provider when there is no ClawBox AI token", async () => {
+    it("does not touch the image provider when there is no ClawBox AI token", async () => {
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-key" }));
 
       expect(res.status).toBe(200);
-      expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
+      expect(callFor(IMAGE_KEY)).toBeUndefined();
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
   });
 
-  describe("ownership of models.providers.openai.apiKey", () => {
-    // ClawBox has never written this field — the openai setup path configures a
-    // native auth profile — so a literal value there is the owner's own OpenAI
-    // credential and we refuse rather than overwrite it.
+  describe("migrating a box provisioned on the openai provider", () => {
+    /** The shape in the field: our key and our row on `models.providers.openai`. */
+    const OUR_LEGACY_ROW = {
+      id: CLAWBOX_AI_IMAGE_MODEL_ID,
+      name: "ClawBox AI Images",
+      baseUrl: PROXY_URL,
+    };
+
+    function legacyBox(openai: Record<string, unknown> = { apiKey: "claw_old", models: [OUR_LEGACY_ROW] }, defaults?: unknown) {
+      mockReadConfig.mockResolvedValue({
+        models: { providers: { openai } },
+        ...(defaults === undefined ? {} : { agents: { defaults } }),
+      } as never);
+    }
+
+    /** The `models[]` the route wrote back to the legacy provider, or undefined. */
+    function writtenLegacyModels(): unknown {
+      const call = mockRunOpenclawConfigSet.mock.calls
+        .map((c) => c[0] as string[])
+        .find((args) => args[0] === `${LEGACY_PROVIDER}.models`);
+      return call === undefined ? undefined : JSON.parse(call[1]);
+    }
+
+    /** The flags that `models[]` write carried, or undefined. */
+    function writtenLegacyModelsFlags(): string[] | undefined {
+      const call = mockRunOpenclawConfigSet.mock.calls
+        .map((c) => c[0] as string[])
+        .find((args) => args[0] === `${LEGACY_PROVIDER}.models`);
+      return call?.filter((arg) => arg.startsWith("--"));
+    }
+
+    it("removes the whole openai entry when nothing but ours was in it", async () => {
+      legacyBox();
+
+      await connectClawai();
+
+      // `config set` cannot remove a key, and a present-but-empty
+      // `models.providers.openai` is still a provider entry the core reads.
+      expect(unsetPaths()).toContain(LEGACY_PROVIDER);
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
+    });
+
+    it("keeps the rest of an openai entry the owner configured", async () => {
+      // Leaf by leaf: the key and the rows are unset, and anything else the
+      // owner put on that entry is never named at all.
+      legacyBox({ apiKey: "claw_old", request: { timeoutMs: 90000 }, models: [OUR_LEGACY_ROW] });
+
+      await connectClawai();
+
+      expect(unsetPaths()).toEqual(
+        expect.arrayContaining([`${LEGACY_PROVIDER}.apiKey`, `${LEGACY_PROVIDER}.models`]),
+      );
+      expect(unsetPaths()).not.toContain(LEGACY_PROVIDER);
+      expect(unsetPaths()).not.toContain(`${LEGACY_PROVIDER}.request`);
+    });
+
+    it("keeps a sibling row of the owner's and removes only ours", async () => {
+      const sibling = { id: "house-model", name: "House model", api: "openai-completions", baseUrl: PROXY_URL };
+      legacyBox({ apiKey: "claw_old", models: [sibling, OUR_LEGACY_ROW] });
+
+      await connectClawai();
+
+      expect(writtenLegacyModels()).toEqual([sibling]);
+      // `models.providers.<id>.models` is a PROTECTED path: a replacement that
+      // removes entries is REFUSED without `--replace`, and `--batch-json` drops
+      // per-entry flags — so this write has to be its own call, with the flag.
+      expect(writtenLegacyModelsFlags()).toEqual(expect.arrayContaining(["--json", "--replace"]));
+      expect(unsetPaths()).toContain(`${LEGACY_PROVIDER}.apiKey`);
+      expect(unsetPaths()).not.toContain(`${LEGACY_PROVIDER}.models`);
+    });
+
+    it("removes every duplicate of our row, not just the first", async () => {
+      legacyBox({ apiKey: "claw_old", models: [OUR_LEGACY_ROW, { ...OUR_LEGACY_ROW, api: "openai-completions" }] });
+
+      await connectClawai();
+
+      expect(unsetPaths()).toContain(LEGACY_PROVIDER);
+    });
+
+    it("recognises our row on a RETIRED proxy host as ours", async () => {
+      // A box paired before the clawbox.com move still names an old host. The
+      // ownership set carries every host ClawBox has ever written.
+      legacyBox({
+        apiKey: "claw_old",
+        models: [{ ...OUR_LEGACY_ROW, baseUrl: "https://www.openclawhardware.dev/api/ai" }],
+      });
+
+      await connectClawai();
+
+      expect(unsetPaths()).toContain(LEGACY_PROVIDER);
+    });
+
+    it("recognises a row naming the default port explicitly", async () => {
+      // `new URL(u).host` drops :443 and the boot migration's python normaliser
+      // once kept it, so the two writers disagreed about the same row.
+      legacyBox({ apiKey: "claw_old", models: [{ ...OUR_LEGACY_ROW, baseUrl: "https://clawbox.com:443/api/ai" }] });
+
+      await connectClawai();
+
+      expect(unsetPaths()).toContain(LEGACY_PROVIDER);
+    });
+
+    it("repoints a slot that still names the legacy ref", async () => {
+      legacyBox({ apiKey: "claw_old", models: [OUR_LEGACY_ROW] }, {
+        mediaModels: { image: { primary: CLAWBOX_AI_LEGACY_IMAGE_MODEL } },
+      });
+
+      await connectClawai();
+
+      expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null"))
+        .toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    });
+
+    it("repoints a bare-string slot naming the legacy ref", async () => {
+      // The core resolves a bare string as a model, and this one names the
+      // provider entry the migration has just removed.
+      legacyBox({ apiKey: "claw_old", models: [OUR_LEGACY_ROW] }, {
+        mediaModels: { image: CLAWBOX_AI_LEGACY_IMAGE_MODEL },
+      });
+
+      await connectClawai();
+
+      expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null"))
+        .toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    });
+
+    it("leaves our legacy primary alone once the owner has added fallbacks to it", async () => {
+      // We only ever wrote `{primary: <our ref>}` into an EMPTY slot.
+      legacyBox({ apiKey: "claw_old", models: [OUR_LEGACY_ROW] }, {
+        mediaModels: { image: { primary: CLAWBOX_AI_LEGACY_IMAGE_MODEL, fallbacks: ["replicate/flux-pro"] } },
+      });
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+    });
+
+    it("leaves an owner's own OpenAI key and their row of our id exactly as they are", async () => {
+      // ClawBox has never written a non-`claw_` key there, so it is the owner's
+      // credential; and `gpt-image-1-mini` on their own host is their row.
+      const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "My Azure image model", baseUrl: "https://my-azure.example/openai/v1" };
+      legacyBox({ apiKey: "sk-proj-users-own-key", models: [theirs] });
+
+      await connectClawai();
+
+      expect(writtenLegacyModels()).toBeUndefined();
+      expect(unsetPaths().filter((path) => path.startsWith(LEGACY_PROVIDER))).toEqual([]);
+    });
+
+    it("still gives such a box its own image provider on the new id", async () => {
+      // The owner's OpenAI setup is not a reason to withhold pictures: the two
+      // providers are independent now, which is the whole point of the move.
+      legacyBox({ apiKey: "sk-proj-users-own-key" });
+
+      await connectClawai();
+
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
+    });
+
+    it("removes the key even when the new provider is one we refuse to touch", async () => {
+      // The key is a defect on its own, so the cleanup is not conditional on
+      // the new write landing. A box running a real LiteLLM proxy gets no
+      // ClawBox image provider — and still gets its ChatGPT lane back.
+      mockReadConfig.mockResolvedValue({
+        models: {
+          providers: {
+            openai: { apiKey: "claw_old", models: [OUR_LEGACY_ROW] },
+            [CLAWBOX_AI_IMAGE_PROVIDER]: { apiKey: "sk-litellm-users-own-key" },
+          },
+        },
+      } as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await connectClawai();
+      } finally {
+        warn.mockRestore();
+      }
+
+      expect(unsetPaths()).toContain(LEGACY_PROVIDER);
+      expect(callFor(IMAGE_KEY)).toBeUndefined();
+    });
+
+    it("removes the key on a box whose credential the proxy has refused", async () => {
+      // The image path stands down there (TASK-727), and the key still has to
+      // come off: a dead credential is no reason to keep hiding a sign-in.
+      const keys: Record<string, unknown> = {
+        clawai_credential_refused_at: 1_788_000_000_000,
+        clawai_token: CLAWAI_TOKEN,
+      };
+      vi.mocked(configGet).mockImplementation(async (key: string) => keys[key]);
+      mockGetAll.mockImplementation(async () => ({ ...keys }));
+      legacyBox();
+
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+
+      expect(res.status).toBe(200);
+      expect(unsetPaths()).toContain(LEGACY_PROVIDER);
+      expect(callFor(IMAGE_KEY)).toBeUndefined();
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+    });
+
+    it("does nothing to a box that never had an openai entry", async () => {
+      await connectClawai();
+
+      expect(unsetPaths()).toEqual([]);
+      expect(callFor(LEGACY_PROVIDER)).toBeUndefined();
+    });
+
+    it("does not report failure when the removal of an absent path fails", async () => {
+      // `config unset` exits 1 on a path that is already gone, and a tidy-up
+      // that could not run must not fail a ClawBox AI connect that did.
+      legacyBox();
+      mockRunOpenclawConfigUnset.mockRejectedValue(new Error("Config path not found"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const res = await connectClawai();
+        expect(res.status).toBe(200);
+        expect(warn.mock.calls.map((call) => call.join(" ")).join("\n"))
+          .toContain("Failed to remove the legacy ClawBox AI image provider entry");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  describe("ownership of the image provider's apiKey", () => {
+    // ClawBox has never written this field on the new provider id, so a literal
+    // value there is the owner's own LiteLLM credential and we refuse rather
+    // than overwrite it.
     it.each<[string, unknown]>([
       ["absent", undefined],
       ["null", null],
@@ -348,28 +588,37 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       ["whitespace", "   "],
       ["a claw_ token we wrote", "claw_older_token"],
     ])("claims the slot when it holds %s", async (_label, apiKey) => {
-      mockReadConfig.mockResolvedValue({ models: { providers: { openai: { apiKey } } } } as never);
+      mockReadConfig.mockResolvedValue({
+        models: { providers: { [CLAWBOX_AI_IMAGE_PROVIDER]: { apiKey } } },
+      } as never);
 
       await connectClawai();
 
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
       expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
     });
 
     it.each<[string, unknown]>([
-      ["a real OpenAI key", "sk-proj-users-own-key"],
-      ["a padded OpenAI key", "  sk-proj-users-own-key  "],
+      ["a real LiteLLM key", "sk-litellm-users-own-key"],
+      ["a padded key", "  sk-litellm-users-own-key  "],
       ["a number", 12345],
-      ["an object", { $env: "OPENAI_API_KEY" }],
-      ["an array", ["sk-proj-key"]],
+      ["an object", { $env: "LITELLM_API_KEY" }],
+      ["an array", ["sk-litellm-key"]],
     ])("backs off entirely when it holds %s", async (_label, apiKey) => {
-      mockReadConfig.mockResolvedValue({ models: { providers: { openai: { apiKey } } } } as never);
-
-      const res = await connectClawai();
+      mockReadConfig.mockResolvedValue({
+        models: { providers: { [CLAWBOX_AI_IMAGE_PROVIDER]: { apiKey } } },
+      } as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let res: Response;
+      try {
+        res = await connectClawai();
+      } finally {
+        warn.mockRestore();
+      }
 
       expect(res.status).toBe(200); // still a successful ClawBox AI connect
-      expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
-      expect(callFor("models.providers.openai.models")).toBeUndefined();
+      expect(callFor(IMAGE_KEY)).toBeUndefined();
+      expect(callFor(IMAGE_BASE_URL)).toBeUndefined();
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
       // …and the chat provider was configured regardless.
       expect(callFor("models.providers.deepseek")).toBeDefined();
@@ -380,96 +629,25 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
       await connectClawai();
 
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
-    });
-  });
-
-  describe("upserts models[] instead of replacing it", () => {
-    // `config set models.providers.openai.models` writes the whole array, so
-    // building it from our entry alone deletes every other row the owner
-    // configured. The boot migration in scripts/gateway-pre-start.sh has always
-    // upserted; a box repaired at boot and a box configured through this route
-    // have to end up with the same config.
-    function writtenModels(): Array<Record<string, unknown>> {
-      return JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "null");
-    }
-
-    async function connectWithOpenaiProvider(openai: Record<string, unknown>) {
-      mockReadConfig.mockResolvedValue({ models: { providers: { openai } } } as never);
-      await connectClawai();
-    }
-
-    it("keeps a sibling row and appends ours", async () => {
-      const sibling = { id: "house-model", name: "House model", api: "openai-completions", baseUrl: PROXY_URL };
-      await connectWithOpenaiProvider({ models: [sibling] });
-
-      expect(writtenModels()).toEqual([
-        sibling,
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
-    });
-
-    it("repairs its own entry in place rather than duplicating it", async () => {
-      // Same three repairs the boot migration applies: a blank `name` (the
-      // config will not validate without one and the gateway then refuses to
-      // start), a baseUrl left on a retired proxy, and a stray `api` that would
-      // put the image model in the chat picker.
-      await connectWithOpenaiProvider({
-        apiKey: "claw_old",
-        models: [{
-          id: CLAWBOX_AI_IMAGE_MODEL_ID,
-          name: "   ",
-          baseUrl: "https://clawbox.com/api/ai",
-          api: "openai-completions",
-        }],
-      });
-
-      expect(writtenModels()).toEqual([
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
-    });
-
-    it("leaves a name the owner gave our entry alone", async () => {
-      await connectWithOpenaiProvider({
-        apiKey: "claw_old",
-        models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "Drawing machine", baseUrl: PROXY_URL }],
-      });
-
-      expect(writtenModels()[0].name).toBe("Drawing machine");
-    });
-
-    it("starts a fresh array when models[] is present but not a list", async () => {
-      await connectWithOpenaiProvider({ models: "nonsense" });
-
-      expect(writtenModels()).toEqual([
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
-    });
-
-    it("drops non-object junk rows rather than writing back an invalid config", async () => {
-      await connectWithOpenaiProvider({ models: [null, "gpt-5", 42] });
-
-      expect(writtenModels()).toEqual([
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
     });
   });
 
   describe("will not make the portal token the credential for someone else's endpoint", () => {
-    // models.providers.openai.apiKey is provider-wide — nothing scopes it to the
-    // image model. getApiKeyForModel (dist/model-auth-CJEm9SNp.js:753 on
-    // OpenClaw 2026.7.1-2) falls back to it for any `openai/*` request once
-    // per-entry bindings, auth profiles and OPENAI_API_KEY come up empty, which
-    // on a ClawBox they always do.
-    async function backsOff(openai: Record<string, unknown>) {
-      mockReadConfig.mockResolvedValue({ models: { providers: { openai } } } as never);
+    // `models.providers.<id>.apiKey` is provider-wide — nothing scopes it to the
+    // image model — so before writing it we have to know that every route
+    // already configured under that id stays on our own proxy.
+    async function backsOff(entry: Record<string, unknown>) {
+      mockReadConfig.mockResolvedValue({
+        models: { providers: { [CLAWBOX_AI_IMAGE_PROVIDER]: entry } },
+      } as never);
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         const res = await connectClawai();
 
         expect(res.status).toBe(200); // ClawBox AI chat still connected
-        expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
-        expect(callFor("models.providers.openai.models")).toBeUndefined();
+        expect(callFor(IMAGE_KEY)).toBeUndefined();
+        expect(callFor(IMAGE_BASE_URL)).toBeUndefined();
         expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
         expect(callFor("models.providers.deepseek")).toBeDefined();
         return warn.mock.calls.map((call) => call.join(" ")).join("\n");
@@ -478,13 +656,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       }
     }
 
-    it("backs off on a sibling row that resolves to api.openai.com", async () => {
-      // `api` makes it a live chat row; the absent baseUrl resolves it to
-      // api.openai.com, where the claw_ token would be sent as the bearer.
+    it("backs off on a sibling row that resolves to the provider's default host", async () => {
       const logged = await backsOff({ models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }] });
 
       expect(logged).toContain("Skipped ClawBox AI image provider");
-      expect(logged).toContain("api.openai.com");
+      expect(logged).toContain("localhost:4000");
     });
 
     it("backs off on a sibling row pointing at a third-party host", async () => {
@@ -494,8 +670,8 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     });
 
     it("backs off on a provider-level baseUrl that is not ours", async () => {
-      // Every row without a baseUrl of its own inherits this one, including
-      // OpenClaw's bundled openai catalog rows.
+      // The owner's own LiteLLM proxy. Every row without a baseUrl of its own
+      // inherits this one.
       const logged = await backsOff({ baseUrl: "https://someone-elses-proxy.example/v1" });
 
       expect(logged).toContain("someone-elses-proxy.example");
@@ -506,16 +682,12 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     });
 
     it("leaves an owner's own row of OUR id on their private proxy alone", async () => {
-      // `gpt-image-1-mini` is a real OpenAI model id, and Azure OpenAI /
-      // LiteLLM / vLLM / any self-hosted OpenAI-compatible gateway is where a
-      // power user's row of that id actually lives. Claiming it by id repointed
-      // their route at our proxy, overwrote their `api`, and wrote the portal
-      // token as the provider-wide credential for a route we do not own.
+      // `gpt-image-1-mini` is a real OpenAI model id, and a self-hosted
+      // OpenAI-compatible gateway is where a power user's row of it lives.
       const logged = await backsOff({
         models: [{
           id: CLAWBOX_AI_IMAGE_MODEL_ID,
           name: "My Azure image model",
-          api: "azure-images",
           baseUrl: "https://my-azure.example/openai/v1",
         }],
       });
@@ -533,40 +705,34 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
     it("proceeds when a sibling row points at a RETIRED ClawBox proxy host", async () => {
       // The foreignness test asks "would our token leave the building?", so it
-      // has to know every host ClawBox has ever written — not just the current
-      // one. With the single-host form this backed the whole migration off on
-      // a box whose owner still carries a row on the old proxy, and the boot
-      // migration (which this claims to mirror) has to agree.
+      // has to know every host ClawBox has ever written — and the boot
+      // migration, which this mirrors, has to agree.
       mockReadConfig.mockResolvedValue({
         models: {
           providers: {
             deepseek: { apiKey: CLAWAI_TOKEN, baseUrl: PROXY_URL },
-            openai: {
-              models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://www.openclawhardware.dev/api/ai" }],
+            [CLAWBOX_AI_IMAGE_PROVIDER]: {
+              models: [{ id: "house-model", name: "House model", baseUrl: "https://www.openclawhardware.dev/api/ai" }],
             },
           },
         },
       } as never);
       await connectClawai();
 
-      expect(callFor("models.providers.openai.apiKey")).toBeDefined();
-      expect(callFor("models.providers.openai.models")).toBeDefined();
+      expect(callFor(IMAGE_KEY)).toBeDefined();
     });
 
     it("still aborts when the deepseek entry is a RAW key at a genuine third party", async () => {
       // install.sh's CLAWBOX_AI_API_KEY branch provisions a raw DeepSeek key at
-      // api.deepseek.com. On the first ClawBox AI pairing the snapshot still
-      // says that, so seeding the proxy-host set from the live baseUrl would
-      // make api.deepseek.com "not foreign" and write the portal token as the
-      // bearer for a route that leaves for DeepSeek — verbatim the harm this
-      // back-off exists to prevent. Only a `claw_` deepseek entry names a
-      // ClawBox proxy.
+      // api.deepseek.com. Seeding the proxy-host set from the live baseUrl
+      // would make that host "not foreign" and write the portal token as the
+      // bearer for a route that leaves for DeepSeek.
       mockReadConfig.mockResolvedValue({
         models: {
           providers: {
             deepseek: { apiKey: "sk-deepseek-raw", baseUrl: "https://api.deepseek.com" },
-            openai: {
-              models: [{ id: "deepseek-chat", name: "DeepSeek", api: "openai-completions", baseUrl: "https://api.deepseek.com/v1" }],
+            [CLAWBOX_AI_IMAGE_PROVIDER]: {
+              models: [{ id: "deepseek-chat", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" }],
             },
           },
         },
@@ -579,81 +745,35 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
         warn.mockRestore();
       }
 
-      expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
-      expect(callFor("models.providers.openai.models")).toBeUndefined();
+      expect(callFor(IMAGE_KEY)).toBeUndefined();
     });
 
     it("proceeds when a sibling row points at the same proxy we do", async () => {
       mockReadConfig.mockResolvedValue({
-        models: { providers: { openai: { models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: PROXY_URL }] } } },
+        models: { providers: { [CLAWBOX_AI_IMAGE_PROVIDER]: { models: [{ id: "house-model", name: "House model", baseUrl: PROXY_URL }] } } },
       } as never);
 
       await connectClawai();
 
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
     });
 
-    it("proceeds on a box whose only openai row is ours", async () => {
+    it("proceeds on a box whose only row is one of ours from an older build", async () => {
       // Re-configuring must not back off on this route's own previous output.
       mockReadConfig.mockResolvedValue({
-        models: { providers: { openai: { apiKey: "claw_old", models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL }] } } },
-      } as never);
-
-      await connectClawai();
-
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
-    });
-  });
-
-  describe("ownership of our own row", () => {
-    it("claims a row naming the default port explicitly", async () => {
-      // `new URL(u).host` drops :443; the boot migration's python normaliser
-      // kept it, so the two writers disagreed about the same row. Pinned from
-      // this side too.
-      mockReadConfig.mockResolvedValue({
         models: {
           providers: {
-            openai: {
+            [CLAWBOX_AI_IMAGE_PROVIDER]: {
               apiKey: "claw_old",
-              models: [{
-                id: CLAWBOX_AI_IMAGE_MODEL_ID,
-                name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
-                baseUrl: "https://clawbox.com:443/api/ai",
-              }],
+              models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "ClawBox AI Images", baseUrl: PROXY_URL }],
             },
           },
         },
       } as never);
+
       await connectClawai();
 
-      expect(JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "null")).toEqual([
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
-    });
-
-    it("still recognises our row on a RETIRED proxy host as ours", async () => {
-      // The ownership set carries every host ClawBox has ever written, so the
-      // retarget of an entry left on an old proxy still finds it — one row
-      // repaired in place, not a second appended beside it.
-      mockReadConfig.mockResolvedValue({
-        models: {
-          providers: {
-            openai: {
-              apiKey: "claw_old",
-              models: [{
-                id: CLAWBOX_AI_IMAGE_MODEL_ID,
-                name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
-                baseUrl: "https://www.openclawhardware.dev/api/ai",
-              }],
-            },
-          },
-        },
-      } as never);
-      await connectClawai();
-
-      expect(JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "null")).toEqual([
-        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
-      ]);
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
     });
   });
 
@@ -680,9 +800,8 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
     it("leaves a fallbacks-only config alone", async () => {
       // The write replaces the whole object, so testing `primary` alone would
-      // delete the owner's fallbacks. OpenClaw's own gate (hasToolModelConfig,
-      // dist/model-config.helpers-BS3FWcoO.js:25 on 2026.7.1-2) accepts primary
-      // OR a non-empty fallback, so fallbacks-only is a working setup.
+      // delete the owner's fallbacks. OpenClaw's own gate (hasToolModelConfig)
+      // accepts primary OR a non-empty fallback.
       await connectWithImageModel({ fallbacks: ["replicate/flux-pro"] });
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
@@ -692,20 +811,19 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
-    it("still provisions the provider block when the slot is taken", async () => {
-      // The token and the model entry are ours regardless; only the slot is not.
+    it("still provisions the provider entry when the slot is taken", async () => {
+      // The credential and the endpoint are ours regardless; only the slot is not.
       await connectWithImageModel({ fallbacks: ["replicate/flux-pro"] });
 
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
-      expect(callFor("models.providers.openai.models")).toBeDefined();
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor(IMAGE_BASE_URL)).toBeDefined();
     });
 
     it("leaves a BARE STRING in the v2 home alone — the core resolves one (TASK-755)", async () => {
       // Measured on 2026.8.1: `resolvePrimaryStringValue` returns the string
-      // itself, so `hasExplicitToolModelConfig` answers true and
-      // `mediaModels.image: "replicate/flux-pro"` is `valid:true` with no
-      // warnings. A dict-only test reads that as an empty slot and replaces it
-      // — an owner-authored model gone, on a save about some other provider.
+      // itself, so `hasExplicitToolModelConfig` answers true. A dict-only test
+      // reads that as an empty slot and replaces it — an owner-authored model
+      // gone, on a save about some other provider.
       mockReadConfig.mockResolvedValue({
         agents: { defaults: { mediaModels: { image: "replicate/flux-pro" } } },
       } as never);
@@ -713,14 +831,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       await connectClawai();
 
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
-      // …and the provider block is still ours to write.
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+      // …and the provider entry is still ours to write.
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
     });
 
     it("leaves a bare string in the LEGACY home alone for the same reason", async () => {
-      // Distinct from the TASK-743 stand-down below, which fires on the key's
-      // PRESENCE whatever it holds: this is about what the value means, and it
-      // is what makes the take-back arm and the upsert agree about a string.
       await connectWithImageModel("replicate/flux-pro");
 
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
@@ -729,8 +844,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
     it("leaves a bare string in agents.defaults.imageModel alone", async () => {
       // The SAME helper reads the vision slot, and the core coerces a string
-      // there too — `{"agents":{"defaults":{"imageModel":"openai/gpt-4o"}}}` is
-      // `valid:true`. Claiming it would overrule the model the owner chose for
+      // there too. Claiming it would overrule the model the owner chose for
       // looking at pictures he sends.
       mockReadConfig.mockResolvedValue({
         agents: { defaults: { imageModel: "openai/gpt-4o" } },
@@ -765,14 +879,6 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
-    /**
-     * The V2 home, seeded directly — which no case in this file did before
-     * TASK-743, and every case that seeded the LEGACY key now stops at the new
-     * key-presence stand-down BEFORE `hasToolModelConfig` is consulted. Without
-     * this case, deleting the `hasToolModelConfig(existingImageModel)` early
-     * return would leave the whole suite green and the next Save on a v2 box
-     * would replace a customer's own `mediaModels.image` with ours.
-     */
     it("leaves an owner's own mediaModels.image alone", async () => {
       mockReadConfig.mockResolvedValue({
         agents: { defaults: { mediaModels: { image: { primary: "replicate/flux-pro" } } } },
@@ -780,13 +886,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       await connectClawai();
 
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
-      // The provider block is still ours to write; only the slot is not.
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+      // The provider entry is still ours to write; only the slot is not.
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
     });
 
     it("leaves an owner's fallbacks-only mediaModels.image alone", async () => {
-      // `hasToolModelConfig` accepts a non-empty fallback, and the write would
-      // replace the whole object and take the owner's fallbacks with it.
       mockReadConfig.mockResolvedValue({
         agents: { defaults: { mediaModels: { image: { fallbacks: ["replicate/flux-pro"] } } } },
       } as never);
@@ -805,26 +909,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
     /**
      * TASK-743 — the same stand-down `scripts/gateway-pre-start.sh` gained, in
-     * the OTHER writer of this slot.
-     *
-     * These shapes resolve no model, so this route used to claim the slot and
-     * write `agents.defaults.mediaModels.image` — beside a legacy
-     * `agents.defaults.imageGenerationModel` that is still on the box. Both
-     * homes present is what OpenClaw 2026.8 refuses outright
-     * (`agents.defaults: Unrecognized key: "imageGenerationModel"`, gateway
-     * exit 78), and it also strands the box for good: the core's own loader
-     * migration moves the legacy key only into a home that is EMPTY, so a
-     * `mediaModels.image` written here is what stops it ever being moved.
-     *
-     * Nothing is lost by waiting. The next gateway start runs the core's
-     * `doctor --fix` over a config it will not load, and the save after that
-     * claims the slot as this route always did — except on a box whose doctor
-     * is itself blocked, which stays refused either way.
-     *
-     * "Resolve no model" is `hasToolModelConfig`'s rule, not the core's: the
-     * core coerces a bare string, so the last case below is an owner's
-     * configured model that this route reads as empty. Separate defect, its own
-     * card; the guard covers it either way.
+     * the OTHER writer of this slot. Both homes present is what OpenClaw 2026.8
+     * refuses outright (`agents.defaults: Unrecognized key:
+     * "imageGenerationModel"`, gateway exit 78), and it strands the box: the
+     * core's loader migration moves the legacy key only into a home that is
+     * EMPTY, so a `mediaModels.image` written here stops it being moved.
      */
     it.each<[string, unknown]>([
       ["null", null],
@@ -834,14 +923,14 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       ["fallbacks holding only blanks", { fallbacks: ["", "  "] }],
       ["fallbacks that is not a list", { fallbacks: "replicate/flux-pro" }],
       ["a non-string primary", { primary: 42 }],
-      ["a plain string", "openai/gpt-image-1-mini"],
+      ["a plain string", "replicate/flux-pro"],
     ])("stands down while a legacy key holding %s is still on the box", async (_label, existing) => {
       await connectWithImageModel(existing);
 
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
-      // The provider block is still ours to write — only the slot waits.
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
-      expect(callFor("models.providers.openai.models")).toBeDefined();
+      // The provider entry is still ours to write — only the slot waits.
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor(IMAGE_BASE_URL)).toBeDefined();
       // …and nothing writes the legacy key back: this route is not the
       // migrator either.
       expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
@@ -850,8 +939,6 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
   describe("which home the installed core decides (TASK-755)", () => {
     /**
-     * The sibling in `scripts/gateway-pre-start.sh` has carried a `_clawbox_v2`
-     * arm all along; this function wrote OpenClaw 2's home on every core.
      * `agents.defaults` is `.strict()` on BOTH generations, so the wrong name
      * is `Unrecognized key` and gateway exit 78 — not a key quietly ignored.
      */
@@ -866,29 +953,30 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     });
 
     it("writes NEITHER home when the installed core cannot be identified", async () => {
-      // The boot script's own rule, in the other language: a half-finished
-      // update is exactly the state in which the core cannot be read AND in
-      // which a guess from the repository pin would be wrong.
+      // A half-finished update is exactly the state in which the core cannot be
+      // read AND in which a guess from the repository pin would be wrong.
       vi.mocked(installedOpenclawCoreGeneration).mockResolvedValueOnce("unknown");
-
-      const res = await connectClawai();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let res: Response;
+      try {
+        res = await connectClawai();
+      } finally {
+        warn.mockRestore();
+      }
 
       expect(res.status).toBe(200);
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
       expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
-      // …and the provider block and the model row are written regardless: they
-      // have one home on both generations.
-      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
-      expect(callFor("models.providers.openai.models")).toBeDefined();
+      // …and the provider entry is written regardless: it has one home on both
+      // generations.
+      expect(callFor(IMAGE_KEY)?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor(IMAGE_BASE_URL)).toBeDefined();
     });
 
     it("writes the legacy home on a v1 core whose legacy key is present but empty", async () => {
-      // The stand-down above this is about a migration only OpenClaw 2
-      // performs. On a v1 core that key is not legacy at all — it is the slot's
-      // ONLY home — so standing down over it leaves the box with no image path
-      // while the boot script, whose sibling guard IS generation-gated, writes
-      // it at the next start. Two writers disagreeing about one config is the
-      // thing this card exists to stop.
+      // On a v1 core that key is not legacy at all — it is the slot's ONLY home
+      // — so standing down over it leaves the box with no image path while the
+      // boot script, whose sibling guard IS generation-gated, writes it.
       vi.mocked(installedOpenclawCoreGeneration).mockResolvedValue("v1");
       mockReadConfig.mockResolvedValue({
         agents: { defaults: { imageGenerationModel: { primary: "" } } },
@@ -902,9 +990,6 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     });
 
     it("still stands down on a v2 core whose legacy key is present but empty", async () => {
-      // The invariant #761 established, unchanged: on the generation that DOES
-      // have the migration, the key's presence is what matters and its contents
-      // are not read.
       vi.mocked(installedOpenclawCoreGeneration).mockResolvedValue("v2");
       mockReadConfig.mockResolvedValue({
         agents: { defaults: { imageGenerationModel: { primary: "" } } },
@@ -937,7 +1022,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       failConfigSetsMatching(
         mockRunOpenclawConfigSet,
         mockRunOpenclawConfigSetBatch,
-        (path) => path.startsWith("models.providers.openai"),
+        (path) => path.startsWith(`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}`),
         () => new Error(message),
       );
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -961,13 +1046,11 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     it("does not let a subprocess error forge extra log records", async () => {
       // CodeQL "Log injection": the message is built from whatever `openclaw`
       // wrote to stderr, and a value reaches that CLI straight from this
-      // route's request body. Unescaped CR/LF would let one API call decide how
-      // many records the journal gets, and an ESC would be acted on by whatever
-      // terminal tails it.
-      const logged = await failImageWritesWith("boom\nWARN forged record\r\n[31mred");
+      // route's request body.
+      const logged = await failImageWritesWith("boom\nWARN forged record\r\n[31mred");
 
       expect(logged).toContain("Failed to configure ClawBox AI image provider");
-      expect(logged).not.toContain("\n[31m");
+      expect(logged).not.toContain("\n[31m");
       expect(logged.split("\n")).toHaveLength(1);
       expect(logged).toContain("�");
     });
@@ -983,22 +1066,14 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
   /*
    * TASK-727, the TypeScript half of the boot script's stand-down.
    *
-   * `scripts/gateway-pre-start.sh` takes the image row and the image slot back
-   * when the proxy has permanently refused this box's credential — and this
-   * function writes exactly those two keys. It also runs on saves that have
+   * `scripts/gateway-pre-start.sh` takes the image provider and the image slot
+   * back when the proxy has permanently refused this box's credential — and
+   * this function writes exactly those keys. It also runs on saves that have
    * nothing to do with ClawBox AI: `ensureFallbackModel` calls
    * `configureClawboxAi(true, undefined)` whenever a box with no local model
-   * saves ANY provider, and with no token supplied it re-pastes the STORED one.
-   * Without the gate below, the owner's obvious recovery — configure a
-   * different chat provider — cleared the persisted refusal, re-armed the image
-   * path and restarted the gateway on top of it.
+   * saves ANY provider, re-pasting the STORED token.
    */
   describe("a credential the proxy has refused", () => {
-    /**
-     * The store the route reads the refusal stamp and the stored token from —
-     * a real one, so a clear the route performs is visible to the gate that
-     * reads the same key a few lines later.
-     */
     function refusedBox(storedToken = CLAWAI_TOKEN) {
       const keys: Record<string, unknown> = {
         clawai_credential_refused_at: 1_788_000_000_000,
@@ -1011,11 +1086,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       });
       mockGetAll.mockImplementation(async () => ({ ...keys }));
       // `setMany` MUST land in the same store, or the fixture models a box the
-      // route never sees: the handler writes the new `clawai_token` well before
-      // `configureClawboxAi` runs, so a `setMany` that changed nothing would let
-      // a "did the credential change?" read taken inside that function answer
-      // correctly by accident. It is answered from the handler's pre-write
-      // snapshot precisely because the store no longer holds the old value.
+      // route never sees.
       mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
         for (const [key, value] of Object.entries(entries)) {
           if (value === undefined) delete keys[key];
@@ -1030,15 +1101,14 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
 
       expect(res.status).toBe(200);
-      expect(configSetCalls().filter(([path]) => path.startsWith("models.providers.openai"))).toEqual([]);
+      expect(configSetCalls().filter(([path]) => path.startsWith(`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}`))).toEqual([]);
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
       expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
     });
 
     it("does not retire the refusal on a pass that re-pastes the same token", async () => {
       // The mark is about the CREDENTIAL. Re-pasting the bytes the box already
-      // holds is not a re-link, and clearing on one would let any other
-      // provider's save undo the boot script's stand-down.
+      // holds is not a re-link.
       refusedBox();
 
       await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
@@ -1063,7 +1133,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       failConfigSetsMatching(
         mockRunOpenclawConfigSet,
         mockRunOpenclawConfigSetBatch,
-        (path) => path.startsWith("models.providers.openai"),
+        (path) => path.startsWith(`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}`),
         () => new Error("config write conflict"),
       );
 

@@ -317,18 +317,70 @@ export function portalDeniesClawboxAiModel(
 /**
  * OpenClaw provider id the image model is registered under.
  *
- * It has to be `openai`. OpenClaw has no built-in image providers at all
- * (`BUILTIN_IMAGE_GENERATION_PROVIDERS = []`); every one of them comes from a
- * bundled plugin declaring the `imageGenerationProviders` capability contract,
- * and the only one that both speaks the OpenAI-compatible
- * `POST {baseUrl}/images/generations` shape and honours a per-model `baseUrl`
- * override is `openai`. A ClawBox-specific provider id would simply not be an
- * image provider as far as the gateway is concerned.
+ * `litellm`, and it MUST NOT be `openai` any more. The id is not cosmetic: it
+ * decides which provider entry the image credential lands on, and on the pinned
+ * core an `openai` provider entry that carries an `apiKey` takes the ChatGPT
+ * (Codex) subscription lane down with it.
  *
- * Reusing `openai` is safe for a user who also brings their own OpenAI key —
- * see `buildClawboxAiImageProviderModels` for why.
+ * WHY `openai` IS NOW WRONG, measured against v2026.9.3. `prepareAgentRuntimeAuth`
+ * (src/agents/runtime-plan/prepare-auth.ts) reads the provider entry before it
+ * looks at any auth profile. A literal `models.providers.openai.apiKey` makes
+ * `providerHasDirectMaterial` true, which makes `selectedConfiguredAuthMode`
+ * default to `"api-key"` — with NO `auth: "api-key"` field anywhere in the
+ * config — and that mode is handed to `selectProviderModelRouteAuth` as the
+ * configured one. There it pins `configuredRequirement` to `"api-key"`, and the
+ * candidate list is rebuilt keeping only profiles whose mode maps to that
+ * requirement. An OAuth (subscription) profile maps to `"subscription"`, so the
+ * ChatGPT sign-in is filtered out of its own provider and the inline key is sent
+ * to api.openai.com instead. That is a 401 on every turn and a silent failover
+ * to the fallback model. The same filter is why an explicit
+ * `auth.order.openai: ["openai:chatgpt"]` answers "Explicit auth order for
+ * openai has no usable profiles" rather than repairing it.
+ *
+ * Declaring `auth: "api-key"` is worse, not better: it sets
+ * `providerBindingSuppressesProfiles`, which removes auth profiles from the
+ * provider outright. There is no per-model credential to escape into either —
+ * `ModelDefinitionSchema` is `.strict()` and has no `apiKey`. So on 9.3 the only
+ * way an `openai` ChatGPT sign-in can own its own provider is for nothing else
+ * to be written onto that provider's auth.
+ *
+ * WHY `litellm` IS THE NATIVE HOME. The core ships a generic OpenAI-compatible
+ * image provider factory (`createOpenAiCompatibleImageGenerationProvider`) and
+ * the bundled `litellm` plugin is the one instance of it built for "an
+ * OpenAI-compatible gateway whose address you supply". It is enabled by default
+ * (`extensions/litellm/openclaw.plugin.json`: `enabledByDefault: true`,
+ * `contracts.imageGenerationProviders: ["litellm"]`), it resolves its bearer
+ * per provider id (`resolveApiKeyForProvider({ provider: "litellm" })`), it
+ * takes its endpoint from `models.providers.litellm.baseUrl`, and it posts
+ * exactly `POST {baseUrl}/images/generations` — the shape the ClawBox AI proxy
+ * serves. Its `models: [...]` list is metadata, not a gate: the factory passes
+ * `req.model` straight through, so `gpt-image-1-mini` is accepted.
+ *
+ * It also arms itself. `collectConfiguredGenerationProviderIds` pulls the
+ * provider id out of `agents.defaults.mediaModels.image`, so naming
+ * `litellm/<id>` there is what enables the plugin at gateway start — the same
+ * job the `imageGenerationModel` write has always done.
+ *
+ * `litellm` is a BUNDLED overlay id (`isBuiltInModelProviderOverlayId`), so the
+ * entry does not have to declare `models[]` the way a custom provider id would
+ * — and deliberately does not: a `models[]` row here would put
+ * `litellm/gpt-image-1-mini` into the core's own chat pickers, which is the
+ * exposure the `openai` row already had and the one thing this move gets to
+ * drop for free.
  */
-export const CLAWBOX_AI_IMAGE_PROVIDER = "openai" as const;
+export const CLAWBOX_AI_IMAGE_PROVIDER = "litellm" as const;
+
+/**
+ * Where every box provisioned before this change put the image entry.
+ *
+ * Kept because the field is full of them: the migration has to RECOGNISE an
+ * `openai/gpt-image-1-mini` slot and an `openai` image row as ours before it can
+ * move them, and every ClawBox surface that refuses to treat the image model as
+ * a chat model has to keep refusing the old ref — a box that has not rebooted
+ * since the update still carries it in
+ * `agents.defaults.mediaModels.image.primary`.
+ */
+export const CLAWBOX_AI_LEGACY_IMAGE_PROVIDER = "openai" as const;
 
 /**
  * Image model advertised by the cloud proxy on every plan.
@@ -353,54 +405,34 @@ export const CLAWBOX_AI_IMAGE_MODEL_ID =
 /** Fully-qualified ref written to `agents.defaults.imageGenerationModel.primary`. */
 export const CLAWBOX_AI_IMAGE_MODEL = `${CLAWBOX_AI_IMAGE_PROVIDER}/${CLAWBOX_AI_IMAGE_MODEL_ID}`;
 
-/**
- * `name` on the model entry. Not cosmetic: OpenClaw's config schema *requires*
- * `name` on every `models.providers.<p>.models[]` entry. Omitting it makes the
- * whole config invalid ("models.providers.openai.models.0.name: Invalid input")
- * and the gateway refuses to start — verified against OpenClaw 2026.7.1-2.
- */
-export const CLAWBOX_AI_IMAGE_MODEL_LABEL = "ClawBox AI Images";
+/** The ref boxes provisioned before the `litellm` move still carry. */
+export const CLAWBOX_AI_LEGACY_IMAGE_MODEL = `${CLAWBOX_AI_LEGACY_IMAGE_PROVIDER}/${CLAWBOX_AI_IMAGE_MODEL_ID}`;
 
 /*
- * The ClawBox AI image entry is written WITHOUT an `api` field, and OpenClaw
- * 2026.8.1 still offers it as a chat model anyway. Both halves matter.
+ * WHERE THE CHAT-PICKER EXPOSURE WENT.
  *
- * Omitting `api` DOES thin the exposure — `appendConfiguredProviderRows`
- * (dist/list.row-sources-Bw2O0JWp.js:377-381) skips a configured row that
- * declares none — but that gate is not the wall it looks like:
+ * Until this build the image model was a `models.providers.openai.models[]` row
+ * with a per-model `baseUrl`, and that row was offerable as a CHAT model by
+ * OpenClaw's own surfaces whatever ClawBox did. Omitting `api` thinned it —
+ * `appendConfiguredProviderRows` (dist/list.row-sources-Bw2O0JWp.js:377-381)
+ * skips a configured row that declares none — but the gate is not a wall: it is
+ * written `if (!replaceMode && !shouldListConfiguredProviderModel(…))`, so
+ * `models.mode: "replace"` bypasses it entirely (and ClawBox writes that mode
+ * whenever a local model is the primary), while `configuredKeys` from
+ * `buildConfiguredModelCatalog` emits every `models.providers.*.models[]` row
+ * regardless of `api` and a key in that set is exempt from the picker's hide
+ * rule. Measured on 2026.8.1: `openclaw models list` printed
+ * `openai/gpt-image-1-mini` and `config set agents.defaults.model.primary
+ * openai/gpt-image-1-mini` was accepted. Nor was there a flag to close it — the
+ * row schema is `.strict()` with no status/disabled field.
  *
- *   - it is written `if (!replaceMode && !shouldListConfiguredProviderModel(…))`,
- *     so `models.mode: "replace"` bypasses it entirely — and ClawBox itself
- *     writes that mode whenever a local model is the primary
- *     (ai-models/configure/route.ts, the Ollama and llama.cpp branches);
- *   - `configuredKeys` is built by `buildConfiguredModelCatalog`
- *     (dist/model-selection-shared-DSwf-R8O.js:922-958), which emits every
- *     `models.providers.*.models[]` row regardless of `api`, and a key in that
- *     set is exempt from the picker's hide rule
- *     (dist/model-catalog-visibility-DdOTmrMO.js:41-43).
- *
- * Measured on 2026.8.1: on a paired box with a local primary,
- * `openclaw models list` prints `openai/gpt-image-1-mini`, and
- * `openclaw config set agents.defaults.model.primary openai/gpt-image-1-mini`
- * is accepted.
- *
- * And there is no flag that would close it. The config schema for a
- * `models.providers.<p>.models[]` row is `.strict()` with no
- * `status`/`deprecated`/`disabled` field (dist/zod-schema.core-BZltxHeB.js:269-303;
- * the CLI refuses the whole config with `Unrecognized key: "status"`), and the
- * hide rule exempts configured rows regardless. So OpenClaw's OWN surfaces —
- * its Control UI picker, Telegram `/model`, `openclaw models set` — remain able
- * to offer this id, and nothing ClawBox can write to the harness's config
- * changes that. That is a harness gap, recorded as a finding rather than
- * papered over with a ClawBox-side workaround.
- *
- * What ClawBox owns, it closes: the chat dropdown's row builder skips this id,
- * and all three write paths to `agents.defaults.model.primary` refuse it (the
- * chat POST at both guard sites, the configure route, the Local-only restore).
- * A stray `api` is still stripped by both writers — it matches beta, it costs
- * nothing, and it keeps the row out of the one path that does honour the gate
- * (`models.mode: "merge"`, the common case) — but it is a narrowing, not a
- * guarantee, and must not be described as one.
+ * The `litellm` entry writes NO row at all (the generic OpenAI-compatible image
+ * provider takes the provider-level `baseUrl` and passes `req.model` through),
+ * so there is no configured key to be exempt and nothing for a picker to offer.
+ * ClawBox's own refusals stay where they are — the chat dropdown's row builder
+ * skips this id and all three writers of `agents.defaults.model.primary` refuse
+ * it, for BOTH refs — because a box carries the old ref until its migration has
+ * run, and because an id can still be typed into a custom-model field.
  *
  * The two predicates below are what those refusals are built from.
  */
@@ -445,9 +477,24 @@ export function isClawboxAiImageModelId(id: unknown): boolean {
   return typeof id === "string" && id.trim().toLowerCase() === CLAWBOX_AI_IMAGE_MODEL_ID.toLowerCase();
 }
 
-/** Is `ref` the fully-qualified ClawBox AI image entry (`openai/gpt-image-1-mini`)? */
+/**
+ * Is `ref` the fully-qualified ClawBox AI image entry?
+ *
+ * BOTH spellings — `litellm/gpt-image-1-mini`, which this build writes, and
+ * `openai/gpt-image-1-mini`, which every box provisioned before it still
+ * carries. Each caller is a REFUSAL (keep this id out of a chat slot) or a
+ * CLAIM (this slot is ours to move), and both have to go on recognising the old
+ * ref: a box updates its code before it reboots its gateway, so the config is
+ * the old shape for as long as it takes the migration to run — and a chat-model
+ * write pinned to the legacy ref is exactly the failure these guards exist for.
+ */
 export function isClawboxAiImageModelRef(ref: unknown): boolean {
-  return typeof ref === "string" && ref.trim().toLowerCase() === CLAWBOX_AI_IMAGE_MODEL.toLowerCase();
+  if (typeof ref !== "string") return false;
+  const normalized = ref.trim().toLowerCase();
+  return (
+    normalized === CLAWBOX_AI_IMAGE_MODEL.toLowerCase() ||
+    normalized === CLAWBOX_AI_LEGACY_IMAGE_MODEL.toLowerCase()
+  );
 }
 
 /* ---------------------------------------------------------------------------
