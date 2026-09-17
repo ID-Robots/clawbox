@@ -17,6 +17,21 @@ import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
+import { AskUserPrompt } from '@/lib/chat-ask-user'
+import {
+  loadPendingQuestions,
+  markQuestionBusy,
+  mergeQuestionCard,
+  questionBelongsToSession,
+  questionsAfterReplay,
+  questionsAfterResolution,
+  questionsAfterResolve,
+  readQuestionCard,
+  readQuestionResolution,
+  QUESTION_REQUESTED_EVENT,
+  QUESTION_RESOLVED_EVENT,
+  type QuestionCard,
+} from '@/lib/gateway-questions'
 import {
   APPROVAL_SESSION_EVENT,
   approvalsAfterReplay,
@@ -1138,6 +1153,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // our own: the harness owns the queue, its expiry and its first-answer-wins
   // resolution, and the next subscribe replays whatever is still open.
   const [approvals, setApprovals] = useState<ApprovalCard[]>([])
+  // The `ask_user` questions the agent is parked on, as the gateway reports
+  // them. Never a store of our own, for the reason the approvals above are
+  // not: the gateway owns the queue, the ids, the expiry and the
+  // first-answer-wins resolution, and `question.list` replays whatever is
+  // still open — which is why, unlike a Hermes clarify, one of these survives
+  // a reload.
+  const [questions, setQuestions] = useState<QuestionCard[]>([])
+  // The clock those cards judge their own window against. One timeout at the
+  // earliest expiry still ahead of it, never a ticker — an idle chat with a
+  // card on screen must not re-render once a second on a Jetson. The same
+  // shape as the approval clock below, and deliberately its own: a question's
+  // 15-minute default and an approval's two minutes are different deadlines,
+  // and one clock woken for either would re-render both sets.
+  const [questionNow, setQuestionNow] = useState(() => Date.now())
+  useEffect(() => {
+    const soonest = questions.reduce(
+      (min, card) => (card.status === 'pending' && card.expiresAtMs > questionNow
+        ? Math.min(min, card.expiresAtMs)
+        : min),
+      Number.POSITIVE_INFINITY,
+    )
+    if (!Number.isFinite(soonest)) return
+    const timer = window.setTimeout(() => setQuestionNow(Date.now()), Math.max(0, soonest - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [questions, questionNow])
   // The clock the cards judge their own window against.
   //
   // A pending approval's window closes on its own, and the card has to stop
@@ -2321,6 +2361,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (forKey !== sessionKeyRef.current) return
             setApprovals(prev => approvalsAfterReplay(prev, replay))
           })
+          // And what the agent is already parked on. A question outlives this
+          // browser tab — `ask_user` waits fifteen minutes by default — so a
+          // reload, a reconnect after a gateway bounce, or simply opening the
+          // chat after the question was asked all land here and get the card
+          // back. `question.list` answers the PENDING set and nothing else,
+          // so this is also what takes down a card that was answered while
+          // this socket was away.
+          void loadPendingQuestions(wsRequest, boundKey, (pending, forKey) => {
+            if (forKey !== sessionKeyRef.current) return
+            setQuestions(prev => questionsAfterReplay(prev, pending))
+          })
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
           // socket. A skill change no longer does either, so it never raises
@@ -2423,7 +2474,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // omitted — the exact pre-2026.8 frame. Every signed value must match
       // this frame byte for byte, so the shared literals live in consts.
       const clientPlatform = navigator.platform || 'web'
-      const scopes = ['operator.admin', 'operator.approvals', 'operator.pairing']
+      // `operator.questions` is what guards `question.requested` /
+      // `question.resolved` and the `question.*` RPCs. `operator.admin` is a
+      // superset on today's gateway, but a paired device is granted what it
+      // ASKED for, and an unknown scope is filtered out rather than refused
+      // (`normalizeOperatorScopeList`), so naming it costs nothing anywhere.
+      const scopes = ['operator.admin', 'operator.approvals', 'operator.questions', 'operator.pairing']
       const device = buildDeviceConnectParams({
         nonce: challenge?.nonce,
         ts: challenge?.ts,
@@ -2810,6 +2866,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (card) setApprovals(prev => mergeApprovalCard(prev, card))
           return
         }
+
+        // The agent has STOPPED and is waiting for a person: `ask_user` put a
+        // question on the gateway and is blocked on `question.waitAnswer`
+        // until somebody resolves it. The payload IS the record here (unlike
+        // the approval event, which is an envelope around one).
+        //
+        // Filtered by session, but loosely — see `questionBelongsToSession`:
+        // the record carries the CANONICAL store key, which is the bound key
+        // with the `agent:<id>:` namespace in front of it, so a byte-for-byte
+        // comparison would drop the card for exactly the conversation the
+        // question was asked in.
+        if (eventName === QUESTION_REQUESTED_EVENT) {
+          const card = readQuestionCard(data.payload)
+          if (!card) return
+          if (!questionBelongsToSession(card.sessionKey, sessionKeyRef.current)) return
+          setQuestions(prev => mergeQuestionCard(prev, card))
+          return
+        }
+
+        // NOT filtered on the session, because the event carries no key: it is
+        // `{id, status, answers?}` and nothing more. The id is the filter —
+        // `questionsAfterResolution` leaves a card this surface never drew
+        // alone. Every terminal path arrives here: an answer from another
+        // surface, the agent abandoning its own question when the run is
+        // aborted, and the clock.
+        if (eventName === QUESTION_RESOLVED_EVENT) {
+          const resolution = readQuestionResolution(data.payload)
+          if (!resolution) return
+          setQuestions(prev => questionsAfterResolution(prev, resolution))
+          return
+        }
       }
     }
 
@@ -3101,6 +3188,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // The approvals belong to the session that is going away. The gateway
     // still holds them; the next subscribe replays whatever is still open.
     setApprovals([])
+    // Same for the agent's own questions, and the same reasoning: the gateway
+    // is still holding them and the next `question.list` replays them, so
+    // nothing is lost by taking a card off a conversation that is gone.
+    setQuestions([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
@@ -3204,6 +3295,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void subscribeSessionApprovals(wsRequest, key, (replay, forKey) => {
       if (forKey !== sessionKeyRef.current) return
       setApprovals(prev => approvalsAfterReplay(prev, replay))
+    })
+    void loadPendingQuestions(wsRequest, key, (pending, forKey) => {
+      if (forKey !== sessionKeyRef.current) return
+      setQuestions(prev => questionsAfterReplay(prev, pending))
     })
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
@@ -4406,6 +4501,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setApprovals(prev => approvalsAfterResolve(prev, card.id, result))
     } catch (err) {
       setApprovals(prev => approvalsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
+  /**
+   * Answer one `ask_user` question through the gateway's own resolver.
+   *
+   * ONE call carrying EVERY question of the request: `validateAnswers` refuses
+   * a resolve that leaves any of them out, so there is no per-question post
+   * here the way there is for a Hermes clarify.
+   *
+   * `question.resolve` is first-answer-wins and answers with the canonical
+   * recorded state, so an owner who answered in Telegram a moment earlier gets
+   * that outcome rather than an error. A refusal leaves the card PENDING with
+   * the gateway's own words on it — the owner may press again, and pressing
+   * again over an answer that did land comes back as the terminal state
+   * rather than as a second answer.
+   */
+  const answerQuestion = useCallback(async (card: QuestionCard, answers: Record<string, string[]>) => {
+    setQuestions(prev => markQuestionBusy(prev, card.id))
+    try {
+      const result = await wsRequest('question.resolve', { id: card.id, answers: { answers } })
+      setQuestions(prev => questionsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setQuestions(prev => questionsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
     }
   }, [wsRequest])
 
@@ -6622,6 +6741,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             thing a turn produces that is deliberately not persisted. */}
         {!reloadingSkill && clarifies.map(card => (
           <ClarifyPrompt key={card.requestId} card={card} onAnswer={answerClarify} />
+        ))}
+
+        {/* The agent's own `ask_user` question, one card per request.
+            OpenClaw only, and not by a harness check here but by construction:
+            they arrive on the gateway socket, and a Hermes box raises none —
+            its equivalent is the clarify card above. Beside the clarifies for
+            the same reason they sit there: this is the turn STOPPING to ask,
+            not something it has already done. */}
+        {!reloadingSkill && questions.map(card => (
+          <AskUserPrompt key={card.id} card={card} nowMs={questionNow} onAnswer={answerQuestion} />
         ))}
 
         {/* Outgoing mail, one card per batch. Below the clarifies and above the
