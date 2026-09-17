@@ -80,9 +80,9 @@ function diskState({
   completed?: boolean;
   interruptedAt?: string;
   /** Who took the lock, as `setUpdateLock` records it. */
-  holder?: { pid: number; bootId: string | null; startedTicks?: string | null; at?: string; step?: string };
+  holder?: { pid: number; bootId: string | null; startedTicks?: string | null; at?: string; step?: string; failed?: string[] };
   /** How and where the last run was cut short, as the verdict records it beside the stamp. */
-  detail?: { cause: "reboot" | "replaced" | "unknown"; step?: string };
+  detail?: { cause: "reboot" | "replaced" | "unknown"; step?: string; failed?: string[] };
   /** The drift warnings the interrupted run persisted before its first step. */
   warnings?: { code: string; message: string }[];
 }) {
@@ -518,16 +518,19 @@ describe("an interrupted run says which step died and what took the box, and res
       ));
   });
 
-  it("resumes at the recorded step itself when it is before the power-profile step", async () => {
+  it("resumes at the power-profile step for a record on the step right after it", async () => {
+    // Since 2026-09-17 the power-profile step is step 2, ahead of apt: every
+    // resumable step is after it, so every resume passes through the unpin.
     vi.spyOn(console, "log").mockImplementation(() => {});
     networkAnswers(true);
     diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "replaced", step: "apt_update" } });
-    const index = stepIndex("apt_update");
-    expect(index).toBeGreaterThan(0);
+    const unpin = stepIndex("performance_mode");
+    expect(stepIndex("apt_update")).toBe(unpin + 1);
 
     expect(updater.startUpdate()).toEqual({ started: true });
 
-    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(index));
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(unpin));
+    expect(updater.getUpdateState().steps[stepIndex("apt_update")].status).toBe("pending");
   });
 
   it("keeps its position when a resume is refused for want of a network", async () => {
@@ -560,18 +563,49 @@ describe("an interrupted run says which step died and what took the box, and res
     expect(updater.getUpdateState().error).toMatch(/assistant may be unavailable/);
   });
 
-  it("starts from the top when the record names no step, or there is no stamp", async () => {
+  it("starts from the top when there is no stamp, whatever the detail says", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(true);
     diskState({ locked: false, detail: { cause: "reboot", step: "openclaw_install" } });
 
     expect(updater.startUpdate()).toEqual({ started: true });
 
-    // No stamp: the detail alone must not move the start. The run parks on
-    // the same probe; its position is what is asserted.
-    await new Promise((r) => setTimeout(r, 20));
+    // The prologue has run (the markers were cleared) and the run went on
+    // from step 1: nothing before it painted completed, the position untouched.
+    await vi.waitFor(() =>
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_detail: undefined })));
     const state = updater.getUpdateState();
     expect(state.currentStepIndex).toBe(0);
     expect(state.steps.every((s) => s.status !== "completed")).toBe(true);
+  });
+
+  it("keeps a step the run had already walked past as failed red, and resumes from it", async () => {
+    // A non-failFast step (apt_update here) failed and the run went on, as it
+    // does; then the box died on openclaw_install. Painting apt green and
+    // skipping it would end the resume in "Update finished" over a failure
+    // nobody was told about — so it stays red, and the resume starts there.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    diskState({
+      locked: true,
+      holder: { pid: 5567, bootId: "a-previous-boot", startedTicks: "1", at: STAMP, step: "openclaw_install", failed: ["apt_update"] },
+    });
+    await updater.checkContinuation();
+    const verdict = updater.getUpdateState();
+    const apt = stepIndex("apt_update");
+    expect(apt).toBeGreaterThan(0);
+    expect(verdict.steps[apt].status).toBe("failed");
+    expect(verdict.steps[apt].error).toMatch(/had failed before the update was cut short/);
+    expect(verdict.steps[stepIndex("openclaw_install")].status).toBe("failed");
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_detail", { cause: "reboot", step: "openclaw_install", failed: ["apt_update"] });
+
+    // The resume, from the record the verdict wrote.
+    updater.resetUpdateState();
+    networkAnswers(true);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install", failed: ["apt_update"] } });
+    expect(updater.startUpdate()).toEqual({ started: true });
+    const resumeAt = Math.min(apt, stepIndex("performance_mode"));
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(resumeAt));
   });
 
   it("Dismiss takes the step record with the stamp, so the next update starts from the top", async () => {

@@ -108,6 +108,7 @@ ctl() {
 ${fn("stop_openclaw_unit_for_migration")}
 ${fn("stop_openclaw_gateways_for_migration")}
 ${fn("openclaw_migration_complete")}
+${fn("recover_parked_openclaw_core")}
 ${fn("promote_staged_openclaw_core")}
 ${fn("step_openclaw_install")}
 step_openclaw_patch() { event PATCH; [ "$SCENARIO" != setup-patch-failure ]; }

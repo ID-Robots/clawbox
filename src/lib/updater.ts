@@ -3256,6 +3256,18 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     failFast: true,
   },
   {
+    id: "performance_mode",
+    label: "Setting the power profile",
+    // FIRST among the root steps that do real work, and ahead of apt_update on
+    // purpose: under an in-app update this step UNPINS the clocks (install.sh
+    // step_performance_mode, `--restore` while the lock is held) so the apt
+    // transaction, the npm install and the rebuild all run unpinned; the
+    // closing reboot pins again. It applied the pinned profile here until
+    // 2026-09-17, one step before the npm install three field boxes died in.
+    timeoutMs: 60_000,
+    requiresRoot: true,
+  },
+  {
     id: "apt_update",
     label: "Updating system packages",
     // 120 s was right while this step only refreshed apt and installed packages
@@ -3280,12 +3292,6 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   // (Owner's decision, 2026-09-14.) The step itself stays — `install.sh --step
   // nvidia_jetpack` and the root-step allow-list keep it available as an
   // explicit repair — it is only off the automatic update path.
-  {
-    id: "performance_mode",
-    label: "Enabling max performance mode",
-    timeoutMs: 60_000,
-    requiresRoot: true,
-  },
   {
     id: "chromium_install",
     label: "Installing Chromium",
@@ -4024,6 +4030,8 @@ export function isInterruptedVerdict(reported: UpdateState): boolean {
 interface InterruptionRecord {
   cause: InterruptionCause;
   step?: string;
+  /** Steps that had already failed and been walked past when the run died. */
+  failed?: string[];
 }
 
 /**
@@ -4036,15 +4044,24 @@ function interruptionRecordFrom(holder: UpdateLockHolder | null): InterruptionRe
   if (!holder) return { cause: "unknown" };
   const rebooted = holderFromAnotherBoot(holder);
   const cause: InterruptionCause = rebooted === null ? "unknown" : rebooted ? "reboot" : "replaced";
-  return holder.step ? { cause, step: holder.step } : { cause };
+  return {
+    cause,
+    ...(holder.step ? { step: holder.step } : {}),
+    ...(holder.failed?.length ? { failed: [...holder.failed] } : {}),
+  };
 }
 
 /** Strict: an unrecognised record is NO record, never a guess at either half. */
 function parseInterruptionRecord(value: unknown): InterruptionRecord | null {
   if (!value || typeof value !== "object") return null;
-  const raw = value as { cause?: unknown; step?: unknown };
+  const raw = value as { cause?: unknown; step?: unknown; failed?: unknown };
   if (raw.cause !== "reboot" && raw.cause !== "replaced" && raw.cause !== "unknown") return null;
-  return typeof raw.step === "string" && raw.step ? { cause: raw.cause, step: raw.step } : { cause: raw.cause };
+  const failed = Array.isArray(raw.failed) ? raw.failed.filter((id): id is string => typeof id === "string" && id !== "") : [];
+  return {
+    cause: raw.cause,
+    ...(typeof raw.step === "string" && raw.step ? { step: raw.step } : {}),
+    ...(failed.length ? { failed } : {}),
+  };
 }
 
 async function readInterruptionRecord(): Promise<InterruptionRecord | null> {
@@ -4060,7 +4077,7 @@ async function readInterruptionRecord(): Promise<InterruptionRecord | null> {
 function describeInterruption(
   record: InterruptionRecord | null,
   steps: UpdateStepDef[],
-): { detail: InterruptionDetail; index: number } {
+): { detail: InterruptionDetail; index: number; failedBefore: number[] } {
   const index = record?.step ? steps.findIndex((s) => s.id === record.step) : -1;
   const detail: InterruptionDetail = { cause: record?.cause ?? "unknown" };
   if (index >= 0) {
@@ -4068,7 +4085,12 @@ function describeInterruption(
     detail.stepLabel = steps[index].label;
     detail.assistantAtRisk = ASSISTANT_DOWN_STEP_IDS.has(steps[index].id);
   }
-  return { detail, index };
+  // The non-failFast steps the run had walked past as FAILED: they were red
+  // on the card the owner was watching, and they stay red here.
+  const failedBefore = (record?.failed ?? [])
+    .map((id) => steps.findIndex((s) => s.id === id))
+    .filter((i) => i >= 0 && (index < 0 || i < index));
+  return { detail, index, failedBefore };
 }
 
 /**
@@ -4079,7 +4101,7 @@ function describeInterruption(
  */
 function applyInterruptedVerdict(record: InterruptionRecord | null, warnings: UpdateWarning[]): void {
   const steps = applicableSteps();
-  const { detail, index } = describeInterruption(record, steps);
+  const { detail, index, failedBefore } = describeInterruption(record, steps);
   const message = interruptedMessage(detail);
   runtime.state = createInitialState(steps);
   runtime.state.warnings = warnings;
@@ -4089,6 +4111,10 @@ function applyInterruptedVerdict(record: InterruptionRecord | null, warnings: Up
     for (let i = 0; i < index; i++) runtime.state.steps[i].status = "completed";
     runtime.state.steps[index].status = "failed";
     runtime.state.steps[index].error = interruptedStepError(detail);
+  }
+  for (const i of failedBefore) {
+    runtime.state.steps[i].status = "failed";
+    runtime.state.steps[i].error = "This step had failed before the update was cut short; a resume runs it again.";
   }
   console.error(`[Updater] ${message}`);
 }
@@ -4108,8 +4134,15 @@ async function interruptedStepIndex(steps: UpdateStepDef[]): Promise<number> {
     if (!stamp.known || typeof stamp.value !== "string") return 0;
     const record = detail.known ? parseInterruptionRecord(detail.value) : null;
     if (!record?.step) return 0;
-    const index = steps.findIndex((s) => s.id === record.step);
+    let index = steps.findIndex((s) => s.id === record.step);
     if (index <= 0) return 0;
+    // …and no later than the first step the run had already walked past as
+    // FAILED: painted green and skipped, a failure nobody was told about would
+    // end in "Update finished".
+    for (const id of record.failed ?? []) {
+      const at = steps.findIndex((s) => s.id === id);
+      if (at > 0 && at < index) index = at;
+    }
     // Never past the power-profile step. A box that died and was power-cycled
     // boots with clawbox-performance.service pinning the clocks again, and a
     // resume that skipped `performance_mode` would run the npm install and the
@@ -4587,9 +4620,6 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // leave Telegram stopped until gateway_verify, which a failed rebuild or
   // rejected core pin never reaches. Resolve once for this run/continuation.
   const desktopIntegration = hasX64DesktopIntegration(PROJECT_DIR);
-  // Whether this run CONTINUES an interrupted one from the step it died on —
-  // decided below, after the lock and before the markers it reads are cleared.
-  let resumed = false;
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -4631,7 +4661,6 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           return;
         }
         startFrom = at;
-        resumed = true;
         for (let i = 0; i < at; i++) runtime.state.steps[i].status = "completed";
         runtime.state.currentStepIndex = at;
         // The interrupted run's own diagnosis (the drift warnings it persisted
@@ -4720,7 +4749,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // ten-minute run.
     // …naming the step about to run, so a successor of this process can say
     // where a dead run stopped and continue from there.
-    if (ownsTheDesktop) await setUpdateLock(step.id);
+    if (ownsTheDesktop) {
+      await setUpdateLock(step.id, runtime.state.steps.filter((s) => s.status === "failed").map((s) => s.id));
+    }
 
     // The window the warning read below is bounded by. Taken BEFORE the
     // dispatch, so nothing this step writes can fall outside it, and per step,

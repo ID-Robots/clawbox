@@ -109,6 +109,58 @@ describe("promote_staged_openclaw_core", () => {
     }
   });
 
+  it("sets a live core that is a symlink aside like any other", () => {
+    // An `npm link`ed or hand-linked core: the link itself is what is moved
+    // aside and dropped, never followed into whatever it points at.
+    const p = makePrefix({ oldCore: false });
+    try {
+      const elsewhere = path.join(p.dir, "elsewhere");
+      mkdirSync(elsewhere, { recursive: true });
+      writeFileSync(path.join(elsewhere, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.7.1" }));
+      symlinkSync(elsewhere, path.join(p.prefix, "lib", "node_modules", "openclaw"));
+      const stage = stageCore(p.prefix, "2026.9.3");
+      const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
+      expect(r.status, r.stderr).toBe(0);
+      const live = path.join(p.prefix, "lib", "node_modules", "openclaw");
+      expect(lstatSync(live).isSymbolicLink()).toBe(false);
+      expect(JSON.parse(readFileSync(path.join(live, "package.json"), "utf-8")).version).toBe("2026.9.3");
+      // The link's target is somebody else's folder: untouched.
+      expect(existsSync(path.join(elsewhere, "package.json"))).toBe(true);
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to finish when nothing launches the new tree, and says so", () => {
+    // A live launcher link that still resolves into the new tree is accepted
+    // (npm's relative link is the same for every version); with neither that
+    // nor a staged launcher, the tree is in place and nothing starts it.
+    const p = makePrefix({});
+    try {
+      const stage = stageCore(p.prefix, "2026.9.3");
+      rmSync(path.join(stage, "bin", "openclaw"));
+      rmSync(path.join(p.prefix, "bin", "openclaw"));
+      const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/no openclaw launcher/);
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a live launcher link that still resolves into the promoted tree", () => {
+    const p = makePrefix({});
+    try {
+      const stage = stageCore(p.prefix, "2026.9.3");
+      rmSync(path.join(stage, "bin", "openclaw"));
+      const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
+      expect(r.status, r.stderr).toBe(0);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.3");
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
   it("works on a box with no core yet", () => {
     const p = makePrefix({ oldCore: false });
     try {
@@ -152,9 +204,62 @@ describe("promote_staged_openclaw_core", () => {
   });
 });
 
+describe("recover_parked_openclaw_core", () => {
+  const recover = (p: Prefix) => spawnSync("bash", ["-c", [
+    "set -uo pipefail",
+    `NPM_PREFIX=${JSON.stringify(p.prefix)}`,
+    shellFunction("recover_parked_openclaw_core"),
+    "recover_parked_openclaw_core",
+  ].join("\n")], { encoding: "utf-8", timeout: 20_000 });
+
+  it("puts a core back that a promotion parked and never replaced", () => {
+    // The window between the two renames: live gone, old tree parked.
+    const p = makePrefix({});
+    try {
+      const live = path.join(p.prefix, "lib", "node_modules", "openclaw");
+      const previous = path.join(p.prefix, "lib", "node_modules", ".openclaw-previous");
+      spawnSync("mv", [live, previous]);
+      const r = recover(p);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/putting it back/);
+      expect(existsSync(previous)).toBe(false);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops what a finished promotion did not get to remove, and touches a present core not at all", () => {
+    const p = makePrefix({});
+    try {
+      const previous = path.join(p.prefix, "lib", "node_modules", ".openclaw-previous");
+      mkdirSync(previous, { recursive: true });
+      const stage = stageCore(p.prefix, "2026.9.9");
+      const r = recover(p);
+      expect(r.status, r.stderr).toBe(0);
+      expect(existsSync(previous)).toBe(false);
+      expect(existsSync(stage)).toBe(false);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does nothing on a box with neither", () => {
+    const p = makePrefix({ oldCore: false });
+    try {
+      const r = recover(p);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim()).toBe("");
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("step_openclaw_install stages the core", () => {
   /** The step, driven with a stub npm that lays npm's layout down at the prefix it is handed. */
-  function runStep(p: Prefix, opts: { npm: "ok" | "empty-launcher" | "wrong-version" | "nothing" }) {
+  function runStep(p: Prefix, opts: { npm: "ok" | "empty-launcher" | "wrong-version" | "nothing"; pin?: string }) {
     const calls = JSON.stringify(path.join(p.dir, "calls"));
     const bin = path.join(p.dir, "bin");
     mkdirSync(bin, { recursive: true });
@@ -186,7 +291,7 @@ exit 0
     // A pin file the step reads its target from.
     const src = path.join(p.dir, "src");
     mkdirSync(path.join(src, "config"), { recursive: true });
-    writeFileSync(path.join(src, "config", "openclaw-target.txt"), "2026.9.3\n");
+    writeFileSync(path.join(src, "config", "openclaw-target.txt"), `${opts.pin ?? "2026.9.3"}\n`);
     const program = [
       "set -uo pipefail",
       `NPM_PREFIX=${JSON.stringify(p.prefix)}`,
@@ -208,6 +313,7 @@ exit 0
       // which this suite is not about: the step is cut off after the install.
       "openclaw_version_is_v2() { return 1; }",
       'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+      shellFunction("recover_parked_openclaw_core"),
       shellFunction("promote_staged_openclaw_core"),
       shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
       "step_openclaw_install",
@@ -225,8 +331,8 @@ exit 0
       const r = runStep(p, { npm: "ok" });
       expect(r.status, r.stderr + r.stdout).toBe(0);
       const npmCall = p.calls().find((c) => c.startsWith("npm "));
-      expect(npmCall).toContain(`--prefix ${path.join(p.prefix, ".openclaw-stage")}`);
-      expect(npmCall).not.toContain(`--prefix ${p.prefix}\n`);
+      // The prefix npm was handed IS the stage, and only the stage.
+      expect(npmCall?.split(" --prefix ")[1]).toBe(path.join(p.prefix, ".openclaw-stage"));
       expect(r.stdout).toContain("OpenClaw installed: OpenClaw 2026.9.3 (new)");
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.3");
       expect(existsSync(path.join(p.prefix, ".openclaw-stage"))).toBe(false);
@@ -241,9 +347,35 @@ exit 0
     try {
       const r = runStep(p, { npm: "empty-launcher" });
       expect(r.status).not.toBe(0);
-      expect(r.stderr).toMatch(/answers '<nothing>' to --version, not 2026\.9\.3/);
+      expect(r.stderr).toMatch(/answers nothing to --version/);
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
       expect(p.calls().some((c) => c.startsWith("flush "))).toBe(false);
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses a launcher that answers nothing when the pin is a dist-tag", () => {
+    // A tag resolves to whatever npm chose, so the version is not compared —
+    // but "answers nothing" is the zero-length launcher, and that never goes
+    // live whatever the target was.
+    const p = makePrefix({});
+    try {
+      const r = runStep(p, { npm: "empty-launcher", pin: "beta" });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/answers nothing to --version/);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("promotes whatever version a dist-tag pin resolved to", () => {
+    const p = makePrefix({});
+    try {
+      const r = runStep(p, { npm: "wrong-version", pin: "beta" });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.1.1");
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }

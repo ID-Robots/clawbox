@@ -76,6 +76,13 @@ export interface UpdateLockHolder {
    * dead mid `openclaw_install` with no assistant left).
    */
   step?: string;
+  /**
+   * The ids of the steps that had already FAILED (and been walked past — the
+   * non-failFast ones) when this record was written. A successor that resumes
+   * the run must not paint them green and skip them: it starts no later than
+   * the first of them.
+   */
+  failed?: string[];
 }
 
 function currentBootId(): string | null {
@@ -88,14 +95,16 @@ function currentBootId(): string | null {
 
 function parseHolder(value: unknown): UpdateLockHolder | null {
   if (!value || typeof value !== "object") return null;
-  const raw = value as { pid?: unknown; bootId?: unknown; startedTicks?: unknown; at?: unknown; step?: unknown };
+  const raw = value as { pid?: unknown; bootId?: unknown; startedTicks?: unknown; at?: unknown; step?: unknown; failed?: unknown };
   if (typeof raw.pid !== "number" || !Number.isInteger(raw.pid) || raw.pid <= 0) return null;
+  const failed = Array.isArray(raw.failed) ? raw.failed.filter((id): id is string => typeof id === "string" && id !== "") : [];
   return {
     pid: raw.pid,
     bootId: typeof raw.bootId === "string" ? raw.bootId : null,
     startedTicks: typeof raw.startedTicks === "string" ? raw.startedTicks : null,
     at: typeof raw.at === "string" ? raw.at : "",
     ...(typeof raw.step === "string" && raw.step ? { step: raw.step } : {}),
+    ...(failed.length ? { failed } : {}),
   };
 }
 
@@ -144,7 +153,7 @@ export { UPDATING_PAGE, UPDATE_LOCK_HEADER } from "./update-constants";
  * silently running an update with the desktop unlocked is not something anyone
  * should have to infer from behaviour.
  */
-export async function setUpdateLock(step?: string): Promise<boolean> {
+export async function setUpdateLock(step?: string, failed?: readonly string[]): Promise<boolean> {
   try {
     // The holder rides with the flag, in one read-modify-write — of THIS
     // process. install.sh and gateway-pre-start.sh write the same file
@@ -163,6 +172,7 @@ export async function setUpdateLock(step?: string): Promise<boolean> {
         startedTicks: processStartTicks(process.pid),
         at: new Date().toISOString(),
         ...(step ? { step } : {}),
+        ...(failed && failed.length ? { failed: [...failed] } : {}),
       },
     });
     return true;

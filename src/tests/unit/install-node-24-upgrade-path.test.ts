@@ -307,7 +307,7 @@ const AMBIENT = [
 ];
 
 /** The promotion is lifted, not stubbed: the swap it performs is what puts the launcher doctor then runs in place. */
-const PROMOTION = [shellFunction("promote_staged_openclaw_core")];
+const PROMOTION = [shellFunction("recover_parked_openclaw_core"), shellFunction("promote_staged_openclaw_core")];
 
 function run(box: Box, step: "step_openclaw_install" | "step_apt_update"): SpawnSyncReturns<string> {
   const program = [

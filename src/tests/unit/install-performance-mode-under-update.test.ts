@@ -11,7 +11,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 /**
  * 2026-09-16 — three field boxes went dark in the middle of the 4.0.0 update.
  *
- * The update runs `step_performance_mode` as step 3 of 13, and since 2660282a
+ * The update runs `step_performance_mode` as step 2 of 13 (ahead of apt since 2026-09-17), and since 2660282a
  * (performance the default, `--apply` on every update) that step pinned every
  * core, the GPU and EMC to their ceilings BEFORE the OpenClaw npm install, the
  * rebuild and post_update. On each box the log stops within a minute of the

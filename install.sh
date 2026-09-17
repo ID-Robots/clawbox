@@ -5200,11 +5200,35 @@ flush_core_to_disk() {
 # rename and whole after the last one, so a box that stops at any point in
 # between has a runnable core of one version or the other — never the third
 # thing the 2026-09-16 boxes were left with (see step_openclaw_install).
+# What a promotion that stopped between its two renames leaves: the live tree
+# gone and the old one parked as `.openclaw-previous`. Put it back — the box
+# then has the core it had — and, when the live tree IS there, drop whatever a
+# finished promotion did not get to remove. Called before the core is probed,
+# so a parked core is never mistaken for an absent one.
+recover_parked_openclaw_core() {
+  local live="$NPM_PREFIX/lib/node_modules/openclaw"
+  local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
+  local stage="$NPM_PREFIX/.openclaw-stage"
+  if ! { [ -e "$live" ] || [ -L "$live" ]; }; then
+    if [ -e "$previous" ] || [ -L "$previous" ]; then
+      echo "  An earlier core swap was cut short with the previous OpenClaw core set aside — putting it back"
+      mv "$previous" "$live" || echo "  Warning: could not put the previous OpenClaw core back ($previous)" >&2
+    fi
+    return 0
+  fi
+  if [ -e "$previous" ] || [ -L "$previous" ] || [ -e "$stage" ]; then
+    echo "  Removing what an earlier core swap left behind"
+    rm -rf "$previous" "$stage"
+  fi
+}
+
 promote_staged_openclaw_core() {
   local stage="$1"
   local live="$NPM_PREFIX/lib/node_modules/openclaw"
   local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
   local entry name
+  # This is called as `promote … || return 1`, which switches errexit OFF for
+  # its whole body: every step below that can fail is checked by hand.
   # THE FLUSH IS THE POINT. npm's writes sit in the page cache until the kernel
   # gets round to them (ext4's delayed allocation, seconds to tens of seconds):
   # on 2026-09-16 npm exited 0 at 21:31:02, the box stopped at ~21:31:07-35,
@@ -5228,8 +5252,15 @@ promote_staged_openclaw_core() {
     { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
     name="$(basename "$entry")"
     rm -f "$NPM_PREFIX/bin/$name"
-    mv "$entry" "$NPM_PREFIX/bin/$name"
+    if ! mv "$entry" "$NPM_PREFIX/bin/$name"; then
+      echo "Error: could not move the launcher $name into $NPM_PREFIX/bin" >&2
+      return 1
+    fi
   done
+  if ! { [ -e "$NPM_PREFIX/bin/openclaw" ] || [ -L "$NPM_PREFIX/bin/openclaw" ]; }; then
+    echo "Error: the staged core came with no openclaw launcher; the new tree is in place but nothing starts it" >&2
+    return 1
+  fi
   # The renames too, before doctor's migration runs on the new core: a stop in
   # the seconds that follow must find it whole AND in place.
   flush_core_to_disk "$NPM_PREFIX" || true
@@ -5301,6 +5332,9 @@ step_openclaw_install() {
   # and fails as soon as the OpenClaw CLI runs, because 2026.9.3 refuses the
   # whole major.
   ensure_openclaw_node_engine
+
+  # A core an earlier swap parked is a core, not an absence.
+  recover_parked_openclaw_core
 
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
@@ -5377,10 +5411,17 @@ step_openclaw_install() {
       rm -rf "$_oc_stage"
       return 1
     fi
+    # …and it answers. An empty answer is what a launcher with no bytes in it
+    # gives — exit 0, nothing printed — and that must never go live, whatever
+    # the target was.
+    if [ -z "$(printf '%s' "$_oc_version_out" | tr -d '[:space:]')" ]; then
+      echo "Error: the staged openclaw answers nothing to --version — leaving the core on the box as it is" >&2
+      rm -rf "$_oc_stage"
+      return 1
+    fi
     # …and it is the core that was asked for. A pinned VERSION must come back
     # as itself; a dist-tag (`OPENCLAW_PIN_VERSION=beta`) resolves to whatever
-    # npm chose and is not checked. An empty answer is what a launcher with no
-    # bytes in it gives — exit 0, nothing printed — and that must never go live.
+    # npm chose and is not compared.
     case "$TARGET" in
       [0-9]*)
         if [ "$(printf '%s\n' "$_oc_version_out" | awk 'NR==1 {print $2}')" != "$TARGET" ]; then
@@ -8685,8 +8726,9 @@ step_performance_mode() {
     echo "  CLAWBOX_TEST_MODE=1, skipping nvpmodel/jetson_clocks"
     return 0
   fi
-  # NOT UNDER AN IN-APP UPDATE. This step is dispatched as step 3 of 13, ahead
-  # of the OpenClaw npm install, the rebuild's `next build` and post_update, and
+  # NOT UNDER AN IN-APP UPDATE. This step is dispatched as step 2 of 13 — ahead
+  # of the apt transaction, the OpenClaw npm install, the rebuild's `next build`
+  # and post_update (it ran AFTER apt until 2026-09-17, so apt still ran pinned) — and
   # `--apply` here pinned every core to 1,728 MHz, the GPU to 1,020 MHz with
   # railgate off and EMC to 3,199 MHz for all of them. On 2026-09-16 three field
   # boxes went dark within a minute of that, seconds after `npm install -g

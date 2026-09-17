@@ -59,9 +59,9 @@ describe("the lock is written where a run starts and released where one ends", (
     const body = run.slice(loopAt);
     // …and names the step it is about to run: that is what the successor of a
     // dead run reads to say WHERE it died, and to continue from there.
-    expect(body, "the loop must re-take the lock").toContain("setUpdateLock(step.id)");
+    expect(body, "the loop must re-take the lock").toContain("setUpdateLock(step.id, ");
     // Before the step runs, not after it.
-    expect(body.indexOf("setUpdateLock(step.id)")).toBeLessThan(body.indexOf("Running step:"));
+    expect(body.indexOf("setUpdateLock(step.id, ")).toBeLessThan(body.indexOf("Running step:"));
   });
 
   it("is taken by the flow that rewrites the tree, and not by the other one", () => {
@@ -297,6 +297,15 @@ describe("update-lock — behaviour against a real config store", () => {
     await m.setUpdateLock();
     expect("step" in onDisk()[m.UPDATE_LOCK_HOLDER_KEY]).toBe(false);
     expect((await m.readUpdateLockHolder())?.step).toBeUndefined();
+  });
+
+  it("records the steps the run had already walked past as failed, and none when there were none", async () => {
+    const m = await import("@/lib/update-lock");
+    await m.setUpdateLock("openclaw_install", ["chromium_install"]);
+    expect((await m.readUpdateLockHolder())?.failed).toEqual(["chromium_install"]);
+    await m.setUpdateLock("openclaw_patch", []);
+    expect("failed" in onDisk()[m.UPDATE_LOCK_HOLDER_KEY]).toBe(false);
+    expect((await m.readUpdateLockHolder())?.failed).toBeUndefined();
   });
 
   it("tells a record from another boot apart from one of this boot", async () => {
