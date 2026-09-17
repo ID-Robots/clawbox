@@ -78,6 +78,23 @@ type Box = {
 };
 
 /**
+ * The core's launcher as this suite stubs it: logs every call with the Node in
+ * place, answers --version with the version npm last installed. One definition,
+ * because the npm stub lays it down in the staging prefix too.
+ */
+function openclawStub(state: string): string {
+  return `#!/usr/bin/env bash
+ST=${JSON.stringify(state)}
+printf 'openclaw %s node=%s\\n' "$*" "$(cat "$ST/node-version" 2>/dev/null || echo none)" >> "$ST/calls"
+case "$1" in
+  --version) printf 'OpenClaw %s (stub)\\n' "$(cat "$ST/core-version" 2>/dev/null || echo none)" ;;
+  plugins) printf '{"plugins":[]}\\n' ;;
+esac
+exit 0
+`;
+}
+
+/**
  * A box on disk: the stub binaries install.sh reaches for, plus the two pieces
  * of state a major upgrade actually moves — which Node is installed, and which
  * NodeSource channel is configured.
@@ -167,13 +184,40 @@ exit 0
   // Every npm line is logged WITH the Node in place at that moment: that pair
   // is the whole claim — the core was installed onto Node 24, not merely after
   // some apt transaction.
+  //
+  // And it leaves npm's own layout behind at the prefix it was handed — the
+  // package under lib/node_modules and a launcher under bin — because the step
+  // now installs into a STAGING prefix, gates the launcher there, and only then
+  // renames the tree into the live prefix. The launcher is the box's own core
+  // stub when the live prefix has one (the case that models a core refusing its
+  // Node plants a refusing stub and its package.json there first), else the
+  // plain stub below; either answers with the version npm was asked for.
   write("npm", `
+LIVE=${JSON.stringify(npmPrefix)}
 printf 'npm %s node=%s\\n' "$*" "$(cat "$ST/node-version" 2>/dev/null || echo none)" >> "$ST/calls"
+prefix=""
+prev=""
 for a in "$@"; do
+  case "$prev" in --prefix) prefix="$a" ;; esac
   case "$a" in
     openclaw@*) printf '%s' "\${a#openclaw@}" > "$ST/core-version" ;;
   esac
+  prev="$a"
 done
+if [ -n "$prefix" ]; then
+  mkdir -p "$prefix/bin" "$prefix/lib/node_modules/openclaw"
+  if [ -x "$LIVE/bin/openclaw" ]; then
+    cp "$LIVE/bin/openclaw" "$prefix/bin/openclaw"
+  else
+    cat > "$prefix/bin/openclaw" <<'STUB'
+${openclawStub(state)}
+STUB
+    chmod 755 "$prefix/bin/openclaw"
+  fi
+  if [ -f "$LIVE/lib/node_modules/openclaw/package.json" ]; then
+    cp "$LIVE/lib/node_modules/openclaw/package.json" "$prefix/lib/node_modules/openclaw/package.json"
+  fi
+fi
 exit 0
 `);
 
@@ -207,15 +251,7 @@ esac
 `);
 
   const openclawBin = path.join(npmPrefix, "bin", "openclaw");
-  writeFileSync(openclawBin, `#!/usr/bin/env bash
-ST=${JSON.stringify(state)}
-printf 'openclaw %s node=%s\\n' "$*" "$(cat "$ST/node-version" 2>/dev/null || echo none)" >> "$ST/calls"
-case "$1" in
-  --version) printf 'OpenClaw %s (stub)\\n' "$(cat "$ST/core-version" 2>/dev/null || echo none)" ;;
-  plugins) printf '{"plugins":[]}\\n' ;;
-esac
-exit 0
-`);
+  writeFileSync(openclawBin, openclawStub(state));
   chmodSync(openclawBin, 0o755);
   // An upgrade starts with the OLD core on disk; a fresh install has none.
   if (!opts.core) rmSync(openclawBin);
@@ -265,7 +301,13 @@ const AMBIENT = [
   // `systemctl show`, `id` and the user bus into a suite about ordering. Logged,
   // so a case can still see that it happened before the npm install.
   'stop_openclaw_gateways_for_migration() { printf "stop-gateways-for-migration\\n" >> "$ST/calls"; }',
+  // The flush before the staged core goes live is `sync -f` on the box; a
+  // no-op here, where it would flush the runner's whole filesystem per case.
+  "flush_core_to_disk() { :; }",
 ];
+
+/** The promotion is lifted, not stubbed: the swap it performs is what puts the launcher doctor then runs in place. */
+const PROMOTION = [shellFunction("promote_staged_openclaw_core")];
 
 function run(box: Box, step: "step_openclaw_install" | "step_apt_update"): SpawnSyncReturns<string> {
   const program = [
@@ -278,6 +320,7 @@ function run(box: Box, step: "step_openclaw_install" | "step_apt_update"): Spawn
     `OPENCLAW_BIN=${JSON.stringify(box.openclawBin)}`,
     ...SHIPPED,
     ...AMBIENT,
+    ...PROMOTION,
     shellFunction(step),
     step,
   ].join("\n");

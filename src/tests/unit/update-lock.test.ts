@@ -57,9 +57,11 @@ describe("the lock is written where a run starts and released where one ends", (
     const loopAt = run.indexOf("for (let i = startFrom");
     expect(loopAt).toBeGreaterThan(-1);
     const body = run.slice(loopAt);
-    expect(body, "the loop must re-take the lock").toContain("setUpdateLock()");
+    // …and names the step it is about to run: that is what the successor of a
+    // dead run reads to say WHERE it died, and to continue from there.
+    expect(body, "the loop must re-take the lock").toContain("setUpdateLock(step.id)");
     // Before the step runs, not after it.
-    expect(body.indexOf("setUpdateLock()")).toBeLessThan(body.indexOf("Running step:"));
+    expect(body.indexOf("setUpdateLock(step.id)")).toBeLessThan(body.indexOf("Running step:"));
   });
 
   it("is taken by the flow that rewrites the tree, and not by the other one", () => {
@@ -281,5 +283,35 @@ describe("update-lock — behaviour against a real config store", () => {
     return import("@/lib/update-lock").then(async (m) => {
       expect(await m.isUpdateLocked()).toBe(false);
     });
+  });
+
+  it("records the step the run is on beside the holder, and reads it back", async () => {
+    // The three field boxes of 2026-09-16 died mid `openclaw_install`; the
+    // record is what lets the next boot say so and continue from there.
+    const m = await import("@/lib/update-lock");
+    await m.setUpdateLock("openclaw_install");
+    expect(onDisk()[m.UPDATE_LOCK_HOLDER_KEY].step).toBe("openclaw_install");
+    expect((await m.readUpdateLockHolder())?.step).toBe("openclaw_install");
+    // The prologue's record names no step, and a re-assertion with none must
+    // not carry a stale one forward.
+    await m.setUpdateLock();
+    expect("step" in onDisk()[m.UPDATE_LOCK_HOLDER_KEY]).toBe(false);
+    expect((await m.readUpdateLockHolder())?.step).toBeUndefined();
+  });
+
+  it("tells a record from another boot apart from one of this boot", async () => {
+    const m = await import("@/lib/update-lock");
+    await m.setUpdateLock("apt_update");
+    const mine = await m.readUpdateLockHolder();
+    expect(mine).not.toBeNull();
+    // Decidable only where /proc names this boot; elsewhere the answer is
+    // null, which no reader takes for either.
+    const decided = m.holderFromAnotherBoot(mine!);
+    if (mine!.bootId === null) {
+      expect(decided).toBeNull();
+    } else {
+      expect(decided).toBe(false);
+      expect(m.holderFromAnotherBoot({ ...mine!, bootId: "a-previous-boot" })).toBe(true);
+    }
   });
 });

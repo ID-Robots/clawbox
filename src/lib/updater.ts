@@ -29,7 +29,15 @@ import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { watchRootStepProgress } from "./root-step-follow";
-import { setUpdateLock, clearUpdateLock, isUpdateLocked, updateLockHeldByLiveProcess } from "./update-lock";
+import {
+  setUpdateLock,
+  clearUpdateLock,
+  isUpdateLocked,
+  updateLockHeldByLiveProcess,
+  readUpdateLockHolder,
+  holderFromAnotherBoot,
+  type UpdateLockHolder,
+} from "./update-lock";
 import { hasX64DesktopIntegration } from "./x64-integration";
 
 /**
@@ -41,12 +49,26 @@ import { hasX64DesktopIntegration } from "./x64-integration";
  * cleared when a new run starts and when the owner dismisses the result.
  */
 const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
+/**
+ * Beside the stamp: how the run was cut short and which step it was on, from
+ * the lock holder's record (`{ cause, step? }`). Written before the stamp and
+ * inert without it — the verdict's wording and the resume both need the stamp
+ * — so a stale detail can never resume anything on its own.
+ */
+const UPDATE_INTERRUPTED_DETAIL_KEY = "update_interrupted_detail";
 
 // The sentence an interrupted run is reported with, from the client-safe
 // module: it is the IDENTITY of that verdict, and the route and the tests have
 // to be able to name it without pulling this file's Node built-ins in with it.
 export { INTERRUPTED_MESSAGE } from "./update-constants";
-import { INTERRUPTED_MESSAGE } from "./update-constants";
+import {
+  INTERRUPTED_MESSAGE_PREFIX,
+  CORE_REPLACING_STEP_IDS,
+  interruptedMessage,
+  interruptedStepError,
+  type InterruptionCause,
+  type InterruptionDetail,
+} from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir, type DriftReport } from "./build-identity";
 import { captureIncident } from "./incident-report";
 export { DRIFT_RESOLVED_CODE } from "./drift-codes";
@@ -3967,6 +3989,13 @@ export async function dismissSettledUpdate(): Promise<DismissOutcome> {
         error: "The device could not save that change — see the server log.",
       };
     }
+    // The step record beside the stamp is inert without it — the verdict's
+    // wording and the resume both need the stamp — so taking it too is
+    // housekeeping, never a reason to refuse a dismissal the stamp's own
+    // removal has just allowed.
+    try {
+      await set(UPDATE_INTERRUPTED_DETAIL_KEY, undefined);
+    } catch { /* a detail with no stamp is ignored by every reader */ }
   }
   // Re-asked after the await: a run can claim the box while the write is in
   // flight, and resetting the state under it would show an empty step list
@@ -3988,7 +4017,102 @@ export async function dismissSettledUpdate(): Promise<DismissOutcome> {
  * a different finding, decided from evidence the markers say nothing about.
  */
 export function isInterruptedVerdict(reported: UpdateState): boolean {
-  return reported.phase === "failed" && reported.error === INTERRUPTED_MESSAGE;
+  return reported.phase === "failed" && (reported.error ?? "").startsWith(INTERRUPTED_MESSAGE_PREFIX);
+}
+
+/** The durable half of the verdict: how the run was cut short, and on which step. */
+interface InterruptionRecord {
+  cause: InterruptionCause;
+  step?: string;
+}
+
+/**
+ * What the lock holder's record says about the run that held it. A record from
+ * another boot means the box restarted under the run; the same boot means the
+ * web server was replaced under it; no record, or no boot id to compare, is
+ * "unknown" — worded as it always was.
+ */
+function interruptionRecordFrom(holder: UpdateLockHolder | null): InterruptionRecord {
+  if (!holder) return { cause: "unknown" };
+  const rebooted = holderFromAnotherBoot(holder);
+  const cause: InterruptionCause = rebooted === null ? "unknown" : rebooted ? "reboot" : "replaced";
+  return holder.step ? { cause, step: holder.step } : { cause };
+}
+
+/** Strict: an unrecognised record is NO record, never a guess at either half. */
+function parseInterruptionRecord(value: unknown): InterruptionRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { cause?: unknown; step?: unknown };
+  if (raw.cause !== "reboot" && raw.cause !== "replaced" && raw.cause !== "unknown") return null;
+  return typeof raw.step === "string" && raw.step ? { cause: raw.cause, step: raw.step } : { cause: raw.cause };
+}
+
+async function readInterruptionRecord(): Promise<InterruptionRecord | null> {
+  try {
+    const detail = await getKnown(UPDATE_INTERRUPTED_DETAIL_KEY);
+    return detail.known ? parseInterruptionRecord(detail.value) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The record resolved against a step list: the label for the sentence, the index for the step list. */
+function describeInterruption(
+  record: InterruptionRecord | null,
+  steps: UpdateStepDef[],
+): { detail: InterruptionDetail; index: number } {
+  const index = record?.step ? steps.findIndex((s) => s.id === record.step) : -1;
+  const detail: InterruptionDetail = { cause: record?.cause ?? "unknown" };
+  if (index >= 0) {
+    detail.step = steps[index].id;
+    detail.stepLabel = steps[index].label;
+    detail.assistantAtRisk = CORE_REPLACING_STEP_IDS.has(steps[index].id);
+  }
+  return { detail, index };
+}
+
+/**
+ * Publish the interrupted verdict: the sentence, and — when the step is known —
+ * the step list as the run left it, every step before it completed and that
+ * one failed, so the screen shows WHERE it stopped rather than thirteen grey
+ * dots over "start the update again".
+ */
+function applyInterruptedVerdict(record: InterruptionRecord | null, warnings: UpdateWarning[]): void {
+  const steps = applicableSteps();
+  const { detail, index } = describeInterruption(record, steps);
+  const message = interruptedMessage(detail);
+  runtime.state = createInitialState(steps);
+  runtime.state.warnings = warnings;
+  runtime.state.phase = "failed";
+  runtime.state.error = message;
+  if (index >= 0) {
+    for (let i = 0; i < index; i++) runtime.state.steps[i].status = "completed";
+    runtime.state.steps[index].status = "failed";
+    runtime.state.steps[index].error = interruptedStepError(detail);
+  }
+  console.error(`[Updater] ${message}`);
+}
+
+/**
+ * Where a fresh run should START to continue the interrupted one: the recorded
+ * step's index in THIS list, or 0 when there is no stamp, no step, or a step
+ * this list does not have (a record from another build's list). Never the
+ * first step, which is the same as starting over.
+ */
+async function interruptedStepIndex(steps: UpdateStepDef[]): Promise<number> {
+  try {
+    const [stamp, detail] = await Promise.all([
+      getKnown(UPDATE_INTERRUPTED_KEY),
+      getKnown(UPDATE_INTERRUPTED_DETAIL_KEY),
+    ]);
+    if (!stamp.known || typeof stamp.value !== "string") return 0;
+    const record = detail.known ? parseInterruptionRecord(detail.value) : null;
+    if (!record?.step) return 0;
+    const index = steps.findIndex((s) => s.id === record.step);
+    return index > 0 ? index : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** The two durable records of how the last run ended. */
@@ -4033,6 +4157,7 @@ async function readSettledMarkers(): Promise<SettledMarkers | null> {
 async function forgetInterruption(): Promise<void> {
   try {
     await set(UPDATE_INTERRUPTED_KEY, undefined);
+    await set(UPDATE_INTERRUPTED_DETAIL_KEY, undefined);
   } catch (err) {
     console.warn(
       "[Updater] Could not clear the interruption a later update overtook:",
@@ -4070,6 +4195,12 @@ export async function isUpdateCompleted(): Promise<boolean> {
 interface RunOptions {
   /** Persist `update_completed` after a successful full run. */
   markCompleted: boolean;
+  /**
+   * Continue an INTERRUPTED run from the step it died on, when the disk holds
+   * one (`interruptedStepIndex`). Only the owner's fresh full run asks for it:
+   * the post-reboot continuation and the OpenClaw-only flow pass their own start.
+   */
+  resumeFromInterruption?: boolean;
 }
 
 /**
@@ -4155,7 +4286,11 @@ async function resumeContinuation(): Promise<boolean> {
     // beginning: marking the pre-reboot steps completed here would skip core
     // installation and the very migration the bridge exists to serialize.
     await rm(handoverFile, { force: true });
-    await setMany({ update_needs_continuation: undefined, [UPDATE_INTERRUPTED_KEY]: undefined });
+    await setMany({
+      update_needs_continuation: undefined,
+      [UPDATE_INTERRUPTED_KEY]: undefined,
+      [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
+    });
     const steps = applicableSteps();
     runtime.running = true;
     runtime.state = createInitialState(steps);
@@ -4227,6 +4362,15 @@ async function resumeContinuation(): Promise<boolean> {
       );
       return false;
     }
+    // WHO held it, read BEFORE the release takes the record with it. The holder
+    // carries the boot it was written on and the step the run was on
+    // (update-lock.ts), which is the difference between "the web server was
+    // replaced" and "the box restarted or lost power" — and between "start the
+    // update again" and continuing from the step that died. On the three field
+    // boxes of 2026-09-16 the run died inside `openclaw_install`, with the new
+    // core's files not yet on the disk, and this branch blamed a replaced web
+    // server and offered a fresh start over a box with no assistant.
+    const holder = await readUpdateLockHolder();
     const released = (await isUpdateLocked()) && (await clearUpdateLock());
     const markers = await readSettledMarkers();
     // A store that could not be read decides NOTHING — it neither stamps a
@@ -4236,6 +4380,7 @@ async function resumeContinuation(): Promise<boolean> {
     if (overtaken) await forgetInterruption();
     const remembered = Boolean(markers.interruptedAt) && !overtaken;
     if ((released && !markers.completed) || remembered) {
+      let record: InterruptionRecord | null;
       if (!remembered) {
         // Asked once more, immediately before the stamp. The run can finish
         // between the read above and this line, and a record dated after the
@@ -4243,14 +4388,16 @@ async function resumeContinuation(): Promise<boolean> {
         // this branch is being fixed for, through a window of milliseconds.
         const now = await readSettledMarkers();
         if (!now || now.completed) return false;
+        record = interruptionRecordFrom(holder);
+        // The detail before the stamp: a reader that finds the stamp finds the
+        // detail too, and a detail with no stamp is ignored by every reader.
+        await set(UPDATE_INTERRUPTED_DETAIL_KEY, record);
         // Only on the transition, so the record keeps the time it happened.
         await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
+      } else {
+        record = await readInterruptionRecord();
       }
-      runtime.state = createInitialState(applicableSteps());
-      runtime.state.warnings = await restoreWarnings();
-      runtime.state.phase = "failed";
-      runtime.state.error = INTERRUPTED_MESSAGE;
-      console.error(`[Updater] ${INTERRUPTED_MESSAGE}`);
+      applyInterruptedVerdict(record, await restoreWarnings());
     } else if (isInterruptedVerdict(runtime.state)) {
       // This process is still holding a verdict whose record is gone — cleared
       // by the completion above, by the next run's prologue, or by a Dismiss in
@@ -4268,6 +4415,7 @@ async function resumeContinuation(): Promise<boolean> {
   await setMany({
     update_needs_continuation: undefined,
     [UPDATE_INTERRUPTED_KEY]: undefined,
+    [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
   });
 
   // Resolve the list ONCE and reuse it for the state, the resume index and the
@@ -4345,7 +4493,9 @@ export function startUpdate(): { started: boolean; error?: string } {
   runtime.state.phase = "running";
   runtime.state.currentStepIndex = 0;
 
-  launchUpdate(steps, 0, { markCompleted: true });
+  // A fresh run — which continues an interrupted one from the step it died on
+  // when the disk says there was one (runUpdate).
+  launchUpdate(steps, 0, { markCompleted: true, resumeFromInterruption: true });
   return { started: true };
 }
 
@@ -4429,6 +4579,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // leave Telegram stopped until gateway_verify, which a failed rebuild or
   // rejected core pin never reaches. Resolve once for this run/continuation.
   const desktopIntegration = hasX64DesktopIntegration(PROJECT_DIR);
+  // Whether this run CONTINUES an interrupted one from the step it died on —
+  // decided below, after the lock and before the markers it reads are cleared.
+  let resumed = false;
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -4447,6 +4600,24 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
   if (ownsTheDesktop) {
     await setUpdateLock();
+    // A run started over an INTERRUPTED one continues from the step that died,
+    // not from the top. Every step is an idempotent root unit, and a box that
+    // died inside `openclaw_install` has no runnable core until that step runs
+    // again — so "Try again" is a resume, and the verdict's own sentence says
+    // so. Read AFTER the lock (the first disk write, the one durable record
+    // that a run exists) and BEFORE the clear below takes the record; only the
+    // owner's fresh full run asks for it, the continuation and the OpenClaw-only
+    // flow pass their own start.
+    if (options.resumeFromInterruption && startFrom === 0) {
+      const at = await interruptedStepIndex(steps);
+      if (at > 0) {
+        startFrom = at;
+        resumed = true;
+        for (let i = 0; i < at; i++) runtime.state.steps[i].status = "completed";
+        runtime.state.currentStepIndex = at;
+        console.log(`[Updater] Continuing the interrupted update from step ${at + 1}: ${steps[at].label}`);
+      }
+    }
     // AND clear what the last run left behind, in the same awaited prologue.
     //
     // `update_completed` is the discriminator resumeContinuation uses to tell
@@ -4472,6 +4643,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     try {
       await setMany({
         [UPDATE_INTERRUPTED_KEY]: undefined,
+        [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
         update_completed: undefined,
         update_completed_at: undefined,
       });
@@ -4483,7 +4655,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     }
   }
 
-  if (startFrom === 0 && !(await checkInternet())) {
+  // A resumed run needs the network as much as a fresh one — the step it
+  // continues from is the npm install more often than not.
+  if ((startFrom === 0 || resumed) && !(await checkInternet())) {
     runtime.state.phase = "failed";
     runtime.state.error = "No internet connection. Check your WiFi and try again.";
     runtime.state.currentStepIndex = -1;
@@ -4521,7 +4695,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // the one thing this lock exists to prevent. One cheap write per step
     // heals that within a step instead of leaving it lost for the rest of a
     // ten-minute run.
-    if (ownsTheDesktop) await setUpdateLock();
+    // …naming the step about to run, so a successor of this process can say
+    // where a dead run stopped and continue from there.
+    if (ownsTheDesktop) await setUpdateLock(step.id);
 
     // The window the warning read below is bounded by. Taken BEFORE the
     // dispatch, so nothing this step writes can fall outside it, and per step,
@@ -4674,6 +4850,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // — "Update failed", every step pending, over an update that worked
       // (measured on the Hermes box, 2026-09-06).
       [UPDATE_INTERRUPTED_KEY]: undefined,
+      [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
     });
   }
   // A terminal phase stops UI polling. Publish only after every final write

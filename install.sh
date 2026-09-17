@@ -5188,6 +5188,55 @@ stop_openclaw_gateways_for_migration() {
   esac
 }
 
+# Everything under a path is on the disk before the caller goes on. A function
+# rather than a bare `sync`, so the bash-driven suites can stub the flush.
+flush_core_to_disk() {
+  sync -f "$1" || { echo "Error: could not flush $1 to disk" >&2; return 1; }
+}
+
+# Put a STAGED OpenClaw core in front of the gateway: flush it, set the live
+# tree aside, rename the staged tree into its place, move the launchers over,
+# flush again, drop the old tree. The live core is untouched until the first
+# rename and whole after the last one, so a box that stops at any point in
+# between has a runnable core of one version or the other — never the third
+# thing the 2026-09-16 boxes were left with (see step_openclaw_install).
+promote_staged_openclaw_core() {
+  local stage="$1"
+  local live="$NPM_PREFIX/lib/node_modules/openclaw"
+  local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
+  local entry name
+  # THE FLUSH IS THE POINT. npm's writes sit in the page cache until the kernel
+  # gets round to them (ext4's delayed allocation, seconds to tens of seconds):
+  # on 2026-09-16 npm exited 0 at 21:31:02, the box stopped at ~21:31:07-35,
+  # and 5,346 of the 35,025 files it had just written — openclaw.mjs and
+  # package.json among them — came back zero-length: a complete tree in shape
+  # and a gateway that could not exec its own launcher.
+  flush_core_to_disk "$stage" || return 1
+  mkdir -p "$NPM_PREFIX/lib/node_modules" "$NPM_PREFIX/bin"
+  rm -rf "$previous"
+  if [ -e "$live" ] || [ -L "$live" ]; then
+    mv "$live" "$previous" || { echo "Error: could not set the current OpenClaw core aside ($live)" >&2; return 1; }
+  fi
+  if ! mv "$stage/lib/node_modules/openclaw" "$live"; then
+    echo "Error: could not move the staged OpenClaw core into place; putting the previous one back" >&2
+    { [ -e "$previous" ] || [ -L "$previous" ]; } && mv "$previous" "$live"
+    return 1
+  fi
+  # The launchers npm linked in the stage: relative symlinks into
+  # ../lib/node_modules/<pkg>/…, which resolve the same from the live bin dir.
+  for entry in "$stage"/bin/*; do
+    { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+    name="$(basename "$entry")"
+    rm -f "$NPM_PREFIX/bin/$name"
+    mv "$entry" "$NPM_PREFIX/bin/$name"
+  done
+  # The renames too, before doctor's migration runs on the new core: a stop in
+  # the seconds that follow must find it whole AND in place.
+  flush_core_to_disk "$NPM_PREFIX" || true
+  rm -rf "$previous" "$stage"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX" 2>/dev/null || true
+}
+
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
@@ -5272,9 +5321,24 @@ step_openclaw_install() {
     mkdir -p "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-    as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
-    if [ ! -x "$OPENCLAW_BIN" ]; then
-      echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
+    # INTO A STAGING PREFIX, never over the live core. `npm install -g` reifies
+    # in place: it retires the old package tree first and removes it last, so
+    # for the length of the install — 33 s on an Orin over WiFi — the box has
+    # no core, and a stop anywhere in that window leaves it none. Then it
+    # answers before the kernel has written what it extracted. On 2026-09-16
+    # (see promote_staged_openclaw_core) three field boxes stopped seconds
+    # after npm exited 0 and came back with a core whose launcher and
+    # package.json were zero-length files. Staged, the live core is not
+    # touched until the new one is complete, gated AND on the disk, and the
+    # swap is two renames. The stage sits inside $NPM_PREFIX so those renames
+    # never cross a filesystem.
+    local _oc_stage="$NPM_PREFIX/.openclaw-stage"
+    rm -rf "$_oc_stage"
+    mkdir -p "$_oc_stage"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$_oc_stage"
+    as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$_oc_stage"
+    if [ ! -x "$_oc_stage/bin/openclaw" ]; then
+      echo "Error: OpenClaw installation failed — npm left no openclaw launcher in $_oc_stage (the core already on the box is untouched)"
       exit 1
     fi
     # THE CORE IS THE AUTHORITY ON ITS OWN ENGINES, so its first word is a GATE
@@ -5285,15 +5349,19 @@ step_openclaw_install() {
     # `gateway_setup` that cannot come up — a box reporting a finished update with
     # no assistant. The table above is OUR copy of `engines.node`; this is the
     # core's own answer, and it is the one that decides.
+    #
+    # Asked of the STAGED launcher, before anything is swapped: a core that
+    # refuses this Node never reaches the live prefix, and the one already there
+    # keeps serving.
     local _oc_version_out _oc_engines
-    if ! _oc_version_out="$("$OPENCLAW_BIN" --version 2>&1)"; then
+    if ! _oc_version_out="$("$_oc_stage/bin/openclaw" --version 2>&1)"; then
       printf '%s\n' "$_oc_version_out" >&2
       # python3, not node: this arm exists because the Node on this box is the
       # problem, and asking it to read the file that says so is how a diagnosis
       # disappears. python3 is a dependency of this step already (the plugin
       # refresh below parses `plugins list --json` with it).
       _oc_engines="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("engines") or {}).get("node") or "")' \
-        "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
+        "$_oc_stage/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
       echo "Error: openclaw@$TARGET is installed but refuses to run on $(node --version 2>/dev/null || echo 'this Node')." >&2
       echo "       The line above is the core's own answer. It declares engines.node ${_oc_engines:-<unreadable>};" >&2
       echo "       this installer was holding the box to $OPENCLAW_NODE_ENGINE, so the two disagree and" >&2
@@ -5306,8 +5374,23 @@ step_openclaw_install() {
       # this return abort the run either way. Said out loud so the operator knows
       # the box is parked rather than guessing.
       echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
+      rm -rf "$_oc_stage"
       return 1
     fi
+    # …and it is the core that was asked for. A pinned VERSION must come back
+    # as itself; a dist-tag (`OPENCLAW_PIN_VERSION=beta`) resolves to whatever
+    # npm chose and is not checked. An empty answer is what a launcher with no
+    # bytes in it gives — exit 0, nothing printed — and that must never go live.
+    case "$TARGET" in
+      [0-9]*)
+        if [ "$(printf '%s\n' "$_oc_version_out" | awk 'NR==1 {print $2}')" != "$TARGET" ]; then
+          echo "Error: the staged openclaw answers '${_oc_version_out:-<nothing>}' to --version, not $TARGET — leaving the core on the box as it is" >&2
+          rm -rf "$_oc_stage"
+          return 1
+        fi
+        ;;
+    esac
+    promote_staged_openclaw_core "$_oc_stage" || return 1
     echo "  OpenClaw installed: $_oc_version_out"
   fi
 
@@ -8567,12 +8650,63 @@ step_nvidia_jetpack() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-jetpack
 }
 
+# Does the in-app updater own the box right now? It writes `update_in_progress`
+# into data/config.json before its first root step and re-asserts it at every
+# step boundary (src/lib/update-lock.ts), so a dispatched step can ask. Read as
+# a HINT and nothing more: the file is clawbox-writable, and the one thing a
+# false answer can buy here is clocks left unpinned until the next boot.
+update_owns_the_box() {
+  local store="$PROJECT_DIR/data/config.json"
+  [ -f "$store" ] || return 1
+  python3 - "$store" <<'PY' 2>/dev/null
+import json, sys
+try:
+    sys.exit(0 if json.load(open(sys.argv[1])).get("update_in_progress") is True else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# The boot unit that applies the persisted (or default) profile, installed and
+# enabled — never started here: `--apply` is the caller's decision.
+install_performance_unit() {
+  if [ -f "$SRC_DIR/config/clawbox-performance.service" ]; then
+    cp "$SRC_DIR/config/clawbox-performance.service" /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable clawbox-performance.service
+  fi
+}
+
 step_performance_mode() {
   # Install the root-owned copies the sudoers rules point at FIRST — both the
   # unit below and the ollama optimiser are now invoked through them.
   install_root_libexec
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping nvpmodel/jetson_clocks"
+    return 0
+  fi
+  # NOT UNDER AN IN-APP UPDATE. This step is dispatched as step 3 of 13, ahead
+  # of the OpenClaw npm install, the rebuild's `next build` and post_update, and
+  # `--apply` here pinned every core to 1,728 MHz, the GPU to 1,020 MHz with
+  # railgate off and EMC to 3,199 MHz for all of them. On 2026-09-16 three field
+  # boxes went dark within a minute of that, seconds after `npm install -g
+  # openclaw` had finished on six pinned cores over WiFi — no shutdown in any
+  # log, syslog and npm's own log NUL-padded where they stop — and stayed dark
+  # until they were power-cycled, each left with a core whose files had never
+  # reached the disk (see promote_staged_openclaw_core).
+  # Whatever the last straw was on that hardware, the pin bought nothing: every
+  # full update ends in rebuild_reboot, and clawbox-performance.service applies
+  # the persisted or default profile at that boot anyway. So under an update
+  # this step only installs and enables the unit: the box updates under the
+  # clocks it was running when the owner pressed the button, and the profile
+  # lands at the reboot that ends the update. The ollama tuning and the cgroup
+  # guards it also used to apply here are step_ollama_install's and
+  # post_update's after that reboot, for the same reason. A full install, and
+  # `sudo bash install.sh --step performance_mode` by hand with no update
+  # running, apply here exactly as they always did.
+  if [ -n "${CLAWBOX_DISPATCHED_STEP:-}" ] && update_owns_the_box; then
+    echo "  An in-app update owns the box: leaving the clocks as they are — clawbox-performance.service applies the power profile at the reboot that ends it"
+    install_performance_unit
     return 0
   fi
   # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
@@ -8593,11 +8727,7 @@ step_performance_mode() {
   "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --apply || \
     echo "  Warning: power profile apply failed (non-fatal)"
   # Ensure persistent service is installed and enabled for next boot
-  if [ -f "$SRC_DIR/config/clawbox-performance.service" ]; then
-    cp "$SRC_DIR/config/clawbox-performance.service" /etc/systemd/system/
-    systemctl daemon-reload
-    systemctl enable clawbox-performance.service
-  fi
+  install_performance_unit
   # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
   # Run the ROOT-OWNED copy, not the one in the clawbox-writable project tree:
@@ -10644,6 +10774,12 @@ if [ "${1:-}" = "--step" ]; then
     exit "$rc"
   }
   trap dispatch_provision_verdict EXIT
+  # Which step this shell was dispatched for, readable by the step itself. A
+  # step that must behave differently inside an in-app update than in a full
+  # install (step_performance_mode, which must not pin the clocks under the
+  # update's own heaviest work) asks this together with the update lock, rather
+  # than guessing from its surroundings.
+  CLAWBOX_DISPATCHED_STEP="$local_step"
   "step_${local_step}"
   exit 0
 fi
