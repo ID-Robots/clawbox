@@ -484,11 +484,16 @@ export default function SpokenReplyPlayer({
       case 'ArrowLeft': case 'ArrowDown': seekTo(at - SEEK_STEP_SECONDS); break
       case 'Home': seekTo(0); break
       case 'End': seekTo(total); break
-      case ' ': case 'Spacebar': case 'Enter': toggle(); break
+      // The same verb the one visible button carries: while the chat's own
+      // element speaks this clip there is no pause to offer, so Space stops it
+      // rather than starting OURS on top (which the speaker would resolve by
+      // silencing the chat's — a restart from zero, from a control whose only
+      // sibling on screen says Stop).
+      case ' ': case 'Spacebar': case 'Enter': if (detached) stop(); else toggle(); break
       default: return
     }
     event.preventDefault()
-  }, [driving, seekTo, toggle])
+  }, [detached, driving, seekTo, stop, toggle])
 
   const scrubToPointer = useCallback((clientX: number, target: HTMLDivElement) => {
     const element = driving()

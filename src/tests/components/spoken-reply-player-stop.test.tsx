@@ -67,6 +67,7 @@ function twoReplies() {
       play: () => root.getByTestId("spoken-reply-play"),
       maybePlay: () => root.queryByTestId("spoken-reply-play"),
       stop: () => root.queryByTestId("spoken-reply-stop"),
+      wave: () => root.getByTestId("spoken-reply-wave"),
     };
   };
   return { a: part("first"), b: part("second") };
@@ -143,5 +144,33 @@ describe("stopping a spoken reply", () => {
     fireEvent.click(a.play());
     await waitFor(() => expect(isPlaying(a.audio)).toBe(true));
     expect(a.audio.currentTime).toBe(0);
+  });
+
+  it("gives the waveform's Space the verb the one visible button carries", async () => {
+    // The scrub target is a `role="slider"` a keyboard reaches, and Space on it
+    // is the transport. While the chat's own element speaks the clip the only
+    // button on screen says Stop, so Space must stop too — starting OUR element
+    // on top would be answered by the speaker silencing the chat's, which the
+    // owner would see as a restart from zero.
+    const { a } = twoReplies();
+    const automatic = new Audio("/clip-a.wav");
+    act(() => {
+      claimSpokenReply(automatic, "/clip-a.wav", { automatic: true, detached: true });
+      void automatic.play();
+    });
+    await waitFor(() => expect(a.stop()).not.toBeNull());
+
+    fireEvent.keyDown(a.wave(), { key: " " });
+    expect(isPlaying(automatic)).toBe(false);
+    expect(automatic.currentTime).toBe(0);
+    // Nothing started in its place.
+    expect(isPlaying(a.audio)).toBe(false);
+    await waitFor(() => expect(a.stop()).toBeNull());
+
+    // With no other element in play, Space is play/pause again.
+    fireEvent.keyDown(a.wave(), { key: " " });
+    await waitFor(() => expect(isPlaying(a.audio)).toBe(true));
+    fireEvent.keyDown(a.wave(), { key: " " });
+    await waitFor(() => expect(isPlaying(a.audio)).toBe(false));
   });
 });
