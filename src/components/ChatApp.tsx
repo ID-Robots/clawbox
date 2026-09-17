@@ -89,7 +89,11 @@ interface ChatAppProps {
 }
 
 function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
-  const { t } = useT()
+  const { t, locale } = useT()
+  // The words a failed turn is said in — a ref, for the handlers that
+  // outlive the render that created them.
+  const failureWordsRef = useRef({ t, locale })
+  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Welcome-to-portal banner: show in the chat empty state when the user
   // hasn't signed in to a ClawBox account yet. Dismissible, persisted in
@@ -638,7 +642,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureWordsRef.current), timestamp: Date.now() }])
             }
           }
         }
@@ -855,7 +859,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       // the customer's transcript (TASK-440).
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined)
+        : describeChatFailure(err instanceof Error ? err.message : undefined, failureWordsRef.current)
       // What the box managed to write is the OWNER'S. Read, clear, THEN append,
       // all outside any updater, and before the failure line so the answer stays
       // above it. Only a harness that streams on this promise ever arrives here

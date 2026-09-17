@@ -1202,6 +1202,28 @@ describe("CodingAgentApp", () => {
         expect(banner.textContent).not.toMatch(/UTC/);
       });
 
+      it("names a spent ClawBox AI chat allowance and the moment it frees up, in the owner's clock", async () => {
+        // A rolling window, days away: the sentence carries the day and the
+        // local time, never the bare "HH:MM UTC" the per-day meters use.
+        const resetsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+        const page = await openPaused({ kind: "allowance", meter: "weekly", resetsAt, message: "Weekly token allowance used up." });
+        const banner = within(page).getByTestId("coding-agent-pause-reason");
+        expect(banner).toHaveTextContent("this week's ClawBox AI chat allowance is used up");
+        const d = new Date(resetsAt);
+        const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+        expect(banner).toHaveTextContent(`It frees up at`);
+        expect(banner.textContent).toContain(hhmm);
+        expect(banner.textContent).not.toMatch(/UTC/);
+        expect(within(page).getByTestId("coding-agent-resume-run-paused03")).toBeInTheDocument();
+      });
+
+      it("tells a burst refusal apart from a spent week", async () => {
+        const page = await openPaused({ kind: "allowance", meter: "burst", resetsAt: null, message: "burst" });
+        const banner = within(page).getByTestId("coding-agent-pause-reason");
+        expect(banner).toHaveTextContent("the ClawBox AI 5-hour burst limit is reached");
+        expect(banner).toHaveTextContent("Resume it once the allowance is back");
+      });
+
       it("explains nothing when the owner paused it themselves", async () => {
         // They know why. The card keeps the wording it has always had.
         const page = await openPaused({ kind: "owner" });

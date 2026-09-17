@@ -84,6 +84,7 @@ import {
   isSettled,
   parsePauseReason,
 } from "@/lib/coding-agent-status";
+import { parseClawaiAllowanceRefusal } from "@/lib/clawai-allowance";
 import {
   HARNESS_FAULT_CONFIG_KEY,
   type HarnessFault,
@@ -9595,6 +9596,9 @@ async function settleWork(killed: ChildProcess[], timeoutMs: number): Promise<vo
   );
 }
 
+/** The shape of the ClawBox AI proxy's allowance refusal as a harness relays it. */
+const PROXY_REFUSAL_RE = /\b429\b|\busage_limit\b/;
+
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
@@ -9674,6 +9678,30 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         // the owner cannot follow from the app.
         ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
         : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+    }
+    // ClawBox AI refused the run's MODEL calls because one of its rolling
+    // allowances is spent. That is not the work failing, and neither a retry
+    // nor a fresh run can help before the window frees up — so it settles the
+    // way a refused picture does: paused, session intact, with the allowance
+    // and its "frees up at" on the record for the card and the agent to say.
+    // Only for a run nobody asked to end, and only with a session to come back
+    // to; without one there is nothing Resume could carry on from.
+    // Only the proxy's own answer counts — its 429 or its `usage_limit`
+    // envelope — never words that merely quote a code: a run working on this
+    // very codebase can fail with a sentence about `weekly_limit_exceeded`.
+    if (run.status === "failed" && state.endRequested === null && run.sessionId && PROXY_REFUSAL_RE.test(run.error ?? "")) {
+      const refusal = parseClawaiAllowanceRefusal(run.error);
+      if (refusal) {
+        run.status = "paused";
+        run.resumable = true;
+        run.pauseReason = {
+          kind: "allowance",
+          meter: refusal.kind,
+          resetsAt: refusal.resetAt,
+          message: (refusal.message ?? run.error ?? "").slice(0, MAX_PAUSE_MESSAGE_CHARS),
+        };
+        run.error = null;
+      }
     }
   }
   // Only a paused run has a pause to explain. A pause that raced the final

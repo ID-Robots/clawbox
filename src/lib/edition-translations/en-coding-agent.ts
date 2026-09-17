@@ -507,6 +507,12 @@ export const codingAgentEn: Record<string, string> = {
   // allowance is actually back.
   "codingAgent.pausedAllowanceImages": "Paused: the daily image allowance is used up.",
   "codingAgent.pausedAllowanceSpeech": "Paused: the speech allowance is used up.",
+  // ClawBox AI's rolling allowances: they free up as old usage ages out, so
+  // the instant is said with its day, in the owner's clock ({time}).
+  "codingAgent.pausedAllowanceWeekly": "Paused: this week's ClawBox AI chat allowance is used up.",
+  "codingAgent.pausedAllowanceBurst": "Paused: the ClawBox AI 5-hour burst limit is reached.",
+  "codingAgent.pausedAllowanceEmbeddings": "Paused: this week's ClawBox AI memory indexing allowance is used up.",
+  "codingAgent.pausedAllowanceFreesUp": "It frees up at {time}.",
   "codingAgent.pausedAllowanceResets": "It resets at {time} UTC.",
   "codingAgent.pausedAllowanceResetsUnknown": "Resume it once the allowance is back.",
   "codingAgent.prOpening": "Opening PR",

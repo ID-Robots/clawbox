@@ -32,15 +32,19 @@ export function isCodingRunStatus(value: unknown): value is CodingRunStatus {
  * the statuses are one list: the routes write it, the record persists it, the
  * app words it and the MCP server relays it.
  *
- * Two, and deliberately only the two that have a writer. The other metered
- * things a run can exhaust do not end it in a pause and so are not pause
- * reasons: the owner's token ceiling and the per-run cost ceiling settle a run
- * as `stopped`/`failed` with a sentence of their own naming the number and the
- * way out, and the per-run picture and clip caps refuse the CALL (code `cap`)
- * while the run carries on. A meter listed here with nothing able to produce
- * it would be a sentence in ten languages that no box can ever show.
+ * Deliberately only the ones that have a writer. `images` and `speech` are
+ * recorded by the media routes; `weekly`, `burst` and `embeddings` — ClawBox
+ * AI's rolling allowances — by the run's own settle, when the harness's last
+ * word is the proxy refusing it (`weekly_limit_exceeded`,
+ * `burst_limit_exceeded`, `embeddings_weekly_limit_exceeded`). The other
+ * metered things a run can exhaust do not end it in a pause and so are not
+ * pause reasons: the owner's token ceiling and the per-run cost ceiling settle
+ * a run as `stopped`/`failed` with a sentence of their own naming the number
+ * and the way out, and the per-run picture and clip caps refuse the CALL (code
+ * `cap`) while the run carries on. A meter listed here with nothing able to
+ * produce it would be a sentence in ten languages that no box can ever show.
  */
-export const PAUSE_METERS = ["images", "speech"] as const;
+export const PAUSE_METERS = ["images", "speech", "weekly", "burst", "embeddings"] as const;
 
 export type CodingPauseMeter = (typeof PAUSE_METERS)[number];
 
@@ -132,7 +136,33 @@ export function parsePauseReason(value: unknown): CodingPauseReason | null {
 export const PAUSE_METER_NOUN: Record<CodingPauseMeter, string> = {
   images: "daily image allowance",
   speech: "speech allowance",
+  weekly: "weekly ClawBox AI chat allowance",
+  burst: "ClawBox AI 5-hour burst allowance",
+  embeddings: "weekly ClawBox AI memory indexing allowance",
 };
+
+/**
+ * The meters that are ROLLING windows rather than calendar ones. Nothing about
+ * them resets at a UTC midnight: the oldest usage ages out, possibly days from
+ * now, so their instant is shown with its day and in the reader's own clock —
+ * never as the bare "HH:MM UTC" the per-day meters use.
+ */
+export const ROLLING_PAUSE_METERS: readonly CodingPauseMeter[] = ["weekly", "burst", "embeddings"];
+
+export function isRollingPauseMeter(meter: CodingPauseMeter): boolean {
+  return ROLLING_PAUSE_METERS.includes(meter);
+}
+
+/**
+ * A rolling meter's "frees up at" for a surface with no clock of its own to
+ * read it in (the agent-facing text): the full instant, "YYYY-MM-DD HH:MM UTC",
+ * so a delegated agent relaying it cannot mistake Friday for this afternoon.
+ */
+export function pauseResetInstant(resetsAt: string | null): string | null {
+  const clock = pauseResetClock(resetsAt);
+  if (!clock || !resetsAt) return null;
+  return `${new Date(Date.parse(resetsAt)).toISOString().slice(0, 10)} ${clock} UTC`;
+}
 
 /**
  * A reset instant as the clock the owner reads: "HH:MM UTC", or null when

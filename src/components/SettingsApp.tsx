@@ -16,6 +16,7 @@ import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { useTr } from "@/lib/i18n-floor";
 import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
+import ClawboxAiUsageCard from "./ClawboxAiUsageCard";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
 import LocalAiPanel from "./LocalAiPanel";
@@ -1279,7 +1280,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean; clawaiConfigured?: boolean } | null>(null);
   useEffect(() => {
     if (section !== "ai" && !isMobile) return;
     const load = () => {
@@ -4050,6 +4051,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
               }}
             /></I18nProvider>
+
+            {/* The ClawBox AI allowances — only for a box that holds a
+                credential the portal still accepts; a refused sign-in is the
+                panel above's to fix, and a usage card under it would only
+                repeat that nothing can be read. */}
+            {aiProvider?.clawaiConfigured && !aiProvider.clawaiTokenRejected && <ClawboxAiUsageCard />}
           </div>
         )}
 

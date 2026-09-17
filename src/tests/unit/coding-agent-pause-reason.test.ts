@@ -27,8 +27,11 @@ import {
   MAX_PAUSE_MESSAGE_CHARS,
   PAUSE_METER_NOUN,
   PAUSE_METERS,
+  ROLLING_PAUSE_METERS,
+  isRollingPauseMeter,
   parsePauseReason,
   pauseResetClock,
+  pauseResetInstant,
 } from "@/lib/coding-agent-status";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -205,8 +208,97 @@ describe("reading a pause reason off a record", () => {
     // The record format is not a wish list. A run's token ceiling and its
     // cost ceiling settle it as stopped/failed with their own sentence, and a
     // spent per-run media cap refuses the call while the run carries on —
-    // none of them is a pause, so none of them belongs here.
-    expect([...PAUSE_METERS]).toEqual(["images", "speech"]);
+    // none of them is a pause, so none of them belongs here. The three
+    // ClawBox AI windows are written by the run's own settle when the
+    // harness's last word is the proxy refusing it (see below).
+    expect([...PAUSE_METERS]).toEqual(["images", "speech", "weekly", "burst", "embeddings"]);
+  });
+
+  it("round-trips a spent ClawBox AI window", () => {
+    for (const meter of ["weekly", "burst", "embeddings"]) {
+      const reason = { kind: "allowance", meter, resetsAt: "2026-09-19T14:05:00.000Z", message: "used up" };
+      expect(parsePauseReason(reason), meter).toEqual(reason);
+    }
+  });
+
+  it("quotes a rolling window's instant with its date for the agent, and a daily one as the bare UTC clock", () => {
+    expect(ROLLING_PAUSE_METERS).toEqual(["weekly", "burst", "embeddings"]);
+    expect(isRollingPauseMeter("weekly")).toBe(true);
+    expect(isRollingPauseMeter("images")).toBe(false);
+    expect(pauseResetInstant("2026-09-19T14:05:00.000Z")).toBe("2026-09-19 14:05 UTC");
+    expect(pauseResetInstant(null)).toBeNull();
+    expect(pauseResetInstant("soon")).toBeNull();
+  });
+});
+
+describe("a run ClawBox AI refused for allowance", () => {
+  /** A harness that starts a session and then reports the proxy's refusal as its result. */
+  function installRefusingWrapper(result: string, withSession = true): void {
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    const event = JSON.stringify({ type: "result", subtype: "success", is_error: true, num_turns: 1, result });
+    fs.writeFileSync(
+      path.join(binDir, "claude-ds"),
+      [
+        "#!/usr/bin/env bash",
+        readFirstTurn(),
+        ...(withSession ? [`echo '${INIT}'`] : []),
+        "cat <<'RESULT_EOF'",
+        event,
+        "RESULT_EOF",
+        "exit 1",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  async function runRefusedWith(result: string, withSession = true) {
+    installRefusingWrapper(result, withSession);
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+    makeProject("site");
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    return settled(started.id);
+  }
+
+  const refusal = (code: string, message: string) =>
+    `API Error: 429 ${JSON.stringify({ error: { message, type: "usage_limit", code, resetAt: "2026-09-19T14:05:00.000Z" } })}`;
+
+  it("pauses it with the weekly allowance and when it frees up, instead of failing it", async () => {
+    const run = await runRefusedWith(refusal("weekly_limit_exceeded", "Weekly token allowance used up. Enough frees up in 2d 5h."));
+    expect(run.status).toBe("paused");
+    expect(run.resumable).toBe(true);
+    expect(run.error).toBeNull();
+    expect(run.pauseReason).toEqual({
+      kind: "allowance",
+      meter: "weekly",
+      resetsAt: "2026-09-19T14:05:00.000Z",
+      message: "Weekly token allowance used up. Enough frees up in 2d 5h.",
+    });
+  });
+
+  it("names the burst window when that is the one that refused", async () => {
+    const run = await runRefusedWith(refusal("burst_limit_exceeded", "Short-term burst limit reached."));
+    expect(run.status).toBe("paused");
+    expect(run.pauseReason).toMatchObject({ kind: "allowance", meter: "burst" });
+  });
+
+  it("does not read a failure that merely MENTIONS a refusal code as the proxy refusing", async () => {
+    // A run working on this very codebase can end in an error whose words
+    // quote the codes; only the proxy's own 429 answer is an allowance refusal.
+    const run = await runRefusedWith("Tests failed: expected the weekly_limit_exceeded refusal to pause the run, but it failed.");
+    expect(run.status).toBe("failed");
+    expect(run.pauseReason).toBeNull();
+  });
+
+  it("leaves an ordinary provider error a failure", async () => {
+    const run = await runRefusedWith('API Error: 400 {"error":{"message":"Bad request","type":"invalid_request_error"}}');
+    expect(run.status).toBe("failed");
+    expect(run.pauseReason).toBeNull();
+  });
+
+  it("does not pause a run with no session to come back to", async () => {
+    const run = await runRefusedWith(refusal("weekly_limit_exceeded", "Weekly token allowance used up."), false);
+    expect(run.status).toBe("failed");
+    expect(run.pauseReason).toBeNull();
   });
 });
 

@@ -95,6 +95,7 @@ describe("translations", () => {
       // translation namespaces (i.e. keys like "foo.bar" where "foo" is the prefix).
       const knownPrefixes = new Set([
         "wifi",
+        "clawaiUsage",
         "update",
         "credentials",
         "ai",

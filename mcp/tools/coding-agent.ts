@@ -28,7 +28,7 @@ import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
 import type { CodingPauseReason, CodingRunStatus } from "../../src/lib/coding-agent-status";
-import { PAUSE_METER_NOUN, pauseResetClock } from "../../src/lib/coding-agent-status";
+import { PAUSE_METER_NOUN, isRollingPauseMeter, pauseResetClock, pauseResetInstant } from "../../src/lib/coding-agent-status";
 // Pure too, for the same reason: the review loop's shape and its fold, so the
 // tool cannot describe a state the server never writes.
 import { foldReviewChecks, type ReviewLoop } from "../../src/lib/coding-review-state";
@@ -636,10 +636,15 @@ function describeRun(run: RunPayload, tail: number, vercel: boolean): string {
     // refusal, which is why the reset time is the operative fact here.
     const reason = run.pauseReason;
     if (reason && reason.kind === "allowance") {
+      // A rolling window can free up days from now, so it is quoted with its
+      // date; the per-day meters keep the bare UTC clock they reset at.
       const clock = pauseResetClock(reason.resetsAt);
+      const when = isRollingPauseMeter(reason.meter)
+        ? pauseResetInstant(reason.resetsAt)
+        : clock && `${clock} UTC`;
       parts.push(
         `Paused because this box's ${PAUSE_METER_NOUN[reason.meter]} is used up`
-        + `${clock ? `, which comes back at ${clock} UTC` : ""}.`
+        + `${when ? `, which comes back at ${when}` : ""}.`
         + " Its work is kept and its session is intact. Tell the user what ran out and when it returns,"
         + " and that Resume in the Coding Agent app carries on from where it stopped — resuming it before then"
         + " only buys the same refusal. Do not start a fresh run for the same task.",
