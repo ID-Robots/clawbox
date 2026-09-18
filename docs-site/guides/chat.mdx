@@ -15,28 +15,18 @@ Everything on this page is on both [editions](/editions/overview) unless it says
 
 The chat panel carries up to three pills in the row beneath the message box.
 
-<Steps>
-  <Step title="Provider">
-    Which service answers. Picking a different one switches the conversation to it.
-  </Step>
-  <Step title="Model">
-    Which of that provider's models. The pill drops the vendor's name because the pill to
-    its left already says it — the dropdown shows the full model name.
-  </Step>
-  <Step title="Reasoning effort">
-    How hard the model thinks before answering. The levels on offer are whatever the
-    provider accepts, so this control changes shape: a provider that takes a scale shows
-    it, one that only has thinking on or off shows two states, and one that takes no
-    reasoning level at all does not show the control.
-  </Step>
-</Steps>
+| Pill | What it does |
+|---|---|
+| **Provider** | Which service answers. Picking a different one switches the conversation to it. |
+| **Model** | Which of that provider's models. The pill drops the vendor's name because the pill to its left already says it — the dropdown shows the full model name. |
+| **Reasoning effort** | How hard the model thinks before answering. The levels on offer are whatever the provider accepts, so this control changes shape: a provider that takes a scale shows it, one that only has thinking on or off shows two states, and one that takes no reasoning level at all does not show the control. |
 
 A change applies to the **running** agent. There is no restart between you and the next
 message, and open conversations are not dropped.
 
 <Note>
-On **ClawBox AI** there is no model pill: chat runs **Flash 4.1** and there is nothing to
-choose. The reasoning control is there and starts at **Medium**.
+On **ClawBox AI** there is no model pill — the chat names the provider and there is
+nothing to choose. The reasoning control is there and starts at **Medium**.
 </Note>
 
 A reasoning change is a **per-conversation** override. It does not rewrite the box's
@@ -72,8 +62,10 @@ stopped and is waiting for you.
   </Accordion>
   <Accordion title="Email waiting to be sent">
     The assistant wrote a message and wants to send it from your account. You read it
-    first — nothing goes out until you approve. You can send them all, send one, or delete
-    them without sending. See [Messaging channels](/guides/messaging-channels#email).
+    first and nothing goes out until you approve — this card is what **Ask me before
+    sending** in **Settings → Email** produces, and it is on by default. You can send them
+    all, send one, or delete them without sending. See
+    [Messaging channels](/guides/messaging-channels#email).
   </Accordion>
 </AccordionGroup>
 
@@ -90,8 +82,8 @@ A failed turn says what actually went wrong: the provider's own reason, not a ge
 
 ## Voice
 
-**Voice in** — press the microphone to record. The recording is turned into text and sent
-as a message. Recording needs a secure connection, so on a plain `http://` address the
+**Voice in** — in the **chat panel**, press the microphone to record. The recording is
+turned into text and sent as a message. The Chat app has no microphone. Recording needs a secure connection, so on a plain `http://` address the
 chat points you at this box's Remote Access tunnel instead of failing silently.
 
 **Voice out** — **Settings → Voice → Spoken replies**, **off by default**. With it on, a

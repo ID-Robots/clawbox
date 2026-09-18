@@ -33,20 +33,37 @@ the upgrade if your box is on Free or is not connected yet. See
     are not using the box. Choose daily or weekly, and a quiet hour.
   </Step>
   <Step title="Let it build the first index">
-    If your plan covers the cloud model, there is nothing to download and the first pass
-    starts straight away. Otherwise the box fetches its own embedding model first — about
+    The last step is where the index gets its embedding model, and it offers both:
+    **ClawBox AI cloud** or **On this box**. Where your plan covers the cloud model it is
+    already selected, so there is nothing to download and the first pass starts straight
+    away. Pick the box instead and it fetches its own embedding model first — about
     640 MB, once.
   </Step>
 </Steps>
 
 ## Where the index is built
 
-**Settings → Embedding model**, inside Memory Shard, is a two-way switch:
+**Settings → Embedding model**, inside Memory Shard, is a two-way switch — on **every
+edition**:
 
-| | What it means |
+| Option | What it means |
 |---|---|
 | **ClawBox AI cloud** | Your notes and documents are sent to ClawBox AI to be indexed. Nothing to download, and the box's own memory stays free. Needs a Pro or Max plan. |
 | **On this box** | Qwen3 on the box's own llama.cpp. Nothing leaves the box; the model is a one-time download of about 640 MB, and it sleeps between searches. |
+
+<Frame caption="Memory Shard indexing through the ClawBox AI cloud">
+  <img src="/images/memory-shard.webp" alt="The Memory Shard window: the memory index card marked Cloud and Healthy, with files, chunks, sources, index size, Index now and Full reindex buttons, and the automatic indexing schedule below." />
+</Frame>
+
+**The cloud is the default** wherever your plan covers it. A box that is connected to
+ClawBox AI on a Pro or Max plan, and whose cloud model answers, indexes there without you
+choosing anything — so a new box has nothing to download and its first index starts at
+once. **On this box** is the opt-in, and once you pick it your choice stands: nothing moves
+your index back on its own.
+
+A box that is not connected, or whose plan does not cover the cloud model, indexes on
+itself, names the reason on the card, and moves to the cloud by itself — with the full
+rebuild that move needs — once a plan that covers it is linked.
 
 Switching **rebuilds the whole index**. That is not a precaution — an index belongs to the
 model that wrote it, so a switch is always followed by a full pass, and the card says so
@@ -55,13 +72,26 @@ before you press anything. Search keeps working on the old index until the new o
 When the cloud option cannot be picked, the card names the reason: the box is not
 connected to ClawBox AI, the plan does not cover the cloud model, the service did not
 answer this box (in which case it is retried on its own and the model on the box works
-meanwhile), or this edition indexes memory on the box itself.
+meanwhile), or you picked the model on the box yourself.
+
+<Note>
+The card names the model your index was actually built with, which is not always one of
+the two buttons: on the OpenClaw edition an embedder pointed at directly in OpenClaw's own
+configuration is reported as **Cloud** and shown under its own model's name.
+</Note>
 
 <Warning>
 Sending documents to be indexed is what the cloud option is: the text of everything you
 index becomes the body of those requests. If that is not what you want, pick **On this
 box** — it is a first-class option on every edition, and nothing about it depends on a
 subscription once the model is downloaded.
+
+Those are the only two places the index will send anything. Every indexing pass and every
+search checks the address it is about to use and refuses any other: the box's own model,
+reached on the device itself, or the ClawBox AI endpoint belonging to this box's own
+account. What is stored is which of the two you chose — never an address, and never a copy
+of a credential — so a restored backup or a hand-edited configuration file cannot redirect
+where your documents go.
 </Warning>
 
 ## What you see while it runs

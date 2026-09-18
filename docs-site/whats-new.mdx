@@ -12,6 +12,8 @@ Some entries are specific to one [edition](/editions/overview). Where that is th
 the entry says so.
 </Note>
 
+Entries are newest first, grouped by the month they shipped in.
+
 ## September 2026
 
 ### Switch your box between OpenClaw and Hermes
@@ -28,7 +30,7 @@ See [Switching editions](/editions/switching).
 ### Change model without restarting anything
 
 Provider, model and reasoning effort are three pills beneath the chat panel's message box. Picking
-a different one applies to the running agent — there is no gateway restart and no
+a different one applies to the running agent — nothing is restarted and there is no
 30-second reconnect between you and the next message. See [Chat](/guides/chat).
 
 ### A failed message tells you what the provider said
@@ -63,8 +65,9 @@ account rather than guessed on the device. See [ClawBox AI](/guides/clawbox-ai).
 
 ### Voice, transcription and memory indexing use your plan's cloud
 
-On a box connected to ClawBox AI, speech-to-text, text-to-speech and the memory index
-default to the cloud your plan covers instead of running engines on the box. The engines
+On a box connected to ClawBox AI — on every edition — speech-to-text, text-to-speech and
+the memory index default to the cloud your plan covers instead of running engines on the
+box. The engines
 on the box stay the fallback, and stay selectable. A choice you make yourself is never
 overwritten. See [ClawBox AI → What your plan powers](/guides/clawbox-ai#what-your-plan-powers).
 
@@ -80,16 +83,38 @@ See [Local AI](/guides/local-ai).
 
 **Settings → Local AI** lists every model that can run on the box — the agent model, the
 voice, speech-to-text and memory search — with Install, Uninstall, Enable and Disable on
-each row and what each one is doing right now. **Local-only mode** routes everything to
-the box and switches every cloud provider off.
+each row and what each one is doing right now. On the **OpenClaw and dual** editions, once
+the box's own model is primary or fallback, a **Local-only mode** switch appears there and
+routes everything to the box, switching every cloud provider off. The Hermes edition has
+no equivalent.
 
-### Memory Shard on both editions
+### A Hermes plugin you install now reaches the chat
+
+Hermes looks for plugins once, when the assistant starts, so a plugin installed or enabled
+after that was invisible to every chat — new conversations included — however healthy it
+looked from the command line. The box now handles it: when your plugins change, the
+assistant restarts itself so it picks them up, and the desktop shows a notice naming the
+plugin and telling you to open a new chat. The assistant can ask for the same restart
+itself, right after it installs something for you.
+
+The restart closes the chat window you have open. That is what the notice is for — open a
+new chat and the plugin is there. **Hermes edition.**
+See [Hermes Edition](/editions/hermes#plugins-and-when-the-assistant-restarts).
+
+### Memory Shard on both editions, and the cloud index by default
 
 Memory Shard turns your notes, your past conversations and folders of your own documents
-into an index the assistant can search. It now works on the Hermes edition too, and its
+into an index the assistant can search. It works on the Hermes edition too, and its
 settings let you choose where the index is embedded: the ClawBox AI cloud, or the model
-on the box. Memory Shard needs a Pro or Max plan.
-See [Memory Shard](/guides/memory-shard).
+on the box.
+
+Since this release the **cloud is the default on every edition** wherever your plan covers
+it — a Pro or Max box that is connected indexes there without choosing anything, so there
+is no 640 MB model to download before your first index. **On this box** is the opt-in and
+is never overridden once you pick it, and a box that could not reach the cloud moves there
+by itself, with the rebuild that move needs, once a plan that covers it is linked.
+Memory Shard needs a Pro or Max plan.
+See [Memory Shard](/guides/memory-shard#where-the-index-is-built).
 
 ### Discord: paste the token, and that is all
 
@@ -119,8 +144,8 @@ web, gateway and terminal ports. It can leave existing desktop services alone.
 
 ### Smaller things
 
-- ClawBox AI chat runs **Flash 4.1**. There is no model to choose, so the chat names the
-  provider and shows no model pill beside it.
+- ClawBox AI chat has no model to choose, so it names the provider and shows no model pill
+  beside it. Its reasoning control starts at **Medium**.
 - A sign-in that restarts the agent now re-points the chats you already have open, so an
   open conversation cannot keep running on the old model while the pills name the new one.
 - The assistant's own tools grew: it can read and send email you have approved, generate

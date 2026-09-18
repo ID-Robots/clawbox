@@ -13,9 +13,9 @@ turns your speech into text, and the model that searches your memory.
 Your box arrives with the local AI runtime and one small model on it. Everything else is
 installed when you ask for it.
 
-| | On a new box | Size |
+| Model | On a new box | Size |
 |---|---|---|
-| **Gemma 4 (on-device)** — the agent model | installed | included |
+| **Gemma 4** — the agent model (the provider pickers list it as *Gemma 4 (on-device)*) | installed | included |
 | **Kokoro** — the voice | install from this panel | downloaded on request |
 | **Whisper** — speech to text | install from this panel, in your choice of size | downloaded on request |
 | **Memory search model** — Qwen3 embeddings | fetched in the background when you set up [Memory Shard](/guides/memory-shard) | about 640 MB |
@@ -37,13 +37,17 @@ carries a menu with the actions that apply to it:
 - **Manage in Memory Shard**, for the memory-search model
 
 Rows are grouped by job: *AI agent model*, *Voice (text to speech)*, *Speech to text* and
-*Memory search*. Disk and memory in use are shown per row, so you can see what a model
-costs before you keep it.
+*Other*, which is where the memory-search model sits. Disk and memory in use are shown per
+row, so you can see what a model costs before you keep it.
+
+<Frame caption="Settings → Local AI on an OpenClaw-edition box">
+  <img src="/images/local-ai.webp" alt="The Local AI panel, with rows for the agent model, voice, speech to text and other models, each showing what it is doing and what it costs in disk and memory." />
+</Frame>
 
 <Warning>
-Uninstalling Gemma is refused while it is the primary model — pick another primary first.
-Uninstall it when it is not, and the next system update puts it back: it is the one model
-ClawBox installs on every box.
+**Uninstall** is not offered while Gemma is the primary model — pick another primary
+first, and the action appears. Uninstall it when it is not primary, and the next system
+update puts it back: it is the one model ClawBox installs on every box.
 </Warning>
 
 ## How the models behave
@@ -51,8 +55,10 @@ ClawBox installs on every box.
 - **Gemma 4 (on-device)** runs on the box's own llama.cpp. It wakes on the first request
   and sleeps again afterwards to give the memory back, so the first message after a quiet
   period is slower than the ones that follow.
-- **Its reasoning control is a two-state switch** — *Thinking off* / *Thinking on* — not
-  an effort scale, because that is what its backend accepts.
+- **Its reasoning control depends on the edition.** On the **Hermes** edition it is a
+  two-state switch — *Thinking off* / *Thinking on* — rather than an effort scale, because
+  that is what its backend accepts. On the **OpenClaw** edition the model takes no
+  reasoning level at all, so no reasoning pill is shown while it is answering.
 - **Turning a local model on makes it available. It does not take over.** Making it your
   default is a separate, explicit choice.
 - **Kokoro** starts cold: the first sound can take fifteen seconds or more unless you
@@ -63,9 +69,17 @@ ClawBox installs on every box.
 
 ## Local-only mode
 
-**Local-only mode** routes everything to the local model and switches every cloud AI
-provider off, fallbacks included. It is one switch in this panel, and switching it back
-restores the providers it saved.
+<Note>
+Local-only mode is an **OpenClaw and dual** feature. It is built on the OpenClaw gateway's
+fallback chain, which the Hermes edition has no equivalent of, so the switch is not offered
+there.
+</Note>
+
+Once the box's own model is set as **primary** or **fallback**, a **Local-only mode** switch
+appears in this panel. It routes everything to the local model and switches every cloud AI
+provider off, fallbacks included, and switching it back restores the providers it saved.
+Until the local model has one of those two roles the switch is not drawn — there would be
+nothing for it to route to.
 
 Use it when nothing may leave the box. Note that it is about the **AI providers** — see
 [Networking](/technical/networking) for what else a ClawBox talks to.

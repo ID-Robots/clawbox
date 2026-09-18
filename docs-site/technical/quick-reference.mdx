@@ -135,7 +135,7 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `GET/POST /setup-api/ai-cloud-defaults` | Which of speech-out, speech-in and embeddings this box's plan puts in the ClawBox AI cloud, and why not where it does not |
 | `POST /setup-api/local-ai` `{action:"disable"}` · `local-ai/exclusive` | Turn Local AI off / local-only mode |
 | `POST /setup-api/tts` · `tts/{install,sample,speak,warm}` · `POST /setup-api/stt` · `whisper` · `embed/{install,status}` | Voice out and the Kokoro install, a spoken reply's audio, the transcription preference, Whisper, the memory-search embedder |
-| `GET /setup-api/clawkeep/memory` · `POST memory/index` · `GET/POST memory/provider` · `memory/{enable,schedule,sources,reset}` · `GET memory/search` | Memory Shard: state, run a pass, cloud/local embedder, switch/schedule/folders/start-over, search (**search is the agent's, deliberately not owner-only**) |
+| `GET /setup-api/clawkeep/memory` · `POST memory/index` · `GET/POST memory/provider` · `memory/{enable,schedule,sources,reset}` · `GET memory/search` | Memory Shard: state, run a pass, cloud/local embedder (the cloud is on offer on **every** edition and is the default where the plan covers it), switch/schedule/folders/start-over, search (**search is the agent's, deliberately not owner-only**) |
 | `GET /setup-api/harness/status` · `active` · `POST harness/select` · `harness/swap` · `harness/mcp` | Edition + active harness, dual runtime switch, the edition swap (NDJSON stream), the ClawBox MCP switch |
 | `GET /setup-api/pets?gallery=1` · `pets/select` · `pets/sprite` · `pets/thumb` | Mascot pet gallery, pick, sprite sheet |
 | `POST /setup-api/discord/configure` · `GET discord/status` · `discord/members` | Discord bot token / state / who may talk to it |
@@ -143,6 +143,7 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `POST /setup-api/telegram/configure` · `pairing` | Bot token / approve pairing codes |
 | `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token — **OpenClaw/dual**; on Hermes health always reports unavailable |
 | `/setup-api/hermes/{chat,models,provider-key,oauth,clawai,skills}` · `/setup-api/harness/active` | **Hermes/dual** — chat, model catalog, provider key/OAuth, ClawBox AI, Skills |
+| `GET/POST /setup-api/hermes/plugins/reload` | **Hermes/dual** — what the box declares beside what the running agent loaded, and the restart that makes a plugin installed after boot reach the chat (404 off the editions with a dashboard) |
 | `GET /setup-api/portal/status` · `POST portal/start` · `portal/stop` | Remote access (Cloudflare Quick Tunnel). **Not** `/setup-api/tunnel/*`, which the UI does not use |
 | `POST /setup-api/setup/reset` | **Factory reset** (destructive) — needs a session **and** `{ password, confirm: "RESET" }`; the password is throttled like `/login-api` |
 | `/setup-api/wifi/*` · `files/*` · `apps/*` · `clawkeep/*` · `code/*` · `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs (all under `/setup-api/`) |
@@ -160,7 +161,7 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 9. **Factory reset password is `clawbox`** — and the box comes back in AP mode (`ClawBox-Setup` → `10.42.0.1`). It keeps `data/network.env`, `data/llamacpp/models` and `~/.hermes/hermes-agent`, and the portal device id is re-derived from `/etc/machine-id`. Never hand-roll it with `rm -rf ~/.hermes` or `rm -rf data/*` — see [Recovery D](/support/recovery#d--factory-reset-wipes-everything).
 10. **Version label ≠ running code** — `package.json` is read live; verify actual deployment via `.next/BUILD_ID` mtime.
 11. **Plan gates are internal names off by one** — the internal `flash` tier is marketed **Pro**, internal `pro` is **Max**. Memory Shard and the Coding Agent need either paid tier; the cloud voice and the [edition swap](/editions/switching) need **Max**; cloud transcription is on every connected box including Free.
-12. **ClawBox AI chat serves Flash 4.1 on every plan** — both wire model ids (`deepseek-v4-flash`, `deepseek-v4-pro`) resolve to it upstream, so the chat shows no model pill. Plan differences are allowance and device features, not the chat model.
+12. **ClawBox AI chat has no model picker** — the chat is pinned to the flash alias (a saved pro-alias choice is migrated to it) and renders no model pill. Plan differences are allowance and device features.
 13. **Nothing heavy is installed by an update** — only the llama.cpp runtime and Gemma 4. Kokoro, Whisper and the ~640 MB embedding model arrive through `voice_kokoro_install`, `voice_whisper_install` and `embed_model`, all owner-started and all off `UI_ROOT_STEPS`.
 14. **A provider or model change does not restart the gateway** — it is hot-applied to the running agent, and open sessions are re-pointed. A change that *does* restart it (a subscription sign-in that migrates the auth store) waits for the gateway to answer again before sweeping sessions.
 

@@ -19,10 +19,11 @@ startup from the device's edition lock.
 
 ## What differs by edition
 
-| | OpenClaw | Hermes |
+| Capability | OpenClaw | Hermes |
 |---|---|---|
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
+| Loading a plugin installed after boot | no plugin system | `hermes_plugins_reload` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own |
 | Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Field guide (`clawbox_context`) | the OpenClaw sections of `Clawbox.md` | the Hermes sections — identity, its own skills and model, its dashboard |
@@ -83,6 +84,24 @@ answer to one string, the device refuses and names both lock ids rather than
 removing either. See
 [Hermes Skills](/editions/hermes-skills).
 
+### Hermes plugins — **Hermes edition only**
+`hermes_plugins_reload`
+
+Hermes scans for plugins once, when its process starts, and offers no runtime reload — so
+a plugin installed, enabled, disabled or removed after that does not reach the chat,
+including a brand-new conversation. This tool restarts the agent so it scans again, and
+answers which plugins the box now declares and, where it can be established, which of them
+the restarted agent actually loaded.
+
+It is the supported way to do this and it is **not a privilege**: the restart stops a
+process the box already owns and lets the service manager bring it back. Verifying a
+plugin from the command line proves nothing about the chat — that is a separate, fresh
+process.
+
+The restart closes the chat window you have open, so the tool tells the assistant to say
+so, and the desktop shows the same notice. See
+[Hermes Edition](/editions/hermes#plugins-and-when-the-assistant-restarts).
+
 ### AI configuration — **Hermes edition only**
 `ai_list_models` · `ai_set_provider` · `ai_set_model`
 
@@ -95,7 +114,7 @@ These tools read and write the **device default** — the provider and model in
 `~/.hermes/config.yaml`, what a new conversation starts on. `ai_list_models`
 reports it as `device_default`, and `ai_set_provider` / `ai_set_model` change
 only that. The chat window can run a different model per conversation, chosen
-in its header, and the tool server cannot see which: it is one process shared
+with the pills under its composer, and the tool server cannot see which: it is one process shared
 by every session. So where the chat knows the model that served a
 reply it prints it under that reply, and the agent is told to read that — not a
 tool — when asked "which model are you". On the OpenClaw edition the header writes the box
@@ -129,8 +148,10 @@ Hermes ships its own equivalents, so ClawBox does not add a second set.
 ### Email — both editions
 `email_send` · `email_list` · `email_read`
 
-`email_send` never sends: it queues a draft that you approve in the chat or in
-**Settings → Email**. See [Messaging channels](/guides/messaging-channels#email).
+`email_send` does not put a message on the wire while **Ask me before sending** is
+on, which is the default: it queues a draft that you approve in the chat or in
+**Settings → Email**. Turn that switch off and the same tool sends directly. See
+[Messaging channels](/guides/messaging-channels#email).
 
 ### Pictures and audio — both editions
 `generate_image` · `generate_audio`

@@ -12,7 +12,7 @@ already own you can change it from the device, with the **Max** plan. See
 
 ## The three editions
 
-| | Agent | Capability store | Desktop | Built-in wallpapers |
+| Edition | Agent | Capability store | Desktop | Built-in wallpapers |
 |---|---|---|---|---|
 | **OpenClaw** — the standard product | OpenClaw gateway | App Store | OpenClaw Control UI | Lobster Orbital (default), ClawBox, Hermes, Deep Space |
 | **Hermes** | Hermes Agent by Nous Research | Hermes Skills | Hermes dashboard | Hermes (default), Deep Space |
@@ -159,7 +159,7 @@ mDNS, and the login model are all edition-independent. So are
 - **How AI providers are configured** — see [AI Providers on Hermes](/editions/hermes-providers).
 - **The agent's own tool set** — some [MCP tools](/technical/agent-interface) exist on one edition only.
 - **Telegram plumbing** — the messages and the pairing-approval flow work the same way for you; the process behind them is the harness's own.
-- **ClawKeep backups** — OpenClaw and dual only. ClawKeep archives the OpenClaw agent through the `openclaw` CLI, which a Hermes box does not ship, so the ClawKeep app there reports the feature as unavailable on this edition.
+- **What a ClawKeep backup archives** — every edition backs up, and the backup daemon picks its backend from the agent the box runs: the OpenClaw agent through the `openclaw` CLI, the Hermes agent through the daemon's own Hermes backend. A snapshot can only be restored onto a box running the agent that wrote it.
 - **Who owns the memory index** — on OpenClaw it is the agent's own and the agent searches it while answering; on Hermes, ClawBox builds it and gives the agent a search tool for it. See [Memory Shard](/guides/memory-shard#how-the-assistant-uses-it).
 - **Spoken replies on messaging channels** — OpenClaw and dual only. Every edition speaks in the desktop chat.
 - **Receiving email** — Hermes only. Sending mail you approve works on every edition.

@@ -22,7 +22,7 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 
 | Provider | Auth | Model namespace | Default model | Notes |
 |---|---|---|---|---|
-| **ClawBox AI** | Portal device-pairing token | `deepseek/…` | `deepseek-v4-flash` | Proxied via the portal. Both ids (`v4-flash`, `v4-pro`) resolve to **Flash 4.1** upstream, so chat has no model choice; the plan decides allowance and device features |
+| **ClawBox AI** | Portal device-pairing token | `deepseek/…` | `deepseek-v4-flash` | Proxied via the portal. The chat is pinned to the flash alias and renders no model pill, so there is no model choice in chat; the plan decides allowance and device features |
 | **Anthropic (Claude)** | API key | `anthropic/…` | `claude-opus-5` | Routed via Anthropic's OpenAI-compatible endpoint |
 | **OpenAI (API key)** | `sk-…` API key | `openai/…` | `gpt-5.4` | Direct `api.openai.com`, per-token billing |
 | **ChatGPT subscription** | ChatGPT OAuth sign-in | `openai/…` + Codex runtime | `openai/gpt-5.5` | Uses your ChatGPT plan. Models: `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` only (no `-pro` variants) |
@@ -79,6 +79,16 @@ ClawBox AI save, and `GET /setup-api/ai-cloud-defaults` publishes the verdict an
 ¹ and only once `POST <proxy>/embeddings` has answered a probe (cached 6 h on success,
 30 min on failure, cleared when the credential changes).
 
+The table is **edition-neutral**, embeddings included. On the edition where ClawBox owns
+the memory index itself rather than the agent, the index client accepts exactly two
+endpoints — the loopback embedder proxy on the device, and this box's own ClawBox AI
+embeddings endpoint — checked per request, so the same cloud default applies there. Where
+that edition records the owner's pick it does so as a word in ClawBox's own store
+(`memory_shard_embedder`), never an address and never a copy of the credential; the older
+`memory_embeddings_choice_source: "owner"` mark is honoured only where that pin stands
+beside it, so a box that finished the wizard before the cloud option existed is promoted
+rather than pinned to the device for good.
+
 The three rules differ because the three capabilities are not sold the same way: the
 transcription route has no tier gate, the cloud voice is Max-only on the proxy and would
 otherwise cost a failed round trip before every fall-back, and moving the memory index
@@ -93,8 +103,11 @@ Two invariants:
   `memory_embeddings_choice_source`). A box that predates those keys is read by what only a
   person could have written.
 
-A refusal names one of `not_linked`, `plan`, `route_unavailable`, `edition` or `owner`, and
-the UI prints the matching sentence rather than a bare "not available".
+A refusal names one of `not_linked`, `plan`, `route_unavailable` or `owner`, and the UI
+prints the matching sentence rather than a bare "not available". (`edition` is a fifth
+word the catalogue still carries and no shipping edition answers with — it is the
+build-time kill switch for cloud embeddings, kept worded in every locale so flipping it
+needs no new strings.)
 
 ## Plan gates
 

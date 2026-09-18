@@ -45,7 +45,7 @@
 
 This repository contains **OpenClaw OS**, the operating system that ships on every ClawBox. Local-first: with local models nothing leaves the box — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
 
-**Real on-device inference, not a cloud relay.** Every ClawBox ships with Gemma 4 preinstalled on its own llama.cpp and runs it on Jetson silicon — no API key, no account, works offline. It is not a low-power router that forwards every prompt to someone else's API: **Local-only mode** routes every request to the box and switches the cloud providers off, and larger models up to ~8B run locally too.
+**Real on-device inference, not a cloud relay.** Every ClawBox ships with Gemma 4 preinstalled on its own llama.cpp and runs it on Jetson silicon — no API key, no account, works offline. It is not a low-power router that forwards every prompt to someone else's API: on the OpenClaw and dual editions **Local-only mode** routes every request to the box and switches the cloud providers off, and larger models up to ~8B run locally too.
 
 > ### ℹ️ Genuine ClawBox
 >
@@ -76,8 +76,8 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🤖 **AI-controlled OS** | 80+ MCP tools let the AI agent operate the entire device |
 | 🔒 **Local-first** | Your data stays on the box; no telemetry, no data collection. Cloud AI only if you opt in |
 | 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude / GPT / Gemini with **your own key or a subscription you already pay for**, OpenRouter, or models that run on the box |
-| 🔁 **Switch model mid-chat** | Provider, model and reasoning effort are pills in the chat header, hot-applied with no gateway restart |
-| 🧠 **Memory Shard** | Indexes your notes, conversations and your own document folders so the assistant can search them — in the cloud or entirely on the box |
+| 🔁 **Switch model mid-chat** | Provider, model and reasoning effort are pills under the composer, hot-applied with no gateway restart |
+| 🧠 **Memory Shard** | Indexes your notes, conversations and your own document folders so the assistant can search them — in the ClawBox AI cloud by default on a paid plan, or entirely on the box |
 | 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
 | 💬 **Multi-platform** | Telegram, Discord, WhatsApp and email — all guided in Settings — plus the built-in web chat |
 | 🗣️ **Voice in and out** | Speak to it, and have replies read back; the voice runs in the cloud or on the box |
@@ -231,12 +231,24 @@ runtime switch between two installed harnesses.
 **What changes on the `hermes` edition:** the App Store and OpenClaw Control UI
 apps are hidden, the **Skills** app takes their place, gateway web paths
 (`/api/*`, `/chat`) return 404 and port `18789` is closed, AI providers are
-configured through Hermes instead of the gateway, ClawKeep is unavailable, and
-the CLI update path is refused in favour of **Settings → System Update**. The MCP
+configured through Hermes instead of the gateway, ClawKeep archives the Hermes
+agent through the backup daemon's own backend rather than the `openclaw` CLI,
+and the CLI update path is refused in favour of **Settings → System Update**. The MCP
 tool set differs too — `app_search`/`app_install`, the coding family and
 coordinate browser control are OpenClaw-only; `skill_*`, `ai_*` and
-`memory_shard_search` are Hermes-only. See [`mcp/README.md`](mcp/README.md) for
-the authoritative tool matrix.
+`memory_shard_search` and `hermes_plugins_reload` are Hermes-only. See
+[`mcp/README.md`](mcp/README.md) for the authoritative tool matrix.
+
+Hermes scans for plugins **once, when its process starts**, and has no runtime reload, so a
+plugin installed or enabled after boot reached no chat at all — new sessions included. The
+box closes that itself: a watcher in the web server restarts the agent when the declared
+plugin set changes, `POST /setup-api/hermes/plugins/reload` (owner cookie or the MCP
+bearer) is the same thing asked for, and `hermes_plugins_reload` is what the assistant
+calls right after `hermes plugins install/enable/disable/remove`. No sudoers grant is
+added or needed — the restart is the unprivileged `hermes dashboard --stop` over a process
+the `clawbox` user owns, with `Restart=always` bringing it back, proved by a new main PID
+and the port answering again. The owner's open chat window drops with it; a desktop notice
+names the plugin and says to open a new one.
 
 Full documentation: **[editions](https://docs.clawbox.com/editions/overview)** ·
 **[switching editions](https://docs.clawbox.com/editions/switching)**.
@@ -253,7 +265,7 @@ Full documentation: **[editions](https://docs.clawbox.com/editions/overview)** �
 
 **Layer 4 — AI agent integration.** The agent operates the device through MCP tools — shell, files, real-browser control, app installs, system power, preferences, email drafts you approve, picture and audio generation, and a code assistant that builds and deploys desktop webapps. The `clawbox-cli.ts` wrapper (run through Bun) exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.com/technical/agent-interface).**
 
-**Layer 5 — The cloud your plan covers.** On a box linked to ClawBox AI, speech-to-text, spoken replies and memory embeddings default to the service the plan already pays for instead of engines on the device; the engines stay the fallback and stay selectable, and a choice made by hand is never overwritten. The matrix is in [AI Providers](https://docs.clawbox.com/technical/ai-providers).
+**Layer 5 — The cloud your plan covers.** On a box linked to ClawBox AI, speech-to-text, spoken replies and memory embeddings default to the service the plan already pays for instead of engines on the device — on **every** edition; the engines stay the fallback and stay selectable, and a choice made by hand is never overwritten. The memory index will only ever talk to two addresses, checked per request: the loopback embedder proxy on the device, or this box's own ClawBox AI endpoint. The matrix is in [AI Providers](https://docs.clawbox.com/technical/ai-providers).
 
 ---
 
@@ -415,7 +427,7 @@ ClawBox is made by **ID Robots Ltd.**, a robotics and AI company based in Plovdi
 No. The hardware is a **one-time purchase (€579)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop, Memory Shard, the Coding Agent and priority support — and you can instead bring your own Claude, GPT, Gemini or OpenRouter key, sign in with a subscription you already pay for, or run entirely on local models with no external account at all.
 
 **Does ClawBox work without internet?**
-Yes, for local models. Gemma 4 ships preinstalled on the box's own llama.cpp, and **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
+Yes, for local models. Gemma 4 ships preinstalled on the box's own llama.cpp, and on the OpenClaw and dual editions **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
 
 **Where do I buy a ClawBox?**
 Only from **[clawbox.com](https://clawbox.com)**. ID Robots ships to 108 countries via DHL Express. Products sold elsewhere under a similar name are not ClawBox and are not covered by our warranty or support.
