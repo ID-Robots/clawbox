@@ -55,13 +55,17 @@ const execFile = promisify(execFileCb);
  */
 
 // THE REPO'S OWN RESOLVER, not a guess at one path. `findOpenclawBin()` searches
-// `dirname(process.execPath)`, `~/.npm-global/bin`, `/usr/local/bin`, `/usr/bin`
-// and every nvm node — which is why it exists — and it is what the updater, the
-// AI-models routes and `openclaw-config` all use. A hand-rolled path here means
-// this route can be looking for a binary the rest of the box is not using, and
-// the ENOENT would reach the owner as "the repair failed", permanently, on a
-// Retry that never ran anything.
-const OPENCLAW_BIN = findOpenclawBin();
+// `~/.npm-global/bin` (the managed core, first), `dirname(process.execPath)`,
+// `/usr/local/bin`, `/usr/bin` and every nvm node — which is why it exists — and
+// it is what the updater, the AI-models routes and `openclaw-config` all use. A
+// hand-rolled path here means this route can be looking for a binary the rest
+// of the box is not using, and the ENOENT would reach the owner as "the repair
+// failed", permanently, on a Retry that never ran anything.
+// Asked per call, never frozen at import: `findOpenclawBin()` remembers only the
+// managed core's path, and a fallback captured here would outlive the moment it
+// was true for — a core installed (or a second one under /usr removed) under a
+// running web server — until the next restart.
+const openclawBin = (): string => findOpenclawBin();
 
 /** Long enough for an npm install on a Jetson, short enough to answer a click. */
 const INSTALL_TIMEOUT_MS = 180_000;
@@ -98,7 +102,7 @@ interface RuntimeInspection {
 async function harnessSaysLoaded(pluginId: string): Promise<boolean | null> {
   let stdout: string;
   try {
-    ({ stdout } = await execFile(OPENCLAW_BIN, ["plugins", "inspect", pluginId, "--runtime", "--json"], {
+    ({ stdout } = await execFile(openclawBin(), ["plugins", "inspect", pluginId, "--runtime", "--json"], {
       timeout: INSPECT_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     }));
@@ -202,7 +206,7 @@ export async function POST(req: Request) {
       // canonicalisation exists for) would answer "plugin not found" on every
       // press and never clear the badge. The `config set` writes below keep the
       // literal key, because those address the config by the key it carries.
-      await execFile(OPENCLAW_BIN, ["plugins", "enable", registryId, "--accept-capabilities"], {
+      await execFile(openclawBin(), ["plugins", "enable", registryId, "--accept-capabilities"], {
         timeout: CONSENT_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
       });
@@ -226,7 +230,7 @@ export async function POST(req: Request) {
       // commonest repair state is a package on disk with a broken peer-dep
       // symlink, and without this the Retry could never succeed once.
       await execFile(
-        OPENCLAW_BIN,
+        openclawBin(),
         ["plugins", "install", entry.spec, "--force", "--accept-capabilities"],
         { timeout: INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
       );

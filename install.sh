@@ -5270,6 +5270,141 @@ promote_staged_openclaw_core() {
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX" 2>/dev/null || true
 }
 
+# A SECOND OpenClaw core, outside $NPM_PREFIX, that nothing on the box updates.
+# The distro's npm has /usr as its default prefix, so one `sudo npm install -g
+# openclaw` — a support session, a README followed by hand — leaves a root-owned
+# core at /usr/lib/node_modules/openclaw with its launcher at /usr/bin/openclaw,
+# and every update after that moves the MANAGED core forward and leaves that one
+# where it was. The web server runs on /usr/bin/node and used to look for the
+# CLI beside its own node first, so it ran the stale core for every `config
+# set`, every `doctor --fix` and every version probe while the gateway ran the
+# managed one. On 2026-09-18 that was 2026.7.1-2 against 2026.9.3: the new core
+# had migrated openclaw.json and the state database, the old CLI refused both,
+# and Settings answered "Credential migration failed" to every ClawBox AI
+# sign-in — with advice to run a command that works from the owner's Terminal,
+# whose PATH has the managed prefix first. `findOpenclawBin` asks the managed
+# prefix first now; this takes the second core off the box, so nothing else that
+# walks PATH as root or as a service (secure_path has no ~/.npm-global) can
+# meet it either.
+#
+# Deliberately narrow, because this is root deleting under /usr:
+#   - only once the managed core is THERE and executable — a box whose own
+#     install just failed keeps whatever core it has;
+#   - only an npm global install: a real directory whose package.json names
+#     `openclaw`, plus the bin symlinks that resolve INTO it. A hand-written
+#     wrapper, or a launcher pointing anywhere else, is left alone and said so;
+#   - never a path a package owns (`dpkg -S`), never $NPM_PREFIX, never a tree
+#     the managed launcher itself resolves into.
+# Never fails the step: a core that cannot be removed is a WARN, and the
+# resolver order already keeps it from being run by ClawBox.
+#
+# The prefixes are ARGUMENTS (default /usr and /usr/local) rather than an
+# environment variable: the suites hand it a tmp dir, and nothing a caller
+# exports can point a root `rm -rf` somewhere new.
+remove_shadowing_system_openclaw() {
+  local prefix tree tree_real parked launcher entry target version managed_real removed
+  if [ ! -x "$OPENCLAW_BIN" ]; then
+    echo "  The managed OpenClaw core is not in place ($OPENCLAW_BIN) — leaving any system-wide install alone"
+    return 0
+  fi
+  managed_real="$(readlink -f "$OPENCLAW_BIN" 2>/dev/null || true)"
+  [ "$#" -gt 0 ] || set -- /usr /usr/local
+  for prefix in "$@"; do
+    tree="$prefix/lib/node_modules/openclaw"
+    parked="$prefix/lib/node_modules/.openclaw-shadow-removed"
+    launcher="$prefix/bin/openclaw"
+    [ "$prefix" = "$NPM_PREFIX" ] && continue
+    # A removal that was cut short — the box stopped inside the `rm -rf` below —
+    # is FINISHED here, not disowned. `rm -rf` unlinks package.json long before
+    # the bulk of the tree (measured on the box's ext4: 4th, ahead of the 187 MB
+    # dist/ and the 323 MB node_modules/), so a half-deleted tree left under its
+    # own name would fail the identity check below on every later run and sit
+    # under /usr for good. The tree is therefore PARKED under a name only this
+    # function writes — one rename, after every check has passed — and deleted
+    # from there.
+    if [ -d "$parked" ] && [ ! -L "$parked" ]; then
+      echo "  Finishing an earlier removal of a second OpenClaw core under $prefix"
+      rm -rf "$parked" || echo "  WARN: could not remove $parked" >&2
+    fi
+    # What a tree removed by hand leaves: a launcher that points into an install
+    # that is no longer there. `readlink -f` cannot resolve it — the tree is
+    # gone — so the target is normalised WITHOUT requiring it to exist
+    # (`readlink -m`) and must fall under THIS prefix's own tree. The link's
+    # text alone is not evidence: `/opt/vendor/lib/node_modules/openclaw/…` on a
+    # volume that is not mounted right now carries the same words and is
+    # somebody else's install. Never a launcher a package owns, and where
+    # `readlink -m` is not to be had the launcher is left alone.
+    if [ -L "$launcher" ] && [ ! -e "$launcher" ] && [ ! -e "$tree" ]; then
+      target="$(readlink -m "$launcher" 2>/dev/null || true)"
+      tree_real="$(readlink -m "$tree" 2>/dev/null || true)"
+      if [ -n "$target" ] && [ -n "$tree_real" ]; then
+        case "$target" in
+          "$tree_real"/*)
+            if command -v dpkg >/dev/null 2>&1 && dpkg -S "$launcher" >/dev/null 2>&1; then
+              echo "  NOTE: a package owns $launcher — leaving it to the package manager"
+            else
+              echo "  Removing a dangling OpenClaw launcher left behind at $launcher"
+              rm -f "$launcher" || echo "  WARN: could not remove $launcher" >&2
+            fi
+            ;;
+        esac
+      fi
+    fi
+    [ -d "$tree" ] && [ ! -L "$tree" ] || continue
+    if ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"openclaw"' "$tree/package.json" 2>/dev/null; then
+      echo "  NOTE: $tree does not look like an npm install of openclaw — leaving it alone"
+      continue
+    fi
+    # LIKE WITH LIKE. `readlink -f` answers canonical paths, and the prefix as
+    # typed is not one wherever a component of it is a link (/usr/local moved
+    # to another disk). Compared against the typed tree, the managed launcher's
+    # target never matched — so a box hand-wired onto that core lost its only
+    # one — and neither did the launchers below.
+    tree_real="$(readlink -f "$tree" 2>/dev/null || true)"
+    [ -n "$tree_real" ] || tree_real="$tree"
+    case "$managed_real" in
+      "$tree_real"/*)
+        echo "  NOTE: the managed launcher resolves into $tree — leaving it alone"
+        continue
+        ;;
+    esac
+    if command -v dpkg >/dev/null 2>&1 \
+      && { dpkg -S "$tree/package.json" >/dev/null 2>&1 || dpkg -S "$launcher" >/dev/null 2>&1; }; then
+      echo "  NOTE: a package owns the OpenClaw install under $prefix — leaving it to the package manager"
+      continue
+    fi
+    # `|| true`: the step runs with errexit and pipefail ON, and `head` closing
+    # the pipe on a manifest with a second "version" key is a SIGPIPE for sed —
+    # a log line's detail must never be what ends an update.
+    version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tree/package.json" 2>/dev/null | head -1 || true)"
+    echo "  Removing a second OpenClaw core (${version:-unknown version}) under $prefix: it shadows the managed one at $NPM_PREFIX for everything that runs without ~/.npm-global on its PATH, and no update ever moves it"
+    removed=1
+    # The launchers first, and only the symlinks that resolve into THIS tree:
+    # they are what shadows, and once the tree has moved they dangle, which
+    # `readlink -f` cannot resolve and `[ -e ]` cannot see.
+    for entry in "$prefix"/bin/*; do
+      [ -L "$entry" ] || continue
+      target="$(readlink -f "$entry" 2>/dev/null || true)"
+      case "$target" in
+        "$tree_real"/*) rm -f "$entry" || removed=0 ;;
+      esac
+    done
+    if mv "$tree" "$parked"; then
+      rm -rf "$parked" || removed=0
+    else
+      removed=0
+    fi
+    if [ "$removed" -ne 1 ] || [ -e "$tree" ] || [ -e "$parked" ]; then
+      echo "  WARN: could not remove the second OpenClaw core under $prefix; ClawBox itself runs the managed one, but a root shell still finds this one first" >&2
+    elif [ -e "$launcher" ] || [ -L "$launcher" ]; then
+      # Only after a removal that WORKED: a launcher still there then is one the
+      # loop above judged not to be a link into that install.
+      echo "  NOTE: $launcher is not a link into that install — leaving it alone" >&2
+    fi
+  done
+  return 0
+}
+
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
@@ -5436,6 +5571,12 @@ step_openclaw_install() {
     promote_staged_openclaw_core "$_oc_stage" || return 1
     echo "  OpenClaw installed: $_oc_version_out"
   fi
+
+  # The managed core is in place on BOTH paths here — already at the pin, or
+  # just promoted — which is the one moment a second core under /usr can go
+  # without leaving the box with none. Before doctor, so the migrations below
+  # and everything after them run on a box that has exactly one OpenClaw.
+  remove_shadowing_system_openclaw
 
   # OpenClaw 2 (>= 2026.8) refuses gateway readiness while legacy state is
   # present: the sessions/transcripts move into SQLite and stale config keys

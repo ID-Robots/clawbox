@@ -51,7 +51,11 @@ export const dynamic = "force-dynamic";
 // CLI's own reason is logged, because "0 models" means the plugin is off or the
 // provider id is gone, not that the box can run nothing.
 
-const OPENCLAW_BIN = findOpenclawBin();
+// Asked per call, never frozen at import: `findOpenclawBin()` remembers only the
+// managed core's path, and a fallback captured here would outlive the moment it
+// was true for — a core installed (or a second one under /usr removed) under a
+// running web server — until the next restart.
+const openclawBin = (): string => findOpenclawBin();
 const REFRESH_TIMEOUT_MS = 5 * 60_000; // openclaw on Jetson is ~3min
 const REFRESH_INTERVAL_MS = 6 * 60 * 60_000; // 6h
 const CACHE_DIR = path.join(DATA_DIR, "catalog-cache");
@@ -1200,7 +1204,7 @@ function toFetchResult(
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(OPENCLAW_BIN, ["models", "list", "--provider", provider, "--all", "--json"], {
+    const child = spawn(openclawBin(), ["models", "list", "--provider", provider, "--all", "--json"], {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,

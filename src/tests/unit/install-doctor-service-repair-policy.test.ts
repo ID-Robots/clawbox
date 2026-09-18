@@ -108,6 +108,9 @@ const SHIPPED = [
 ];
 
 const AMBIENT = [
+  // Stubbed, never lifted: the step calls it with no arguments, which means the
+  // REAL /usr and /usr/local (install-shadowing-system-openclaw.test.ts).
+  "remove_shadowing_system_openclaw() { :; }",
   "wait_for_apt() { :; }",
   "ensure_clawbox_bashrc_path() { :; }",
   "ensure_openclaw_node_engine() { :; }",
