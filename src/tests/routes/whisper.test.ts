@@ -75,9 +75,12 @@ vi.mock("@/lib/whisper-models", () => ({
  * be able to exit 0 and leave nothing behind.
  */
 const child = { code: 0, stdout: ["Fetching the small model..."], stderr: "", leavesWeights: true };
+/** Every spawn the route made: command, argv and the options it passed. */
+const spawned: [string, string[], { env?: NodeJS.ProcessEnv }][] = [];
 vi.mock("child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("child_process")>()),
-  spawn: () => {
+  spawn: (...a: unknown[]) => {
+    spawned.push(a as (typeof spawned)[number]);
     const handlers: Record<string, ((...a: unknown[]) => void)[]> = {};
     const outHandlers: ((chunk: string) => void)[] = [];
     const errHandlers: ((chunk: string) => void)[] = [];
@@ -130,6 +133,7 @@ beforeEach(() => {
   child.stdout = ["Fetching the small model..."];
   child.stderr = "";
   child.leavesWeights = true;
+  spawned.length = 0;
   pointed.mockClear().mockResolvedValue({ ok: true, error: undefined });
   restarted.mockClear().mockResolvedValue({ ok: true });
   removed.mockClear().mockResolvedValue({ ok: true, error: undefined, code: undefined });
@@ -249,6 +253,74 @@ describe("POST /setup-api/whisper", () => {
 
     expect(lines.at(-1)).toMatchObject({ success: true, restarted: false });
     expect(String(lines.at(-1)?.status)).toContain("after the next restart");
+  });
+});
+
+/**
+ * The fetcher has to be able to LOAD the engine it downloads for.
+ *
+ * install-voice.sh builds CTranslate2 into ~/.local/lib, which `ldconfig` does
+ * not know; whisper-server.service names it in its own Environment= line, and
+ * clawbox-setup.service — the web server this route runs in — names nothing.
+ * The fetcher was spawned with no `env`, so it inherited that, and on a Jetson
+ * with the engine installed and enabled, every size failed in ~3 s:
+ *
+ *   faster-whisper is not installed on this box (libctranslate2.so.4: cannot
+ *   open shared object file: No such file or directory)
+ */
+describe("POST /setup-api/whisper — the fetcher's environment", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  async function fetchEnv(): Promise<NodeJS.ProcessEnv> {
+    const { POST } = await load();
+    await readStream(await POST(post({ size: "small" })));
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0][1]).toEqual(["/tmp/fetch-whisper-model.py", "small"]);
+    const env = spawned[0][2].env;
+    expect(env, "the fetcher inherits a web server with no library path").toBeDefined();
+    return env as NodeJS.ProcessEnv;
+  }
+
+  it("carries the whisper-server unit's library path, CTranslate2's directory first", async () => {
+    vi.stubEnv("HOME", "/home/clawbox");
+    vi.stubEnv("LD_LIBRARY_PATH", undefined);
+    const entries = String((await fetchEnv()).LD_LIBRARY_PATH).split(":");
+
+    expect(entries[0]).toBe("/home/clawbox/.local/lib");
+    // ctranslate2's CUDA build links libcublas/libcudnn: without it the import
+    // fails one library later than it used to.
+    expect(entries).toContain("/usr/local/cuda/lib64");
+    // An empty entry is "the current directory" to the loader.
+    expect(entries).not.toContain("");
+  });
+
+  it("derives the directory from the server's home rather than naming one account", async () => {
+    vi.stubEnv("HOME", "/home/someone-else");
+    vi.stubEnv("LD_LIBRARY_PATH", undefined);
+    const entries = String((await fetchEnv()).LD_LIBRARY_PATH).split(":");
+
+    expect(entries[0]).toBe("/home/someone-else/.local/lib");
+    expect(entries.some((e) => e.startsWith("/home/clawbox/"))).toBe(false);
+  });
+
+  it("keeps the rest of the server's environment: HOME for the model cache, a proxy for the download", async () => {
+    vi.stubEnv("HOME", "/home/clawbox");
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example:3128");
+    const env = await fetchEnv();
+
+    expect(env.HOME).toBe("/home/clawbox");
+    expect(env.HTTPS_PROXY).toBe("http://proxy.example:3128");
+    expect(env.PATH).toBe(process.env.PATH);
+  });
+
+  it("puts an inherited LD_LIBRARY_PATH behind the engine's own, and leaves the server's alone", async () => {
+    vi.stubEnv("HOME", "/home/clawbox");
+    vi.stubEnv("LD_LIBRARY_PATH", "/opt/already-here");
+    const entries = String((await fetchEnv()).LD_LIBRARY_PATH).split(":");
+
+    expect(entries[0]).toBe("/home/clawbox/.local/lib");
+    expect(entries.at(-1)).toBe("/opt/already-here");
+    expect(process.env.LD_LIBRARY_PATH).toBe("/opt/already-here");
   });
 });
 
