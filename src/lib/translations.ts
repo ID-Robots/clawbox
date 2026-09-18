@@ -147,6 +147,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "I've stored these somewhere safe",
     "credentials.writeDownContinue": "I've saved them — continue",
+    "credentials.saveAndContinue": "Save & Continue",
 
     // === AIModelsStep ===
     "ai.title": "Connect AI Model",
@@ -994,6 +995,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Точка за достъп",
     "credentials.writeDownAck": "Записах ги на сигурно място",
     "credentials.writeDownContinue": "Записах ги — продължи",
+    "credentials.saveAndContinue": "Запази и продължи",
 
     // === AIModelsStep ===
     "ai.title": "Свързване на AI модел",
@@ -1833,6 +1835,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "Ich habe sie sicher notiert",
     "credentials.writeDownContinue": "Notiert — weiter",
+    "credentials.saveAndContinue": "Speichern & Weiter",
 
     // === AIModelsStep ===
     "ai.title": "KI-Modell verbinden",
@@ -2675,6 +2678,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Punto de acceso",
     "credentials.writeDownAck": "Las he guardado en un lugar seguro",
     "credentials.writeDownContinue": "Ya las guardé, continuar",
+    "credentials.saveAndContinue": "Guardar y continuar",
 
     // === AIModelsStep ===
     "ai.title": "Conectar modelo de IA",
@@ -3514,6 +3518,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Point d'accès",
     "credentials.writeDownAck": "Je les ai notés en lieu sûr",
     "credentials.writeDownContinue": "C'est noté — continuer",
+    "credentials.saveAndContinue": "Enregistrer et continuer",
 
     // === AIModelsStep ===
     "ai.title": "Connecter un modèle d'IA",
@@ -4353,6 +4358,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "Le ho messe al sicuro",
     "credentials.writeDownContinue": "Le ho salvate, continua",
+    "credentials.saveAndContinue": "Salva e continua",
 
     // === AIModelsStep ===
     "ai.title": "Connetti modello IA",
@@ -5192,6 +5198,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "ホットスポット",
     "credentials.writeDownAck": "安全な場所に控えました",
     "credentials.writeDownContinue": "控えました — 続ける",
+    "credentials.saveAndContinue": "保存して続行",
 
     // === AIModelsStep ===
     "ai.title": "AIモデルを接続",
@@ -6031,6 +6038,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "Ik heb ze veilig genoteerd",
     "credentials.writeDownContinue": "Genoteerd — doorgaan",
+    "credentials.saveAndContinue": "Opslaan en doorgaan",
 
     // === AIModelsStep ===
     "ai.title": "AI-model verbinden",
@@ -6870,6 +6878,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Surfzon",
     "credentials.writeDownAck": "Jag har sparat dem på ett säkert ställe",
     "credentials.writeDownContinue": "Sparade — fortsätt",
+    "credentials.saveAndContinue": "Spara och fortsätt",
 
     // === AIModelsStep ===
     "ai.title": "Anslut AI-modell",
@@ -7709,6 +7718,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "热点",
     "credentials.writeDownAck": "我已妥善保存",
     "credentials.writeDownContinue": "已保存，继续",
+    "credentials.saveAndContinue": "保存并继续",
 
     // === AIModelsStep ===
     "ai.title": "连接 AI 模型",
