@@ -1,60 +1,122 @@
 ---
 title: "Messaging Channels"
 icon: "comments"
-summary: "Connect Telegram, use web chat, and understand which OpenClaw channels are managed by ClawBox versus advanced extensions."
+summary: "Message your ClawBox from Telegram, Discord, WhatsApp, email or the web chat — all set up from Settings → Channels."
 ---
 
-ClawBox runs OpenClaw, which connects to your favorite chat apps so you can message
-your assistant from anywhere. The managed ClawBox setup path currently focuses on
-Telegram plus the on-device web chat. Other OpenClaw channels may be possible, but
-they are advanced configuration unless they appear in your device UI.
+Your ClawBox answers where you already are. **Settings → Channels** sets up each one, on
+both [editions](/editions/overview), and each panel shows what the channel is doing right
+now rather than only whether it saved.
 
-## Supported channels
+<CardGroup cols={2}>
+  <Card title="Telegram" icon="telegram">
+    Paste a bot token, approve each sender.
+  </Card>
+  <Card title="Discord" icon="discord">
+    Paste a bot token, add the bot to your server.
+  </Card>
+  <Card title="WhatsApp" icon="whatsapp">
+    Pair the box with your account.
+  </Card>
+  <Card title="Email" icon="envelope">
+    Send mail you approve; read mail on the Hermes edition.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card title="Telegram" icon="telegram" />
-  <Card title="Web Chat" icon="globe" />
-</Columns>
+Web chat is built into the ClawBox desktop and needs no setup — see [Chat](/guides/chat).
 
-Telegram is the first-class ClawBox channel: setup, bot-token validation, pairing
-approvals, and progress streaming are handled by the ClawBox UI. Web chat is built
-into the ClawBox interface.
-
-Advanced users can add other OpenClaw-supported channels manually if their installed
-OpenClaw version and plugins support them. Treat WhatsApp, Discord, Slack, Signal,
-Matrix, Microsoft Teams, Google Chat, and iMessage as extension paths, not guaranteed
-guided setup flows.
-
-## Linking a channel
-
-For Telegram, from the ClawBox settings page:
+## Telegram
 
 <Steps>
-  <Step title="Open Telegram settings">
-    Go to **Settings → Telegram** in your ClawBox web interface.
-  </Step>
   <Step title="Create a bot">
-    Open Telegram, search **@BotFather**, create a bot, and copy the bot token.
+    Open Telegram, search **@BotFather**, send `/newbot`, and copy the token it gives you.
+    The panel shows a QR code that opens BotFather on your phone.
   </Step>
   <Step title="Paste the token">
-    Paste the token into ClawBox and wait for the gateway restart to finish.
+    **Settings → Channels → Telegram**. The box checks the token with Telegram and waits
+    for the channel to come up.
   </Step>
-  <Step title="Approve users">
-    New Telegram users send the bot a message and then approve the pairing request
-    on the ClawBox screen.
+  <Step title="Approve who may talk to it">
+    A new sender messages the bot; a pairing request appears on the ClawBox screen for you
+    to approve. Nobody gets an answer until you do.
   </Step>
 </Steps>
 
-<Tip>
-Use the web chat when you are on the same ClawBox interface and Telegram when you
-want phone-based access.
-</Tip>
+Group behaviour depends on your bot's privacy settings. Start with one-to-one pairing,
+then test a group deliberately.
 
-## Group chats
+## Discord
 
-Telegram group behavior depends on your bot privacy settings and the OpenClaw channel
-configuration. Start with one-to-one pairing first, then test group behavior deliberately.
+You need only the **bot token**. The box reads your application id and your servers from
+Discord itself and builds the invite link for you.
+
+<Steps>
+  <Step title="Create the bot">
+    In the Discord Developer Portal, create an application, add a bot and copy its token.
+    On the same tab turn **Public Bot** off — otherwise anyone can add your bot to their
+    server.
+  </Step>
+  <Step title="Enable the Message Content intent">
+    Without it the bot appears online and never sees a message. The panel says so
+    explicitly if it is missing.
+  </Step>
+  <Step title="Paste the token">
+    **Settings → Channels → Discord**. There is no Application ID field to fill in.
+  </Step>
+  <Step title="Add the bot to a server">
+    Use the button in the panel, pick your server in Discord and authorize. The panel
+    finishes the setup by itself once the bot has joined, and gives that server's owner
+    access. Opening the link again later sets up a second server the same way.
+  </Step>
+  <Step title="Choose who may talk to it">
+    **Who may talk to the assistant** lists the members; only the people you tick get an
+    answer. The server owner is selected by default.
+  </Step>
+</Steps>
+
+The status card names the exact state — *Connected and listening*, *Message Content intent
+is off*, *Connected, but nobody is allowed in*, *Not connected* — so a silent bot has a
+cause you can act on.
+
+The invite the box builds grants: view channels, send messages, read history, attach
+files, embed links, add reactions.
+
+## WhatsApp
+
+**Settings → Channels → WhatsApp** pairs the box with your WhatsApp account and shows
+whether it is paired, enabled but unpaired, or actively receiving.
+
+## Email
+
+**Settings → Channels → Email** connects a mailbox and offers three modes: **send**,
+**read** and **answer**.
+
+<Warning>
+Mail the assistant writes is never sent without you. Every draft waits in **Settings →
+Email** and in the chat, where you read it and choose **Send it** or **Delete it without
+sending**. You can also have every waiting draft posted to a second Telegram bot with an
+Approve button, so you can send it without opening the page.
+</Warning>
+
+<Note>
+**Receiving** mail is a Hermes-edition feature. On other editions the inbound fields are
+not shown rather than being offered and doing nothing; sending works on every edition.
+</Note>
+
+## Spoken replies on channels
+
+With [Spoken replies](/guides/chat#voice) on, a voice note sent to a channel gets a spoken
+answer back. This is an OpenClaw-edition feature — on the Hermes edition the box still
+answers out loud in the desktop chat, and channel replies stay in text.
+
+## Other OpenClaw channels
+
+OpenClaw supports more channels than ClawBox sets up for you — Slack, Signal, Matrix,
+Microsoft Teams, Google Chat and iMessage among them. Treat those as advanced
+configuration: they work where your installed OpenClaw version and its channel plugins
+support them, and they have no guided setup in the ClawBox UI.
 
 ## Troubleshooting
 
-If a channel won't link or stops replying, see [Troubleshooting](/support/troubleshooting).
+If a channel will not link or stops replying, start with its own status card — it names
+the state — then see [Troubleshooting](/support/troubleshooting).

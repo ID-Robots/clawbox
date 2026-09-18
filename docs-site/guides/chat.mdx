@@ -1,0 +1,125 @@
+---
+title: "Chat"
+icon: "comments"
+summary: "The chat on your ClawBox — switching model mid-conversation, slash commands, the cards the assistant shows when it needs you, and spoken replies."
+---
+
+Your ClawBox has two chat surfaces on the desktop, and they talk to the same assistant:
+
+- the **chat panel**, which opens when you click the mascot and docks beside your windows;
+- the **Chat** app, a full window from the desktop icon.
+
+Everything on this page is on both [editions](/editions/overview) unless it says otherwise.
+
+## The pills: provider, model and reasoning
+
+The chat panel carries up to three pills in the row beneath the message box.
+
+<Steps>
+  <Step title="Provider">
+    Which service answers. Picking a different one switches the conversation to it.
+  </Step>
+  <Step title="Model">
+    Which of that provider's models. The pill drops the vendor's name because the pill to
+    its left already says it — the dropdown shows the full model name.
+  </Step>
+  <Step title="Reasoning effort">
+    How hard the model thinks before answering. The levels on offer are whatever the
+    provider accepts, so this control changes shape: a provider that takes a scale shows
+    it, one that only has thinking on or off shows two states, and one that takes no
+    reasoning level at all does not show the control.
+  </Step>
+</Steps>
+
+A change applies to the **running** agent. There is no restart between you and the next
+message, and open conversations are not dropped.
+
+<Note>
+On **ClawBox AI** there is no model pill: chat runs **Flash 4.1** and there is nothing to
+choose. The reasoning control is there, minus the top level — the service does not accept it.
+</Note>
+
+A reasoning change is a **per-conversation** override. It does not rewrite the box's
+default, which lives in **Settings → Providers**.
+
+## Slash commands
+
+Type `/` in the composer and a menu appears with the commands your assistant actually
+publishes — the built-in ones plus anything your skills and plugins added. Each row shows
+the command, its arguments if it takes any, and the agent's own one-line description.
+Keep typing to filter; pick a row to insert it.
+
+The list is read from the agent itself, so it is never out of date with what your box can
+actually run, and it differs between editions and between boxes with different skills
+installed.
+
+## When the assistant needs you
+
+Three kinds of card can appear in the transcript. All three mean the assistant has
+stopped and is waiting for you.
+
+<AccordionGroup>
+  <Accordion title="A question">
+    The assistant asks you to choose. Each option carries its own short description —
+    usually the consequence of picking it — and there is a field for an answer of your
+    own. One **Send answer** submits the whole card. There is no skip: to decline, leave
+    it, and the assistant carries on when its own timer runs out.
+  </Accordion>
+  <Accordion title="An approval">
+    The assistant is asking to do something that needs your permission. **Allow once**,
+    **Always allow** or **Deny**. Nothing happens until you answer, and if nobody answers
+    in time the window closes and it does not go ahead.
+  </Accordion>
+  <Accordion title="Email waiting to be sent">
+    The assistant wrote a message and wants to send it from your account. You read it
+    first — nothing goes out until you approve. You can send them all, send one, or delete
+    them without sending. See [Messaging channels](/guides/messaging-channels#email).
+  </Accordion>
+</AccordionGroup>
+
+## When a message fails
+
+A failed turn says what actually went wrong: the provider's own reason, not a generic
+"the run failed". Two common cases have their own wording:
+
+- **A fallback model answered.** Your first-choice model refused or errored and the next
+  model in the chain replied instead. The reply says which model wrote it.
+- **An allowance ran out.** On ClawBox AI, the chat says whether it was the weekly chat
+  allowance, the 5-hour burst or the memory-indexing allowance, and when it frees up. Your
+  usage is in **Settings → Providers**.
+
+## Voice
+
+**Voice in** — press the microphone to record. The recording is turned into text and sent
+as a message. Recording needs a secure connection, so on a plain `http://` address the
+chat points you at this box's Remote Access tunnel instead of failing silently.
+
+**Voice out** — **Settings → Voice → Spoken replies**, **off by default**. With it on, a
+reply gets a player on its bubble: press play, scrub through it, or download the audio.
+A question you asked out loud is answered out loud. Where your box answers messaging
+channels, a voice note there gets a spoken reply too.
+
+<Note>
+Speaking on Telegram, WhatsApp and Discord is an OpenClaw-edition feature. On the Hermes
+edition the box still answers out loud in the chat; replies on those channels stay in text.
+</Note>
+
+## Other things in the composer
+
+- **Attach a picture** or take a photo, and ask about it.
+- **Generate a picture** from a description.
+- **Several chats at once** — tabs across the top, each its own conversation. **New
+  session** starts a fresh one in the same tab.
+- **Files the assistant produced** appear as cards you can download, with their real name
+  and size.
+
+## Where the conversation runs
+
+The pills are per-conversation; the box's **default** provider and model are in
+**Settings → Providers**, and that is what a new conversation starts on.
+
+When a sign-in has to restart the agent — connecting a subscription, for instance — the
+chats you already have open are re-pointed at the new default once the agent answers
+again, so a conversation cannot keep running on the old model while the pills name the
+new one. If that could not be done, the box tells you rather than leaving it to be
+discovered.

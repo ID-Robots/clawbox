@@ -47,12 +47,15 @@ and reboots the box.
     2. **Update** — the box pulls the current release. This is not optional and can reboot the box.
     3. **Security** — set the device password. It is the same password for the browser login and for
        SSH. You can also rename the setup hotspot and give it a password here.
-    4. **AI provider** — pick what powers the assistant, see [Choose your AI provider](/setup/choose-ai-provider). On a
-       [Hermes](/editions/hermes) box this step shows the Hermes provider panel instead — see
-       [AI Providers on Hermes](/editions/hermes-providers).
+    4. **AI provider** — the step opens on **ClawBox AI** with its plan card; **Show more
+       providers…** reveals the rest, and **Skip — I'll use only local AI** is at the bottom.
+       See [Choose your AI provider](/setup/choose-ai-provider). On a
+       [Hermes](/editions/hermes) box this step drives Hermes' own provider configuration —
+       see [AI Providers on Hermes](/editions/hermes-providers).
     5. **Telegram** *(optional)* — create a bot with [@BotFather](https://t.me/BotFather) and paste
        its token. The wizard shows a QR code that opens BotFather on your phone. **Skip** is a
-       first-class option; you can connect Telegram later from Settings.
+       first-class option; you can connect Telegram later from Settings, along with
+       [Discord, WhatsApp and email](/guides/messaging-channels).
   </Step>
   <Step title="Start chatting">
     Setup finishes on the desktop. Open **Chat** and send your first message.
@@ -80,10 +83,16 @@ plus a DHCP reservation is the most reliable setup. See
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Configure OpenClaw" href="/setup/openclaw-setup" icon="gear">
-    Channels, voice, AI models, advanced options.
+  <Card title="Chat" href="/guides/chat" icon="comments">
+    Switching model mid-conversation, slash commands, spoken replies.
   </Card>
   <Card title="Choose your AI" href="/setup/choose-ai-provider" icon="robot">
-    ClawBox AI, or bring Claude / Gemini / OpenRouter.
+    ClawBox AI, a subscription you already pay for, an API key, or the box itself.
+  </Card>
+  <Card title="Messaging channels" href="/guides/messaging-channels" icon="comment-dots">
+    Telegram, Discord, WhatsApp and email.
+  </Card>
+  <Card title="Configure OpenClaw" href="/setup/openclaw-setup" icon="gear">
+    Channels, voice, AI models, advanced options.
   </Card>
 </CardGroup>

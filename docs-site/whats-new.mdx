@@ -1,0 +1,128 @@
+---
+title: "What's New"
+icon: "sparkles"
+summary: "What changed on your ClawBox recently, what it looks like on screen, and where to click."
+---
+
+Everything below is on the current release. Open **Settings → System Update** to bring
+your box up to date — see [Updating ClawBox](/support/updating).
+
+<Note>
+Some entries are specific to one [edition](/editions/overview). Where that is the case,
+the entry says so.
+</Note>
+
+## September 2026
+
+### Switch your box between OpenClaw and Hermes
+
+A box that shipped as one edition can now be re-made as the other from
+**Settings → Harness**, without a reflash and without a second box. The button installs
+the other agent, re-bakes the edition lock, carries your ClawBox AI sign-in and your
+Telegram bot across, and reloads the desktop. The same button swaps back.
+
+It needs the **Max** plan, an internet connection and about 3 GB of free disk.
+Staying on the harness your box already runs costs nothing.
+See [Switching editions](/editions/switching).
+
+### Change model without restarting anything
+
+Provider, model and reasoning effort are three pills beneath the chat panel's message box. Picking
+a different one applies to the running agent — there is no gateway restart and no
+30-second reconnect between you and the next message. See [Chat](/guides/chat).
+
+### A failed message tells you what the provider said
+
+When a turn fails, the chat now prints the provider's own reason instead of a generic
+"the run failed". When a fallback model answered in place of your first choice, the reply
+says which model wrote it.
+
+### Slash commands with autocomplete
+
+Type `/` in the chat composer and the commands your agent actually publishes appear in a
+menu, each with its own description and argument hint. The list comes from the agent
+itself, so it includes the commands your skills and plugins added. Both editions.
+
+### The assistant can ask you a question
+
+When the agent needs a decision, it shows a card with the options it is choosing between —
+each with the consequence spelled out — plus a box for an answer of your own. Nothing
+happens until you send one.
+
+### Spoken replies
+
+The chat can read a reply out loud, with a player on the bubble and a scrubber. It is
+**off by default**: turn it on in **Settings → Voice → Spoken replies**. A box on the Max
+plan speaks with the ClawBox AI cloud voice; any box can install a voice of its own.
+
+### ClawBox AI: usage, credits and plans in one card
+
+**Settings → Providers** now shows your weekly chat allowance, the 5-hour burst window,
+the images, speech and memory-indexing meters, and your credit balance — read from your
+account rather than guessed on the device. See [ClawBox AI](/guides/clawbox-ai).
+
+### Voice, transcription and memory indexing use your plan's cloud
+
+On a box connected to ClawBox AI, speech-to-text, text-to-speech and the memory index
+default to the cloud your plan covers instead of running engines on the box. The engines
+on the box stay the fallback, and stay selectable. A choice you make yourself is never
+overwritten. See [ClawBox AI → What your plan powers](/guides/clawbox-ai#what-your-plan-powers).
+
+### Nothing heavy is installed behind your back
+
+A fresh install and every update now install only the local AI runtime and the small
+on-device model. The voice engine, the transcription engine and the 640 MB embedding
+model are installed when you ask for them, from **Settings → Local AI** or from Memory
+Shard's own setup. Updates got much shorter as a result.
+See [Local AI](/guides/local-ai).
+
+### Local AI is one inventory
+
+**Settings → Local AI** lists every model that can run on the box — the agent model, the
+voice, speech-to-text and memory search — with Install, Uninstall, Enable and Disable on
+each row and what each one is doing right now. **Local-only mode** routes everything to
+the box and switches every cloud provider off.
+
+### Memory Shard on both editions
+
+Memory Shard turns your notes, your past conversations and folders of your own documents
+into an index the assistant can search. It now works on the Hermes edition too, and its
+settings let you choose where the index is embedded: the ClawBox AI cloud, or the model
+on the box. Memory Shard needs a Pro or Max plan.
+See [Memory Shard](/guides/memory-shard).
+
+### Discord: paste the token, and that is all
+
+**Settings → Channels → Discord** now reads your application id and your servers from
+Discord itself, builds the invite link on the box, and gives the server owner access as
+soon as the bot joins. There is no Application ID field to fill in any more, and no need
+to tell the assistant your user id.
+See [Messaging channels](/guides/messaging-channels#discord).
+
+### Sign in with a subscription you already pay for
+
+Besides API keys, the provider step takes **Claude Pro/Max**, **ChatGPT Plus/Pro** and
+**Google One AI Premium** sign-ins. On the Hermes edition, Anthropic and GitHub Copilot
+sign in from the panel again, with the link and the code shown on screen.
+
+### Pick your desktop companion
+
+**Settings → Appearance → Mascot Pet** offers the ClawBox crab, which ships with the box
+and works offline, plus a gallery of community pets that download when you pick one.
+Every edition. See [Desktop & appearance](/guides/appearance).
+
+### Installing on your own x64 machine
+
+`install-x64.sh` checks the host before it changes anything — ports already in use,
+services it would replace, desktop services it would take over — and lets you choose the
+web, gateway and terminal ports. It can leave existing desktop services alone.
+
+### Smaller things
+
+- ClawBox AI chat runs **Flash 4.1**. There is no model to choose, so the chat names the
+  provider and shows no model pill beside it.
+- A sign-in that restarts the agent now re-points the chats you already have open, so an
+  open conversation cannot keep running on the old model under a header naming the new one.
+- The assistant's own tools grew: it can read and send email you have approved, generate
+  pictures and audio, drive the coding agent, and search Memory Shard on the Hermes
+  edition. See [Agent Interface](/technical/agent-interface).

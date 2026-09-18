@@ -1,0 +1,92 @@
+---
+title: "Local AI"
+icon: "microchip"
+summary: "Everything that can run on the box itself — the agent model, the voice, speech-to-text and memory search — what ships, what you install, and how to run entirely offline."
+---
+
+**Settings → Local AI** is the inventory of everything that can run on your ClawBox
+without leaving it: the model that answers, the voice it speaks with, the engine that
+turns your speech into text, and the model that searches your memory.
+
+## What ships, and what you install
+
+Your box arrives with the local AI runtime and one small model on it. Everything else is
+installed when you ask for it.
+
+| | On a new box | Size |
+|---|---|---|
+| **Gemma 4 (on-device)** — the agent model | installed | included |
+| **Kokoro** — the voice | install from this panel | downloaded on request |
+| **Whisper** — speech to text | install from this panel, in your choice of size | downloaded on request |
+| **Memory search model** — Qwen3 embeddings | fetched in the background when you set up [Memory Shard](/guides/memory-shard) | about 640 MB |
+
+<Note>
+This is why updates are quick. Nothing heavy is installed behind your back: an install or
+an update sets up the runtime and the small model, and stops there.
+</Note>
+
+## The panel
+
+Each row names the model, says what it is doing right now — *Answering right now*,
+*Ready. Sleeps until needed to save memory*, *Off. Starts by itself when you speak* — and
+carries a menu with the actions that apply to it:
+
+- **Install** / **Uninstall**
+- **Enable** / **Disable**, and **Turn on now**
+- **Make primary** or **Use as fallback**, for the agent model
+- **Manage in Memory Shard**, for the memory-search model
+
+Rows are grouped by job: *AI agent model*, *Voice (text to speech)*, *Speech to text* and
+*Memory search*. Disk and memory in use are shown per row, so you can see what a model
+costs before you keep it.
+
+<Warning>
+Uninstalling Gemma is refused while it is the primary model — pick another primary first.
+Uninstall it when it is not, and the next system update puts it back: it is the one model
+ClawBox installs on every box.
+</Warning>
+
+## How the models behave
+
+- **Gemma 4 (on-device)** runs on the box's own llama.cpp. It wakes on the first request
+  and sleeps again afterwards to give the memory back, so the first message after a quiet
+  period is slower than the ones that follow.
+- **Its reasoning control is a two-state switch** — *Thinking off* / *Thinking on* — not
+  an effort scale, because that is what its backend accepts.
+- **Turning a local model on makes it available. It does not take over.** Making it your
+  default is a separate, explicit choice.
+- **Kokoro** starts cold: the first sound can take fifteen seconds or more unless you
+  leave it switched on, which keeps it warm. It speaks English only — for other languages
+  use the ClawBox AI cloud voice.
+- **Whisper** comes in several sizes. Bigger is more accurate and slower, and the box keeps
+  using the current one until the new one has finished downloading.
+
+## Local-only mode
+
+**Local-only mode** routes everything to the local model and switches every cloud AI
+provider off, fallbacks included. It is one switch in this panel, and switching it back
+restores the providers it saved.
+
+Use it when nothing may leave the box. Note that it is about the **AI providers** — see
+[Networking](/technical/networking) for what else a ClawBox talks to.
+
+## Local versus the cloud
+
+On a box connected to [ClawBox AI](/guides/clawbox-ai), speech-to-text, spoken replies and
+memory indexing default to the cloud your plan covers. The engines on the box remain the
+fallback and remain selectable: pick the box in this panel, or in Memory Shard's settings
+for the index, and the box is what it uses. A choice you make here is never overwritten by
+a later default.
+
+## What the hardware can run
+
+<Note>
+**ClawBox Connect** (Jetson Orin Nano, 8 GB) runs a small model comfortably and is best
+paired with a cloud provider for heavier work. **ClawBox Workstation** (DGX Spark, 128 GB
+unified memory) runs models up to roughly 200B parameters locally. See
+[Requirements](/hardware/requirements).
+</Note>
+
+Bringing your own local model is supported through Ollama and llama.cpp — see
+[AI Providers](/technical/ai-providers#local-models-ollama--llamacpp) for how the local
+lanes are wired.

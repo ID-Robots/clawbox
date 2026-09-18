@@ -1,0 +1,101 @@
+---
+title: "Switching Editions"
+icon: "right-left"
+summary: "Turn a ClawBox that ships as one edition into the other — what it needs, what it does, what carries over, and how to go back."
+---
+
+A ClawBox ships as one [edition](/editions/overview) — **OpenClaw** or **Hermes**. Since
+September 2026 you can change that on a box you already own, from the device, without a
+reflash and without a second box.
+
+**Settings → Harness** shows the two agents with their logos, which one is running, and a
+**Switch to …** button for the other.
+
+<Note>
+This is a different thing from the **dual** edition's runtime picker. A dual box has both
+agents installed and switches between them instantly. A single-edition box has one agent
+installed, so switching means installing the other one and re-baking the device's edition
+lock — which is what this does.
+</Note>
+
+## What it needs
+
+<CardGroup cols={2}>
+  <Card title="The Max plan" icon="crown">
+    Switching the agent is part of the **Max** [ClawBox AI plan](/guides/subscriptions).
+    Keeping the agent your box already runs costs nothing and needs no plan.
+  </Card>
+  <Card title="An internet connection" icon="globe">
+    The other agent is downloaded and installed. The box refuses at the door rather than
+    failing minutes in.
+  </Card>
+  <Card title="About 3 GB free" icon="hard-drive">
+    Plus enough free memory at the moment you start; the box checks both first.
+  </Card>
+  <Card title="Nothing else running" icon="hourglass">
+    A coding run in progress blocks a switch — wait for it or stop it first.
+  </Card>
+</CardGroup>
+
+## What happens
+
+<Steps>
+  <Step title="You confirm">
+    The dialog lists exactly what is about to happen, including that the chat and the
+    assistant are unavailable while it runs and that it cannot be cancelled once started.
+  </Step>
+  <Step title="The other agent is installed">
+    A few minutes, with live progress through five phases: install, edition, set up, carry
+    over, done.
+  </Step>
+  <Step title="The edition lock is re-baked">
+    Your box *is* the other edition from this point. The installer treats it as such on
+    every later update.
+  </Step>
+  <Step title="Your things are carried over">
+    Your ClawBox AI sign-in and your Telegram bot token move across. Memory Shard's folder
+    list moves with them.
+  </Step>
+  <Step title="The desktop reloads">
+    Onto the other agent, with its own apps.
+  </Step>
+</Steps>
+
+## What carries over, and what does not
+
+| | Carried over |
+|---|---|
+| Your ClawBox AI sign-in | ✓ |
+| Your Telegram **bot token** | ✓ |
+| Telegram **pairing approvals** | ✗ — approve senders again |
+| Other AI providers (keys and sign-ins) | ✗ — each agent keeps its own |
+| The assistant's persona and what it knows about you | ✓ |
+| What the assistant learned on the other agent | ✗ — each agent keeps its own workspace |
+| Your files, wallpapers, preferences, webapps and code projects | ✓ |
+
+<Warning>
+Each agent keeps its provider sign-ins in its own configuration. Signing in to a provider
+on one side does not sign you in on the other — set them up again after the switch.
+</Warning>
+
+## Going back
+
+The same button. A box switched to Hermes shows **Switch to OpenClaw**, and it does the
+same job in the other direction.
+
+## If it does not finish
+
+The dialog names the reason it refused — no plan, offline, not enough disk or memory, a
+coding run still working, a switch already running. If the connection to the box is lost
+mid-switch, the switch itself carries on; close the dialog and re-open **Settings →
+Harness** to see where it stands.
+
+If the box comes back still reporting its old edition, stop there and
+[contact support](mailto:yanko@idrobots.com) rather than switching again.
+
+## Doing it at install time instead
+
+On a device you are installing yourself, the edition is chosen by the installer — see
+[Editions → How the edition is chosen](/editions/overview#how-the-edition-is-chosen). The
+installer still refuses to change the edition of a box that is already installed; the
+switch above is the supported way to do that.

@@ -29,6 +29,14 @@ If you are not sure which edition you have, see [Editions](/editions/overview).
     The agent operates the device through the ClawBox MCP server, same as on
     OpenClaw. The tool set is slightly different — see below.
   </Card>
+  <Card title="Memory Shard" href="/guides/memory-shard" icon="brain">
+    Hermes ships no memory index of its own, so ClawBox builds one here and
+    gives the agent a tool to search it.
+  </Card>
+  <Card title="Email you can receive" href="/guides/messaging-channels#email" icon="envelope">
+    Reading an inbox is a Hermes-edition feature. Sending mail you approve works
+    on every edition.
+  </Card>
 </Columns>
 
 ## What is absent, on purpose
@@ -78,7 +86,7 @@ providers, skills, Telegram) are all in the ClawBox UI.
 The desktop chat and Telegram both talk to Hermes. Message-by-message you can
 change:
 
-- **Provider** and **model** — the pills in the chat header.
+- **Provider** and **model** — the pills beneath the message box.
 - **Reasoning effort** — the brain icon, eight levels from *None* to *Ultra*.
   This is a per-conversation override; the device default lives in Hermes'
   own configuration. ClawBox AI shows seven: its backend rejects *Ultra*.
@@ -87,8 +95,15 @@ change:
   A provider that accepts no reasoning level at all simply does not show the
   control.
 
+- **Slash commands.** Type `/` in the composer and Hermes' own command catalogue
+  appears, filtered to the commands it says belong in a chat composer. They are
+  executed by Hermes, not handed to the model as text.
+
 Setting the device's default provider and model is a Settings job — see
-[AI Providers on Hermes](/editions/hermes-providers).
+[AI Providers on Hermes](/editions/hermes-providers). The rest of the chat — the
+question and approval cards, spoken replies, picture generation, several
+conversations at once — is the same on both editions and is covered in
+[Chat](/guides/chat).
 
 ## Telegram
 
@@ -125,6 +140,10 @@ The full catalogue is on the [Agent Interface](/technical/agent-interface) page.
 Same as any ClawBox: **Settings → System Update**. Updates keep the edition —
 the installer reads the edition lock on every run and skips every OpenClaw step
 on this SKU.
+
+If you would rather run OpenClaw on this box, **Settings → Harness** re-makes it
+as the OpenClaw edition without a reflash — see
+[Switching editions](/editions/switching).
 
 If an update ever leaves the Hermes side half-provisioned, the installer says so
 and prints the one command that repairs it:

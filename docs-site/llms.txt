@@ -9,17 +9,19 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 - [Quick Reference](https://docs.clawbox.com/technical/quick-reference): the one-page fact sheet — ports, paths, services, commands, endpoints, gotchas. Best single page for agents.
 - [ClawBox Overview](https://docs.clawbox.com/): what ClawBox is, models, pricing
 - [Quickstart](https://docs.clawbox.com/quickstart): unbox → power → talk
+- [What's New](https://docs.clawbox.com/whats-new): dated, customer-facing changes on the current release
 
 ## Setup
 
 - [First Boot](https://docs.clawbox.com/setup/first-boot): unbox, join the ClawBox-Setup hotspot (open, 10.42.0.1 / fallback 10.43.0.1), run the 5-step browser wizard (Wi-Fi → update → password → AI provider → optional Telegram) — the first-run guide. There is NO QR-code pairing; the only QR in the product opens Telegram's @BotFather
 - [Connect to a Network](https://docs.clawbox.com/setup/connect-network): joining Wi-Fi or Ethernet after setup
-- [Choose Your AI Provider](https://docs.clawbox.com/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models
+- [Choose Your AI Provider](https://docs.clawbox.com/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models — with an API-key tab AND a Subscription tab (Claude Pro/Max, ChatGPT Plus/Pro, Google One AI Premium OAuth); models a subscription does not cover are greyed out, not offered
 - [OpenClaw Setup](https://docs.clawbox.com/setup/openclaw-setup): gateway configuration
 
 ## Editions
 
 - [Editions](https://docs.clawbox.com/editions/overview): the three editions (openclaw | hermes | dual), chosen at flash time and recorded in the root-owned /etc/clawbox/edition.env; no `clawbox` command is installed — run `bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts edition` to print it
+- [Switching Editions](https://docs.clawbox.com/editions/switching): Settings → Harness re-makes a single-edition box as the other edition through the `harness_swap` root step — needs the Max plan, internet and ~3 GB free; carries the ClawBox AI sign-in, the Telegram bot token and Memory Shard's folders; Telegram approvals and other provider sign-ins are per harness. NOT the same as /setup-api/harness/select, which is the dual SKU's runtime switch. An update never changes the edition
 - [Hermes Edition](https://docs.clawbox.com/editions/hermes): Hermes Agent as the only agent — no OpenClaw gateway (unit masked, :18789 closed, /api/* and /chat 404), no App Store or Control UI, Skills + Hermes dashboard instead; the CLI update path is refused on this edition, use Settings → System Update. ClawKeep backups are not available on this edition. There is no VS Code / code-server app on ANY edition — it was removed from the product
 - [AI Providers on Hermes](https://docs.clawbox.com/editions/hermes-providers): the Hermes models panel — sign-in vs API-key providers, ClawBox AI as a custom provider, on-device Gemma 4 with standby and a two-state Thinking off/on switch, eight reasoning levels for effort-scale providers (seven on ClawBox AI — no Ultra)
 - [Hermes Skills](https://docs.clawbox.com/editions/hermes-skills): the capability store replacing the App Store; offline catalogue; install takes a full identifier, uninstall takes the short name; skills live in ~/.hermes/skills
@@ -30,9 +32,9 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 - [Networking](https://docs.clawbox.com/technical/networking): AP mode (no DNS hijack — dnsmasq forwards upstream; the middleware answers captive-portal probe paths), mDNS/clawbox.local reliability, full port map, remote access via /setup-api/portal/*, portal heartbeat
 - [Filesystem Layout](https://docs.clawbox.com/technical/filesystem): where everything lives; what survives updates vs factory reset; where secrets are
 - [Authentication & Security](https://docs.clawbox.com/technical/authentication): browser login flow (unix_chkpwd), session cookies, gateway token, service tokens
-- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (both openai/, split by credential + Codex runtime), boot-time self-healing — OpenClaw/dual editions only; Hermes provider config is Hermes' own
+- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (both openai/, split by credential + Codex runtime), boot-time self-healing — OpenClaw/dual only; Hermes provider config is Hermes' own. Also the EVERY-EDITION parts: the ClawBox AI cloud-defaults matrix for tts/stt/embeddings (promote-only, never overwrites an owner's pick; reasons not_linked | plan | route_unavailable | edition | owner) and the plan gates (Memory Shard + Coding Agent = either paid tier, cloud TTS and the harness swap = Max)
 - [Update System](https://docs.clawbox.com/technical/update-system): tag-based updates, channels (main/beta), divergence/"Updates paused", manual-update pitfalls
-- [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface): the device tools the AI agent gets, the clawbox-cli.ts wrapper (invoked via bun; no `clawbox` command on PATH), auth model — the tool set differs by edition (app_* + coding family + coordinate browser control on OpenClaw only; skill_* + ai_* on Hermes only)
+- [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface): the device tools the AI agent gets, the clawbox-cli.ts wrapper (invoked via bun; no `clawbox` command on PATH), auth model — the tool set differs by edition (app_* + coding family + coordinate browser control on OpenClaw only; skill_*, ai_* and memory_shard_search on Hermes only). Both editions also get email_send/list/read (send QUEUES a draft for the owner's approval, it never sends), generate_image / generate_audio, the coding_agent_* / coding_team_* family and clawbox_incidents_list / clawbox_incident_report (gated by the Improvement Program, which no tool can change)
 
 ## Troubleshooting & Recovery
 
@@ -50,8 +52,13 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 
 ## Using ClawBox
 
-- [Messaging Channels](https://docs.clawbox.com/guides/messaging-channels): Telegram (device-managed, pairing-approved) and OpenClaw's wider channel support
-- [Subscriptions](https://docs.clawbox.com/guides/subscriptions): ClawBox AI plans
+- [Chat](https://docs.clawbox.com/guides/chat): two surfaces — the mascot chat panel (provider/model/reasoning pills, hot-applied with no gateway restart) and the full Chat app (no pickers); `/` slash-command autocomplete on both editions, read from the harness's own catalogue (`commands.list` on OpenClaw, `commands.catalog` on Hermes); question / approval / email-approval cards; a failed turn names the provider's reason and says when a fallback model answered; spoken replies OFF by default
+- [ClawBox AI](https://docs.clawbox.com/guides/clawbox-ai): device-code pairing, what each plan unlocks, the weekly + 5-hour-burst allowances, credits, and the cloud defaults for speech-out / speech-in / embeddings. Chat is Flash 4.1 on EVERY plan — no model pill
+- [Memory Shard](https://docs.clawbox.com/guides/memory-shard): the searchable index over notes, conversations and the owner's own folders; both editions (OpenClaw's index is the agent's, on Hermes ClawBox owns it and exposes `memory_shard_search`); needs a Pro or Max plan; cloud vs on-box embedder, and every switch forces a full reindex
+- [Local AI](https://docs.clawbox.com/guides/local-ai): Settings → Local AI as a per-model inventory (Gemma 4 ships, Kokoro/Whisper/embeddings install on request); local-only mode; nothing heavy is installed by an update
+- [Messaging Channels](https://docs.clawbox.com/guides/messaging-channels): Telegram, Discord (token-only connect, invite link built on the box), WhatsApp and email all guided in Settings → Channels; receiving mail is Hermes-only; spoken replies on channels are OpenClaw-only; other OpenClaw channels remain advanced configuration
+- [Desktop & Appearance](https://docs.clawbox.com/guides/appearance): wallpapers per edition (Lobster Orbital is the OpenClaw default), the mascot, and the Mascot Pet picker on every edition — the built-in ClawBox crab plus Petdex pets that download on pick
+- [Subscriptions](https://docs.clawbox.com/guides/subscriptions): ClawBox AI plans and what each unlocks on the device. Internal tier names are off by one: `flash` = Pro, `pro` = Max
 
 ## External
 

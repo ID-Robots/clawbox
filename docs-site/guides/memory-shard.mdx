@@ -1,0 +1,101 @@
+---
+title: "Memory Shard"
+icon: "brain"
+summary: "Turn your notes, your past conversations and folders of your own documents into something the assistant can search — on the box or in the ClawBox AI cloud."
+---
+
+**Memory Shard** reads what your box already remembers — its notes and your past
+conversations — and turns it into a searchable index the assistant can draw on. Point it
+at folders of your own and it indexes those too.
+
+Open it from the **Memory Shard** icon on the desktop.
+
+<Note>
+Memory Shard needs a **Pro or Max** ClawBox AI plan. The first step of its setup offers
+the upgrade if your box is on Free or is not connected yet. See
+[ClawBox AI](/guides/clawbox-ai).
+</Note>
+
+## Setting it up
+
+<Steps>
+  <Step title="Open Memory Shard and press Enable">
+    The setup runs in four short steps and can be re-run later.
+  </Step>
+  <Step title="Choose folders to read">
+    Point it at folders of your own — notes, documents, exports. PDFs, Word and
+    OpenDocument files are converted to text **on the box** before they are indexed;
+    nothing is uploaded to do the conversion. This step is optional: your notes and
+    conversations are indexed either way.
+  </Step>
+  <Step title="Pick when it refreshes">
+    Indexing reads every source and re-embeds what changed, so it is best done while you
+    are not using the box. Choose daily or weekly, and a quiet hour.
+  </Step>
+  <Step title="Let it build the first index">
+    If your plan covers the cloud model, there is nothing to download and the first pass
+    starts straight away. Otherwise the box fetches its own embedding model first — about
+    640 MB, once.
+  </Step>
+</Steps>
+
+## Where the index is built
+
+**Settings → Embedding model**, inside Memory Shard, is a two-way switch:
+
+| | What it means |
+|---|---|
+| **ClawBox AI cloud** | Your notes and documents are sent to ClawBox AI to be indexed. Nothing to download, and the box's own memory stays free. Needs a Pro or Max plan. |
+| **On this box** | Qwen3 on the box's own llama.cpp. Nothing leaves the box; the model is a one-time download of about 640 MB, and it sleeps between searches. |
+
+Switching **rebuilds the whole index**. That is not a precaution — an index belongs to the
+model that wrote it, so a switch is always followed by a full pass, and the card says so
+before you press anything. Search keeps working on the old index until the new one is ready.
+
+When the cloud option cannot be picked, the card names the reason: the box is not
+connected to ClawBox AI, the plan does not cover the cloud model, the service did not
+answer this box (in which case it is retried on its own and the model on the box works
+meanwhile), or this edition indexes memory on the box itself.
+
+<Warning>
+Sending documents to be indexed is what the cloud option is: the text of everything you
+index becomes the body of those requests. If that is not what you want, pick **On this
+box** — it is a first-class option on every edition, and nothing about it depends on a
+subscription once the model is downloaded.
+</Warning>
+
+## What you see while it runs
+
+The app shows files, chunks, sources, anything pending and anything that failed, the
+index size, when the last pass ran and what triggered it, and live progress through the
+current pass. **Index now** runs an incremental pass; **Full reindex** rebuilds everything.
+
+Health is one of three words:
+
+- **Healthy** — the index matches the configured embedding model and is searchable.
+- **Needs attention** — usually the index and the model no longer match, which a full
+  reindex fixes. The card says which.
+- **Unavailable** — the box could not read the index's state at all.
+
+Turning Memory Shard **off** in its settings stops the schedule and refuses indexing by
+hand. What is already indexed stays searchable. **Start over** switches it off, clears the
+schedule and runs setup again, keeping your folders, the model and the existing index.
+
+## How the assistant uses it
+
+- On the **OpenClaw** edition the index is the agent's own, and it searches it as part of
+  answering you. There is nothing extra to do.
+- On the **Hermes** edition ClawBox builds and owns the index, and the assistant gets a
+  tool for it. Ask in plain words — *"what does the lease say about the deposit"* — and it
+  searches your documents, quoting the file each passage came from.
+
+<Note>
+What comes back from your own documents is information for the assistant to read, never
+instructions for it to follow. That rule is written into the tool itself.
+</Note>
+
+## Where it lives
+
+The index and its state are device state: they survive updates and are wiped by a factory
+reset, along with the rest of the device's data. See
+[Filesystem Layout](/technical/filesystem).
