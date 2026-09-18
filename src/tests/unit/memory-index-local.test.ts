@@ -567,20 +567,54 @@ describe("the index knows what it was built for", () => {
     expect(row.status.custom.indexIdentity.status).toBe("valid");
   });
 
-  it("keeps MISSING when the pass DID scan files and the index came out empty", async () => {
-    // The other empty, and the one the zero-chunk rule exists for: there were
-    // documents to index and none of them made it in. The reindex the panel
-    // offers is the right advice there, so it has to stay.
+  it("calls an index VALID when the pass read every file and they held nothing", async () => {
+    // Zero chunks over FILES is two states as well, and this is the finished
+    // one: both documents were read and both were blank, so there is nothing
+    // owed and nothing a reindex could do. Called `missing`, the card carried
+    // "the index fingerprint is missing. Run a full reindex" for ever — the
+    // reindex reads the same two files, writes the same nothing, and the banner
+    // comes straight back. A scanned PDF with no text layer lands here too.
     write("blank.md", "   \n\n  ");
     write("also-blank.md", "\t\n");
     const result = await runLocalIndexPass("full");
     expect(result.chunks).toBe(0);
     const row = await localMemoryStatusJson() as {
       scan: { totalFiles: number };
-      status: { custom: { indexIdentity: { status: string } } };
+      status: { files: number; custom: { indexIdentity: { status: string } } };
     };
     expect(row.scan.totalFiles).toBe(2);
-    expect(row.status.custom.indexIdentity.status).toBe("missing");
+    // Both have a row: the pass FINISHED with them. That is the whole
+    // difference from a pass that could not do the work, and it is the same
+    // subtraction the card prints as `pendingFiles`.
+    expect(row.status.files).toBe(2);
+    expect(row.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  it("keeps MISSING when the pass could not FINISH the files it scanned", async () => {
+    // The other empty, and the one the zero-chunk rule exists for: there were
+    // documents to index and the pass left work owed on them. The reindex the
+    // panel offers is the right advice there, so it has to stay. A file it
+    // could not read leaves no row, which is exactly what says so.
+    write("blank.md", "   \n\n  ");
+    const unreadable = write("locked.md", "The deposit is two months' rent.");
+    fs.chmodSync(unreadable, 0o000);
+    let result: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      result = await runLocalIndexPass("full");
+    } finally {
+      fs.chmodSync(unreadable, 0o644);
+    }
+    // Running as root in some CI images makes the chmod moot; only assert the
+    // contract when the file really did become unreadable.
+    if (result.failures > 0) {
+      const row = await localMemoryStatusJson() as {
+        scan: { totalFiles: number };
+        status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+      };
+      expect(row.status.chunks).toBe(0);
+      expect(row.scan.totalFiles).toBeGreaterThan(row.status.files);
+      expect(row.status.custom.indexIdentity.status).toBe("missing");
+    }
   });
 
   it("still calls it empty when a registered folder is not there any more", async () => {

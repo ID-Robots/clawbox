@@ -398,12 +398,27 @@ function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing
   // and the pass that ended recorded the first two in the same transaction as
   // the identity. A pass has to have LOOKED (no row at all is the wizard's
   // stamp before the first pass, and an index older than these rows); it has to
-  // have found NOTHING, since files found with no chunks to show for them are
-  // work that did not happen; and what it looked at has to still be what the
-  // owner has registered — "there is nothing to index" is a claim about now,
-  // and a folder added after that pass makes it false. An index from before
-  // this row is trusted on that last point only when nothing is registered at
-  // all, which is the one configuration that cannot have gone stale under it.
+  // have OWED nothing when it stopped; and what it looked at has to still be
+  // what the owner has registered — "there is nothing to index" is a claim
+  // about now, and a folder added after that pass makes it false. An index from
+  // before this row is trusted on that last point only when nothing is
+  // registered at all, which is the one configuration that cannot have gone
+  // stale under it.
+  //
+  // The middle one used to read "the scan found no files at all", and that is
+  // the same conflation one line up, one level down: zero chunks OVER FILES is
+  // itself two states, and the FILES table is what tells them apart. A file the
+  // pass finished with has a row — whatever the file held — and one it could
+  // not read, could not embed or could not fit has none. So a folder whose
+  // documents genuinely hold no text (a note the owner has not written yet, a
+  // scanned PDF with no text layer, a document the extractor converted to
+  // nothing) was carrying "the index fingerprint is missing. Run a full
+  // reindex" for ever: the reindex reads the same files and writes the same
+  // nothing, and the banner comes straight back — the exact loop this arm of
+  // the rule exists to have closed. Work that did not happen still says
+  // `missing`, because it leaves the scan's count above the rows, and it is
+  // the same subtraction the card prints as `pendingFiles`, so the banner and
+  // the tile can no longer disagree.
   //
   // A folder the walk could not open is deliberately NOT part of this: it is a
   // real fault, but the fault is the folder and not the fingerprint, a reindex
@@ -411,7 +426,11 @@ function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing
   // "Failed" tile for it. `missing` is not what makes the next pass rebuild
   // either — that is `resolveIndexMode`, on the chunk count.
   const scanned = metaGet(db, "scan_total_files");
-  if (scanned === null || Number(scanned) !== 0) return "missing";
+  if (scanned === null) return "missing";
+  // Written as `!(owed <= 0)`, so an unreadable or half-written row — `Number`
+  // of it being NaN — falls to `missing` rather than through to `valid`.
+  const owed = Number(scanned) - countOf(db, "SELECT COUNT(*) AS n FROM files");
+  if (!(owed <= 0)) return "missing";
   const covered = metaGet(db, "scan_sources");
   const stillTrue = covered === null ? sources.length === 0 : covered === sourceListKey(sources);
   return stillTrue ? "valid" : "missing";
