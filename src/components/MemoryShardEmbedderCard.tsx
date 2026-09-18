@@ -143,6 +143,13 @@ export default function MemoryShardEmbedderCard() {
       <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-hint">
         {t(status.source === "cloud" ? "clawkeep.memory.embedder.cloudHint" : "clawkeep.memory.embedder.localHint")}
       </p>
+      {/* This branch is unreachable against any server on this branch — the
+          route hard-codes `cloudSupported: true` since 2026-09-18 — and is kept
+          for the two cases that can still produce a false: an OLDER server this
+          page is talking to across an update, and the build-time kill switch
+          `CloudDefaultsFacts.embeddingsSupported` documents. Its string is in
+          all ten locales; deleting the branch would mean writing it back under
+          whichever of those happened first. */}
       {!status.cloudSupported ? (
         <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-cloud-unsupported">
           {t("clawkeep.memory.embedder.cloudUnsupported")}

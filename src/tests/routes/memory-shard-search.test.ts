@@ -15,15 +15,28 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  * stated here as a test rather than only in a comment.
  */
 
-const { absent, enabled, search } = vi.hoisted(() => ({
+const { absent, enabled, search, MEMORY_SEARCH_DEADLINE_MS } = vi.hoisted(() => ({
   absent: { value: true },
   enabled: { value: true },
-  search: vi.fn(async () => [{ path: "Documents/lease.md", snippet: "The deposit is two months' rent.", score: 0.82 }]),
+  search: vi.fn(async (_query: string, _limit: number, _signal?: AbortSignal) => [
+    { path: "Documents/lease.md", snippet: "The deposit is two months' rent.", score: 0.82 },
+  ]),
+  /**
+   * The box's OWN bound on an interactive search, which the route combines with
+   * the caller's `request.signal`. Hoisted with the rest because the mock
+   * factory runs before this file's own statements do, and named once so the
+   * deadline case below cannot pass over whatever number the route happened to
+   * hand `AbortSignal.timeout`.
+   */
+  MEMORY_SEARCH_DEADLINE_MS: 60_000,
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({ openclawIsAbsent: () => absent.value }));
 vi.mock("@/lib/memory-shard", () => ({ getMemoryShardEnabled: async () => enabled.value }));
-vi.mock("@/lib/memory-index-local", () => ({ searchLocalMemory: search }));
+vi.mock("@/lib/memory-index-local", () => ({
+  searchLocalMemory: search,
+  MEMORY_SEARCH_DEADLINE_MS,
+}));
 
 import { NextRequest } from "next/server";
 import { GET } from "@/app/setup-api/clawkeep/memory/search/route";
@@ -53,6 +66,36 @@ describe("who may search", () => {
     expect(await res.json()).toEqual({
       results: [{ path: "Documents/lease.md", snippet: "The deposit is two months' rent.", score: 0.82 }],
     });
+  });
+
+  it("hands the search a deadline of the box's own, not only the caller's signal", async () => {
+    // A client that simply waits gives the box no bound at all, and ONE embed
+    // attempt can hold the request for the whole 120 s embed timeout while the
+    // MCP tool that asked has already abandoned the call at 60 s. The abort is a
+    // bound on the ANSWER, not a cancellation of the wake it started: that
+    // carries on and makes the next search warm.
+    //
+    // The BOX'S OWN half is what is proven here, and it takes a controlled
+    // signal to prove it: "an AbortSignal that is not aborted yet" is equally
+    // true of a route that forwarded `request.signal` alone, and Vitest's fake
+    // timers do not advance `AbortSignal.timeout`, so waiting the deadline out
+    // is not an option either. Standing a controller in for the timeout is.
+    const timeoutController = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockReturnValue(timeoutController.signal);
+    try {
+      await call("?q=deposit");
+      const signal = search.mock.calls[0]?.[2];
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal?.aborted).toBe(false);
+      // The box's own budget, not some other number the route happened to have.
+      expect(timeout).toHaveBeenCalledWith(MEMORY_SEARCH_DEADLINE_MS);
+      timeoutController.abort();
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it("refuses while the owner's switch is off", async () => {

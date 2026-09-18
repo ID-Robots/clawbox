@@ -19,10 +19,18 @@ import {
   runOpenclawConfigUnset,
 } from "@/lib/openclaw-config";
 import { readLocalSources, stampLocalEmbeddingIdentity, writeLocalSources } from "@/lib/memory-index-local";
+import {
+  assertEmbedEndpointAllowed,
+  defaultEmbedderSource,
+  readEmbedderPin,
+  writeEmbedderPin,
+} from "@/lib/memory-embedder";
 import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import {
   CLOUD_EMBEDDING_MODEL,
   CLOUD_EMBEDDING_PROVIDER,
+  cloudEmbeddingsSwitchedOff,
+  embeddingEndpointParseable,
   embeddingsBaseUrlOf,
 } from "@/lib/clawai-cloud-embeddings";
 import { getLocalAiToken } from "@/lib/local-ai-token";
@@ -33,8 +41,10 @@ import {
   LOCAL_EMBEDDING_PROVIDER,
   MEMORY_SHARD_ENABLED_KEY,
   MEMORY_SHARD_SETUP_KEY,
+  type EmbeddingSource,
   type MemorySource,
 } from "@/lib/memory-shard-state";
+import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 
 /** The owner's consent for the index to run. Off on a new box. */
 export async function getMemoryShardEnabled(): Promise<boolean> {
@@ -265,6 +275,11 @@ export async function switchToLocalEmbeddings(): Promise<void> {
   // belong to, so a later embedder change is caught rather than silently
   // degrading search.
   if (openclawIsAbsent()) {
+    // The pin FIRST, then the stamp: the stamp reads where the box is pointed,
+    // and in the other order it would record the embedder being switched away
+    // from. Both halves are idempotent, so a failure between them asks for a
+    // retry that costs nothing.
+    await writeEmbedderPin("local");
     await stampLocalEmbeddingIdentity();
     return;
   }
@@ -327,14 +342,84 @@ export async function readEmbeddingChoice(): Promise<{ provider: string | null; 
 }
 
 /**
+ * Where the index is embedded right now — the ONE reader both editions use.
+ *
+ * Two arms because the thing that INDEXES owns the setting: OpenClaw's own
+ * `memory.search.remote.baseUrl` where the core is the embedding client, and
+ * ClawBox's `memory_shard_embedder` pin where ClawBox is.
+ *
+ * `recorded` is the half a caller cannot work out afterwards: FALSE means
+ * nothing has been written down and the answer is the default rule speaking —
+ * the cloud whenever this box's subscription covers it (the owner's ruling of
+ * 2026-09-18). The automatic promotion reads exactly that to decide whether it
+ * still has a write to make, and it is why a box that has been promoted once is
+ * not promoted — and reindexed — again at every boot.
+ */
+export interface EmbeddingPlacement {
+  source: EmbeddingSource;
+  recorded: boolean;
+}
+
+export async function readEmbeddingPlacement(fallback?: EmbeddingSource): Promise<EmbeddingPlacement> {
+  if (openclawIsAbsent()) {
+    const pinned = await readEmbedderPin();
+    if (pinned) {
+      // THE SUPPORT LEVER OUTRANKS THE PIN, on this reader as it already does on
+      // `resolveMemoryEmbedder`. With `clawai_cloud_embeddings: "off"` every
+      // embed and every search goes to the loopback proxy, and this reader
+      // answering "cloud" from the pin alone made the embedder card draw the
+      // cloud hint, preselect the cloud segment and the provider GET report
+      // `source: "cloud"` beside `cloudAvailable: false` — the very shape that
+      // route's own comment records as a defect and fixed for the unpinned path,
+      // while `clawkeep-memory.ts` read the resolved embedder and said "local".
+      // The pin is NOT rewritten: the lever is a support action and reversible,
+      // and clearing the key must put the box back where the owner left it.
+      if (pinned === "cloud" && (await cloudEmbeddingsSwitchedOff())) {
+        return { source: "local", recorded: true };
+      }
+      return { source: pinned, recorded: true };
+    }
+    return { source: fallback ?? (await defaultEmbedderSource()), recorded: false };
+  }
+  const { baseUrl } = await readEmbeddingChoice();
+  // No endpoint at all is the on-device answer: the only thing this box points
+  // at without one is its own embedder, and claiming "cloud" over an unset key
+  // would make the automatic default skip the write that puts it right.
+  if (!baseUrl) return { source: "local", recorded: false };
+  if (isLoopbackBaseUrl(baseUrl)) return { source: "local", recorded: true };
+  // AN ADDRESS NOTHING CAN EMBED THROUGH IS NOT A PLACEMENT. `memory.search`
+  // is a file a restored backup, a hand edit or a half-finished migration can
+  // leave holding a truncated URL or a `file:` scheme. Reading one of those as
+  // "recorded: cloud" is the false-success shape on the one reader the automatic
+  // default asks before it decides whether it still owes this box a write: it
+  // would skip the write, and the box would keep a `memory.search` it cannot
+  // embed with and no surface saying so. Unrecorded hands it back to the default
+  // rule, which writes a configuration that works.
+  //
+  // CLEARTEXT OFF THE DEVICE IS NOT ONE OF THOSE, and refusing it here was a
+  // regression of its own: on this arm the client is OPENCLAW'S, not ClawBox's
+  // (see `embeddingEndpointParseable`), so an owner's own LAN llama.cpp is a
+  // real placement and overwriting it would be the configuration change.
+  if (!embeddingEndpointParseable(baseUrl)) {
+    console.warn(
+      "[memory-shard] the configured memory embedder endpoint is not an address anything can embed through; treating it as unset",
+    );
+    return { source: "local", recorded: false };
+  }
+  return { source: "cloud", recorded: true };
+}
+
+/**
  * Point the memory index at the ClawBox AI cloud embedder.
  *
- * The mirror of {@link switchToLocalEmbeddings}, and deliberately NOT available
- * on the edition where ClawBox itself is the indexer: `memory-index-local.ts`
- * refuses an embedder endpoint that is not loopback, on purpose — the owner's
- * document text is the request body there — and a default is not allowed to
- * open that fence. The caller checks; this refuses too, because a fence with
- * one gate is a fence.
+ * The mirror of {@link switchToLocalEmbeddings}, and since 2026-09-18 available
+ * on BOTH editions. Where ClawBox itself is the indexer there is no external
+ * client to point, so what is written is the word `cloud` in ClawBox's own store
+ * — never the address and never a copy of the credential: `memory-index-local.ts`
+ * re-derives both per request, from the image's environment and the box's own
+ * credential store. The fence did not move, it widened by exactly one address:
+ * the endpoint offered here is checked against the ClawBox AI endpoint this box
+ * knows, because a fence with one gate is a fence.
  *
  * The two `*InputType` keys are REMOVED rather than left: they exist to make
  * OpenClaw label each request so ClawBox's own proxy can restore the Qwen3
@@ -348,7 +433,12 @@ export async function readEmbeddingChoice(): Promise<{ provider: string | null; 
  */
 export async function switchToCloudEmbeddings(endpoint: string, token: string): Promise<void> {
   if (openclawIsAbsent()) {
-    throw new Error("This edition indexes memory on the box itself and cannot use a cloud embedder.");
+    if (!token.trim()) throw new Error("The ClawBox AI credential is missing.");
+    assertEmbedEndpointAllowed("cloud", embeddingsBaseUrlOf(endpoint));
+    // Same order as the local arm, for the same reason.
+    await writeEmbedderPin("cloud");
+    await stampLocalEmbeddingIdentity();
+    return;
   }
   const home = embeddingConfigHome(await installedOpenclawVersion());
   await runOpenclawConfigSetBatch([
