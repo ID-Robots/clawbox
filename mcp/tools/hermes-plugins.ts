@@ -1,0 +1,117 @@
+// Making a Hermes plugin the assistant just installed actually reach the chat.
+//
+// THE FAILURE THIS TOOL REMOVES, from the owner's own transcript (2026-09-18).
+// The assistant installed and enabled the `superpowers` plugin, verified it
+// worked by running `hermes chat -q` — a FRESH process — and reported success.
+// The chat the owner was looking at is served by a long-lived process that had
+// started hours earlier, and Hermes scans for plugins exactly once per process.
+// So the plugin was installed, provably working, and invisible to every chat the
+// owner opened, including new sessions.
+//
+// The assistant then did the only sensible thing and tried `sudo systemctl
+// restart clawbox-hermes-dashboard`. It was refused — agent shells run with
+// `no_new_privs`, and no such grant exists or should — and it stopped there.
+//
+// This tool is what it should have reached for instead. What it asks for is not
+// privileged: the route behind it stops a process the clawbox user already owns
+// and lets systemd's `Restart=always` bring it back.
+
+import { apiPost, type ApiOptions } from "../lib/api";
+import { type ErrorRule } from "../lib/errors";
+import { json, type Registrar } from "../lib/register";
+
+/** What POST /setup-api/hermes/plugins/reload answers. */
+interface ReloadBody {
+  restarted?: unknown;
+  ready?: unknown;
+  plugins?: unknown;
+  loaded?: unknown;
+  stale?: unknown;
+  detail?: unknown;
+}
+
+/**
+ * The restart takes seconds, not milliseconds: a stop, systemd's `RestartSec=5`,
+ * two `ExecStartPre` steps and the process binding its socket. The route's own
+ * budget is 45 s and it answers either way at the end of it, so this waits out
+ * that budget plus the round trip rather than abandoning a restart that is
+ * working.
+ */
+const RELOAD_TIMEOUT_MS = 60_000;
+
+const RELOAD_RULES: ErrorRule[] = [
+  {
+    status: 404,
+    code: "NOT_SUPPORTED_HERE",
+    message: "This ClawBox does not run the Hermes agent, so it has no plugins to reload.",
+    next: "Do not retry. Report that this device has no Hermes plugins.",
+  },
+  {
+    status: 502,
+    code: "ENDPOINT_DOWN",
+    message: "The Hermes agent could not be restarted, so the plugin is installed but not loaded.",
+    next: "Tell the owner the plugin is installed but the agent could not be restarted to load it, and that a reboot from Settings will load it.",
+  },
+];
+
+/**
+ * Timing out is NOT a reason to call this again. The restart is already under
+ * way on the box, and a second call would stop a dashboard that is in the middle
+ * of coming back — turning one bounce into two outages for the owner.
+ */
+const RELOAD_TIMEOUT_NOTE = {
+  message: "The restart was started but did not report back in time.",
+  next: "Do not call this again. Wait about a minute, then use clawbox_health or simply tell the owner to open a new chat.",
+};
+
+export function registerHermesPluginTools(reg: Registrar): void {
+  reg.tool(
+    "hermes_plugins_reload",
+    "Restart this device's Hermes agent so it loads plugins installed or enabled since it started. "
+      + "Hermes only scans for plugins when its process starts, so a plugin you add with "
+      + "`hermes plugins install`, `enable`, `disable` or `remove` does NOT reach the chat until this "
+      + "is called — not even in a new chat session. Call it once, right after any of those commands. "
+      + "Never try `sudo systemctl restart` for this; it is refused, and this tool is the supported way. "
+      + "The owner's open chat window closes when the agent restarts, so tell them to open a new chat. "
+      + "Answers which plugins the device now declares and, where it can be established, which ones the "
+      + "restarted agent actually loaded.",
+    {},
+    // HERMES ONLY. On OpenClaw there is no dashboard and no plugin system, and a
+    // tool that 404s for ever there trips the per-server circuit breaker that
+    // takes every ClawBox tool offline for the agent.
+    { editions: ["hermes"], destructive: true, profile: "core" },
+    async () => {
+      const options: ApiOptions = {
+        timeoutMs: RELOAD_TIMEOUT_MS,
+        rules: RELOAD_RULES,
+        onTimeout: RELOAD_TIMEOUT_NOTE,
+      };
+      const body = await apiPost<ReloadBody>("/setup-api/hermes/plugins/reload", {}, options);
+      const plugins = Array.isArray(body.plugins) ? body.plugins.map(String) : [];
+      // `loaded` is null when the running agent could not be asked what it
+      // registered, and that is NOT "it loaded nothing" — passing an empty list
+      // on would have the assistant tell the owner their plugin is missing from a
+      // device that is serving it. The null is carried through as an explicit
+      // "could not be established".
+      const loaded = Array.isArray(body.loaded) ? body.loaded.map(String) : null;
+      // On most devices `loaded` cannot be read at all — the dashboard publishes
+      // no plugin-registration lines — so THIS is the fact that proves the
+      // restart took: the process now serving chat is no longer behind the files.
+      const stale = typeof body.stale === "boolean" ? body.stale : null;
+      return json({
+        restarted: body.restarted === true,
+        // `restarted` without `ready` means systemd owns the restart and it is on
+        // its way back. That is not a failure and must not be retried.
+        serving_again: body.ready === true,
+        plugins,
+        ...(loaded ? { loaded } : { loaded: "could not be established on this device" }),
+        ...(stale === null
+          ? {}
+          : stale
+            ? { warning: "the agent is still behind the files — the plugin is NOT loaded yet" }
+            : { up_to_date: "the agent now serving chat has read the current plugin set" }),
+        tell_the_owner: "Open a new chat to use the plugin — the previous chat window closed with the restart.",
+      });
+    },
+  );
+}

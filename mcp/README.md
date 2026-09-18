@@ -83,6 +83,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | | OpenClaw | Hermes |
 |---|---|---|
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
+| Plugin reload (`hermes_plugins_reload`) | **no** — no plugin system | yes |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
@@ -101,6 +102,53 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
 | `clawbox_context` | The device field guide, the webapp storage/styling rules, and whose screen the browser tools drive (`BROWSER_GUIDE` — the desktop's window while the owner's real-browser setting is on, an invisible one when it is off). The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
+
+### Hermes plugins (Hermes only)
+`hermes_plugins_reload`
+
+A PLUGIN is not a skill, and the difference is the whole reason this tool
+exists. A skill is re-read per turn; a plugin is scanned **once, when the agent's
+process starts** — `discover_plugins(force=True)` at start, and
+`_ensure_plugins_discovered()` returning early ever after, with nothing reachable
+over the dashboard socket passing its `force` flag. Hermes knows: every
+`plugins install` ends with *"Restart the gateway for the plugin to take
+effect."*
+
+On this SKU the process serving chat is `clawbox-hermes-dashboard.service`, so
+that instruction means "restart the dashboard" — and the assistant cannot,
+because `sudo systemctl restart` is refused (agent shells run with
+`no_new_privs`). Measured on the owner's box: a plugin installed at 12:59 into a
+dashboard up since 10:52 was proven working in a fresh `hermes chat -q`, listed
+as `enabled` by `hermes plugins list`, and invisible to every chat the owner
+opened, new sessions included.
+
+This tool is the supported way to ask, and **it is not a privilege**. It posts to
+`/setup-api/hermes/plugins/reload`, whose restart is `bounceHermesDashboard()`:
+`hermes dashboard --stop`, upstream's own SIGTERM path over a process the clawbox
+user already owns, with the unit's `Restart=always` bringing it back and the
+route waiting for a new main PID and for :9119 to answer before it reports
+`ready`. **No sudoers grant is added or needed**, and one must not be: `systemctl
+restart` also STARTS a stopped unit, which would let an OpenClaw box resurrect
+the dashboard its foreign-edition teardown had just stopped and disabled
+(`install-sudoers-migration.test.ts`, `install-foreign-edition-teardown.test.ts`).
+
+The device does this by itself as well — a watcher in the web server bounces the
+dashboard when `~/.hermes` really declares a different plugin set — so the tool
+is for the deliberate case: call it once, right after `hermes plugins
+install/enable/disable/remove`.
+
+Two answers that must not be collapsed. `restarted` without `serving_again` means
+systemd owns the restart and it is on its way; that is not a failure and calling
+again would stop a dashboard in the middle of coming back. And `loaded` is
+`"could not be established on this device"` rather than an empty list whenever
+the running agent could not be asked what it registered — a plugin whose only
+registrations are tools logs them below the level that read can see, so an empty
+list would have the assistant tell an owner their plugin is missing from a device
+that is serving it.
+
+**The owner's open chat window closes with the restart.** That is the feature, not
+a fault: the box shows them a notice saying to open a new chat, and the tool's
+answer repeats it so the assistant says the same thing.
 
 ### Hermes skills (Hermes only)
 `skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`

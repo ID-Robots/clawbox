@@ -266,14 +266,28 @@ export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
   if (!(await restartsItself())) return "failed";
   // Read BEFORE the stop: this is the process the answer is measured against.
   const outgoing = await mainPid();
-  const result = await runHermesCli(["dashboard", "--stop"], { timeoutMs: STOP_TIMEOUT_MS }).catch(
-    () => null,
-  );
-  if (result?.code !== 0) return "failed";
+  await runHermesCli(["dashboard", "--stop"], { timeoutMs: STOP_TIMEOUT_MS }).catch(() => null);
 
-  // Past this line the restart HAS been taken: the stop exited 0 over a unit
-  // that restarts itself. The clock running out below is therefore "pending" —
-  // with one exception, asked of systemd rather than assumed, immediately after.
+  // THE STOP'S EXIT CODE IS NOT THE OUTCOME, and reading it as one was a false
+  // failure on every bounce this box performs.
+  //
+  // MEASURED on the owner's Hermes device (2026-09-18): `hermes dashboard
+  // --stop` exits **143** — SIGTERM, 128+15 — after 764 ms, printing
+  // "Terminated", while stopping the dashboard perfectly well; the unit's
+  // MainPID went 17768 → 17877 across that call. The CLI signals the process
+  // group it is itself in, so it kills its own process on the way out. The old
+  // `if (result?.code !== 0) return "failed"` therefore reported a failure over
+  // a restart that had just happened, on EVERY caller of this helper: a ClawKeep
+  // restore told the owner its restored state.db was not being served, the image
+  // refresh told them the box could not draw, and the plugin watcher sent no
+  // "open a new chat" notice for a chat window it had just dropped — then armed
+  // a retry to do it again.
+  //
+  // So the stop is VERIFIED rather than believed, which this function already
+  // knew how to do: the answer is systemd's NEW MainPID and a socket that
+  // answers, and neither of those can be faked by an exit code. That is also why
+  // no branch is lost — a stop that genuinely did not take is still caught, by
+  // the `outgoing` comparison below rather than by the CLI's word for it.
   //
   // ONE deadline across both halves — the doc block above budgets them together
   // because they are the same restart, and spending it twice would put the
@@ -295,6 +309,19 @@ export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
     // already spent the whole budget: the ceiling moves 45 s → 50 s, still far
     // inside the 100 s edge cut the budget above is sized against.
     const state = await hermesDashboardUnitState();
+    // THE STOP NEVER TOOK — the branch the exit-code check used to cover, now
+    // asked of the thing that knows. The very same process is still the unit's
+    // main one and systemd calls the unit running, so nothing was stopped and
+    // nothing is on its way back. `pending` here would be the worst of the three
+    // answers: it means "leave it alone", over a dashboard that will stay stale
+    // until somebody acts.
+    const current = await mainPid();
+    if (current !== null && current === outgoing && state === "running") {
+      console.error(
+        `[hermes] ${HERMES_DASHBOARD_UNIT} was not stopped — the same process is still serving`,
+      );
+      return "failed";
+    }
     console.error(
       `[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop (unit is ${state})`,
     );

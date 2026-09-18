@@ -125,14 +125,58 @@ describe("bounceHermesDashboard", () => {
     expect(cliMock).not.toHaveBeenCalled();
   });
 
+  it("counts a stop that exited NON-ZERO but did stop the dashboard as a restart", async () => {
+    // MEASURED on the owner's Hermes box (2026-09-18): `hermes dashboard --stop`
+    // exits 143 — SIGTERM, 128+15 — after 764 ms, printing "Terminated", while
+    // stopping the dashboard perfectly well; MainPID went 17768 → 17877 across
+    // that call. The CLI signals the process group it is itself in, so it kills
+    // its own process on the way out.
+    //
+    // Reading that code as the outcome was a false failure on EVERY bounce this
+    // device performs: a ClawKeep restore told the owner its restored state.db
+    // was not being served, the image refresh told them the box could not draw,
+    // and the plugin watcher sent no "open a new chat" notice for a chat window
+    // it had just dropped. The outcome is systemd's new MainPID and a socket
+    // that answers — neither of which an exit code can fake.
+    cliMock.mockResolvedValue({ code: 143, stdout: "Terminated", stderr: "" });
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
+  });
+
   it("reports a failure when the stop itself did not take", async () => {
+    // The branch the exit-code check used to cover, asked of the thing that
+    // knows instead: the SAME process is still the unit's main one and systemd
+    // calls the unit running, so nothing was stopped and nothing is coming.
+    // `pending` here would be the worst of the three answers — it means "leave
+    // it alone" over a dashboard that will stay stale until somebody acts.
     cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "unkillable" });
-    await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "active", SubState: "running" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
   });
 
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
-    await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "active", SubState: "running" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
   });
 
   /**
