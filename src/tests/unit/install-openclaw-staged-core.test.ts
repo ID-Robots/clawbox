@@ -315,6 +315,10 @@ exit 0
       'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
       shellFunction("recover_parked_openclaw_core"),
       shellFunction("promote_staged_openclaw_core"),
+      // Stubbed, never lifted: the step calls it with no arguments, which means
+      // the REAL /usr and /usr/local. Its own suite hands it a tmp prefix
+      // (install-shadowing-system-openclaw.test.ts).
+      "remove_shadowing_system_openclaw() { :; }",
       shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
       "step_openclaw_install",
     ].join("\n");

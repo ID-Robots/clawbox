@@ -55,12 +55,12 @@ const execFile = promisify(execFileCb);
  */
 
 // THE REPO'S OWN RESOLVER, not a guess at one path. `findOpenclawBin()` searches
-// `dirname(process.execPath)`, `~/.npm-global/bin`, `/usr/local/bin`, `/usr/bin`
-// and every nvm node — which is why it exists — and it is what the updater, the
-// AI-models routes and `openclaw-config` all use. A hand-rolled path here means
-// this route can be looking for a binary the rest of the box is not using, and
-// the ENOENT would reach the owner as "the repair failed", permanently, on a
-// Retry that never ran anything.
+// `~/.npm-global/bin` (the managed core, first), `dirname(process.execPath)`,
+// `/usr/local/bin`, `/usr/bin` and every nvm node — which is why it exists — and
+// it is what the updater, the AI-models routes and `openclaw-config` all use. A
+// hand-rolled path here means this route can be looking for a binary the rest
+// of the box is not using, and the ENOENT would reach the owner as "the repair
+// failed", permanently, on a Retry that never ran anything.
 const OPENCLAW_BIN = findOpenclawBin();
 
 /** Long enough for an npm install on a Jetson, short enough to answer a click. */

@@ -3248,15 +3248,49 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
  * services it by exiting 0 and handing off to the supervisor. Every skill install
  * therefore stopped the gateway and left it to systemd to bring back.
  */
-/** Find the openclaw binary — checks common locations including nvm, caches result. */
+/**
+ * Find the openclaw binary — the device's MANAGED core first, then the places a
+ * dev machine keeps one.
+ *
+ * THE MANAGED CORE WINS, and the order is the fix. `$HOME/.npm-global` is the
+ * one prefix install.sh installs the pinned core into (`NPM_PREFIX`), the one
+ * `clawbox-gateway.service` ExecStarts and the one `gateway-pre-start.sh` runs
+ * its migrations with. The node dir used to be asked FIRST, and on the device
+ * node is the distro package — `/usr/bin/node` — whose npm has `/usr` as its
+ * default prefix, so a single `sudo npm install -g openclaw` leaves a second,
+ * root-owned core at `/usr/bin/openclaw` that no update ever touches again. On
+ * 2026-09-18 a box carried one from July (2026.7.1-2) beside the managed
+ * 2026.9.3: the gateway ran the new core, which migrated openclaw.json and the
+ * state database, while every CLI call from this web server ran the OLD one,
+ * which refuses both ("meta: Unrecognized key: migrations", "state database
+ * uses newer schema version 16; this OpenClaw build supports 1"). Every
+ * `config set` failed, `doctor --fix` threw, and the ClawBox AI sign-in was
+ * rolled back with "Credential migration failed" — advice to run the very
+ * command that works fine from the owner's Terminal, whose PATH has the managed
+ * prefix first. `installedOpenclawCoreGeneration` derives the core's manifest
+ * from this path too, so the same box was also classified as the wrong
+ * GENERATION. install.sh's `remove_shadowing_system_openclaw` takes such an
+ * install off the box; this order is what makes it harmless meanwhile.
+ *
+ * ONLY THE MANAGED PATH IS CACHED. A fallback answer describes a box whose
+ * managed core is not there YET — an install still running, a core promotion
+ * between its two renames — and remembering it for the life of the process
+ * would pin this web server to the wrong core after the right one landed. The
+ * re-probe is a handful of `existsSync` calls in front of a CLI cold start that
+ * is measured in seconds.
+ */
 let _openclawBinCache: string | null = null;
 export function findOpenclawBin(): string {
   if (_openclawBinCache) return _openclawBinCache;
   const nodeDir = path.dirname(process.execPath);
   const home = process.env.HOME || "/home/clawbox";
+  const managed = path.join(home, ".npm-global", "bin", "openclaw");
+  if (fsSync.existsSync(managed)) {
+    _openclawBinCache = managed;
+    return managed;
+  }
   const candidates = [
     path.join(nodeDir, "openclaw"),
-    path.join(home, ".npm-global", "bin", "openclaw"),
     "/usr/local/bin/openclaw",
     "/usr/bin/openclaw",
   ];
@@ -3268,10 +3302,7 @@ export function findOpenclawBin(): string {
     }
   } catch {}
   for (const p of candidates) {
-    if (fsSync.existsSync(p)) {
-      _openclawBinCache = p;
-      return p;
-    }
+    if (fsSync.existsSync(p)) return p;
   }
   return "openclaw";
 }

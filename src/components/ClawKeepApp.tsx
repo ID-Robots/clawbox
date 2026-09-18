@@ -1471,6 +1471,9 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
   );
 }
 
+/** The one install command this card may print — see the note in SystemCard. */
+const OPENCLAW_INSTALL_COMMAND = "npm install -g openclaw --prefix ~/.npm-global";
+
 function SystemCard({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
   return (
@@ -1480,12 +1483,19 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
         {/* Only on the edition that HAS a separate CLI. On Hermes the archiver
             ships inside the daemon, so telling the owner to
             `npm install -g openclaw` would be an instruction that contradicts
-            their SKU and fixes nothing. */}
+            their SKU and fixes nothing.
+
+            WITH THE PREFIX, always. The distro npm's default prefix is /usr, so
+            the bare command fails EACCES as the box's user and, retried with
+            sudo, leaves a SECOND root-owned core at /usr/bin/openclaw that no
+            update ever moves — the core the web server then ran instead of the
+            managed one (2026-09-18, "Credential migration failed"). The
+            managed prefix is the one install.sh and the gateway use. */}
         {status.agent !== "hermes" && !status.openclawInstalled && (
           <li>
             <code className="bg-[var(--bg-elevated)] px-1 rounded">openclaw</code>{" "}
             {t("clawkeep.system.notOnPath")}{" "}
-            <code className="bg-[var(--bg-elevated)] px-1 rounded">npm install -g openclaw</code>.
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">{OPENCLAW_INSTALL_COMMAND}</code>.
           </li>
         )}
         {!status.daemonInstalled && (
