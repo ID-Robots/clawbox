@@ -318,6 +318,41 @@ describe("indexing the owner's folders", () => {
     }
   });
 
+  it("walks a derived folder it could not stat rather than calling it absent", async () => {
+    // Only ENOENT means "no derived folder". A stat that fails for any other
+    // reason — a permission refused, an I/O error — is "could not look", and
+    // folded into "absent" it skipped the walk, left the source unflagged, and
+    // let the stale sweep delete every derived document it had not seen: the
+    // owner's converted files gone from the index over a folder ClawBox could
+    // not open for a moment. Refused at the stat only, so the walk itself —
+    // the thing that decides what is kept — still sees the folder.
+    const { derivedFolderFor } = await import("@/lib/memory-extract");
+    write("keep.md", "A bicycle is stored in the basement.");
+    write("lease.txt", "The deposit is two months' rent.");
+    expect((await runLocalIndexPass("full")).files).toBe(2);
+
+    const derived = derivedFolderFor(source);
+    const fsp = (await import("node:fs/promises")).default;
+    const realStat = fsp.stat.bind(fsp);
+    const spy = vi.spyOn(fsp, "stat").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+      if (String(target) === derived) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return (realStat as (...args: unknown[]) => Promise<fs.Stats>)(target, ...rest);
+    }) as typeof fsp.stat);
+    let after: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      after = await runLocalIndexPass("incremental");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(after.files, "a derived folder that could not be stat'd keeps its rows").toBe(2);
+
+    _resetLocalMemoryCacheForTests();
+    const hits = await searchLocalMemory("deposit", 5);
+    expect(hits.map((h) => h.path).join(" ")).toContain("lease.txt");
+  });
+
   it("can still shrink and still take new work after it has hit its ceiling", async () => {
     // Skipping the delete pass while capped wedged the index for good: the
     // chunks of deleted files were never reclaimed, so every later pass hit the
@@ -656,6 +691,46 @@ describe("the index knows what it was built for", () => {
       expect(row.scan.totalFiles).toBeGreaterThan(row.status.files);
       expect(row.status.custom.indexIdentity.status).toBe("missing");
     }
+  });
+
+  it("keeps MISSING when a file it indexed before cannot be read now", async () => {
+    // A row is not proof the pass finished with a file. One indexed on an
+    // earlier pass keeps its old row when this pass cannot read it — it is
+    // still in the scan, so the stale sweep rightly leaves it — and "rows ==
+    // files scanned" then balanced over work that did not happen: an empty
+    // index calling itself valid, which the shared parser draws as healthy.
+    // Refused at `open` for that one file, so the test does not depend on
+    // whether the suite runs as root.
+    const blank = write("blank.md", "   \n\n  ");
+    await runLocalIndexPass("full");
+    const first = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(first.status.custom.indexIdentity.status).toBe("valid");
+
+    touchLater(blank);
+    const fsp = (await import("node:fs/promises")).default;
+    const realOpen = fsp.open.bind(fsp);
+    const spy = vi.spyOn(fsp, "open").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+      if (String(target) === blank) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return (realOpen as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+    }) as typeof fsp.open);
+    let result: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      result = await runLocalIndexPass("incremental");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.failures).toBe(1);
+
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    // The trap: the counts balance, because the old row is still there.
+    expect(row.status.files).toBe(row.scan.totalFiles);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("missing");
   });
 
   it("still calls it empty when a registered folder is not there any more", async () => {

@@ -438,6 +438,13 @@ function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing
   // of it being NaN — falls to `missing` rather than through to `valid`.
   const owed = Number(scanned) - countOf(db, "SELECT COUNT(*) AS n FROM files");
   if (!(owed <= 0)) return "missing";
+  // A row is not proof the pass finished with the file. One indexed on an
+  // earlier pass that this pass could not read keeps its old row — it is still
+  // in the scan, so the stale sweep rightly leaves it — and the count above
+  // then balances over work that did not happen. The pass records how many
+  // files it left unfinished; an index from before that row has none, which is
+  // the old rule. Same `!(… <= 0)` shape, so NaN falls to `missing`.
+  if (!(Number(metaGet(db, "incomplete_files") ?? 0) <= 0)) return "missing";
   const covered = metaGet(db, "scan_sources");
   const stillTrue = covered === null ? sources.length === 0 : covered === sourceListKey(sources);
   return stillTrue ? "valid" : "missing";
@@ -617,6 +624,31 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
+ * Is the derived folder simply not there?
+ *
+ * Only ClawBox's own derived folder is asked. "Not there" and "could not be
+ * opened" are one silence to `walkFiles`, and for the OWNER'S folder that is
+ * exactly right — an unplugged drive must never look like an emptied one. For
+ * the derived folder they are different facts, and only one of them is a fault:
+ * see the caller.
+ *
+ * ENOENT and nothing else. Every other answer — a permission refused, an I/O
+ * error, something that is not a folder — is "could not look", and it has to
+ * reach the walk, which reports it as the shortfall it is. Folded into "absent"
+ * it skipped the walk, the source was never marked unreadable, and the stale
+ * sweep then deleted every derived document it had not seen: the owner's PDFs
+ * gone from the index over a folder ClawBox could not open for a moment.
+ */
+async function derivedFolderAbsent(dir: string): Promise<boolean> {
+  try {
+    await fs.stat(dir);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/**
  * Every `.md` under one root, inside the shared walk budget — and whether the
  * walk actually SAW the whole tree.
  *
@@ -626,23 +658,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * from a folder the owner emptied. Only the caller knows that difference is the
  * difference between "delete this source's index" and "leave it exactly alone".
  */
-/**
- * Is there a directory there at all?
- *
- * Only ClawBox's own derived folder is asked. "Not there" and "could not be
- * opened" are one silence to `walkFiles`, and for the OWNER'S folder that is
- * exactly right — an unplugged drive must never look like an emptied one. For
- * the derived folder they are different facts, and only one of them is a fault:
- * see the caller.
- */
-async function directoryPresent(dir: string): Promise<boolean> {
-  try {
-    return (await fs.stat(dir)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
 async function indexableFilesUnder(root: string): Promise<{ files: string[]; complete: boolean }> {
   const files: string[] = [];
   const budget = newWalkBudget();
@@ -805,6 +820,14 @@ export async function runLocalIndexPass(
     // are the extractor's own and are dropped here. Without it a folder of
     // PDFs none of which convert is a silently empty index.
     let failures = scan.unreadableSources.size + scan.unusableDocuments;
+    // The part of `failures` that is about a FILE this pass did not finish —
+    // opened, read, embedded or fitted — as opposed to a folder it could not
+    // walk or a document the extractor refused. Kept apart because
+    // `identityOf` needs exactly this and not the aggregate: a file that was
+    // indexed once and cannot be read now keeps its old row (it is still in the
+    // scan, so the stale sweep leaves it), and "rows == files scanned" then
+    // reads as nothing owed over work that did not happen.
+    let incompleteFiles = 0;
     let capped = false;
     let wrote = false;
     // The denominator as soon as it exists. Until the scan has walked every
@@ -860,11 +883,13 @@ export async function runLocalIndexPass(
         opened = await openForIndexing(entry.file);
       } catch {
         failures += 1;
+        incompleteFiles += 1;
         continue;
       }
       if (!opened) {
         // Not a regular file, or bigger than this pass will read.
         failures += 1;
+        incompleteFiles += 1;
         continue;
       }
       const { stat } = opened;
@@ -883,6 +908,7 @@ export async function runLocalIndexPass(
         text = await opened.read();
       } catch {
         failures += 1;
+        incompleteFiles += 1;
         continue;
       } finally {
         // `continue` runs this too, so the descriptor is released on every path.
@@ -902,6 +928,7 @@ export async function runLocalIndexPass(
         // `continue`, not `break`: one large document early in the scan must not
         // shut out the thousand small ones behind it that still fit.
         capped = true;
+        incompleteFiles += 1;
         continue;
       }
 
@@ -917,6 +944,7 @@ export async function runLocalIndexPass(
         // file's fault and every later file would fail the same way.
         if (err instanceof EmbeddingUnavailableError || err instanceof IndexPassAbortedError) throw err;
         failures += 1;
+        incompleteFiles += 1;
         continue;
       }
       // A width change empties the store, so everything counted before it is
@@ -1034,6 +1062,7 @@ export async function runLocalIndexPass(
       // owner added afterwards reads as nothing to index — see `identityOf`.
       metaSet(db, "scan_sources", sourceListKey(sources));
       metaSet(db, "failures", String(failures));
+      metaSet(db, "incomplete_files", String(incompleteFiles));
       metaSet(db, "capped", capped ? "1" : "");
       // What the vector cache keys on. A file mtime cannot do this job under
       // WAL: an ordinary commit lands in the -wal and leaves the main file's
@@ -1142,7 +1171,7 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
     // looked at and nothing is unknown — a derived folder that does not exist
     // is an extraction that wrote nothing, which `skipped` has already counted.
     const roots = [source];
-    if (derived && await directoryPresent(derived)) roots.push(derived);
+    if (derived && !(await derivedFolderAbsent(derived))) roots.push(derived);
     for (const root of roots) {
       const found = await indexableFilesUnder(root);
       if (!found.complete) unreadableSources.add(source);
