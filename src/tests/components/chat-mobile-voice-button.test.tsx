@@ -17,6 +17,8 @@ type Frame = Record<string, unknown>;
 const sentFrames: Frame[] = [];
 /** Every URL the component fetched, in order. */
 const fetchedUrls: string[] = [];
+/** While true the fake gateway accepts a turn and never finishes it. */
+let holdReplies = false;
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -54,6 +56,7 @@ class FakeGatewayWs {
     }
     const runId = `run-${sentFrames.length}`;
     this.respond(id, { runId, status: "started" });
+    if (holdReplies) return;
     setTimeout(() => this.emit({
       type: "event",
       event: "chat",
@@ -215,7 +218,7 @@ describe("the phone chat's microphone", () => {
     resetHarnessCache();
   });
 
-  it("is the large, thumb-sized button beside the text box on a phone", async () => {
+  it("is the touch microphone beside the text box on a phone", async () => {
     installFetch("hello");
     render(<ChatPopup isOpen onClose={() => {}} mobile />);
     const record = await readyToRecord();
@@ -227,6 +230,30 @@ describe("the phone chat's microphone", () => {
     expect(record.parentElement).toContainElement(screen.getByRole("textbox"));
     // Exactly one microphone — the compact one is not drawn as well.
     expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
+  });
+
+  it("swaps the idle microphone for Send while typing and restores it when cleared", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "A typed question" } });
+    expect(screen.queryByTestId("voice-record")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-send")).toBeEnabled();
+    expect(input.parentElement).toContainElement(screen.getByTestId("chat-send"));
+    fireEvent.change(input, { target: { value: "" } });
+    expect(screen.getByTestId("voice-record")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-send")).not.toBeInTheDocument();
+  });
+
+  it("does not hide the recording stop action when text is entered", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    fireEvent.click(await readyToRecord());
+    await screen.findByTestId("voice-stop");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Draft during capture" } });
+    expect(screen.getByTestId("voice-stop")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-send")).not.toBeInTheDocument();
   });
 
   it("turns into the large stop button while it records, and records through the same flow", async () => {
@@ -248,6 +275,26 @@ describe("the phone chat's microphone", () => {
       return params?.message === "hello from the car";
     })).toBe(true));
     expect(await screen.findByTestId("voice-record")).toHaveAttribute("data-size", "large");
+  });
+
+  it("names the attach button for assistive technology instead of its icon glyph", async () => {
+    installFetch("hello");
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+    // The paperclip is a Material Symbols ligature: its text content is the
+    // glyph name, which a screen reader would otherwise announce verbatim.
+    const attach = screen.getByTestId("chat-attach");
+    expect(attach).toHaveAccessibleName("Attach file");
+    expect(attach.querySelector(".material-symbols-rounded")).toHaveAttribute("aria-hidden", "true");
+    // On a phone it sits in the primary row beside the text box.
+    expect(attach.parentElement).toContainElement(screen.getByRole("textbox"));
+    unmount();
+
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await readyToRecord();
+    const desktopAttach = screen.getByTestId("chat-attach");
+    expect(desktopAttach).toHaveAccessibleName("Attach file");
+    expect(screen.getByTestId("chat-composer-row")).toContainElement(desktopAttach);
   });
 
   it("keeps the compact button in the composer row on a big screen", async () => {
@@ -273,5 +320,137 @@ describe("the phone chat's microphone", () => {
 
     render(<ChatPopup isOpen onClose={() => {}} />);
     expect(screen.getByTestId("chat-popup-close")).toHaveAccessibleName("window.close");
+  });
+});
+
+/**
+ * A phone held upright (TASK-894). The slot beside the text box is always Send
+ * or, while a reply runs, the red Stop — so the thumb never moves between the
+ * two — and the microphone stands alone on a centred row of its own under the
+ * text box, where it can never cover the field. Landscape keeps the #900
+ * layout, pinned by the suite above (jsdom's viewport is wider than tall).
+ */
+describe("the portrait phone composer", () => {
+  const originalMatchMedia = window.matchMedia;
+
+  function orient(portrait: boolean) {
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("portrait") ? portrait : false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  beforeEach(() => {
+    sentFrames.length = 0;
+    fetchedUrls.length = 0;
+    holdReplies = false;
+    FakeMediaRecorder.instances.length = 0;
+    micTrackStop.mockClear();
+    resetHarnessCache();
+    window.localStorage.clear();
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+    installMedia();
+    orient(true);
+  });
+
+  afterEach(() => {
+    window.matchMedia = originalMatchMedia;
+    holdReplies = false;
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    resetHarnessCache();
+  });
+
+  it("reads attachment → field → Send on the input row, the microphone alone on its own row", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    const record = await readyToRecord();
+
+    const primary = screen.getByTestId("chat-composer-primary");
+    const buttons = Array.from(primary.children).filter((el) => el.tagName !== "TEXTAREA");
+    expect(Array.from(primary.children).map((el) => el.getAttribute("data-testid") ?? el.tagName)).toEqual([
+      "chat-attach", "TEXTAREA", "chat-send",
+    ]);
+    expect(buttons).toHaveLength(2);
+    expect(primary).not.toContainElement(record);
+
+    // Its row holds that one control and nothing else.
+    const voiceRow = screen.getByTestId("chat-composer-voice-row");
+    expect(voiceRow).toHaveClass("chat-composer-voice-row");
+    expect(Array.from(voiceRow.children)).toEqual([record]);
+    expect(record).toHaveAttribute("data-size", "large");
+    // Directly under the input row, ahead of the create/picker row.
+    expect(primary.nextElementSibling).toBe(voiceRow);
+    expect(voiceRow.nextElementSibling).toBe(screen.getByTestId("chat-composer-row"));
+    expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
+    expect(screen.getByTestId("chat-popup")).toHaveAttribute("data-chat-portrait", "true");
+  });
+
+  it("keeps the microphone on its row while the owner types, Send enabling beside the field", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    const record = await readyToRecord();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Typed" } });
+    expect(screen.getByTestId("chat-send")).toBeEnabled();
+    expect(screen.getByTestId("chat-composer-primary")).toContainElement(screen.getByTestId("chat-send"));
+    expect(screen.getByTestId("chat-composer-voice-row")).toContainElement(record);
+  });
+
+  it("puts the red Stop in Send's slot beside the field while a reply runs", async () => {
+    installFetch("hello");
+    holdReplies = true;
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "A long question" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+
+    const stop = await screen.findByTestId("chat-stop");
+    const primary = screen.getByTestId("chat-composer-primary");
+    expect(primary.lastElementChild).toBe(stop);
+    expect(stop.previousElementSibling).toBe(input);
+    expect(screen.queryByTestId("chat-send")).not.toBeInTheDocument();
+    // The microphone keeps its own row; nothing joins it.
+    const voiceRow = screen.getByTestId("chat-composer-voice-row");
+    expect(voiceRow.children).toHaveLength(1);
+    expect(voiceRow).not.toContainElement(stop);
+  });
+
+  it("toggles recording with the one control on its row — never a second button", async () => {
+    installFetch("hello from the car");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    fireEvent.click(await readyToRecord());
+    const stop = await screen.findByTestId("voice-stop");
+    const voiceRow = screen.getByTestId("chat-composer-voice-row");
+    expect(Array.from(voiceRow.children)).toEqual([stop]);
+    expect(screen.queryByTestId("voice-record")).not.toBeInTheDocument();
+    fireEvent.click(stop);
+    const record = await screen.findByTestId("voice-record");
+    expect(screen.getByTestId("chat-composer-voice-row")).toContainElement(record);
+  });
+
+  it("keeps the landscape phone composer and the desktop composer as they were", async () => {
+    orient(false);
+    installFetch("hello");
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    const record = await readyToRecord();
+    expect(screen.queryByTestId("chat-composer-voice-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-primary")).toContainElement(record);
+    expect(screen.getByTestId("chat-popup")).not.toHaveAttribute("data-chat-portrait");
+    unmount();
+
+    orient(true);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const compact = await readyToRecord();
+    expect(compact).toHaveAttribute("data-size", "compact");
+    expect(screen.queryByTestId("chat-composer-voice-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-row")).toContainElement(compact);
   });
 });

@@ -29,6 +29,10 @@ import HelpTip from "./HelpTip";
 interface RulesPayload {
   allowRules?: unknown;
   maxAllowRules?: unknown;
+  /** The folder a run may read with no rule at all — where the owner puts a
+   *  file a run needs. Absent from an older server, and then the note is left
+   *  off rather than pointing at a folder this page made up. */
+  sharedInputsDir?: unknown;
 }
 
 function rulesFrom(payload: RulesPayload): string[] {
@@ -46,6 +50,7 @@ export default function CodingAgentRulesCard() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sharedInputs, setSharedInputs] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -54,6 +59,7 @@ export default function CodingAgentRulesCard() {
       const payload = await res.json() as RulesPayload;
       setRules(rulesFrom(payload));
       if (typeof payload.maxAllowRules === "number" && payload.maxAllowRules > 0) setMax(payload.maxAllowRules);
+      setSharedInputs(typeof payload.sharedInputsDir === "string" && payload.sharedInputsDir ? payload.sharedInputsDir : null);
     } catch {
       // Not new information about the rules — the card keeps what it last
       // knew rather than claiming the list is empty, which would invite the
@@ -134,6 +140,19 @@ export default function CodingAgentRulesCard() {
           {t("codingAgent.rulesCount", { n: rules.length, max })}
         </span>
       </div>
+
+      {sharedInputs && (
+        // The question this card raises and never answered: a run was refused
+        // a file, so where does the file go? Not a rule — the folder below
+        // needs none, and the assistant's own media folder can never be opened
+        // by one however the rule is written.
+        <p
+          className="mt-2 text-[11px] text-[var(--text-muted)] leading-relaxed break-all"
+          data-testid="coding-agent-rules-inputs"
+        >
+          {t("codingAgent.rulesInputs", { shared: sharedInputs })}
+        </p>
+      )}
 
       {loaded && rules.length === 0 ? (
         <p className="mt-2 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-rules-empty">

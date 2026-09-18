@@ -36,10 +36,13 @@ const V2_MONTH = 8;
  * `src/lib/memory-shard.ts` already reads THIS file for THIS boundary, and its
  * own docblock states the invariant: "the two writers read one file and cannot
  * disagree about the generation". A private path here would have broken it —
- * `findOpenclawBin` searches the node dir, `$HOME/.npm-global/bin`,
- * `/usr/local/bin`, `/usr/bin` and every nvm version, so a box whose core is
- * anywhere but the first of those would be identified by one reader and called
- * unknown by the other, permanently. Consolidating the three readers of this
+ * `findOpenclawBin` searches `$HOME/.npm-global/bin` (the managed core, first),
+ * the node dir, `/usr/local/bin`, `/usr/bin` and every nvm version, so a box
+ * whose core is anywhere but the first of those would be identified by one
+ * reader and called unknown by the other, permanently. The ORDER is part of
+ * that invariant: with the node dir first, a stale root-owned 2026.7 core at
+ * `/usr/bin/openclaw` answered `v1` here for a box whose gateway ran 2026.9.3
+ * (2026-09-18). Consolidating the three readers of this
  * one fact — here, `memory-shard.ts`, and `installedOpenclawUsesSqliteAuthStore`
  * by CLI spawn — is recorded as a follow-up.
  */

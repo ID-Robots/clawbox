@@ -49,7 +49,7 @@ import { invalidateMemoryStatusCache, startMemoryIndex } from "@/lib/clawkeep-me
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
-import { getMemoryShardEnabled, readEmbeddingChoice, switchToCloudEmbeddings } from "@/lib/memory-shard";
+import { readEmbeddingChoice, switchToCloudEmbeddings } from "@/lib/memory-shard";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { createSerialLock } from "@/lib/serial-lock";
 import { syncChannelAudio } from "@/lib/stt-channel";
@@ -332,6 +332,13 @@ async function promote(capability: CloudCapability, voice: VoiceSnapshot): Promi
  * restart of the harness the owner may be mid-conversation with is a far worse
  * trade than a channel order that lands a few seconds later. The owner's own
  * change through `/setup-api/stt` still restarts, as it always did.
+ *
+ * Nothing here re-checks that the box is LINKED, and it does not have to: the
+ * caller only reaches a capability whose `target` is the cloud, which for
+ * transcription is `facts.linked` itself. What makes a stale `cloud` in the
+ * store harmless in the other direction — an owner who unlinks, or a credential
+ * the portal revokes — is `resolveSttPrimary`, which will not report the cloud
+ * as the engine that hears a box holding no credential for it.
  */
 async function promoteStt(): Promise<boolean> {
   const order = sttEngineOrder("cloud");
@@ -372,15 +379,27 @@ async function promoteTts({ harness, status }: VoiceSnapshot): Promise<boolean> 
  * That rebuild is asked for here, in the same breath — `ensure-local-embeddings.sh`
  * does the same thing for the other direction, and for the same reason.
  *
- * Only on a box whose owner has switched Memory Shard ON: with it off there is
- * no index to invalidate and no pass that would run, so the write would be a
- * gateway restart bought for nothing.
+ * DELIBERATELY NOT GATED ON THE MEMORY SHARD SWITCH, which it was until
+ * 2026-09-17. That switch is ClawBox's consent to run index PASSES over the
+ * owner's folders; it has never governed which embedder the AGENT searches
+ * memory with, and `ensure-local-embeddings.sh` writes the on-device one into
+ * `memory.search` at every gateway start with no regard for it. Since the switch
+ * is off on a new box, gating here meant every freshly onboarded box that linked
+ * a paid subscription kept the local embedder for good while the card said its
+ * target was the cloud, with no reason beside it and nothing that would ever
+ * move it — voice and transcription flipped, memory did not (measured on three
+ * rig boxes, 2026-09-15).
+ *
+ * With the switch off the rebuild below simply declines `disabled`, which is
+ * already handled as the non-failure it is: there is no index to rebuild, and
+ * the first pass the owner ever runs then builds under the cloud identity
+ * instead of building under the local one and being invalidated at the next
+ * boot.
  */
 async function promoteEmbeddings(): Promise<boolean> {
   // Already pointed off the box: nothing to write, and writing anyway would
   // invalidate a perfectly good index and buy a reindex for nothing.
   if ((await currentEmbeddingSource()) === "cloud") return false;
-  if (!(await getMemoryShardEnabled())) return false;
   const token = await resolveClawaiToken();
   if (!token) return false;
   await switchToCloudEmbeddings(cloudEmbeddingsUrl(), token);
@@ -391,7 +410,10 @@ async function promoteEmbeddings(): Promise<boolean> {
   // rebuilds, and the panel shows the mismatched fingerprint meanwhile.
   try {
     const started = await startMemoryIndex("full", "manual");
-    if (!started.accepted) {
+    // `disabled` is not worth a warning line: it is the expected answer on a box
+    // whose owner has not switched Memory Shard on, where there is no index to
+    // rebuild in the first place. `running` is the one worth saying out loud.
+    if (!started.accepted && started.declined !== "disabled") {
       console.warn(`[clawai-cloud-defaults] memory reindex declined after the switch: ${started.declined}`);
     }
   } catch (err) {

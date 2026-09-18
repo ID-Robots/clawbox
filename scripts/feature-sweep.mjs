@@ -107,6 +107,76 @@ function ok(...fields) {
   };
 }
 
+/**
+ * The desktop's UI language — which a box may legitimately never have stored.
+ *
+ * A freshly flashed device has no `pref:ui_language`: the desktop resolves its
+ * language from the browser (`detectLocale` in src/lib/i18n.tsx) until the
+ * owner picks one, and `/setup-api/preferences?keys=ui_language` then answers
+ * `{}` — the route working, not the route broken. Checked with the plain
+ * `ok("ui_language")` this was `missing field \`ui_language\` in {}` on every
+ * clean box, which is the kind of red that teaches an operator to re-run a
+ * sweep until it goes green.
+ *
+ * So: a stored language is a PASS, no stored language is `unproven`, and the
+ * failures that matter are still failures — a route that does not answer 200,
+ * one that answers something other than JSON (the anonymous-read carve-out
+ * regressing into a `/login` redirect body), and a value that is not a
+ * language, which `sanitizePreferences` would have dropped on the way out.
+ */
+export function uiLanguageReadsBack(res) {
+  if (res.status !== 200) return `expected 200, got ${res.status} ${truncate(res.text)}`;
+  if (res.json === null || typeof res.json !== "object" || Array.isArray(res.json)) {
+    return `expected a JSON object, got ${truncate(res.text)}`;
+  }
+  const value = res.json.ui_language;
+  if (value === undefined || value === null) {
+    return { unproven: "no language has ever been chosen on this box, so there is none to read back: the desktop takes its language from the browser until the owner picks one" };
+  }
+  if (typeof value !== "string" || value === "") {
+    return `ui_language came back as ${truncate(JSON.stringify(value) ?? String(value), 60)}`;
+  }
+  return true;
+}
+
+/**
+ * The voice route's engines — which a box may legitimately have none of.
+ *
+ * A box with no speech engine configured (no Kokoro installed, no ClawBox AI
+ * link) answers `/setup-api/tts` with `activeEngine: null` beside an `engines`
+ * list in which nothing is `configured` — the route working, not the route
+ * broken. Checked with the plain `ok("engines", "activeEngine")` that was
+ * `missing field \`activeEngine\`` on every such box, and the release-gate
+ * sweep exited 1 over a device with nothing wrong with it.
+ *
+ * So: an active engine is a PASS, no active engine with nothing configured is
+ * `unproven`, and the failures that matter are still failures — a route that
+ * does not answer 200 or JSON, no `engines` array, an `activeEngine` that is
+ * not a name, and no active engine while one IS configured, which is drift
+ * rather than an empty box.
+ */
+export function speechEnginesReport(res) {
+  if (res.status !== 200) return `expected 200, got ${res.status} ${truncate(res.text)}`;
+  if (res.json === null || typeof res.json !== "object" || Array.isArray(res.json)) {
+    return `expected a JSON object, got ${truncate(res.text)}`;
+  }
+  const { engines, activeEngine } = res.json;
+  if (!Array.isArray(engines)) return `missing \`engines\` array in ${truncate(res.text)}`;
+  const wellFormed = (e) => e !== null && typeof e === "object" && !Array.isArray(e) && typeof e.configured === "boolean";
+  if (!engines.every(wellFormed)) return `invalid \`engines\` entry in ${truncate(res.text)}`;
+  if (activeEngine === undefined || activeEngine === null) {
+    const configured = engines.filter((e) => e.configured);
+    if (configured.length === 0) {
+      return { unproven: "nothing can speak on this box yet: no speech engine is configured, so there is no active one to report" };
+    }
+    return `activeEngine is ${activeEngine === null ? "null" : "missing"} while ${configured.map((e) => e.id ?? "?").join(", ")} is configured in ${truncate(res.text)}`;
+  }
+  if (typeof activeEngine !== "string" || activeEngine === "") {
+    return `activeEngine came back as ${truncate(JSON.stringify(activeEngine) ?? String(activeEngine), 60)}`;
+  }
+  return true;
+}
+
 /** A specific refusal: the status, and the stable code the route promises. */
 function refuses(status, code) {
   return (res) => {
@@ -225,7 +295,7 @@ const AREAS = [
     { name: "the device's own bearer is accepted", path: "/setup-api/system/info", expect: ok("hostname") },
   ]],
   ["preferences", [
-    { name: "the UI language reads back", path: "/setup-api/preferences?keys=ui_language", expect: ok("ui_language") },
+    { name: "the UI language reads back", path: "/setup-api/preferences?keys=ui_language", expect: uiLanguageReadsBack },
     { name: "the agent cannot write installed_apps", path: "/setup-api/preferences", method: "POST", body: { installed_apps: "\u0001" }, expect: ownerOnly() },
   ]],
   ["kv", [
@@ -344,7 +414,7 @@ const AREAS = [
     { name: "the agent gateway is healthy", path: "/setup-api/gateway/health", expect: all(ok("available"), (res) => (res.json.available === true ? true : "the gateway is not answering")) },
   ]],
   ["voice", [
-    { name: "speech output reports its engines", path: "/setup-api/tts", expect: ok("engines", "activeEngine") },
+    { name: "speech output reports its engines", path: "/setup-api/tts", expect: speechEnginesReport },
     { name: "speech input reports its chain", path: "/setup-api/stt", expect: ok("primary", "chain") },
   ]],
   ["channels", [

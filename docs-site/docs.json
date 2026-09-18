@@ -26,7 +26,8 @@
             "group": "Get Started",
             "pages": [
               "index",
-              "quickstart"
+              "quickstart",
+              "whats-new"
             ]
           },
           {
@@ -42,6 +43,7 @@
             "group": "Editions",
             "pages": [
               "editions/overview",
+              "editions/switching",
               "editions/hermes",
               "editions/hermes-providers",
               "editions/hermes-skills"
@@ -58,7 +60,12 @@
           {
             "group": "Using ClawBox",
             "pages": [
+              "guides/chat",
+              "guides/clawbox-ai",
+              "guides/memory-shard",
+              "guides/local-ai",
               "guides/messaging-channels",
+              "guides/appearance",
               "guides/subscriptions"
             ]
           },

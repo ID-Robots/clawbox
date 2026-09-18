@@ -147,6 +147,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "I've stored these somewhere safe",
     "credentials.writeDownContinue": "I've saved them — continue",
+    "credentials.saveAndContinue": "Save & Continue",
 
     // === AIModelsStep ===
     "ai.title": "Connect AI Model",
@@ -417,6 +418,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Tunnel online",
     "remoteControl.onlineDesc": "Publishing local UI to Cloudflare",
     "remoteControl.tunnelUrlLabel": "Tunnel URL",
+    "remoteControl.namedUrlLabel": "Permanent address",
+    "remoteControl.namedUrlDesc": "This address stays the same when the tunnel or the box restarts.",
     "remoteControl.copy": "Copy",
     "remoteControl.copied": "Copied",
     "remoteControl.addDevice": "Add device for quick access",
@@ -994,6 +997,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Точка за достъп",
     "credentials.writeDownAck": "Записах ги на сигурно място",
     "credentials.writeDownContinue": "Записах ги — продължи",
+    "credentials.saveAndContinue": "Запази и продължи",
 
     // === AIModelsStep ===
     "ai.title": "Свързване на AI модел",
@@ -1259,6 +1263,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Тунелът е онлайн",
     "remoteControl.onlineDesc": "Публикуване на локалния UI през Cloudflare",
     "remoteControl.tunnelUrlLabel": "URL на тунела",
+    "remoteControl.namedUrlLabel": "Постоянен адрес",
+    "remoteControl.namedUrlDesc": "Този адрес остава същият, когато тунелът или устройството се рестартират.",
     "remoteControl.copy": "Копирай",
     "remoteControl.copied": "Копирано",
     "remoteControl.addDevice": "Добави устройството за бърз достъп",
@@ -1833,6 +1839,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "Ich habe sie sicher notiert",
     "credentials.writeDownContinue": "Notiert — weiter",
+    "credentials.saveAndContinue": "Speichern & Weiter",
 
     // === AIModelsStep ===
     "ai.title": "KI-Modell verbinden",
@@ -2098,6 +2105,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Tunnel online",
     "remoteControl.onlineDesc": "Lokale Oberfläche wird über Cloudflare veröffentlicht",
     "remoteControl.tunnelUrlLabel": "Tunnel-URL",
+    "remoteControl.namedUrlLabel": "Dauerhafte Adresse",
+    "remoteControl.namedUrlDesc": "Diese Adresse bleibt gleich, wenn der Tunnel oder die Box neu startet.",
     "remoteControl.copy": "Kopieren",
     "remoteControl.copied": "Kopiert",
     "remoteControl.addDevice": "Gerät für Schnellzugriff hinzufügen",
@@ -2675,6 +2684,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Punto de acceso",
     "credentials.writeDownAck": "Las he guardado en un lugar seguro",
     "credentials.writeDownContinue": "Ya las guardé, continuar",
+    "credentials.saveAndContinue": "Guardar y continuar",
 
     // === AIModelsStep ===
     "ai.title": "Conectar modelo de IA",
@@ -2940,6 +2950,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Túnel en línea",
     "remoteControl.onlineDesc": "Publicando UI local en Cloudflare",
     "remoteControl.tunnelUrlLabel": "URL del túnel",
+    "remoteControl.namedUrlLabel": "Dirección permanente",
+    "remoteControl.namedUrlDesc": "Esta dirección no cambia cuando se reinicia el túnel o la caja.",
     "remoteControl.copy": "Copiar",
     "remoteControl.copied": "Copiado",
     "remoteControl.addDevice": "Añadir dispositivo para acceso rápido",
@@ -3514,6 +3526,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Point d'accès",
     "credentials.writeDownAck": "Je les ai notés en lieu sûr",
     "credentials.writeDownContinue": "C'est noté — continuer",
+    "credentials.saveAndContinue": "Enregistrer et continuer",
 
     // === AIModelsStep ===
     "ai.title": "Connecter un modèle d'IA",
@@ -3779,6 +3792,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Tunnel en ligne",
     "remoteControl.onlineDesc": "Publication de l’UI locale via Cloudflare",
     "remoteControl.tunnelUrlLabel": "URL du tunnel",
+    "remoteControl.namedUrlLabel": "Adresse permanente",
+    "remoteControl.namedUrlDesc": "Cette adresse reste la même lorsque le tunnel ou la box redémarre.",
     "remoteControl.copy": "Copier",
     "remoteControl.copied": "Copié",
     "remoteControl.addDevice": "Ajouter l'appareil pour un accès rapide",
@@ -4353,6 +4368,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "Le ho messe al sicuro",
     "credentials.writeDownContinue": "Le ho salvate, continua",
+    "credentials.saveAndContinue": "Salva e continua",
 
     // === AIModelsStep ===
     "ai.title": "Connetti modello IA",
@@ -4618,6 +4634,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Tunnel online",
     "remoteControl.onlineDesc": "Pubblicazione UI locale via Cloudflare",
     "remoteControl.tunnelUrlLabel": "URL del tunnel",
+    "remoteControl.namedUrlLabel": "Indirizzo permanente",
+    "remoteControl.namedUrlDesc": "Questo indirizzo resta lo stesso quando il tunnel o il box si riavvia.",
     "remoteControl.copy": "Copia",
     "remoteControl.copied": "Copiato",
     "remoteControl.addDevice": "Aggiungi dispositivo per l'accesso rapido",
@@ -5192,6 +5210,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "ホットスポット",
     "credentials.writeDownAck": "安全な場所に控えました",
     "credentials.writeDownContinue": "控えました — 続ける",
+    "credentials.saveAndContinue": "保存して続行",
 
     // === AIModelsStep ===
     "ai.title": "AIモデルを接続",
@@ -5457,6 +5476,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "トンネル稼働中",
     "remoteControl.onlineDesc": "ローカル UI を Cloudflare で公開しています",
     "remoteControl.tunnelUrlLabel": "トンネル URL",
+    "remoteControl.namedUrlLabel": "固定アドレス",
+    "remoteControl.namedUrlDesc": "このアドレスは、トンネルや本体が再起動しても変わりません。",
     "remoteControl.copy": "コピー",
     "remoteControl.copied": "コピーしました",
     "remoteControl.addDevice": "デバイスを追加してクイックアクセス",
@@ -6031,6 +6052,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Hotspot",
     "credentials.writeDownAck": "Ik heb ze veilig genoteerd",
     "credentials.writeDownContinue": "Genoteerd — doorgaan",
+    "credentials.saveAndContinue": "Opslaan en doorgaan",
 
     // === AIModelsStep ===
     "ai.title": "AI-model verbinden",
@@ -6296,6 +6318,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Tunnel online",
     "remoteControl.onlineDesc": "Lokale UI wordt via Cloudflare gepubliceerd",
     "remoteControl.tunnelUrlLabel": "Tunnel-URL",
+    "remoteControl.namedUrlLabel": "Vast adres",
+    "remoteControl.namedUrlDesc": "Dit adres blijft hetzelfde wanneer de tunnel of de box opnieuw start.",
     "remoteControl.copy": "Kopieer",
     "remoteControl.copied": "Gekopieerd",
     "remoteControl.addDevice": "Apparaat toevoegen voor snelle toegang",
@@ -6870,6 +6894,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "Surfzon",
     "credentials.writeDownAck": "Jag har sparat dem på ett säkert ställe",
     "credentials.writeDownContinue": "Sparade — fortsätt",
+    "credentials.saveAndContinue": "Spara och fortsätt",
 
     // === AIModelsStep ===
     "ai.title": "Anslut AI-modell",
@@ -7135,6 +7160,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "Tunnel online",
     "remoteControl.onlineDesc": "Publicerar lokalt UI via Cloudflare",
     "remoteControl.tunnelUrlLabel": "Tunnel-URL",
+    "remoteControl.namedUrlLabel": "Permanent adress",
+    "remoteControl.namedUrlDesc": "Den här adressen är densamma när tunneln eller boxen startas om.",
     "remoteControl.copy": "Kopiera",
     "remoteControl.copied": "Kopierad",
     "remoteControl.addDevice": "Lägg till enheten för snabb åtkomst",
@@ -7709,6 +7736,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.writeDownHotspot": "热点",
     "credentials.writeDownAck": "我已妥善保存",
     "credentials.writeDownContinue": "已保存，继续",
+    "credentials.saveAndContinue": "保存并继续",
 
     // === AIModelsStep ===
     "ai.title": "连接 AI 模型",
@@ -7974,6 +8002,8 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "remoteControl.onlineTitle": "隧道在线",
     "remoteControl.onlineDesc": "正通过 Cloudflare 发布本地 UI",
     "remoteControl.tunnelUrlLabel": "隧道 URL",
+    "remoteControl.namedUrlLabel": "固定地址",
+    "remoteControl.namedUrlDesc": "隧道或设备重启后，此地址保持不变。",
     "remoteControl.copy": "复制",
     "remoteControl.copied": "已复制",
     "remoteControl.addDevice": "添加设备以便快速访问",

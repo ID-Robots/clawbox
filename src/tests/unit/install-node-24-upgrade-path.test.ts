@@ -304,6 +304,9 @@ const AMBIENT = [
   // The flush before the staged core goes live is `sync -f` on the box; a
   // no-op here, where it would flush the runner's whole filesystem per case.
   "flush_core_to_disk() { :; }",
+  // Stubbed, never lifted: the step calls it with no arguments, which means the
+  // REAL /usr and /usr/local (install-shadowing-system-openclaw.test.ts).
+  "remove_shadowing_system_openclaw() { :; }",
 ];
 
 /** The promotion is lifted, not stubbed: the swap it performs is what puts the launcher doctor then runs in place. */

@@ -7,7 +7,14 @@ export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline? } → start a coding run.
+ * deliverable?, pipeline?, inputs? } → start a coding run.
+ *
+ * `inputs` names files this run is to be given — the pictures the assistant
+ * generated for the task, an attachment that arrived in chat. The device copies
+ * them into a folder the run may read (src/lib/coding-run-inputs.ts), because
+ * the assistant's own media tree sits inside a credential store denied to every
+ * run. A path the box will not copy costs that asset and nothing else: the
+ * answer's run record carries what landed and what did not.
  *
  * `provider` and `model` are the per-run override of the owner's default
  * account (Settings → Coding Agent). They are validated together, by the one
@@ -36,6 +43,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
+    inputs?: unknown;
   };
   try {
     body = await request.json();
@@ -85,6 +93,13 @@ export async function POST(request: Request) {
       // PROJECT's own default decides — which is why `undefined` has to survive
       // this line rather than being normalised to null.
       pipeline: body.pipeline,
+      // Absolute paths of files this run is to be GIVEN. Passed through
+      // unvalidated for the reason `deliverable` is: `startRun` reads the list
+      // through the one reader and judges each path on its own, answering a
+      // coded refusal per entry rather than losing the task over one of them.
+      // The assistant needs this because it writes its generated media inside
+      // its own state directory, which no run may read.
+      inputs: body.inputs,
     });
     return NextResponse.json({ started: true, run }, { status: 202 });
   } catch (err) {

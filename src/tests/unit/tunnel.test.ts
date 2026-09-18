@@ -40,6 +40,14 @@ vi.mock("@/lib/cloudflared", () => ({
   readTunnelUrlFromJournal: () => journalUrlMock(),
 }));
 
+// Which tunnel scripts/run-tunnel.sh started, and the named credential beside it.
+const modeMock = vi.fn(async () => null as "named" | "quick" | null);
+const credentialMock = vi.fn(async () => null as { hostname: string; token: string } | null);
+vi.mock("@/lib/named-tunnel", () => ({
+  readTunnelMode: () => modeMock(),
+  readNamedTunnelCredential: () => credentialMock(),
+}));
+
 let tunnel: typeof import("@/lib/tunnel");
 
 beforeAll(async () => {
@@ -161,7 +169,48 @@ describe("tunnel — getTunnelStatus", () => {
       error: null,
       service: "inactive",
       managedBy: null,
+      mode: null,
+      hostname: null,
     });
+  });
+
+  it("reports the named mode and its hostname — never the token", async () => {
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue("https://amber-otter-k7m2p9qx4w3n.clawbox.tech");
+    modeMock.mockResolvedValue("named");
+    credentialMock.mockResolvedValue({
+      hostname: "amber-otter-k7m2p9qx4w3n.clawbox.tech",
+      token: "eyJzZWNyZXQiOiJkby1ub3Qtc2hvdy1tZSJ9eyJzZWNyZXQiOiJ9",
+    });
+    try {
+      const status = await tunnel.getTunnelStatus();
+      expect(status.mode).toBe("named");
+      expect(status.hostname).toBe("amber-otter-k7m2p9qx4w3n.clawbox.tech");
+      expect(status.tunnelUrl).toBe("https://amber-otter-k7m2p9qx4w3n.clawbox.tech");
+      expect(JSON.stringify(status)).not.toContain("eyJzZWNyZXQi");
+    } finally {
+      modeMock.mockReset().mockResolvedValue(null);
+      credentialMock.mockReset().mockResolvedValue(null);
+      serviceStateMock.mockReset().mockResolvedValue("inactive");
+      unitUrlMock.mockReset().mockResolvedValue(null);
+    }
+  });
+
+  it("reports quick mode with no hostname even when a credential is on file", async () => {
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue("https://abc.trycloudflare.com");
+    modeMock.mockResolvedValue("quick");
+    credentialMock.mockResolvedValue({ hostname: "amber-otter-k7m2p9qx4w3n.clawbox.tech", token: "x".repeat(40) });
+    try {
+      const status = await tunnel.getTunnelStatus();
+      expect(status.mode).toBe("quick");
+      expect(status.hostname).toBeNull();
+    } finally {
+      modeMock.mockReset().mockResolvedValue(null);
+      credentialMock.mockReset().mockResolvedValue(null);
+      serviceStateMock.mockReset().mockResolvedValue("inactive");
+      unitUrlMock.mockReset().mockResolvedValue(null);
+    }
   });
 
   it("reports running+url when pid + url + state are present", async () => {

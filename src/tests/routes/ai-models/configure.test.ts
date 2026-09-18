@@ -106,6 +106,14 @@ const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() 
   LLAMACPP_PROXY_BASE_URL: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
 }));
 
+vi.mock("@/lib/openclaw-gateway-ws", () => ({
+  waitForGatewayRpcReady: vi.fn().mockResolvedValue(true),
+  gatewayWsCall: vi.fn(),
+  gatewayWsPatchConfig: vi.fn(),
+  GatewayWsUnavailableError: class GatewayWsUnavailableError extends Error {},
+  GatewayRpcError: class GatewayRpcError extends Error {},
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   // Pure helper — mirror the real implementation (unit-tested in
@@ -118,6 +126,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class, not `vi.fn()` and not an omitted export: the route narrows on
   // `instanceof GatewayNotReadyError`, and `instanceof undefined` throws a
   // TypeError the first time a test makes the restart reject.
+  // The port-readiness budget, which is also the one the deferred session
+  // sweep is bounded by. A plain value, not a vi.fn(): every suite here means
+  // the shipped 30 s.
+  gatewayReadyWaitMs: () => 30000,
   GatewayNotReadyError: class GatewayNotReadyError extends Error {
     constructor(message = "gateway did not come back") {
       super(message);
@@ -321,6 +333,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     // defaults set in `vi.mock(...)` hold across vi.resetModules but are
     // wiped by mockClear call history cleanup, so we seed them per-test.
     mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
+    // The gateway came back: the default every case here means, and the one the
+    // detached follow-up needs too (an unseeded mock resolves `undefined`,
+    // which is not a promise to hang a `.then` on).
+    vi.mocked((await import("@/lib/openclaw-gateway-ws")).waitForGatewayRpcReady).mockResolvedValue(true);
     mockParseFullyQualifiedModel.mockImplementation(parseFullyQualifiedModelImpl);
     mockGetDefaultLlamaCppModel.mockReturnValue("gemma4-e2b-it-q4_0");
     mockGetLlamaCppContextWindow.mockReturnValue(131072);
@@ -385,6 +401,20 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(400);
     expect(body.error).toContain("Unknown provider");
+  });
+
+  // The same 400, for the names a PLAIN OBJECT answers for whether or not the
+  // table declares them. `PROVIDERS["toString"]` resolved to
+  // `Object.prototype.toString`, which is truthy, so the "Unknown provider"
+  // guard below it never fired and the handler carried on with a config that
+  // spreads to `{}` — no defaultModel, no profileKey.
+  it("returns 400 for a provider named after something on Object.prototype", async () => {
+    for (const provider of ["toString", "valueOf", "constructor", "hasOwnProperty"]) {
+      const res = await configurePost(jsonRequest({ provider, apiKey: "test" }));
+      const body = await res.json();
+      expect(res.status, `${provider} must be refused`).toBe(400);
+      expect(body.error).toContain("Unknown provider");
+    }
   });
 
   it("configures anthropic provider successfully", async () => {
@@ -964,6 +994,126 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set models.mode merge");
   });
 
+  /**
+   * The sign-in that migrates the auth store stops the gateway for `doctor`
+   * and nothing restarts it before step 9. The session sweep used to run in
+   * that window, hit "Gateway not reachable (ECONNREFUSED)" and be swallowed
+   * as non-fatal — on a box (2026-09-18) the main session kept its ClawBox AI
+   * pin while the box default became GPT-6 Astra. The sweep must follow the
+   * restart AND the gateway answering RPC, and a sweep that still could not
+   * run must be said in the answer.
+   */
+  it("re-points open chats only after the gateway it stopped answers again", async () => {
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    const order: string[] = [];
+    vi.mocked(restartGateway).mockImplementation(async () => { order.push("restart"); });
+    vi.mocked(waitForGatewayRpcReady).mockImplementation(async () => { order.push("ready"); return true; });
+    mockApplyModelOverrideToAllAgentSessions.mockImplementation(async () => { order.push("sweep"); return { filesUpdated: 1, sessionsUpdated: 1, refused: [] } as unknown as Awaited<ReturnType<typeof applyModelOverrideToAllAgentSessions>>; });
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+    expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai", modelId: "gpt-5.5", source: "user" }),
+    );
+    expect(order).toEqual(["restart", "ready", "sweep"]);
+  });
+
+  it("still owes the deferred sweep its attempt and its warning when the port never came back", async () => {
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    vi.mocked(restartGateway).mockRejectedValueOnce(new GatewayNotReadyError());
+    let resolveReady: (ready: boolean) => void = () => {};
+    vi.mocked(waitForGatewayRpcReady).mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveReady = resolve; }));
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    const body = await res.json();
+
+    // Answered at once, with both facts: the gateway is not back, and the open
+    // chats keep their model for now.
+    expect(res.status).toBe(200);
+    expect(body.warning).toMatch(/has not finished restarting/);
+    expect(body.warning).toMatch(/keeps its previous model/);
+    expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+    // …and the sweep still follows the gateway when it does come back.
+    resolveReady(true);
+    await vi.waitFor(() => expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledTimes(1));
+  });
+
+  it("says so when the open chats could not be re-pointed after the restart", async () => {
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    vi.mocked(waitForGatewayRpcReady).mockResolvedValueOnce(false);
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warning).toMatch(/keeps its previous model/);
+    // The wait a PERSON pays is the port budget and no more — the tunnel in
+    // front of this box gives up at ~100 s, and a save that landed reported as
+    // a failure is the worse answer. Past it the sentence goes out and the
+    // sweep still follows the gateway: the budget expiring means "slow", not
+    // "never".
+    expect(vi.mocked(waitForGatewayRpcReady).mock.calls[0][0]).toBe(30000);
+    await vi.waitFor(() => expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledTimes(1));
+  });
+
+  /**
+   * The sweep does not THROW when the gateway refuses a session. On an
+   * OpenClaw 2 agent — the sqlite store, every current box —
+   * `patchChunk` catches the RPC error, `applyModelOverrideToAllAgentSessions`
+   * counts the session into `sessionsSkipped`, logs it and returns NORMALLY.
+   * Reading the absent exception as an outcome answered 200 with no warning
+   * over open chats that kept their old pin: the "false success" class.
+   */
+  it("says so when the gateway refused the sessions the sweep asked it to re-point", async () => {
+    mockApplyModelOverrideToAllAgentSessions.mockResolvedValueOnce({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 2 });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalled();
+    expect(body.warning).toMatch(/keeps its previous model/);
+  });
+
+  it("stays quiet when every session the sweep could repoint was repointed", async () => {
+    // The other direction: `sessionsUpdated: 0` with nothing skipped is a box
+    // with no open chat, not a failure, and must not warn about one.
+    mockApplyModelOverrideToAllAgentSessions.mockResolvedValueOnce({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+  });
+
   it("configures subscription auth mode for oauth", async () => {
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -996,7 +1146,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // One openai profile on this box, so there is nothing to disambiguate and
     // an explicit order would only hide the credential the owner adds next —
     // the core already selects a usable profile over the
-    // `models.providers.openai.apiKey` fallback. And no `clear` either: ClawBox
+    // provider-entry fallback. And no `clear` either: ClawBox
     // has never written an order on this box, so the clear would be a CLI cold
     // start (~10 s on a Jetson, on the wizard's critical path) against a store
     // that has none.
@@ -3054,8 +3204,11 @@ describe("POST /setup-api/ai-models/configure", () => {
         "models.providers.deepseek",
         "models.mode",
         "agents.defaults.imageModel",
-        "models.providers.openai.apiKey",
-        "models.providers.openai.models",
+        // The ClawBox AI image endpoint, on its OWN provider id: an apiKey on
+        // `models.providers.openai` pins that provider to API-key auth and
+        // hides a ChatGPT sign-in (see CLAWBOX_AI_IMAGE_PROVIDER).
+        "models.providers.litellm.apiKey",
+        "models.providers.litellm.baseUrl",
         "agents.defaults.mediaModels.image",
         "agents.defaults.model.fallbacks",
       ]) {
@@ -3073,7 +3226,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       // The expensive ones. Each of these used to be written twice.
       expect(paths.filter((p) => p === "models.providers.deepseek")).toHaveLength(1);
-      expect(paths.filter((p) => p === "models.providers.openai.apiKey")).toHaveLength(1);
+      expect(paths.filter((p) => p === "models.providers.litellm.apiKey")).toHaveLength(1);
       expect(paths.filter((p) => p === "agents.defaults.mediaModels.image")).toHaveLength(1);
       // Two, not one: the generic auth-profile step and the ClawBox AI step
       // both name this path, with the same value. That overlap predates this

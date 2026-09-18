@@ -13,6 +13,17 @@ import { I18nProvider } from "@/lib/i18n";
  * embedded on the box or in somebody's cloud, and can reindex without SSH.
  */
 
+/**
+ * `I18nProvider` loads its catalogue through a dynamic import, so the first
+ * mount in this file pays for that before a single translated word is on
+ * screen — and every assertion here is about words. Vitest's five-second
+ * default is what that lands under on a loaded six-core box, which is how the
+ * suite's first two tests came to be the only ones that ever failed. The
+ * `chat-approval-card-batch` precedent: raise it for the file rather than
+ * sprinkle per-test overrides on whichever test happens to run first.
+ */
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+
 const LOCAL_MEMORY = {
   available: true,
   provider: "ollama",
@@ -56,6 +67,8 @@ let indexGate: Promise<void> | null = null;
 let scheduleGate: Promise<void> | null = null;
 /** The same, for the status read the window opens with. */
 let statusGate: Promise<void> | null = null;
+/** The desktop's language, as the preferences route reports it. */
+let uiLanguage = "en";
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -90,6 +103,9 @@ function installFetch() {
       if (statusGate) await statusGate;
       return ok(memory);
     }
+    // How the desktop's language reaches `I18nProvider`. English unless a test
+    // says otherwise, which is what every other case here assumes.
+    if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: uiLanguage });
     return ok({});
   }));
 }
@@ -110,6 +126,7 @@ describe("the Memory Shard app", () => {
     indexGate = null;
     scheduleGate = null;
     statusGate = null;
+    uiLanguage = "en";
     installFetch();
   });
 
@@ -125,9 +142,12 @@ describe("the Memory Shard app", () => {
     // embedder, or reads nothing, the panel is worse than not shipping it.
     // This file runs beside 500 others on a six-core Jetson: the default
     // one-second wait was the only thing that ever failed here, and only
-    // under that load.
-    expect(await screen.findByText("On device", {}, { timeout: 5000 })).toBeTruthy();
-    expect(await screen.findByText("Embedding with qwen3-embedding:0.6b", {}, { timeout: 5000 })).toBeTruthy();
+    // under that load. Five seconds went the same way once this suite grew a
+    // second page of tests — it is the FIRST mount that pays for the i18n
+    // catalogue's dynamic import, so this one assertion carries the whole
+    // file's cold start.
+    expect(await screen.findByText("On device", {}, { timeout: 15_000 })).toBeTruthy();
+    expect(await screen.findByText("Embedding with qwen3-embedding:0.6b", {}, { timeout: 15_000 })).toBeTruthy();
     expect(screen.getByText("Healthy")).toBeTruthy();
   });
 
@@ -523,6 +543,115 @@ describe("the Memory Shard app", () => {
     expect(statusReads()).toBe(before + 5);
     await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     expect(statusReads()).toBe(before + 6);
+  });
+
+  /**
+   * The bar. The whole of the customer's ask: a pass that is going must show
+   * something moving, and where the box knows the numbers it must show those
+   * rather than a spinner — but where it does NOT know them (a pass that
+   * has not counted anything yet, or an OpenClaw box with no terminal to run
+   * its CLI on, whose reporter prints only to one) the bar must claim no
+   * percentage at all, or the owner is watching an invented one.
+   */
+  describe("while a pass is going", () => {
+    const RUNNING = (progress: unknown) => ({
+      ...LOCAL_MEMORY,
+      run: {
+        ...LOCAL_MEMORY.run,
+        status: "running",
+        mode: "full",
+        trigger: "manual",
+        startedAtMs: Date.now() - 20_000,
+        progress,
+      },
+    });
+
+    it("draws the files it has done of the files it found, and the percentage", async () => {
+      memory = RUNNING({ filesDone: 140, filesTotal: 980, chunks: 3412 });
+      mount();
+      // The copy, not the test id, is awaited: `I18nProvider` loads its
+      // catalogue through a dynamic import, so the card paints its keys raw
+      // for a tick or two first.
+      expect(await screen.findByText("140 of 980 files · 3,412 chunks", {}, { timeout: 8000 })).toBeTruthy();
+      const bar = screen.getByTestId("memory-shard-progress");
+      expect(bar.querySelector('[data-determinate="true"]')).toBeTruthy();
+      expect(screen.getByTestId("memory-shard-progress-percent").textContent).toBe("14%");
+      // What assistive tech reads: a real fraction, not a busy spinner.
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("14");
+      expect(screen.getByTestId("memory-shard-progress-fill").getAttribute("style")).toContain("width: 14%");
+    });
+
+    it("draws the same fraction for an OpenClaw box's pass, read off its CLI's reporter", async () => {
+      // The case the bar was missing on: a linked OpenClaw box with cloud
+      // embeddings, a Full reindex of 6 files / 12 chunks. The server now
+      // fills `progress` from `openclaw memory index` run on a terminal, in
+      // the same shape the box's own indexer uses — so the card has no branch
+      // for it, and this is the proof.
+      memory = {
+        ...RUNNING({ filesDone: 3, filesTotal: 6, chunks: 7 }),
+        provider: "openai-compatible",
+        model: "text-embedding-3-large",
+        location: "cloud",
+      };
+      mount();
+      expect(await screen.findByText("3 of 6 files · 7 chunks", {}, { timeout: 8000 })).toBeTruthy();
+      expect(screen.getByTestId("memory-shard-progress").querySelector('[data-determinate="true"]')).toBeTruthy();
+      expect(screen.getByTestId("memory-shard-progress-percent").textContent).toBe("50%");
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+      expect(screen.queryByText(/Working through your files/)).toBeNull();
+    });
+
+    it("says an OpenClaw box's numbers in Bulgarian too", async () => {
+      uiLanguage = "bg";
+      memory = {
+        ...RUNNING({ filesDone: 3, filesTotal: 6, chunks: 7 }),
+        provider: "openai-compatible",
+        model: "text-embedding-3-large",
+        location: "cloud",
+      };
+      mount();
+      expect(await screen.findByText(/3 от 6 файла · 7 части/, {}, { timeout: 8000 })).toBeTruthy();
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+    });
+
+    it("claims no percentage on a box whose indexer cannot count", async () => {
+      // An OpenClaw box with no terminal to run its CLI on sends
+      // `progress: null`. A bar reading 0% for twenty minutes is a worse
+      // answer than a bar that says only "working".
+      memory = RUNNING(null);
+      mount();
+      expect(await screen.findByText(/Working through your files/, {}, { timeout: 8000 })).toBeTruthy();
+      const bar = screen.getByTestId("memory-shard-progress");
+      expect(bar.querySelector('[data-determinate="false"]')).toBeTruthy();
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBeNull();
+      expect(screen.queryByTestId("memory-shard-progress-percent")).toBeNull();
+    });
+
+    it("claims no percentage while the scan is still walking the folders", async () => {
+      // Before the scan finishes there is no denominator, and the pass says so
+      // with a total of zero rather than by holding the bar back.
+      memory = RUNNING({ filesDone: 0, filesTotal: 0, chunks: 0 });
+      mount();
+      const bar = await screen.findByTestId("memory-shard-progress");
+      expect(bar.querySelector('[data-determinate="false"]')).toBeTruthy();
+      expect(screen.queryByTestId("memory-shard-progress-percent")).toBeNull();
+    });
+
+    it("keeps the bar off the card when no pass is going", async () => {
+      mount();
+      await screen.findByText("On device", {}, { timeout: 8000 });
+      expect(screen.queryByTestId("memory-shard-progress")).toBeNull();
+    });
+
+    it("says it in the language of the desktop", async () => {
+      // The one thing a hard-coded English bar would have got past every other
+      // test in this file. The locale arrives the way it does on the box:
+      // `I18nProvider` asks the preferences route on mount.
+      uiLanguage = "de";
+      memory = RUNNING({ filesDone: 3, filesTotal: 4, chunks: 12 });
+      mount();
+      expect(await screen.findByText(/3 von 4 Dateien/, {}, { timeout: 8000 })).toBeTruthy();
+    });
   });
 
   it("surfaces a mismatched index as something to fix, not as a healthy box", async () => {

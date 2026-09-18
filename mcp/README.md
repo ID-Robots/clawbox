@@ -588,6 +588,22 @@ itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
 Code running on the box's own ClawBox AI plan (`scripts/claude-ds`) — which
 works in the background inside one folder and reports back with a summary.
 
+`coding_agent_run` takes an optional `input_files`: a comma-separated list of
+ABSOLUTE paths of files the run is to be GIVEN — the pictures or clips the
+agent generated for the task, a file the user sent it. This exists because the
+agent writes its generated media inside its own state directory, which is a
+credential store denied to every run, wholesale and unopenably: a deny rule
+outranks any allow rule in Claude Code, so a path merely MENTIONED in the task
+is a file the run can never open (reported from a live run: "denied by
+permission settings for all routes — Bash cp and Read both refused", after
+which the run drew the four pictures again). Named here, the device copies each
+one into `data/coding-agent-inputs/<runId>/`, a folder every run may read, and
+tells the run their names. It copies only out of the media trees it writes and
+out of that inputs tree — a path anywhere else is refused, per file, with a
+stable code, and the answer says which asset did not arrive. A file the OWNER
+wants a run to have goes in `data/coding-agent-inputs/shared/`, which every run
+may read with no permission rule at all.
+
 `coding_agent_run` takes an optional `provider` (`clawbox-ai` | `anthropic`)
 and, for `anthropic` only, a `model`. Omitted, they mean the owner's stored
 default (Settings → Coding Agent), which this process does not know — so an

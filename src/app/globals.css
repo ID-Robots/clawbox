@@ -391,9 +391,8 @@ h6 {
  * and a readable pill row no longer fit on one line, the pills take a line of
  * their own — see .chat-header-pills' flex-basis, which is what decides when
  * that happens. */
-/* The phone chat's microphone: 72px, round, beside the text box. Solid orange
- * at rest, solid red with a pulsing ring while it records, so the state reads
- * at a glance from arm's length. See renderVoiceButton in ChatPopup.tsx. */
+/* Phone voice feedback. The composer rules below size this in-flow target to
+ * 44px; the recording state stays red with a reduced-motion-aware pulse. */
 .chat-voice-large {
   width: 72px;
   height: 72px;
@@ -535,6 +534,17 @@ h6 {
 .spoken-reply-play:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* Stop sits beside play while a reply speaks: the same target size, a quieter
+   ground, so the play/pause button stays the primary control. */
+.spoken-reply-stop {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.spoken-reply-stop:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
 }
 
 .spoken-reply-wave {
@@ -968,6 +978,50 @@ select optgroup {
   font-weight: 400;
   white-space: normal;
   line-height: 1.3;
+}
+
+/* ── the composer's slash-command menu ─────────────────────────────────
+   Reuses the dropdown's ground, rows and highlight WHOLE (the popover carries
+   `header-dropdown-popover` and each row `header-dropdown-option`), so a
+   popover over the composer reads as the same control family as the pills
+   above it. Nothing about the container is restated: `.slash-command-menu` is
+   the family's name in the markup and carries no declarations — the rule that
+   used to sit here set the padding the base already sets, under a comment
+   about an 8px this codebase never uses.
+
+   What follows is only what a COMMAND row needs and a menu row does not.
+
+   The rows are `<div role="option">` and never take focus — the textarea keeps
+   it and drives the list through aria-activedescendant — so `cursor: default`
+   on the container is corrected back to a pointer per row rather than fought
+   with :focus styles that can never fire. */
+/* The command itself, in the font the owner is typing it in: a menu that
+   renders `/model` in the body face and the composer in another is a menu that
+   does not look like what it inserts. */
+.slash-command-usage {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Two lines at most: these are the harness's own descriptions and some of them
+   are a full sentence, but a row that grew to four lines would leave two
+   commands visible where eight belong. */
+.slash-command-description {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 400;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.slash-command-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
 }
 
 /* ── field variant ─────────────────────────────────────────────────────
@@ -2148,53 +2202,88 @@ input[type="range"].appearance-none::-moz-range-track {
   }
 }
 
-/* Phone chat composer (ChatPopup, mobile). Two tidy rows instead of three
- * ragged ones: the text box beside the big microphone (the primary action),
- * then ONE row of equal 40px buttons — attach, create, picture, the pickers
- * toggle — with Send (or Stop) pinned right. The provider / model / effort
- * pills fold behind the toggle and, when opened, take a full-width row of
- * their own under it, each pill an equal share. `display: contents` on the
- * tail lets the pills and Send be ordered as members of the row itself. */
-@media (max-width: 767px) {
-  [data-chat-mobile] .chat-voice-large { width: 64px; height: 64px; flex-basis: 64px; }
-  [data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 32px !important; }
-  [data-chat-mobile] .chat-composer-row { flex-wrap: wrap; gap: 8px; }
-  [data-chat-mobile] .chat-composer-tail { display: contents; }
-  [data-chat-mobile] .chat-composer-row > button,
-  [data-chat-mobile] .chat-composer-tail > button {
-    width: 40px !important;
-    height: 40px !important;
-    border-radius: 12px !important;
+/* Phone composer: one in-flow primary row and one settings row.
+ * Scope to the component's mobile mode (also used in phone landscape), not
+ * only viewport width. Desktop geometry and button sizes remain unchanged. */
+[data-chat-mobile] .chat-composer { flex-shrink: 0; }
+[data-chat-mobile] .chat-composer-primary { min-width: 0; }
+[data-chat-mobile] .chat-composer-primary > button {
+  width: 44px !important;
+  height: 44px !important;
+  flex: 0 0 44px;
+  border-radius: 12px !important;
+}
+[data-chat-mobile] .chat-composer-primary textarea {
+  font-size: 16px !important;
+  min-height: 44px;
+  padding: 10px 12px !important;
+}
+[data-chat-mobile] .chat-voice-large { box-shadow: none; }
+/* Portrait phone: the microphone alone on its own row, centred across the
+ * chat's full width, a 56px thumb target; Send/Stop keeps the slot beside the
+ * text box. Landscape never renders this row. */
+[data-chat-mobile] .chat-composer-voice-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+}
+[data-chat-mobile] .chat-composer-voice-row .chat-voice-large {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+}
+[data-chat-mobile] .chat-composer-voice-row .chat-voice-large .material-symbols-rounded { font-size: 30px !important; }
+[data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 24px !important; }
+[data-chat-mobile] .chat-composer-row { flex-wrap: nowrap; gap: 6px; min-width: 0; }
+[data-chat-mobile] .chat-composer-row > button {
+  width: 36px !important;
+  height: 40px !important;
+  border-radius: 12px !important;
+}
+[data-chat-mobile] .chat-composer-tail { flex: 1 1 0; min-width: 0; }
+[data-chat-mobile] .chat-header-pills { gap: 4px; flex: 1 1 0; }
+[data-chat-mobile] .chat-header-pills .header-dropdown { flex: 1 1 0; }
+[data-chat-mobile] .chat-header-pills .header-dropdown-trigger {
+  width: 100%;
+  max-width: none !important;
+  min-height: 40px;
+  font-size: 12.5px;
+  border-radius: 12px;
+}
+
+/* ── Memory Shard's indexing bar (src/components/MemoryShardApp.tsx) ────────
+   A pass ClawBox runs itself counts the files its scan found, so that bar is a
+   real fraction and needs no keyframes — its width is a style. This is the
+   OTHER face: `openclaw memory index` reports its progress to a terminal
+   reporter that is a no-op on the pipe this box spawns it down, so that arm
+   sends no numbers and gets motion that says "working" without claiming a
+   percentage. Flat classes only — the setup-ground parity test parses every
+   selector in this file with its own small engine, which reads classes and
+   attributes but no combinators. */
+.memory-index-bar-sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  border-radius: inherit;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .memory-index-bar-sweep {
+    animation: memory-index-sweep 1.6s ease-in-out infinite;
   }
-  [data-chat-mobile] [data-testid="chat-send"],
-  [data-chat-mobile] [data-testid="chat-stop"] { margin-left: auto; }
-  [data-chat-mobile] .chat-header-pills {
-    display: none;
-    order: 10;
-    flex: 1 0 100%;
-    gap: 8px;
-  }
-  [data-chat-mobile] [data-pickers-open] .chat-header-pills { display: flex; }
-  [data-chat-mobile] .chat-header-pills .header-dropdown { flex: 1 1 0; }
-  [data-chat-mobile] .chat-header-pills .header-dropdown-trigger {
+}
+/* Its resting frame: the whole track, dimmed. Without this the un-animated
+   sweep sits over the first 40% and reads as a stalled 40% run — a number the
+   box never reported. */
+@media (prefers-reduced-motion: reduce) {
+  .memory-index-bar-sweep {
     width: 100%;
-    max-width: none !important;
-    min-height: 40px;
-    font-size: 12.5px;
-    border-radius: 12px;
+    opacity: 0.45;
+    animation: none;
   }
-  .chat-pickers-toggle {
-    border: none;
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    cursor: pointer;
-  }
-  .chat-pickers-toggle[aria-expanded="true"] {
-    background: rgba(249, 115, 22, 0.2);
-    color: #f97316;
-  }
+}
+@keyframes memory-index-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
 }

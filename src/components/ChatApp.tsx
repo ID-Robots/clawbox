@@ -3,7 +3,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
-import { describeChatFailure } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
+import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -17,6 +18,7 @@ import { renderText, audioLabel } from '@/lib/chat-markdown'
 import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
 import { ChatProgressCard } from '@/components/ChatProgressCard'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
+import { stopSpokenReply } from '@/lib/spoken-reply-playback'
 import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
@@ -60,6 +62,8 @@ import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
 // so a wrapped reply showed its tags live and lost them after a reload — the
 // replayed path goes through this module's projection.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { useSlashCommands } from '@/lib/use-slash-commands'
+import SlashCommandMenu from '@/components/SlashCommandMenu'
 import {
   HarnessError,
   type HarnessAdapter,
@@ -83,6 +87,12 @@ import {
   type ChatAttachment,
   type StagingFailure,
 } from '@/lib/chat-attachments'
+import {
+  gatewayFrameError,
+  isGatewayStartingRefusal,
+  STARTING_MAX_RETRIES,
+  STARTING_RETRY_DELAY_MS,
+} from '@/lib/chat-gateway-starting'
 
 
 interface ChatAppProps {
@@ -91,7 +101,11 @@ interface ChatAppProps {
 }
 
 function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
-  const { t } = useT()
+  const { t, locale } = useT()
+  // The words a failed turn is said in — a ref, for the handlers that
+  // outlive the render that created them.
+  const failureWordsRef = useRef({ t, locale })
+  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Welcome-to-portal banner: show in the chat empty state when the user
   // hasn't signed in to a ClawBox account yet. Dismissible, persisted in
@@ -169,6 +183,19 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
+  // The provider's own refusal rides on the lifecycle frames; see lib/chat-run-failure.ts.
+  const runFailureRef = useRef(new RunFailureLedger())
+  // A connect the gateway refused only because it is still booting is
+  // retried on this ladder; reset once a connect lands.
+  const startingRetriesRef = useRef(0)
+  const startingRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Has this component gone? The starting-retry timer is the one deferred piece
+  // of work here that OPENS A SOCKET rather than touching state, so a pending
+  // one on an unmounted component is up to two minutes of sockets and ws-config
+  // fetches (STARTING_MAX_RETRIES × STARTING_RETRY_DELAY_MS) for a window the
+  // owner has already closed. ChatPopup gates every branch of its own ladder
+  // the same way, with `isCurrent()`.
+  const unmountedRef = useRef(false)
   // Sends queued while status is 'connecting'. Drained by a useEffect when
   // we transition to 'connected'. The optimistic user message is added to
   // `messages` immediately so the UI feels responsive even though the
@@ -278,7 +305,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     () => ({ gateway: gatewayLink, hermesContext }),
     [gatewayLink, hermesContext],
   )
-  const { adapter, capabilities: caps, resolved: harnessLoaded } = useHarnessAdapter(harnessWiring)
+  // `harnessId` is taken only so the portaled slash menu can carry the Hermes
+  // skin marker: it mounts on <body>, outside this surface's ancestor, so it
+  // cannot inherit the theme. Every other branch here is on `caps.*`, and
+  // deliberately stays that way.
+  const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } = useHarnessAdapter(harnessWiring)
   // Read by the callbacks that must stay stable: `connect` and `loadHistory` are
   // closed over by long-lived socket handlers, so neither may capture whichever
   // adapter was current on the first render — before the box had answered.
@@ -447,6 +478,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         resolve: (hello: unknown) => {
           setStatus('connected')
           connectedOnceRef.current = true
+          startingRetriesRef.current = 0
           const h = hello as Record<string, unknown>
           const snapshot = h.snapshot as Record<string, unknown> | undefined
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
@@ -456,6 +488,34 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           loadHistory()
         },
         reject: (err: Error) => {
+          // A gateway that is still booting refuses the connect frame with the
+          // core's own retryable startup-sidecars shape — every restart does,
+          // for ten to twenty seconds. Not a refusal to park on: stay in the
+          // connecting state and try again, bounded, and keep the error panel
+          // for refusals that will not change on their own.
+          if (isGatewayStartingRefusal(err) && startingRetriesRef.current < STARTING_MAX_RETRIES) {
+            startingRetriesRef.current++
+            // THIS socket, not whatever `wsRef` happens to hold: a newer
+            // connect may already own the ref, and closing it here would tear
+            // down the attempt that is about to succeed. Its handlers come off
+            // FIRST: the browser fires `close` for the close below, and this
+            // socket's onClose would paint the error panel over a retry that
+            // is still climbing — and null a `wsRef` a newer socket owns.
+            ws.onclose = null
+            ws.onmessage = null
+            try { ws.close() } catch { /* already closing */ }
+            if (wsRef.current === ws) wsRef.current = null
+            if (startingRetryTimerRef.current) clearTimeout(startingRetryTimerRef.current)
+            startingRetryTimerRef.current = setTimeout(() => {
+              startingRetryTimerRef.current = null
+              // The component may have gone in the three seconds this waited,
+              // and a newer connect may have taken the socket over; either way
+              // this attempt is stale and must not open another one.
+              if (unmountedRef.current || wsRef.current) return
+              void connectRef.current()
+            }, STARTING_RETRY_DELAY_MS)
+            return
+          }
           setStatus('error')
           setErrorMsg(err.message || 'Auth failed')
         },
@@ -509,8 +569,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           if (data.ok) {
             pending.resolve(data.payload)
           } else {
-            const err = data.error as Record<string, unknown> | undefined
-            pending.reject(new Error((err?.message as string) || 'Request failed'))
+            pending.reject(gatewayFrameError(data.error as Record<string, unknown> | undefined))
           }
         }
         return
@@ -536,6 +595,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         if (eventName === 'agent') {
           const payload = data.payload as Record<string, unknown> | undefined
           if (!payload) return
+          runFailureRef.current.observe(payload)
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
           if (payload.stream === 'tool') {
@@ -595,6 +655,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               appendAssistantReply(text, images, audio, files.length ? { files } : undefined)
             }
             applyStreaming('')
+            // A reply another model wrote — the picked one failed and the
+            // gateway's configured fallback answered. The `final` frame does
+            // not say so; the run's lifecycle frames did. One honest line
+            // under the reply, or the owner reads "I'm deepseek" under a
+            // header that says otherwise (a box, 2026-09-17).
+            const fallbackNote = describeFallbackReply(runFailureRef.current.settle(payload))
+            if (fallbackNote) setMessages(prev => [...prev, { role: 'system', text: fallbackNote, timestamp: Date.now() }])
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
@@ -658,7 +725,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, runFailureRef.current.settle(payload), failureWordsRef.current), timestamp: Date.now() }])
             }
           }
         }
@@ -875,7 +942,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       // the customer's transcript (TASK-440).
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined)
+        : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
       // What the box managed to write is the OWNER'S. Read, clear, THEN append,
       // all outside any updater, and before the failure line so the answer stays
       // above it. Only a harness that streams on this promise ever arrives here
@@ -926,6 +993,8 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     const text = input.trim()
     const staged = [...pendingAttachments]
     if ((!text && staged.length === 0) || sending) return
+    // A new prompt: the reply still speaking stops; its bubble keeps the clip.
+    stopSpokenReply()
 
     // Pictures render in the bubble; everything else keeps a 📎 line, because a
     // document has nothing to show and a caption alone would refer to nothing.
@@ -1041,17 +1110,30 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
   // dependencies, so this is where the socket and the deferred refetch were
   // always released.
-  useEffect(() => () => {
-    // The adapter's own teardown — the gateway's closes the socket and rejects
-    // what was waiting on it; a harness that answers on a promise aborts the turn
-    // it was running. The direct close stays beside it because the socket is this
-    // component's to own whatever the adapter turns out to be.
-    adapterRef.current.disconnect()
-    wsRef.current?.close()
-    wsRef.current = null
-    if (ackOnlyHistoryTimerRef.current !== null) {
-      window.clearTimeout(ackOnlyHistoryTimerRef.current)
-      ackOnlyHistoryTimerRef.current = null
+  useEffect(() => {
+    // Set on every mount, not only declared once: React 19's StrictMode mounts,
+    // unmounts and mounts again, and a flag only ever set to true would leave
+    // the remounted component believing it was gone.
+    unmountedRef.current = false
+    return () => {
+      // The adapter's own teardown — the gateway's closes the socket and rejects
+      // what was waiting on it; a harness that answers on a promise aborts the
+      // turn it was running. The direct close stays beside it because the socket
+      // is this component's to own whatever the adapter turns out to be.
+      unmountedRef.current = true
+      adapterRef.current.disconnect()
+      wsRef.current?.close()
+      wsRef.current = null
+      if (ackOnlyHistoryTimerRef.current !== null) {
+        window.clearTimeout(ackOnlyHistoryTimerRef.current)
+        ackOnlyHistoryTimerRef.current = null
+      }
+      // The starting-retry ladder: cleared only by the NEXT retry until now, so
+      // a window closed inside the three-second wait went on reconnecting.
+      if (startingRetryTimerRef.current !== null) {
+        clearTimeout(startingRetryTimerRef.current)
+        startingRetryTimerRef.current = null
+      }
     }
   }, [])
 
@@ -1073,12 +1155,38 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // Enter often inserts a newline instead of sending. ChatPopup's predicate.
   const sendable = input.trim().length > 0 || pendingAttachments.length > 0
 
+  // ── Slash-command autocomplete ──────────────────────────────────────────
+  //
+  // The same hook the mascot chat uses, over the same adapter: the list is the
+  // HARNESS'S (`commands.list` on the gateway, `commands.catalog` on Hermes'
+  // dashboard), and so is the behaviour. This surface's whole share of the
+  // feature is this call, the guard below and the menu at the composer.
+  const slash = useSlashCommands({
+    adapter: harnessLoaded ? adapter : null,
+    status,
+    value: input,
+    setValue: setInput,
+    inputRef,
+    enabled: status === 'connected',
+  })
+
+  // The HANDLER, not the object it comes on: `useSlashCommands` returns a
+  // fresh literal every render, so a callback that depended on `slash` was
+  // rebuilt on every keystroke and its memo did nothing at all.
+  const slashKeyDown = slash.handleKeyDown
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // An IME candidate window owns Enter while it is up — before the menu,
+    // which would otherwise accept a command on the keystroke that was
+    // committing a half-composed word.
+    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
+    // The menu gets first refusal: with it open Enter and Tab accept the
+    // highlighted command instead of sending. Closed, this is unchanged.
+    if (slashKeyDown(e)) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
     }
-  }, [sendMessage])
+  }, [sendMessage, slashKeyDown])
 
   return (
     <div style={{
@@ -1267,7 +1375,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   ))}
                 </div>
               )}
-              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
+              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
               {files.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
                   {files.map(src => <ChatFileCard key={src} src={src} />)}
@@ -1332,7 +1440,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   still agree, which is the property that matters; there is no
                   `dropUnfinishedDirective` equivalent for media, and the
                   mascot chat accepts the same token. */}
-              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"))}
+              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"), t("chat.detailsSummary"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>
@@ -1483,9 +1591,18 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         <textarea
           ref={inputRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          // The draft and the caret move together — see the mascot chat's note.
+          onChange={slash.handleChange}
+          onSelect={slash.handleSelect}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          // Focus never leaves this textarea: the menu is a listbox it owns and
+          // announces from here. The role stays `textbox` on purpose — see the
+          // note on the mascot chat's composer.
+          aria-haspopup="listbox"
+          aria-controls={slash.open ? slash.listboxId : undefined}
+          aria-activedescendant={slash.activeOptionId}
+          aria-autocomplete="list"
           placeholder={status === 'connected' ? t("chat.messagePlaceholder") : t("chat.connectingPlaceholder")}
           disabled={status !== 'connected'}
           rows={1}
@@ -1501,6 +1618,20 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
+        {slash.open && (
+          <SlashCommandMenu
+            anchorRef={inputRef}
+            commands={slash.items}
+            activeIndex={slash.activeIndex}
+            listboxId={slash.listboxId}
+            optionId={slash.optionId}
+            onPick={slash.accept}
+            onHover={slash.setActiveIndex}
+            ariaLabel={t("chat.slash.menuLabel")}
+            emptyLabel={t("chat.slash.noMatches")}
+            hermes={harnessId === 'hermes'}
+          />
+        )}
         {sending ? (
           <button
             onClick={abort}

@@ -9,6 +9,7 @@ import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 import { isSetupApiPath } from "@/lib/clawbox-namespaces";
 import { UPDATE_LOCK_HEADER, UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
+import { isAllowedHostHeader, isTunnelRequest, systemHostLabel } from "@/lib/host-allowlist";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -384,6 +385,36 @@ async function verifySessionCookie(cookie: string, expectedGen: number): Promise
   }
 }
 
+/**
+ * The answer to a request on a name that is not this box's (step 1a).
+ *
+ * While the box has no owner it is usually on its own hotspot, where dnsmasq
+ * resolves EVERY name to it and a phone's browser lands on whatever the owner
+ * typed — so a page navigation goes to the portal, the one address the wizard
+ * is advertised on. A redirect leaks nothing: the page that asked cannot read
+ * the other origin. Otherwise the refusal is a 403 — JSON with a stable `code`
+ * for an API caller, a line naming the box's `.local` address for a person.
+ */
+function refuseForeignHost(request: NextRequest, pathname: string): NextResponse {
+  const accept = request.headers.get("accept") || "";
+  const isApi = isSetupApiPath(pathname) || pathname.startsWith("/api/") || accept.includes("application/json");
+  const isRead = request.method === "GET" || request.method === "HEAD";
+  if (isRead && !isApi && isBootstrapWindowOpen()) {
+    return NextResponse.redirect(PORTAL_URL, { status: 302, headers: { "cache-control": "no-store" } });
+  }
+  if (isApi) {
+    return NextResponse.json(
+      { error: "ClawBox does not answer on this address", code: "host_not_allowed" },
+      { status: 403, headers: { "cache-control": "no-store" } },
+    );
+  }
+  const label = systemHostLabel() ?? "clawbox";
+  return new NextResponse(
+    `ClawBox does not answer on this address. Open http://${label}.local/ or the box's IP address instead.\n`,
+    { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8", "cache-control": "no-store" } },
+  );
+}
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 export async function middleware(request: NextRequest) {
@@ -451,6 +482,30 @@ export async function middleware(request: NextRequest) {
       "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
       { status: 200, headers: { "Content-Type": "text/html" } }
     );
+  }
+
+  // 1a. The Host allow-list (src/lib/host-allowlist.ts). A name that is not
+  // one of this box's own — `intranet` from a hostile DHCP search domain, a
+  // rebinding record — would give a page served on that name the owner's
+  // host-only, SameSite=Lax session on top-level navigations and same-origin
+  // reads of everything below. So nothing below this line answers such a name,
+  // public paths included. It sits AFTER the captive-portal probes, which a
+  // phone on the hotspot sends under Google's, Apple's or Microsoft's name.
+  // The tunnel is admitted by CF-Connecting-IP, which only survives
+  // scripts/proxy-peer.js on a loopback peer.
+  //
+  // The Host HEADER is what is judged, never `request.url`: behind the
+  // standalone server the URL's host is not the one the browser typed, and
+  // `nextUrl.host` additionally honours X-Forwarded-Host, which on this box
+  // is a header the client writes (there is no reverse proxy in front of
+  // :80). It is used only when the header is absent altogether — impossible
+  // from an HTTP/1.1 client, and a failure direction that must not 403 the
+  // whole box if some internal caller ever arrives without one.
+  {
+    const hostHeader = request.headers.get("host") ?? request.nextUrl.host;
+    if (!isAllowedHostHeader(hostHeader) && !isTunnelRequest(request.headers)) {
+      return refuseForeignHost(request, pathname);
+    }
   }
 
   // 1b. Gateway paths on a Hermes device.

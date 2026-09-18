@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { PREFERENCE_KEY_PREFIX, sanitizePreferences, validatePreference } from "@/lib/preference-schema";
+import {
+  PREFERENCE_KEY_PREFIX,
+  safePreferenceKey,
+  sanitizePreferences,
+  validatePreference,
+} from "@/lib/preference-schema";
 import {
   DEFERRED_LANGUAGE_KEY,
   personaFilesFor,
@@ -33,8 +38,29 @@ function isAnonymousReadable(allParam: string | null, keysParam: string | null):
 // Allowed preference keys (prefix-based whitelist)
 const ALLOWED_PREFIXES = ["wp_", "desktop_", "ui_", "app_", "installed_", "icon_", "pinned_", "hidden_"];
 
+/** Does this door own that name at all? The prefix, and only the prefix. */
 function isAllowed(key: string) {
   return ALLOWED_PREFIXES.some((p) => key.startsWith(p));
+}
+
+/**
+ * The name this route will READ under, or null.
+ *
+ * Two rules, and the second is why this returns a STRING rather than a boolean.
+ * The prefix says which names this door owns; `safePreferenceKey` rebuilds the
+ * name out of a bounded alphabet, so the value that reaches `result[…]` below
+ * is made of those characters rather than being the caller's own string. The
+ * prefix test alone left everything after `ui_` free — any length, any
+ * character — and both of this route's writes were on the caller's side of
+ * that gap (CodeQL js/remote-property-injection #300 and #301).
+ *
+ * The READ filters, as it always has for a name with the wrong prefix: a query
+ * that names something unreadable is answered with what IS readable rather
+ * than refused. The write does not — see the POST handler.
+ */
+function readableKey(key: string): string | null {
+  if (!isAllowed(key)) return null;
+  return safePreferenceKey(key);
 }
 
 // The prefix whose WRITES need the person, not the agent. `installed_apps` and
@@ -61,6 +87,38 @@ const OWNER_ONLY_WRITE_PREFIX = "installed_";
 // mascot-client) or use `all=1`. Headroom is deliberate: if that allowlist ever
 // grows past this cap the tool starts getting a 400, so raise this with it.
 const MAX_KEYS_PER_READ = 32;
+
+// Most names one WRITE may carry. The same number as the read, and for the
+// same reason: the work a request costs must not follow the size of its body.
+//
+// The read's cap is the one to match rather than a tighter one of its own —
+// the two doors take the same names, so a body this route accepts should be
+// one a single `keys=` query could ask back. The widest legitimate write is
+// the desktop's appearance bundle — four names (`wp_fit`, `wp_bg_color`,
+// `wp_opacity`, `wp_id`, page.tsx); every other writer on both pages sends one
+// or two, and the MCP `preferences_set` tool sends exactly one. Headroom is
+// deliberate, exactly as on the read: a legitimate caller that grows past this
+// starts getting a 400, so raise this with it.
+const MAX_KEYS_PER_WRITE = 32;
+
+// Most `pref:*` names the store may hold, whatever order they were written in.
+//
+// The per-request cap bounds one body; this bounds the FILE. Without it a
+// caller with a bearer could spend 200 legal requests to reach the same place
+// one illegal request of 5000 keys would have — and `config.get()` re-reads
+// and re-parses config.json synchronously on every call, so a file grown that
+// way takes the desktop, Settings and the setup wizard down with it until
+// someone SSHes in. The middleware admits the MCP bearer to this route, and
+// the bearer is a file anything running as the box's user can read, including
+// a prompt-injected agent turn — see OWNER_ONLY_WRITE_PREFIX above for the
+// same threat model.
+//
+// 500 is the KV route's MAX_ENTRIES (src/app/setup-api/kv/route.ts), which
+// bounds data/kv.json for exactly this reason. A box in the field holds a few
+// dozen: the desktop's own state plus one `app_<id>_settings` per installed
+// app. The cap is on NEW names — a store already at it can still be written
+// to, or the wallpaper would stop changing on the box that hit it.
+const MAX_STORED_PREFERENCES = 500;
 
 // GET /setup-api/preferences?keys=wp_opacity,wp_bg_color
 // GET /setup-api/preferences?all=1  (returns all pref:* keys)
@@ -111,7 +169,7 @@ export async function GET(req: Request) {
       { status: 400 },
     );
   }
-  const keys = named.filter(isAllowed);
+  const keys = named.map(readableKey).filter((key): key is string => key !== null);
   // One read of the store rather than one per key: config.get() re-reads and
   // re-parses the whole file synchronously on every call, so the work of a
   // request would otherwise follow the length of its `keys` parameter.
@@ -125,9 +183,12 @@ export async function GET(req: Request) {
 
 // POST /setup-api/preferences  { wp_opacity: 80, wp_bg_color: "#111" }
 //
-// Every value is validated before it is stored. The request is rejected whole
-// rather than partially applied — a caller that sent an impossible value
-// should learn that, not have the rest of its bundle silently land.
+// Every name and every value is validated before it is stored. The request is
+// rejected whole rather than partially applied — a caller that sent an
+// impossible name or an impossible value should learn that, not have the rest
+// of its bundle silently land. A name this door does not own at all (the wrong
+// prefix) is a different thing and is still skipped: the caller was not asking
+// this route to store it.
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -154,20 +215,71 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
-    const entries: Record<string, unknown> = {};
+    // Counted before the loop and on what the body NAMES rather than on what
+    // survives the prefix filter, the same way the read counts what the query
+    // names: the bound is on the work one request may ask for.
+    if (Object.keys(body).length > MAX_KEYS_PER_WRITE) {
+      return NextResponse.json(
+        { error: `at most ${MAX_KEYS_PER_WRITE} keys per request` },
+        { status: 400 },
+      );
+    }
+    // Null-prototype accumulator, like every other one that takes a name from
+    // outside: the key written below is `pref:` + a rebuilt name, so it cannot
+    // be `__proto__` today, but a later change that drops the prefix or adds a
+    // second assignment here must not be the one that discovers this.
+    const entries: Record<string, unknown> = Object.create(null);
     for (const [key, value] of Object.entries(body)) {
+      // A name with the wrong prefix is not this door's to write and is
+      // skipped, as it always has been. A name WITH the prefix but spelled
+      // impossibly is this door's and is refused, like an impossible value:
+      // the caller meant a preference, so it should learn that the write did
+      // not land rather than read `ok: true` over it — InstalledAppSettings
+      // branches on this response (`preferencesRes.ok`), which is exactly how
+      // a dropped write would have been rendered as "Saved". The desktop's
+      // other writer, `usePreferenceWriter` in page.tsx, still discards the
+      // response entirely (`.catch(() => {})`), so for THAT caller this 400 is
+      // only a truthful answer, not yet a visible one.
       if (!isAllowed(key)) continue;
-      const check = validatePreference(key, value);
+      const safeKey = safePreferenceKey(key);
+      if (!safeKey) {
+        // The name is NOT quoted back: it is caller-supplied, and this body is
+        // both returned and logged.
+        console.error("[preferences] Rejected write: name outside the preference alphabet");
+        return NextResponse.json(
+          { error: "preference name is not one this box stores" },
+          { status: 400 },
+        );
+      }
+      const check = validatePreference(safeKey, value);
       if (!check.ok) {
-        // The reason is built from the rejected key, which is caller-supplied
-        // and only prefix-checked — bound and sanitise it like any other
-        // request-derived log field.
+        // The reason is built from the rejected key. That key is now bounded
+        // and alphabet-only (`safePreferenceKey` above), so `logSafe` is the
+        // second rule rather than the only one — kept because this line must
+        // stay safe whatever the reason is built from next.
         console.error(`[preferences] Rejected write: ${logSafe(check.reason ?? "")}`);
         return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }
-      entries[`${PREFERENCE_KEY_PREFIX}${key}`] = value;
+      entries[`${PREFERENCE_KEY_PREFIX}${safeKey}`] = value;
     }
     if (Object.keys(entries).length > 0) {
+      // One read of the store before the write, and only for a body that
+      // actually stores something: `setMany` is about to read the same file
+      // anyway (read-modify-rewrite), so this costs one extra parse on the
+      // debounced write path and nothing at all on a body this door owns no
+      // name in.
+      const stored = await config.getAll();
+      const held = new Set(
+        Object.keys(stored).filter((key) => key.startsWith(PREFERENCE_KEY_PREFIX)),
+      );
+      const adding = Object.keys(entries).filter((key) => !held.has(key)).length;
+      if (held.size + adding > MAX_STORED_PREFERENCES) {
+        console.error("[preferences] Rejected write: the store already holds the most preferences it may");
+        return NextResponse.json(
+          { error: `this box stores at most ${MAX_STORED_PREFERENCES} preferences` },
+          { status: 400 },
+        );
+      }
       await config.setMany(entries);
     }
     // When language changes, update the persona files of the harness that is

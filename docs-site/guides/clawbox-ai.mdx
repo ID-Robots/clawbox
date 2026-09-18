@@ -1,0 +1,115 @@
+---
+title: "ClawBox AI"
+icon: "cloud-bolt"
+summary: "The managed AI that comes with your box — connecting it, what each plan covers, what it powers besides chat, and where to read your usage."
+---
+
+**ClawBox AI** is the managed AI service ClawBox ships with. Connect your box to your
+ClawBox account and the assistant works immediately: no API key to obtain, no billing
+relationship with a model vendor, nothing to keep running.
+
+It is optional. You can run your box on [your own provider key or a
+subscription](/setup/choose-ai-provider), or entirely on [the models on the
+box](/guides/local-ai), and nothing on this page applies.
+
+## Connecting your box
+
+<Steps>
+  <Step title="Open the provider panel">
+    **Settings → Providers**, or the **AI provider** step of the first-boot wizard.
+  </Step>
+  <Step title="Choose ClawBox AI">
+    It is the first row. Pick the plan you want on the card below it.
+  </Step>
+  <Step title="Authorize the box">
+    The box shows an **Open authorization page** link and a short code. Open the page —
+    on your phone is fine — and enter the code there. The box waits and picks the
+    authorization up by itself.
+  </Step>
+</Steps>
+
+The token that results is stored on the device. Your plan is read from your account
+afterwards, not set locally, so upgrading in your account is reflected on the box without
+you re-entering anything.
+
+<Note>
+Changing which ClawBox account a box is linked to unpairs [ClawKeep](/guides/subscriptions)
+backups with it — the backups belong to the account.
+</Note>
+
+## What each plan covers
+
+The full price list is on [Subscriptions](/guides/subscriptions). What matters on the
+device is this:
+
+| Capability | Free | Pro | Max |
+|---|---|---|---|
+| Chat | ✓ | ✓ | ✓ |
+| Weekly chat allowance | standard | 5× Free | maximum |
+| Speech to text in the cloud | ✓ | ✓ | ✓ |
+| Spoken replies in the cloud | — | — | ✓ |
+| Memory index in the cloud | — | ✓ | ✓ |
+| [Memory Shard](/guides/memory-shard) and the Coding Agent | — | ✓ | ✓ |
+| [Switching the box's edition](/editions/switching) | — | — | ✓ |
+| Remote Desktop | — | ✓ | ✓ |
+| ClawKeep cloud backups | 1 GB | 5 GB | 50 GB |
+
+<Note>
+On ClawBox AI there is no model to pick: the chat names the provider and shows no model
+pill beside it. What a plan buys is how much you get and which device features are
+unlocked. The reasoning control is there and starts at **Medium**.
+</Note>
+
+## What your plan powers
+
+ClawBox AI is not only the chat model. On a connected box, three things that used to run
+engines on the device default to the cloud your plan already covers:
+
+| Capability | Where it runs by default | Why |
+|---|---|---|
+| **Speech to text** — your voice messages, turned into text | the cloud, on every connected box including Free | the transcription service is part of every plan |
+| **Spoken replies** — the assistant reading an answer out loud | the cloud on **Max**; the voice on the box otherwise | the cloud voice is a Max feature, and pointing an unentitled box at it would only add a failed round trip |
+| **Memory indexing** — turning your notes and documents into something searchable | the cloud on **Pro and Max**, on every edition, once the box has confirmed the service answers it | it needs a paid plan, and moving an index costs a full rebuild, so the box will not move it on a guess |
+
+Two rules govern this, and both are deliberate:
+
+- **It only ever moves work to the cloud, never back.** Nothing here quietly takes a
+  capability off the cloud and puts it back on your box.
+- **A choice you made yourself is never overwritten.** Every screen that lets you pick
+  records that you picked. Pin a capability to the box and it stays pinned; choose the
+  cloud, or hand it back to the default, and the box takes it from there.
+
+You can see and change all three in **Settings → Local AI** and, for the memory index,
+in [Memory Shard's settings](/guides/memory-shard#where-the-index-is-built).
+
+When a capability is on the box rather than the cloud, the card says which of the reasons
+applies — not connected, the plan does not cover it, or the service did not answer — so
+there is something to act on rather than a bare "not available". A choice you made by hand
+is not a refusal: the cloud stays selectable.
+
+## Usage and credits
+
+**Settings → Providers** shows a usage card for the connected account:
+
+- **Weekly chat allowance** — how much of this week's allowance you have spent, and when
+  it frees up.
+- **5-hour burst** — a shorter rolling window on top of the weekly one. Hitting it does
+  not mean your week is gone.
+- **This week** — separate meters for images, text-to-speech minutes, speech-to-text
+  minutes and memory indexing.
+- **Credits** — your balance, and what you have spent from it this week. Credits are used
+  only after an allowance runs out, and paid plans can top them up.
+
+If an allowance runs out mid-conversation the chat says exactly which one, and when it
+frees up, instead of failing silently.
+
+<Note>
+The numbers come from your ClawBox account. If the box cannot read them the card says so
+and tries again shortly — it never invents a figure.
+</Note>
+
+## Changing or leaving
+
+Switch to any other provider any time from **Settings → Providers**; the next message
+uses it. Billing is handled in your ClawBox account — use the customer portal link in
+your billing email to change plan or cancel.

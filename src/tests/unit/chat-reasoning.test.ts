@@ -290,3 +290,118 @@ describe("chat-reasoning", () => {
     });
   });
 });
+
+describe("Claude models that mandate thinking", () => {
+  // The gateway refuses `thinkingLevel: "off"` for them — seen on a box:
+  //   thinkingLevel "off" is not supported for anthropic/claude-fable-5-1
+  //   (use minimal|low|medium|adaptive|high|xhigh|max)
+  // and the chat's safe start value IS "off", so every fresh session hit it.
+  it("never offers or sends Off for Fable 5 / Mythos 5", () => {
+    for (const model of ["anthropic/claude-fable-5-1", "claude-fable-5", "anthropic/claude-mythos-5-1"]) {
+      const cfg = getProviderReasoningConfig("anthropic", model);
+      expect(cfg.levels).not.toContain("off");
+      expect(cfg.default).toBe("medium");
+      expect(resolveWireThinkingLevel("anthropic", "off", model)).toBe("medium");
+    }
+  });
+
+  // M2 of the 2026-09-17 review. The hand-written regex under-matched the
+  // core's own predicate (`requiresClaudeMandatoryAdaptiveThinking`,
+  // packages/llm-core/src/model-contracts/anthropic.ts at v2026.9.3), which
+  // also names `claude-mythos-preview` and anchors both ends.
+  it("names claude-mythos-preview, which the core's own predicate does", () => {
+    for (const model of [
+      "anthropic/claude-mythos-preview",
+      "claude-mythos-preview",
+      // The core's boundary is `(?:^|-)`, so a HYPHEN-prefixed id counts. A
+      // dotted deployment id (`us.anthropic.claude-…`) does not reach this
+      // regex the way it reaches the core's, which runs
+      // `resolveClaudeModelIdentity` first; the gateway's own `thinkingLevels`
+      // is what covers that case here (see the intersection suite below).
+      "anthropic/bedrock-claude-mythos-preview",
+    ]) {
+      const cfg = getProviderReasoningConfig("anthropic", model);
+      expect(cfg.levels).not.toContain("off");
+      expect(resolveWireThinkingLevel("anthropic", "off", model)).toBe("medium");
+    }
+  });
+
+  it("is anchored at BOTH ends, so a longer id is not swept in", () => {
+    // No trailing boundary meant `claude-fable-50` matched and lost its Off.
+    for (const model of [
+      "anthropic/claude-fable-50",
+      "anthropic/claude-mythos-55",
+      "anthropic/claude-mythos-previewer",
+      "anthropic/notclaude-fable-5",
+    ]) {
+      expect(getProviderReasoningConfig("anthropic", model).levels).toContain("off");
+    }
+  });
+
+  it("leaves the other Claude models, and other providers, as they were", () => {
+    expect(getProviderReasoningConfig("anthropic", "anthropic/claude-opus-5").levels).toContain("off");
+    expect(getProviderReasoningConfig("openai", "openai/gpt-5.5").levels).toContain("off");
+    expect(resolveWireThinkingLevel("anthropic", "off", "anthropic/claude-opus-5")).toBe("off");
+  });
+
+  it("reads the level to fall back to out of the gateway's menu-style refusal", () => {
+    expect(parseUnsupportedThinkingLevelError(
+      'thinkingLevel "off" is not supported for anthropic/claude-fable-5-1 (use minimal|low|medium|adaptive|high|xhigh|max)',
+    )).toBe("medium");
+    expect(parseUnsupportedThinkingLevelError(
+      'thinkingLevel "off" is not supported for some/model (use adaptive|high)',
+    )).toBe("adaptive");
+    // The single-level form still reads as before.
+    expect(parseUnsupportedThinkingLevelError(
+      'thinkingLevel "high" is not supported for llamacpp/gemma4-e2b-it-q4_0 (use off)',
+    )).toBe("off");
+  });
+});
+
+describe("the gateway's own thinkingLevels, intersected with ClawBox's ladder", () => {
+  // HARNESS-FIRST. `models.list` carries `thinkingLevels` per MODEL
+  // (packages/gateway-protocol/src/schema/agents-models-skills.ts at
+  // v2026.9.3), built from the same profile the gateway then judges a
+  // `thinkingLevel` against — so a level it publishes is a level it will take.
+  // `/setup-api/chat/model` reads it over the in-process socket and stamps it
+  // on the row; the local table stays as the offline fallback.
+  const UNIFORM = ["off", "low", "medium", "high"];
+
+  it("keeps only what both agree on", () => {
+    const cfg = getProviderReasoningConfig("openai", "openai/gpt-5.5", ["low", "medium", "high", "xhigh"]);
+    // `xhigh` is the gateway's and not the ladder's; `off` is the ladder's and
+    // not the gateway's. Neither is offered.
+    expect(cfg.levels).toEqual(["low", "medium", "high"]);
+    expect(cfg.default).toBe("medium");
+  });
+
+  it("drops Off for a model the gateway says refuses it, whatever the local table thinks", () => {
+    // The whole failure M2 is about, for a model no regex here names: the
+    // gateway is the one that knows.
+    const cfg = getProviderReasoningConfig("anthropic", "anthropic/claude-something-new", ["low", "medium", "high"]);
+    expect(cfg.levels).not.toContain("off");
+    expect(resolveWireThinkingLevel("anthropic", "off", "anthropic/claude-something-new", ["low", "medium", "high"]))
+      .toBe("medium");
+  });
+
+  it("falls back to the local table when the gateway was not asked or said nothing", () => {
+    for (const levels of [undefined, null, [], ["not-a-level"]] as const) {
+      expect(getProviderReasoningConfig("openai", "openai/gpt-5.5", levels).levels).toEqual(UNIFORM);
+    }
+  });
+
+  it("offers the gateway's own levels when the two share none", () => {
+    // A model that takes only `adaptive`/`max`: offering the uniform ladder
+    // would be four controls the gateway refuses. The default is clamped in.
+    const cfg = getProviderReasoningConfig("anthropic", "anthropic/claude-odd", ["adaptive", "max"]);
+    expect(cfg.levels.length).toBeGreaterThan(0);
+    expect(cfg.levels.every((level) => ["adaptive", "max"].includes(level))).toBe(true);
+    expect(cfg.levels).toContain(cfg.default);
+  });
+
+  it("never lets the wire value leave the intersection", () => {
+    const wire = resolveWireThinkingLevel("openai", "off", "openai/gpt-5.5", ["low", "medium", "high"]);
+    expect(wire).not.toBe("off");
+    expect(["low", "medium", "high"]).toContain(wire);
+  });
+});

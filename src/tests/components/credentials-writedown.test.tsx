@@ -36,6 +36,8 @@ const STRINGS: Record<string, string> = {
   "credentials.writeDownAck": "I've stored these somewhere safe",
   "credentials.writeDownContinue": "I've saved them — continue",
   "settings.connect": "Connect",
+  "credentials.saveAndContinue": "Save & Continue",
+  saving: "Saving...",
   back: "Back",
   continue: "Continue",
   copy: "Copy",
@@ -141,7 +143,7 @@ function fillForm(container: HTMLElement, { hotspot = true } = {}) {
   }
 }
 
-const connect = () => screen.getByRole("button", { name: "Connect" });
+const connect = () => screen.getByRole("button", { name: "Save & Continue" });
 const dialog = () => screen.queryByTestId("credentials-writedown-dialog");
 
 describe("CredentialsStep write-down confirmation", () => {
@@ -382,5 +384,38 @@ describe("CredentialsStep write-down confirmation", () => {
 
     const glyph = badge.querySelector(".material-symbols-rounded");
     expect(glyph?.textContent?.trim()).toBe("lock");
+  });
+
+  it("stretches the real checkbox over its whole row instead of hiding it in a 1px clip", async () => {
+    // `sr-only` made the input a clipped 1px box positioned against no
+    // container of its own: a pointer aimed at the checkbox landed on
+    // something else, which is why a plain click timed out on the rig. jsdom
+    // computes no layout, so what is held is the geometry the classes ask for —
+    // a transparent input covering a positioned label, bound to it by nesting.
+    const { container } = await mountStep();
+    fillForm(container);
+    fireEvent.click(connect());
+
+    const label = screen.getByTestId("writedown-ack-label");
+    const input = screen.getByTestId("writedown-ack") as HTMLInputElement;
+    expect(label.contains(input)).toBe(true);
+    expect(label.className.split(/\s+/)).toContain("relative");
+    const classes = input.className.split(/\s+/);
+    expect(classes).not.toContain("sr-only");
+    for (const c of ["absolute", "inset-0", "h-full", "w-full", "opacity-0", "cursor-pointer"]) {
+      expect(classes).toContain(c);
+    }
+    // The label names the control, so a role query by its text finds it.
+    const box = screen.getByRole("checkbox", { name: "I've stored these somewhere safe" });
+    expect(box).toBe(input);
+    fireEvent.click(box);
+    expect(input.checked).toBe(true);
+    expect((screen.getByTestId("writedown-continue") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("names the step's forward control as the step's next action, not a hotspot connect", async () => {
+    await mountStep();
+    expect(screen.getByRole("button", { name: "Save & Continue" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
   });
 });

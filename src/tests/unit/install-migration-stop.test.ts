@@ -110,6 +110,9 @@ ${fn("stop_openclaw_gateways_for_migration")}
 ${fn("openclaw_migration_complete")}
 ${fn("recover_parked_openclaw_core")}
 ${fn("promote_staged_openclaw_core")}
+# Stubbed, never lifted: the step calls it with no arguments, which means the
+# REAL /usr and /usr/local (install-shadowing-system-openclaw.test.ts).
+remove_shadowing_system_openclaw() { :; }
 ${fn("step_openclaw_install")}
 step_openclaw_patch() { event PATCH; [ "$SCENARIO" != setup-patch-failure ]; }
 step_openclaw_config() { event CONFIG; [ "$SCENARIO" != setup-config-failure ]; }

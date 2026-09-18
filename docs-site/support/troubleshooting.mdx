@@ -163,13 +163,13 @@ A ClawBox update is more than `git pull` — the installer also refreshes the **
   <Accordion title="'Incorrect API key … sk-proj-…' after switching OpenAI to the ChatGPT subscription">
     Cause: OpenAI has two separate lanes with different credentials, and after a switch an old dead API key can keep being used — recurring `401` on every reply, returning after each restart. (Full explanation: [AI Providers](/technical/ai-providers).)
 
-    **Fix now, on any version:** open **Settings → AI**, choose **ChatGPT (sign in with ChatGPT)**, complete the sign-in again — then reboot once and confirm it still works after the restart. The beta channel (and the next stable release) [self-heals this on boot](/technical/ai-providers#self-healing-on-boot-beta-channel); if the manual fix doesn't stick, contact support.
+    **Fix now, on any version:** open **Settings → Providers**, choose **ChatGPT (sign in with ChatGPT)**, complete the sign-in again — then reboot once and confirm it still works after the restart. The beta channel (and the next stable release) [self-heals this on boot](/technical/ai-providers#self-healing-on-boot-beta-channel); if the manual fix doesn't stick, contact support.
   </Accordion>
   <Accordion title="Replies stopped after changing provider or plan">
-    Re-save the provider in **Settings → AI** (this rewrites the full provider config), then reboot. Check quota/billing on the provider's dashboard — an exhausted key returns errors that look like auth failures.
+    Re-save the provider in **Settings → Providers** (this rewrites the full provider config), then reboot. Check quota/billing on the provider's dashboard — an exhausted key returns errors that look like auth failures.
   </Accordion>
   <Accordion title="Local models (Ollama / llama.cpp) not responding">
-    Local models share the Jetson's memory — only one local runtime is active at a time. Check status in **Settings → AI**. Over SSH: `systemctl status ollama` and retry after `sudo systemctl restart ollama`.
+    Local models share the Jetson's memory — only one local runtime is active at a time. Check status in **Settings → Providers**. Over SSH: `systemctl status ollama` and retry after `sudo systemctl restart ollama`.
   </Accordion>
 </AccordionGroup>
 

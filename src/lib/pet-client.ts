@@ -24,6 +24,12 @@ export interface PetDescriptor {
    *  Optional so a descriptor built by hand (a test, an older payload) is still
    *  a valid one: every reader falls back to the un-measured cell geometry. */
   rowMetrics?: PetRowMetrics[];
+  /** This body is ClawBox's OWN crab (`vibrant-clawd`), not a pet the owner
+   *  picked from the gallery. Same sheet, same renderer — but the mascot keeps
+   *  calling itself the crab and keeps the crab's voice. Absent from a server
+   *  that predates the bundled pack, which reads correctly: everything such a
+   *  server can send IS someone else's pet. */
+  brand?: boolean;
 }
 
 export interface PetStatus {
@@ -74,6 +80,7 @@ function coerce(data: unknown): PetStatus {
       submittedBy: String(a.submittedBy ?? ""),
       revision: a.revision,
       loopMs: Number(a.loopMs) || 1100,
+      brand: a.brand === true,
       // A descriptor from an older device (or a cache file an older build
       // wrote) simply has no metrics; `normaliseRowMetrics` answers with the
       // pre-measurement behaviour rather than dropping the pet.

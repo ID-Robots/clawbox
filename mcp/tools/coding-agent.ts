@@ -28,7 +28,7 @@ import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
 import type { CodingPauseReason, CodingRunStatus } from "../../src/lib/coding-agent-status";
-import { PAUSE_METER_NOUN, pauseResetClock } from "../../src/lib/coding-agent-status";
+import { PAUSE_METER_NOUN, isRollingPauseMeter, pauseResetClock, pauseResetInstant } from "../../src/lib/coding-agent-status";
 // Pure too, for the same reason: the review loop's shape and its fold, so the
 // tool cannot describe a state the server never writes.
 import { foldReviewChecks, type ReviewLoop } from "../../src/lib/coding-review-state";
@@ -275,6 +275,12 @@ interface RunPayload {
    * knows the project by.
    */
   worktree?: { path: string; branch: string; base: string; project: string; removed: boolean; branchRemoved?: boolean } | null;
+  /**
+   * The files this run was GIVEN, and the folder they are in. Absent on a
+   * record written before the hand-over existed — which is why a caller must
+   * never read a missing field as "nothing was handed over".
+   */
+  inputs?: { dir: string; files?: { name: string; bytes: number }[]; refused?: { name: string; code: string }[] } | null;
   /** Set on the automatic review pass, naming the run it reviewed. */
   reviewOf?: string | null;
   /** Set on a review-loop turn, naming the run whose pull request it is fixing. */
@@ -636,10 +642,15 @@ function describeRun(run: RunPayload, tail: number, vercel: boolean): string {
     // refusal, which is why the reset time is the operative fact here.
     const reason = run.pauseReason;
     if (reason && reason.kind === "allowance") {
+      // A rolling window can free up days from now, so it is quoted with its
+      // date; the per-day meters keep the bare UTC clock they reset at.
       const clock = pauseResetClock(reason.resetsAt);
+      const when = isRollingPauseMeter(reason.meter)
+        ? pauseResetInstant(reason.resetsAt)
+        : clock && `${clock} UTC`;
       parts.push(
         `Paused because this box's ${PAUSE_METER_NOUN[reason.meter]} is used up`
-        + `${clock ? `, which comes back at ${clock} UTC` : ""}.`
+        + `${when ? `, which comes back at ${when}` : ""}.`
         + " Its work is kept and its session is intact. Tell the user what ran out and when it returns,"
         + " and that Resume in the Coding Agent app carries on from where it stopped — resuming it before then"
         + " only buys the same refusal. Do not start a fresh run for the same task.",
@@ -687,6 +698,33 @@ function describeRun(run: RunPayload, tail: number, vercel: boolean): string {
   return redact(parts.join("\n"));
 }
 
+/**
+ * What became of the assets the caller handed over, in one sentence.
+ *
+ * Only ever says something when the caller actually named some: a run with no
+ * inputs is the ordinary case and a line about it would be noise on every
+ * single start. A device that does not report the hand-over at all (an older
+ * build) says nothing rather than guessing, because the one thing this must not
+ * do is claim a file arrived.
+ */
+function inputsSentence(run: RunPayload, asked: number): string {
+  if (asked === 0) return "";
+  const inputs = run.inputs;
+  if (!inputs) return "";
+  const staged = inputs.files ?? [];
+  const refused = inputs.refused ?? [];
+  const parts: string[] = [];
+  if (staged.length > 0) parts.push(`It was given ${staged.map((f) => f.name).join(", ")}.`);
+  else parts.push("None of the files you named reached it.");
+  if (refused.length > 0) {
+    parts.push(
+      `The device would not hand over ${refused.map((r) => `${r.name} (${r.code})`).join(", ")} —`
+      + " it only copies from the media folder it writes and from its own inputs folder, so tell the user which asset is missing rather than starting the run again.",
+    );
+  }
+  return `${parts.join(" ")} `;
+}
+
 export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent" | "codingVercel">): void {
   // The device said no (switch off, harness missing, or an older build without
   // the route). Registering nothing is the safe direction.
@@ -721,6 +759,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           ? "Run the whole delivery flow instead of just the build: review, improvement laps, a preview deploy, a check that the deployed page actually shows what was asked for, then production and the same check again. Only for a project the owner has attached a Vercel project to — the device refuses at once, saying what is missing, when it cannot. It deploys to PRODUCTION only where the owner has switched that on for that project; otherwise it pauses and waits for them to press the button. Leave it off for anything that is not a deployable web project."
           : "Run the review and improvement laps after the build instead of just the build. NOTE: deploying is switched off on this ClawBox, so the deploy and check stages of the delivery flow are skipped — this gives you the review and improvement laps and nothing else. Leave it off for anything that is not a web project.",
       ),
+      input_files: zOptText(
+        1024,
+        "Comma-separated ABSOLUTE paths of files this run is to be GIVEN to work from — pictures or audio you generated for this task, a file the user sent you. "
+        + "Name them here whenever the task refers to an asset that already exists: the device copies each one into a folder the run can read, and tells the run their names. "
+        + "The run CANNOT read your own media folder, so a path you only mention in the task text is a file the run will never open. "
+        + "A path the device will not copy is reported back and costs only that file.",
+      ),
       deliverable_files: zOptText(
         512,
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) of the files this run MUST leave behind, e.g. "src/app.js,index.html". `
@@ -729,9 +774,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       ),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; deliverable_files?: string; delivery_pipeline?: boolean;
+      input_files?: string;
     }) => {
       // No client-side "needs a place to work" guard: the route itself falls
       // back to the owner's stored default folder when neither a project nor
@@ -783,6 +829,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // and when it is off there is no branch for a pull request to exist on.
       const paths = (deliverable_files ?? "").split(",").map((p) => p.trim()).filter(Boolean);
       if (paths.length) body.deliverable = { kind: "paths", paths };
+      // The same list-in-a-string shape, for the same schema reason. The device
+      // decides what it will copy and from where; this end only splits.
+      const inputs = (input_files ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+      if (inputs.length) body.inputs = inputs;
       // Only when the caller actually asked: sending `false` would override the
       // owner's own per-project default, which is the switch that makes the
       // flow automatic for a project they ship from every day.
@@ -834,6 +884,10 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           ? `That folder is this run's own copy of ${run.worktree.project}, on branch ${run.worktree.branch}. `
           : "")
         + (paths.length ? `It is not counted as finished until ${paths.join(", ")} exist and are not empty. ` : "")
+        // What the device actually managed to hand over. Said plainly, because
+        // an asset that did not arrive is something the user can fix — and
+        // something the run will otherwise be blamed for not using.
+        + inputsSentence(run, inputs.length)
         + "It works in the background on the ClawBox and may take several minutes. "
         + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
       );

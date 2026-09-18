@@ -20,6 +20,16 @@ vi.mock("@/lib/config-store", () => ({
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
 
+// The picker asks the gateway for each model's own reasoning-effort levels
+// (`models.list`) over the in-process socket. Mocked so a suite can hand it the
+// gateway's real answer, and unavailable by default — which is the fallback
+// path every other case here exercises.
+const { gatewayWsCallMock } = vi.hoisted(() => ({ gatewayWsCallMock: vi.fn() }));
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()),
+  gatewayWsCall: gatewayWsCallMock,
+}));
+
 // The catalogue is told out-of-band when the plugin gate changes the provider
 // set; the real module forks `openclaw models list`.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
@@ -27,6 +37,10 @@ vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // The picker asks the gateway for each model's own thinking levels; every
+  // case here is a box with none reachable, which is the fallback the local
+  // reasoning table exists for.
+  gatewayIsAbsent: vi.fn(() => true),
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
   // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
@@ -88,7 +102,7 @@ vi.mock("@/lib/ollama-capabilities", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, gatewayIsAbsent, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
@@ -105,6 +119,19 @@ describe("/setup-api/chat/model", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // `clearAllMocks` keeps implementations and queued answers: the reasoning
+    // tests leave the gateway present and `models.list` configured, and every
+    // test after them would otherwise run against that instead of the
+    // default box with no gateway to ask.
+    vi.mocked(gatewayIsAbsent).mockReturnValue(true);
+    gatewayWsCallMock.mockReset();
+    // Implementations too, not only call history: the Anthropic ordering
+    // suite replaces these two, and nothing restored them for the tests after
+    // it — a ChatGPT case could run against a batch that refuses to forward.
+    vi.mocked(readConfigStrict).mockReset().mockResolvedValue({} as never);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockImplementation(async (ops) => {
+      for (const op of ops) await vi.mocked(runOpenclawConfigSet)(op);
+    });
 
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);
@@ -309,7 +336,7 @@ describe("/setup-api/chat/model", () => {
     });
   });
 
-  it("switches the active chat model to Local AI and restarts the gateway", async () => {
+  it("switches the active chat model to Local AI without restarting the gateway — the switch is live", async () => {
     vi.mocked(readConfig)
       .mockResolvedValueOnce({
         auth: {
@@ -369,19 +396,16 @@ describe("/setup-api/chat/model", () => {
       "agents.defaults.model.primary",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
-    expect(restartGateway).toHaveBeenCalled();
+    // The open sessions are patched live and the gateway hot-applies the new
+    // default itself; a restart here cost ~20 s of "gateway starting" per
+    // switch and every run in flight.
+    expect(restartGateway).not.toHaveBeenCalled();
     expect(body.activeSource).toBe("local");
     expect(body.activeLabel).toBe("Gemma 4 Local");
   });
 
-  it("answers 502 when the switch landed but the gateway did not come back", async () => {
-    // The primary is already written when the restart runs, so a gateway that
-    // never starts listening again is neither the 200 this route used to give
-    // (the box still answers on the OLD model) nor the 500 "Failed to switch
-    // chat model" the outer catch would give — that would be a false failure
-    // over a change that IS on disk.
-    vi.mocked(restartGateway).mockRejectedValue(new GatewayNotReadyError());
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("never restarts the gateway for a plugin flip — the core hot-applies plugins.entries", async () => {
+    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
 
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
@@ -389,39 +413,14 @@ describe("/setup-api/chat/model", () => {
       body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
     }));
     const body = await response.json();
-    errorSpy.mockRestore();
 
-    expect(response.status).toBe(502);
-    expect(body.warning).toMatch(/did not come back/i);
-    // The switch still happened: the body describes the new model, not an error.
-    expect(body.error).toBeUndefined();
+    expect(response.status).toBe(200);
+    expect(body.warning).toBeUndefined();
+    expect(restartGateway).not.toHaveBeenCalled();
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
-  });
-
-  it("answers 502, not 500, when the restart is refused outright", async () => {
-    // A masked unit (an update in flight) or a denied sudo is still not a failed
-    // switch: the primary is on disk either way, and 500 "Failed to switch chat
-    // model" over a written model is the same false failure by another route.
-    // The warning distinguishes it, because the owner's next step differs.
-    vi.mocked(restartGateway).mockRejectedValue(new Error("Unit is masked"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    const response = await POST(new Request("http://localhost/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
-    }));
-    const body = await response.json();
-    errorSpy.mockRestore();
-
-    expect(response.status).toBe(502);
-    expect(body.warning).toMatch(/could not be restarted/i);
-    expect(body.error).toBeUndefined();
-    // Never the raw exec text: it carries unit and path internals.
-    expect(JSON.stringify(body)).not.toContain("Unit is masked");
   });
 
   it("does not arm the Codex runtime for a non-Codex model", async () => {
@@ -547,6 +546,39 @@ describe("/setup-api/chat/model", () => {
       { provider: "deepseek", modelId: "deepseek-v4-flash", source: "user" },
       { skipUserTagged: false },
     );
+  });
+
+  /**
+   * The sibling of the configure route's own fix: the sweep does not THROW
+   * when the gateway refuses a session — it counts it into `sessionsSkipped`
+   * and returns — so a `try/catch` around it read an absent exception as a
+   * successful sweep and this route answered with no warning at all over a
+   * chat still pinned to the previous model.
+   */
+  it("says so when the gateway refused the sessions the sweep asked it to re-point", async () => {
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValueOnce({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 1 });
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning).toMatch(/keeps its previous model/);
+  });
+
+  it("stays quiet when there was no session to re-point", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
   });
 
   it("keeps the session sweep when an automatic switch changes provider", async () => {
@@ -1137,7 +1169,7 @@ describe("/setup-api/chat/model", () => {
       },
       { skipUserTagged: false },
     );
-    expect(restartGateway).toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
@@ -1171,7 +1203,7 @@ describe("/setup-api/chat/model", () => {
         "agents.defaults.model.primary",
         `openai/${modelId}`,
       ]);
-      expect(restartGateway).toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
     },
   );
 
@@ -1206,7 +1238,7 @@ describe("/setup-api/chat/model", () => {
       'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id',
       "codex",
     ]);
-    expect(restartGateway).toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it("rejects a non-openrouter model that is not in state.options", async () => {
@@ -1305,6 +1337,31 @@ describe("/setup-api/chat/model", () => {
     expect(openai?.model).toBe("openai/gpt-5.4");
   });
 
+  it("never offers a row for the image lane's provider, whatever the box is pinned to", async () => {
+    // A box whose primary was set from OpenClaw's own picker to the litellm
+    // plugin's chat row. `rememberPrimaryOption` must drop it, or the chat
+    // dropdown offers a row whose every turn goes to the image proxy asking
+    // for a model it does not serve — and the header cannot name it.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: { litellm: { apiKey: "claw_redacted", baseUrl: "https://clawbox.com/api/ai" } },
+      },
+      agents: { defaults: { model: { primary: "litellm/claude-opus-4-6" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    expect(body.options.some((option: { provider: string }) => option.provider === "litellm")).toBe(false);
+    expect(body.options.some((option: { model: string | null }) => option.model?.startsWith("litellm/"))).toBe(false);
+    // The OpenAI credential still gets its own row, resolved from OpenAI's
+    // default rather than left owned by the refused primary.
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/gpt-5.4");
+  });
+
   it("keeps an owner's own openai row that the picker's curation list does not carry", async () => {
     // The catalog allowlist exists to curate a NOISY UPSTREAM catalog down for
     // a picker. `models.providers.openai.models[]` is not that catalog — it is
@@ -1366,6 +1423,58 @@ describe("/setup-api/chat/model", () => {
     expect(openai?.model).toBe("openai/llama-3.3-70b");
   });
 
+  // H1 of the 2026-09-17 review. The `openai` → `litellm` image move did not
+  // close the chat-picker exposure, it moved it: the bundled litellm plugin
+  // registers a CHAT provider beside the image one and ships its own catalog
+  // row (`claude-opus-4-6`, 1M context, reasoning — extensions/litellm/onboard.ts
+  // at v2026.9.3), whose bearer is the same `models.providers.litellm.apiKey`
+  // this build writes. `openclaw models list`, the Control UI picker and
+  // Telegram `/model` all offer it; ClawBox's own refusals therefore have to
+  // cover the PROVIDER ID, not just the one image ref, or a model picked over
+  // there reaches `agents.defaults.model.primary` through this route.
+  it("refuses every model on the image provider id, not just the image ref", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    for (const model of [
+      // The bundled plugin's own static chat row.
+      "litellm/claude-opus-4-6",
+      // Whatever live discovery returned from `<baseUrl>/v1/models`.
+      "litellm/some-discovered-model",
+      // The image ref on the current provider id.
+      "litellm/gpt-image-1-mini",
+    ]) {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      }));
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatch(/not a chat (model|provider)/);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not widen the refusal to the LEGACY provider id, which is a real chat provider", async () => {
+    // `openai` hosts the image entry on every box provisioned before the move
+    // AND every OpenAI chat model. Refusing it by provider would take the
+    // owner's own GPT models away.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-5.5" }),
+    }));
+    expect(response.status).not.toBe(400);
+  });
+
   it("refuses the image entry at the custom-model door, before any write", async () => {
     // A valid-SHAPED `openai/*` id that every paired box carries in
     // models.providers.openai.models[]; as the primary it fails every turn.
@@ -1384,6 +1493,121 @@ describe("/setup-api/chat/model", () => {
     expect((await response.json()).error).toContain("not a chat model");
     expect(runOpenclawConfigSet).not.toHaveBeenCalled();
     expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  // M2 of the 2026-09-17 review. ClawBox kept a hand-written table of which
+  // provider offers which reasoning-effort levels, plus a regex for the Claude
+  // models that refuse `off`; the gateway publishes the fact natively, per
+  // MODEL, on every row of `models.list` (`thinkingLevels: [{ id, label }]`,
+  // built by `resolveEffectiveThinkingProfile` at v2026.9.3). With the
+  // in-process socket that read costs milliseconds, which is exactly the
+  // constraint that justified the local table alone.
+  describe("the reasoning levels the gateway itself publishes", () => {
+    const pairedBox = () => {
+      vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "anthropic" });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "api_key" } } },
+        agents: { defaults: { model: { primary: "anthropic/claude-mythos-preview" } } },
+      } as never);
+    };
+
+    it("stamps the active row with what models.list said", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          {
+            id: "claude-mythos-preview",
+            provider: "anthropic",
+            thinkingLevels: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+            ],
+          },
+          { id: "gpt-5.5", provider: "openai", thinkingLevels: [{ id: "off", label: "Off" }] },
+        ],
+      });
+      pairedBox();
+
+      const body = await (await GET()).json();
+
+      expect(gatewayWsCallMock).toHaveBeenCalledWith("models.list", {}, expect.anything());
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toEqual(["low", "medium", "high"]);
+      // `off` is not among them, which is the whole point: the chat's safe
+      // start value IS `off` and the gateway refuses it for this model.
+      expect(anthropic.thinkingLevels).not.toContain("off");
+    });
+
+    it("says nothing at all when the gateway could not be asked", async () => {
+      // Absent is NOT "no levels": the header falls back to the local table,
+      // which is a correct answer, and inventing an empty list would take
+      // every effort control away on a box whose gateway was restarting.
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      const { GatewayWsUnavailableError } = await import("@/lib/openclaw-gateway-ws");
+      gatewayWsCallMock.mockRejectedValue(new GatewayWsUnavailableError("gateway connect timed out"));
+      pairedBox();
+
+      const body = await (await GET()).json();
+
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic).toBeDefined();
+      expect(anthropic.thinkingLevels).toBeUndefined();
+    });
+
+    it("never asks a box that runs no gateway", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(true);
+      pairedBox();
+
+      await GET();
+
+      expect(gatewayWsCallMock).not.toHaveBeenCalled();
+    });
+
+    it("survives a row shape it does not recognise", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          null,
+          "not a row",
+          { id: "claude-mythos-preview" },
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: "nope" },
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: [{ label: "no id" }] },
+        ],
+      });
+      pairedBox();
+
+      const body = await (await GET()).json();
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toBeUndefined();
+    });
+
+    it("asks the gateway ONCE per switch, for the read the answer is built from", async () => {
+      // POST reads the state twice — once for its routing facts, once fresh
+      // after the write — and the levels are a decoration on the second. A
+      // `models.list` round trip on the first cost the connect and method
+      // deadlines twice per switch on a slow gateway, for a map nothing read.
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: [{ id: "low", label: "Low" }, { id: "high", label: "High" }] },
+        ],
+      });
+      pairedBox();
+
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-mythos-preview" }),
+      }));
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(gatewayWsCallMock.mock.calls.filter((call) => call[0] === "models.list")).toHaveLength(1);
+      // …and that one read is the one the rows are decorated from.
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toEqual(["low", "high"]);
+    });
   });
 
   // The UI sweep of 2026-09-07: the picker offered "Ollama Local" backed by
@@ -1623,7 +1847,12 @@ describe("/setup-api/chat/model", () => {
       // The CLI as a 2026.8.1 box answers it: the anthropic plugin is OFF
       // (an older gate switched it off on the last switch away from Claude)
       // and a batch carrying an `anthropic/*` primary is refused unless the
-      // same batch switches the plugin on ahead of it.
+      // same batch switches the plugin on ahead of it. The config the route
+      // reads before the batch says the same, which is what makes the switch
+      // a plugin flip — the one change that still restarts the gateway.
+      vi.mocked(readConfigStrict).mockResolvedValue({
+        plugins: { entries: { anthropic: { enabled: false } } },
+      } as never);
       vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => {
         const enableIdx = ops.findIndex((op) => op[0] === ENABLE_OP[0] && op[1] === "true");
         const primaryIdx = ops.findIndex((op) => isPrimaryWrite(op) && String(op[1]).startsWith("anthropic/"));
@@ -1632,7 +1861,7 @@ describe("/setup-api/chat/model", () => {
       });
     });
 
-    it("switches the plugin on in the SAME batch as the Anthropic primary, ahead of it, and restarts after", async () => {
+    it("switches the plugin on in the SAME batch as the Anthropic primary, ahead of it, with no restart", async () => {
       const response = await POST(new Request("http://localhost/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1648,8 +1877,7 @@ describe("/setup-api/chat/model", () => {
       ]);
       // A plugin enabled by the batch loads on the next gateway start, so the
       // restart that already follows the switch has to stay after it.
-      expect(orderOf(vi.mocked(runOpenclawConfigSetBatch), carriesPrimary)).toBeLessThan(orderOf(vi.mocked(restartGateway)));
-      expect(restartGateway).toHaveBeenCalledTimes(1);
+      expect(restartGateway).not.toHaveBeenCalled();
     });
 
     it("leaves the plugin and the gateway alone when the batch is refused", async () => {
@@ -1790,6 +2018,8 @@ describe("/setup-api/chat/model", () => {
     });
 
     it("keeps the OFF half of the gate AFTER the write when the new primary is not Anthropic", async () => {
+      // The gate switches the anthropic plugin off: a flip, so the restart follows it.
+      vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
       // The OFF half (off only when nothing on the box could use the plugin)
       // stays where it was: never before the write, so a plugin whose model IS
       // the current primary is not switched off under it.
@@ -1803,7 +2033,7 @@ describe("/setup-api/chat/model", () => {
       const writtenAt = orderOf(vi.mocked(runOpenclawConfigSetBatch), carriesPrimary);
       const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "llamacpp");
       expect(writtenAt).toBeLessThan(gatedAt);
-      expect(gatedAt).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+      expect(restartGateway).not.toHaveBeenCalled();
     });
   });
 

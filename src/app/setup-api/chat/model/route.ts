@@ -3,11 +3,10 @@ import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
 import {
-  GatewayNotReadyError,
+  gatewayIsAbsent,
   inferConfiguredLocalModel,
   readConfig,
   readConfigStrict,
-  restartGateway,
   repairClawboxAiFlashModelPolicy,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -43,12 +42,17 @@ import {
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { GatewayWsUnavailableError, gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import {
   forgetClawboxAiPickIfMovedOff,
   recordExplicitModelPick,
 } from "@/lib/explicit-model-pick";
-import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
+import {
+  clawboxAiNonChatModelReason,
+  isClawboxAiImageModelId,
+  isClawboxAiNonChatModelRef,
+} from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   CHATGPT_PROVIDER,
@@ -101,7 +105,76 @@ interface ChatModelOption {
    * be routed until the owner signs in again (src/lib/chatgpt-subscription.ts).
    */
   reauthRequired?: true;
+  /**
+   * The reasoning-effort levels the GATEWAY says this model takes, from its own
+   * `models.list` (see {@link readGatewayThinkingLevels}). Absent whenever the
+   * gateway could not be asked, which is not the same as "none": the header
+   * falls back to ClawBox's local table then, exactly as it always did.
+   */
+  thinkingLevels?: string[];
 }
+
+/**
+ * What the gateway says each model's reasoning-effort levels are.
+ *
+ * HARNESS-FIRST. ClawBox kept a hand-written table of which provider offers
+ * which effort levels (`REASONING_BY_PROVIDER` in src/lib/chat-reasoning.ts)
+ * plus a regex for the Claude models that refuse `off`. The gateway publishes
+ * the fact natively, per MODEL rather than per provider: every row of a
+ * `models.list` result carries `thinkingLevels: [{ id, label }]`, built by
+ * `resolveEffectiveThinkingProfile`
+ * (`src/gateway/server-methods/models-list-result.ts` at v2026.9.3; schema at
+ * `packages/gateway-protocol/src/schema/agents-models-skills.ts`). It is the
+ * same source the gateway then judges a `thinkingLevel` against, so a level it
+ * publishes is a level it will take.
+ *
+ * Asked over the in-process socket, which is what makes this affordable: the
+ * local table exists because the answer used to cost a ~3 s CLI start, and
+ * `gatewayWsCall` costs milliseconds. Never fatal — the map is a decoration on
+ * the rows, and a box with no gateway (the Hermes SKU), one that is still
+ * booting, or a core too old to send the field all answer an empty map and the
+ * local table stands. That is deliberately a FALLBACK and not a second source
+ * of truth: `intersectWithLadder` takes what the two agree on.
+ */
+async function readGatewayThinkingLevels(): Promise<Map<string, string[]>> {
+  const byRef = new Map<string, string[]>();
+  let payload: Record<string, unknown>;
+  try {
+    if (gatewayIsAbsent()) return byRef;
+    payload = await gatewayWsCall("models.list", {}, { timeoutMs: GATEWAY_MODELS_LIST_TIMEOUT_MS });
+  } catch (err) {
+    // A gateway that is down or still booting is the ordinary case on a box
+    // that has just restarted one, and it is not worth a line per poll. The
+    // whole read is inside the catch — including the edition probe — because
+    // this is a DECORATION on the picker's rows and must never be the reason
+    // the owner cannot see which model the box runs.
+    if (!(err instanceof GatewayWsUnavailableError)) {
+      console.warn("[chat/model] gateway models.list refused; using the local reasoning table");
+    }
+    return byRef;
+  }
+  const models = payload.models;
+  if (!Array.isArray(models)) return byRef;
+  for (const row of models) {
+    if (!row || typeof row !== "object") continue;
+    const { id, provider, thinkingLevels } = row as {
+      id?: unknown; provider?: unknown; thinkingLevels?: unknown;
+    };
+    if (typeof id !== "string" || typeof provider !== "string") continue;
+    if (!Array.isArray(thinkingLevels)) continue;
+    const levels = thinkingLevels
+      .map((level) => (level && typeof level === "object" ? (level as { id?: unknown }).id : undefined))
+      .filter((level): level is string => typeof level === "string" && level.length > 0);
+    if (levels.length === 0) continue;
+    byRef.set(`${provider}/${id}`.toLowerCase(), levels);
+  }
+  return byRef;
+}
+
+/** The picker's read is on the owner's click path, and the local table is a
+ *  correct answer — so a gateway mid-restart is waited on briefly, not for the
+ *  default ten seconds. */
+const GATEWAY_MODELS_LIST_TIMEOUT_MS = 2_000;
 
 const PROVIDER_LABELS: Record<string, string> = {
   clawai: "ClawBox AI",
@@ -478,12 +551,19 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
 /**
  * `preloaded` is the config POST has already read for its own routing facts,
  * so one request reads openclaw.json once; GET reads it here.
+ *
+ * `gatewayLevels: false` skips the `models.list` round trip. The levels are a
+ * DECORATION on the rows the answer carries, and POST's pre-write read is for
+ * routing facts only — every response it sends is built from a fresh read
+ * after the write, so asking the gateway twice per switch bought nothing and,
+ * on a slow gateway, cost the connect and method deadlines twice over.
  */
-async function loadChatModelState(preloaded?: OpenClawConfig) {
-  const [configStore, openclawConfig, storedPrimaryModel] = await Promise.all([
+async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean } = {}) {
+  const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
+    read.gatewayLevels === false ? new Map<string, string[]>() : readGatewayThinkingLevels(),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
   // Subscription-only providers, computed ONCE: the row attribution below and
@@ -567,11 +647,15 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   ) => {
     const trimmedModel = typeof model === "string" ? canonicalChatModel(model.trim()) : "";
     if (!trimmedModel || isLocalModel(trimmedModel)) return;
-    // The ClawBox AI image entry, written as the primary by an older build,
-    // must not own the provider's row: the profile loop below then picks a
-    // model the box can chat with instead. Only the image id — a remembered
-    // chat model the curated list omits is still what the gateway runs.
-    if (isClawboxAiImageModelRef(trimmedModel)) return;
+    // The ClawBox AI image LANE, written as the primary by an older build or
+    // picked from one of OpenClaw's own surfaces, must not own a provider's
+    // row: the profile loop below then picks a model the box can chat with
+    // instead. The image ref on either provider id, and any other model on the
+    // image provider id — the bundled litellm plugin ships a chat catalog of
+    // its own on that id and the box cannot run a word of it (see
+    // `isClawboxAiImageProviderRef`). A remembered chat model the curated list
+    // omits is still what the gateway runs.
+    if (isClawboxAiNonChatModelRef(trimmedModel)) return;
     const provider = normalizeProvider(providerHint ?? uiProviderForModel(trimmedModel));
     if (!provider) return;
     if (configuredPrimaryOptions.has(provider)) return;
@@ -582,6 +666,10 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     // first row to claim a model keeps the bare id; a later one is qualified,
     // so no two rows collide.
     const claimed = [...configuredPrimaryOptions.values()].some((option) => option.id === trimmedModel);
+    // The gateway's answer for THIS model, keyed by the ref the row carries.
+    // Absent means "not asked or not known", never "no levels" — the header
+    // falls back to the local ladder then.
+    const thinkingLevels = gatewayThinkingLevels.get(trimmedModel.toLowerCase());
     configuredPrimaryOptions.set(provider, {
       id: claimed ? `${provider}:${trimmedModel}` : trimmedModel,
       label,
@@ -590,6 +678,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
       available: true,
       settingsSection: "ai",
       isLocal: false,
+      ...(thinkingLevels ? { thinkingLevels } : {}),
     });
   };
 
@@ -634,14 +723,14 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     );
 
     let model: string | null = null;
-    // `!isClawboxAiImageModelRef` matters here, not only in the filter above:
+    // `!isClawboxAiNonChatModelRef` matters here, not only in the filter above:
     // this branch wins whenever the primary belongs to this provider, so on
     // the very boxes the image guard exists for it took the image ref, handed
     // it to `rememberPrimaryOption`, and had it dropped there — leaving the
     // provider with no row until the hard-coded fallback far below invented
     // one. Treating an image-ref primary as "no active model for this
     // provider" is what lets the owner's configured rows be consulted.
-    if (activeModel && !isClawboxAiImageModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
+    if (activeModel && !isClawboxAiNonChatModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
       model = activeModel;
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
@@ -717,6 +806,12 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
         available: true,
         settingsSection: "localAi",
         isLocal: true,
+        // The local model's levels are the gateway's to state too: llama.cpp
+        // takes `off` alone, and the hard-coded row for it here says the same
+        // thing only for as long as that stays true of every local model.
+        ...(gatewayThinkingLevels.has(localModel.toLowerCase())
+          ? { thinkingLevels: gatewayThinkingLevels.get(localModel.toLowerCase())! }
+          : {}),
       }
     : {
         id: "__setup_local__",
@@ -966,7 +1061,9 @@ export async function POST(request: Request) {
     // One read of openclaw.json for the request: the state below and every
     // credential fact the routing turns on come from the same snapshot.
     const preloadedConfig = await readConfig().catch(() => null);
-    const state = await loadChatModelState(preloadedConfig ?? {});
+    // Routing facts only: no response below is built from this snapshot, so
+    // the gateway's `models.list` is asked once, for the fresh read that is.
+    const state = await loadChatModelState(preloadedConfig ?? {}, { gatewayLevels: false });
     // Set wherever a pick is resolved onto the ChatGPT subscription: that
     // route is written under `openai/`, so the namespace cannot say so and
     // the runtime arm below has to be told.
@@ -1044,12 +1141,15 @@ export async function POST(request: Request) {
           return NextResponse.json({ error: "Invalid model identifier" }, { status: 400 });
         }
         // The door the picker does not stand in front of: the ClawBox AI
-        // image entry is a valid-SHAPED `openai/*` id on every paired box, and
-        // written as the primary it fails every chat turn. Only that id — this
-        // door deliberately takes chat ids the curated list omits.
-        if (isClawboxAiImageModelRef(requestedModel)) {
+        // image entry is a valid-SHAPED id on every paired box, and written as
+        // the primary it fails every chat turn. By PROVIDER for the image
+        // lane's own id, because OpenClaw's pickers offer the bundled litellm
+        // plugin's chat rows on it once the image half arms the plugin, and
+        // this door is where such a pick arrives. Nothing wider — it
+        // deliberately takes chat ids the curated list omits.
+        if (isClawboxAiNonChatModelRef(requestedModel)) {
           return NextResponse.json(
-            { error: `${parsed.modelId} is the ClawBox AI image model, not a chat model.` },
+            { error: clawboxAiNonChatModelReason(requestedModel) },
             { status: 400 },
           );
         }
@@ -1259,9 +1359,9 @@ export async function POST(request: Request) {
     // because `rememberPrimaryOption` and the `models[]` filter keep the ref
     // out of `state.options`, which is exactly the "guard that holds because
     // of a condition two functions away" this block was written to avoid.
-    if (isClawboxAiImageModelRef(targetModel)) {
+    if (isClawboxAiNonChatModelRef(targetModel)) {
       return NextResponse.json(
-        { error: `${resolvedParsed?.modelId ?? targetModel} is the ClawBox AI image model, not a chat model.` },
+        { error: clawboxAiNonChatModelReason(targetModel) },
         { status: 400 },
       );
     }
@@ -1276,9 +1376,9 @@ export async function POST(request: Request) {
     // Read/recheck/append under the native config lock. Never serialize an
     // allowlist from the earlier request snapshot into a retryable CLI batch.
     // The equivalent Flash permission remains if primary validation later fails.
-    const policyRepaired = targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash
-      ? await repairClawboxAiFlashModelPolicy()
-      : false;
+    // Whether it repaired anything no longer decides a re-read: every answer
+    // below comes from a fresh read (see loadChatModelState).
+    if (targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash) await repairClawboxAiFlashModelPolicy();
 
     if (state.activeModel === targetModel) {
       // Naming the model the box already runs is still a choice, and the write
@@ -1306,7 +1406,6 @@ export async function POST(request: Request) {
       //     a same-model pick is free only when they already agree.
       let sameModelWarning: string | undefined;
       const armed = chatgptRuntimeArmed(preloadedConfig, targetModel);
-      const wrote = chatgptRouted !== armed || policyRepaired;
       if (chatgptRouted && !armed) {
         await runOpenclawConfigSet(chatgptRuntimeArmOp(targetModel));
       } else if (!chatgptRouted && armed) {
@@ -1316,13 +1415,12 @@ export async function POST(request: Request) {
       // config as it was, where the arm this branch just removed still says
       // the model belongs to the ChatGPT row. Answering with that would tell
       // the owner they are on the subscription in the same response that took
-      // them off it. A branch that wrote nothing keeps the snapshot it has.
-      // Another lock holder may have already repaired or removed the Pro
-      // permission. Re-read a previously flagged policy even if we wrote
-      // nothing, so the response does not keep a stale migration flag.
-      const settledState = wrote || state.needsFlashModelMigration
-        ? await loadChatModelState()
-        : state;
+      // them off it. Another lock holder may have already repaired or removed
+      // the Pro permission, so a previously flagged policy is re-read too.
+      // And a branch that wrote nothing re-reads all the same: the pre-write
+      // snapshot carries no gateway reasoning levels (see loadChatModelState),
+      // and this is the one read of the request that decorates the rows.
+      const settledState = await loadChatModelState();
       const sameModelOption = settledState.options.find((option) =>
         option.model === targetModel
         && (!pickedUiProvider || option.provider === pickedUiProvider));
@@ -1451,9 +1549,18 @@ export async function POST(request: Request) {
     //    running different models" use case has no UI today.
     //    Automatic ClawBox alias normalization preserves unrelated session
     //    pins; the chat patches its own session to Flash when it connects.
+    //    A sweep that could not run is SAID, never only logged — the sibling of
+    //    the same fix in /setup-api/ai-models/configure. Two ways it fails and
+    //    only one of them throws: on an OpenClaw 2 agent (the sqlite store,
+    //    every current box) a session the gateway refuses is caught inside
+    //    `patchChunk`, counted into `sessionsSkipped` and returned normally, so
+    //    the `try` alone answered 200 over a chat still pinned to the old
+    //    model. `sessionsUpdated === 0` with nothing skipped is not a failure:
+    //    it is a box with no session to repoint.
+    let sweepWarning: string | undefined;
     if (parsed && !automaticClawboxAliasNormalization) {
       try {
-        await applyModelOverrideToAllAgentSessions(
+        const sweep = await applyModelOverrideToAllAgentSessions(
           {
             provider: parsed.provider,
             modelId: parsed.modelId,
@@ -1461,11 +1568,18 @@ export async function POST(request: Request) {
           },
           { skipUserTagged: false },
         );
+        if (sweep.sessionsSkipped > 0) {
+          console.warn(
+            `[chat/model] The gateway would not re-point ${sweep.sessionsSkipped} session(s); they keep their previous model`,
+          );
+          sweepWarning = "Saved, but a chat that was already open keeps its previous model — pick the model again in its header.";
+        }
       } catch (err) {
         // Non-fatal: the default change (step 1) still takes effect
         // for brand-new sessions. Worst case the user has to /reset
         // the open chat. Log and continue.
         console.error("[chat/model] Failed to sweep session overrides:", err);
+        sweepWarning = "Saved, but a chat that was already open keeps its previous model — pick the model again in its header.";
       }
     }
     if (parsed) {
@@ -1486,28 +1600,31 @@ export async function POST(request: Request) {
       if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
-    // The model is already written; the restart is only what makes it live. So
-    // NO restart failure is a failed switch — the outer catch's 500 "Failed to
-    // switch chat model" would be a false failure over a change that IS on
-    // disk, whether the gateway never came back or the unit was masked by an
-    // update in flight. Both answer 502 with the new state, and the warning
-    // says which, because the owner's next step differs: wait, or find out why
-    // the service refused.
-    let gatewayWarning: string | undefined;
-    try {
-      await restartGateway();
-    } catch (err) {
-      gatewayWarning = err instanceof GatewayNotReadyError
-        ? "Saved, but the gateway did not come back — the new model applies once it is serving again."
-        : "Saved, but the gateway could not be restarted — the new model applies at its next restart.";
-      console.error("[chat/model] gateway restart failed after the model switch:", err);
-    }
-
+    // Nothing here restarts the gateway. Every write this handler makes is
+    // one the pinned core hot-applies in its default `hybrid` reload mode —
+    // its own table (docs/gateway/configuration, "What hot-applies vs what
+    // needs a restart"): `agents.*` and `models.*` (the primary, the Codex
+    // runtime arm on `agents.defaults.models`, a provider's model list),
+    // `auth.*`, and `plugins.entries.*` (a provider plugin switched on or
+    // off, which reloads the plugin runtime in place). Proven on a box
+    // (2026-09-17): the arm hot-applied with the primary ("[reload] config
+    // hot reload applied (agents.defaults.model.primary,
+    // agents.defaults.models.openai/gpt-5.5)"), and a plugin flipped off and
+    // on through the gateway's own config.patch was applied in 400 ms with
+    // the process id unchanged. The restart this route kept for those two
+    // cases cost every provider switch 25 s — eleven in the unit's pre-start
+    // before a process existed — and every run in flight, for nothing.
+    //
+    // The open sessions were patched above (`sessions.patchMany`, ~80 ms),
+    // and the gateway picks the new primary up for new sessions about a
+    // second after the write.
     const nextState = await loadChatModelState();
-    const warning = [disarmWarning, gatewayWarning].filter(Boolean).join(" ");
+    // One `warning` field, both producers: the disarm failure and the sweep,
+    // joined the way the configure route joins its own.
+    const warning = [disarmWarning, sweepWarning].filter(Boolean).join(" ");
     return NextResponse.json(
       { ...nextState, ...(warning ? { warning } : {}) },
-      { status: gatewayWarning ? 502 : 200, headers: { "Cache-Control": "no-store" } },
+      { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
     // A config-mutation conflict is the box racing ITSELF, not a failed switch:

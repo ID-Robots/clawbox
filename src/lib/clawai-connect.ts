@@ -29,6 +29,15 @@ export interface ClawAiConnectSession {
   deviceName?: string;
   verificationUrl?: string;
   error?: string | null;
+  /**
+   * What the configure answered BESIDE success: a save that landed and could
+   * not do all of it (today: the session sweep the doctor stop defers). It
+   * travels on the session for the same reason `error` does — the configure
+   * runs off the poll request that started it, so the sentence has to survive
+   * until the UI's next tick — and the poll answers it with `status:
+   * "complete"` so Settings can render it instead of a plain "Configured".
+   */
+  warning?: string | null;
   completedAt?: number;
   /**
    * When the session entered the `configuring` state. Used by the poll

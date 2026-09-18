@@ -88,11 +88,23 @@ const { parseFullyQualifiedModelImpl } = vi.hoisted(() => ({
   },
 }));
 
+vi.mock("@/lib/openclaw-gateway-ws", () => ({
+  waitForGatewayRpcReady: vi.fn().mockResolvedValue(true),
+  gatewayWsCall: vi.fn(),
+  gatewayWsPatchConfig: vi.fn(),
+  GatewayWsUnavailableError: class GatewayWsUnavailableError extends Error {},
+  GatewayRpcError: class GatewayRpcError extends Error {},
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
   // finished coming back" from "the restart was refused", and `instanceof
   // undefined` throws a TypeError the first time a test makes it reject.
+  // The port-readiness budget, which is also the one the deferred session
+  // sweep is bounded by. A plain value, not a vi.fn(): every suite here means
+  // the shipped 30 s.
+  gatewayReadyWaitMs: () => 30000,
   GatewayNotReadyError: class GatewayNotReadyError extends Error {
     constructor(message = "gateway did not come back") {
       super(message);
@@ -281,6 +293,9 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
   vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
   vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
+  // The gateway came back: what every case here means, and what the detached
+  // follow-up needs (an unseeded mock resolves `undefined`).
+  vi.mocked((await import("@/lib/openclaw-gateway-ws")).waitForGatewayRpcReady).mockResolvedValue(true);
   vi.mocked(setProviderPlugins).mockResolvedValue(null);
   vi.mocked(unpairLocal).mockResolvedValue(undefined);
   mockSpawn.mockImplementation(() => successfulChild());

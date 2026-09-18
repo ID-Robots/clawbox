@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { curatedPet } from "@/lib/pet-curated";
+import { petAuthor } from "@/lib/pet-curated";
 import {
   activePetDescriptor,
   disablePet,
@@ -52,6 +52,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message, reason: outcome.reason }, { status: 502 });
   }
 
-  const active = await activePetDescriptor((s) => curatedPet(s)?.submittedBy ?? "");
+  const active = await activePetDescriptor(petAuthor);
   return NextResponse.json({ ok: true, active });
 }

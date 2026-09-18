@@ -62,7 +62,7 @@ async function mountStep() {
   return utils;
 }
 
-const connect = () => screen.getByRole("button", { name: "Connect" });
+const connect = () => screen.getByRole("button", { name: "Save & Continue" });
 const reason = () => screen.queryByTestId("credentials-blocked-reason");
 const discloser = (container: HTMLElement) =>
   container.querySelector<HTMLButtonElement>('[aria-controls="hotspot-secret-panel"]')!;

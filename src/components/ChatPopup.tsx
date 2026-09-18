@@ -15,10 +15,26 @@ import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } f
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
+import { gatewayFrameError, isGatewayStartingRefusal } from '@/lib/chat-gateway-starting'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
 import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
 import { ChatProgressCard } from '@/components/ChatProgressCard'
+import { AskUserPrompt } from '@/lib/chat-ask-user'
+import {
+  loadPendingQuestions,
+  markQuestionBusy,
+  mergeQuestionCard,
+  questionBelongsToSession,
+  questionsAfterReplay,
+  questionsAfterResolution,
+  questionsAfterResolve,
+  readQuestionCard,
+  readQuestionResolution,
+  QUESTION_REQUESTED_EVENT,
+  QUESTION_RESOLVED_EVENT,
+  type QuestionCard,
+} from '@/lib/gateway-questions'
 import {
   APPROVAL_SESSION_EVENT,
   approvalsAfterReplay,
@@ -48,7 +64,8 @@ import {
   type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
-import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply, describeImageFailure } from '@/lib/chat-error-text'
+import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
@@ -60,6 +77,9 @@ import { useModalDialog } from '@/hooks/useModalDialog'
 // is the provider/model header, which renders a different vendor's catalogue
 // and is product identity rather than a capability.
 import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
+import { useSlashCommands } from '@/lib/use-slash-commands'
+import { isSlashCommandMessage } from '@/lib/chat-slash-commands'
+import SlashCommandMenu from '@/components/SlashCommandMenu'
 import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // `extractText` stays with the gateway adapter: it strips that gateway's own
 // wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
@@ -154,6 +174,13 @@ const VOICE_TRANSCRIBE_TIMEOUT_MS = 180_000
 // extend the retry budget to quadruple so the chat reconnects automatically
 // once it comes back instead of forcing the user to click Try again.
 const SKILL_INSTALL_MAX_RETRIES = MAX_RETRIES * 4
+/** How often an open, visible popup re-reads which model the box runs.
+ *  One a minute: the read is a route handler plus two file reads on a Jetson,
+ *  per open popup per visible tab, and it is a backstop behind the
+ *  `onProvidersChanged` signal rather than the primary path — the 20 s it
+ *  started at was three of them a minute for a change that almost never
+ *  happens between ticks. */
+const MODEL_STATE_POLL_MS = 60_000
 const RETRY_DELAY = 3000
 // When the gateway closes the socket with an auth rejection (it rate-limits a
 // client after too many failed auth attempts), retrying on the fast RETRY_DELAY
@@ -161,6 +188,7 @@ const RETRY_DELAY = 3000
 // so the cooldown can expire, then the next attempt succeeds without the user
 // having to reload.
 const AUTH_BACKOFF_DELAY = 30000
+
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 // The status line's small sibling of SPINNER_STYLE.
 const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border: '2px solid rgba(249,115,22,0.25)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }
@@ -315,6 +343,12 @@ interface ChatModelState {
      * the only fix, so the row must not say "set up in Settings" — that sends
      * the owner to re-enter something they already have. */
     reauthRequired?: boolean
+    /** The reasoning-effort levels the GATEWAY published for this model, off
+     * its own `models.list` (see `readGatewayThinkingLevels` in
+     * setup-api/chat/model/route.ts). Optional, and ABSENT is not "none": a
+     * gateway that could not be asked, or a core too old to send the field,
+     * leaves the header on ClawBox's local table. */
+    thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
   local: { available: boolean; label: string | null; model: string | null }
@@ -364,6 +398,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
+import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
 import { DESKTOP_GAP, DESKTOP_LAYERS, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
@@ -379,6 +414,7 @@ import {
 } from '@/lib/chat-attachments'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
+import { usePortrait } from '@/lib/use-portrait'
 import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
@@ -856,8 +892,13 @@ function emailRefusalSentence(rows: unknown[]): string {
 }
 
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
-  const { t } = useT()
+  const { t, locale } = useT()
   const tr = useTr()
+  // The words a failed turn is said in. A ref, because the gateway's event
+  // handlers outlive the render that created them and must still speak the
+  // owner's current language.
+  const failureWordsRef = useRef({ t, locale })
+  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   // A PHONE never draws the docked panel. Its geometry is a desktop one — a
   // column anchored to the right edge at a width chosen on a big screen — which
@@ -867,18 +908,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
-  // Phone composer: whether the folded provider/model/effort pills are shown,
-  // and whether there are any to fold (a ClawBox AI chat can have none).
-  const [pickersOpen, setPickersOpen] = useState(false)
-  const pillsRef = useRef<HTMLDivElement | null>(null)
-  const [hasPills, setHasPills] = useState(false)
-  // No dependency list on purpose: the pills are rendered by several branches
-  // below, so re-measure after every commit; it only sets state on a change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    const next = (pillsRef.current?.childElementCount ?? 0) > 0
-    if (next !== hasPills) setHasPills(next)
-  })
+  // A phone held upright gets its own composer: Send/Stop stays beside the
+  // text box and the microphone takes a centred row of its own under it, so
+  // it can never crowd the field. Landscape keeps the one-row composer.
+  const portraitComposer = usePortrait(mobile) && mobile
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -902,6 +935,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     speechGenerationRef.current += 1
     replyPlayerRef.current?.pause()
     replyPlayerRef.current = null
+    // A bubble's own player too: the conversation it was speaking is gone.
+    stopSpokenReply()
     for (const url of spokenUrlsRef.current) { try { URL.revokeObjectURL(url) } catch { /* jsdom */ } }
     spokenUrlsRef.current = []
     // The notes those URLs carried go with them: a released clip has no player
@@ -1165,6 +1200,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const timer = window.setTimeout(() => setApprovalNow(Date.now()), Math.max(0, soonest - Date.now()))
     return () => window.clearTimeout(timer)
   }, [approvals, approvalNow])
+  // The `ask_user` questions the agent is parked on, as the gateway reports
+  // them. Never a store of our own, for the reason the approvals above are
+  // not: the gateway owns the queue, the ids, the expiry and the
+  // first-answer-wins resolution, and `question.list` replays whatever is
+  // still open — which is why, unlike a Hermes clarify, one of these survives
+  // a reload.
+  const [questions, setQuestions] = useState<QuestionCard[]>([])
+  // The clock those cards judge their own window against. One timeout at the
+  // earliest expiry still ahead of it, never a ticker — an idle chat with a
+  // card on screen must not re-render once a second on a Jetson. The same
+  // shape as the approval clock above, and deliberately its own: a question's
+  // 15-minute default and an approval's two minutes are different deadlines,
+  // and one clock woken for either would re-render both sets.
+  const [questionNow, setQuestionNow] = useState(() => Date.now())
+  useEffect(() => {
+    const soonest = questions.reduce(
+      (min, card) => (card.status === 'pending' && card.expiresAtMs > questionNow
+        ? Math.min(min, card.expiresAtMs)
+        : min),
+      Number.POSITIVE_INFINITY,
+    )
+    if (!Number.isFinite(soonest)) return
+    const timer = window.setTimeout(() => setQuestionNow(Date.now()), Math.max(0, soonest - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [questions, questionNow])
   /**
    * Which read of the approval queue is the current one.
    *
@@ -1405,9 +1465,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
     return activeOption?.model ?? chatModelState.activeModel ?? null
   }, [chatModelState])
+  // What the gateway itself says the ACTIVE model takes, when the box has one
+  // to ask. Memoised on the row rather than on the whole state, which is
+  // replaced on every poll.
+  const headerThinkingLevels = useMemo<string[] | undefined>(() => {
+    if (!chatModelState) return undefined
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    return activeOption?.thinkingLevels
+  }, [chatModelState])
   const reasoningConfig = useMemo<ProviderReasoningConfig>(
-    () => getProviderReasoningConfig(headerProvider, headerModel),
-    [headerProvider, headerModel],
+    () => getProviderReasoningConfig(headerProvider, headerModel, headerThinkingLevels),
+    [headerProvider, headerModel, headerThinkingLevels],
   )
   const visibleThinkingLevels = reasoningConfig.levels
   // Snap the displayed value to a level the active provider actually
@@ -1898,6 +1968,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (error) tabErrorsRef.current.set(key, error)
   }, [])
   const runIdRef = useRef<string | null>(null)
+  // What the gateway said about a run before it declared the turn dead — the
+  // provider's own refusal rides on the lifecycle frames, never on the `chat`
+  // error itself. See lib/chat-run-failure.ts.
+  const runFailureRef = useRef(new RunFailureLedger())
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
    *
@@ -2091,7 +2165,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // reasoning-capable model is folded to the local model's `off`) and returns
     // null while the provider is still unknown (catalog loading) so we hold the
     // push rather than sending a speculative value the gateway would reject.
-    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel, headerModel)
+    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel, headerModel, headerThinkingLevels)
     if (wireLevel === null) return
     // Reconcile legacy Pro session pins even when the device default is
     // already Flash. The gateway owns this write and preserves the transcript.
@@ -2131,7 +2205,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
     })
   // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
-  }, [status, headerProvider, headerModel, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
+  }, [status, headerProvider, headerModel, headerThinkingLevels, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -2144,13 +2218,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // A persisted user choice is per provider and still wins.
   useEffect(() => {
     if (!headerProvider) return
-    const cfg = getProviderReasoningConfig(headerProvider, headerModel)
+    const cfg = getProviderReasoningConfig(headerProvider, headerModel, headerThinkingLevels)
     const persisted = readPersistedThinkingLevel(headerProvider, cfg)
     if (thinkingLevelRef.current !== persisted) applyThinkingLevel(persisted)
-  }, [headerProvider, headerModel, applyThinkingLevel])
+  }, [headerProvider, headerModel, headerThinkingLevels, applyThinkingLevel])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
-    const cfg = getProviderReasoningConfig(headerProvider, headerModel)
+    const cfg = getProviderReasoningConfig(headerProvider, headerModel, headerThinkingLevels)
     const normalized: ThinkingLevel = cfg.levels.includes(next as ThinkingLevel)
       ? (next as ThinkingLevel)
       : cfg.default
@@ -2167,7 +2241,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (headerProvider) {
       try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, normalized) } catch { /* localStorage unavailable */ }
     }
-  }, [headerProvider, headerModel, applyThinkingLevel])
+  }, [headerProvider, headerModel, headerThinkingLevels, applyThinkingLevel])
 
   // Connect to gateway
   const connectionGenerationRef = useRef(0)
@@ -2295,6 +2369,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (!isCurrent()) return
           clearDeadlineTimer()
           setStatus('connected')
+          // A reconnect follows every restart, and a restart follows some model
+          // switches made elsewhere: what the box runs may have changed. The
+          // first handshake is not a reconnect; the open effect already read it.
+          if (hasEverConnectedRef.current) refreshChatModelState()
           connectedOnceRef.current = true
           hasEverConnectedRef.current = true
 
@@ -2372,28 +2450,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               if (wasProviderChange) {
                 const pendingModelSwitch = pendingModelSwitchResetRef.current
                 pendingModelSwitchResetRef.current = null
-                if (pendingModelSwitch && !pendingModelSwitch.automatic) {
-                  try {
-                    // The fresh chat belongs to MAIN — the pre-tabs contract,
-                    // and the session every other surface shares. With a side
-                    // tab bound, resetting "the current session" would wipe
-                    // the conversation under the owner's cursor and leave
-                    // main carrying the old model's transcript — the exact
-                    // leak the banner below claims was prevented.
-                    if (sessionKeyRef.current === mainSessionKeyRef.current) {
-                      await resetSessionRef.current()
-                    } else {
-                      await wsRequest('sessions.reset', { key: mainSessionKeyRef.current, reason: 'new' })
-                    }
-                  } catch (err) {
-                    setMessages(prev => [...prev, {
-                      role: 'system',
-                      text: `Switched chat to ${pendingModelSwitch.model}, but could not start a fresh chat: ${err instanceof Error ? err.message : 'unknown error'}`,
-                      timestamp: Date.now(),
-                      variant: 'error',
-                    }])
-                  }
-                }
+                // The conversation CONTINUES on the new model. It used to be
+                // reset here "so the previous model's transcript does not leak
+                // into this model" — but the core carries a session across
+                // providers on its own (its `/model` command switches in
+                // place, and its transport transforms the history for the
+                // provider that reads it next), and the owner asked for the
+                // thread to stay (2026-09-17): a switch mid-task that wiped
+                // the task was the leak.
                 try {
                   const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
                   const state = await res.json() as ChatModelState
@@ -2402,9 +2466,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
                   setMessages(prev => [...prev, {
                     role: 'system',
-                    text: pendingModelSwitch
-                      ? `Switched chat to ${label}. Started a fresh chat so the previous model's transcript does not leak into this model.`
-                      : `Switched chat to ${label}.`,
+                    text: `Switched chat to ${label}.`,
                     timestamp: Date.now(),
                     variant: 'success',
                   }])
@@ -2416,10 +2478,56 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           } else {
             loadHistory()
           }
+          // And what the agent is already parked on — asked LAST, after the
+          // transcript read is under way. A question outlives this browser tab
+          // (`ask_user` waits fifteen minutes by default), so a reload, a
+          // reconnect after a gateway bounce, or simply opening the chat after
+          // the question was asked all land here and get the card back;
+          // `question.list` answers the PENDING set and nothing else, so this
+          // is also what takes a card down that was answered while this socket
+          // was away. Last, because the transcript is what the owner is
+          // waiting for and this frame must not sit in front of it — and
+          // because every frame added ahead of the history read shifts the
+          // interleaving of a turn that is already in flight.
+          void loadPendingQuestions(wsRequest, boundKey, (pending, forKey) => {
+            if (forKey !== sessionKeyRef.current) return
+            setQuestions(prev => questionsAfterReplay(prev, pending))
+          })
         },
         reject: (err: Error) => {
           if (!isCurrent()) return
           clearDeadlineTimer()
+          // A gateway that is still BOOTING accepts the socket and refuses the
+          // connect frame with `UNAVAILABLE` / `retryable: true` /
+          // `details.reason: "startup-sidecars"` (its channels and sidecars are
+          // not up yet) — the state every restart passes through for ten to
+          // twenty seconds. That is not a failure to surface: it is the
+          // reconnect the close path already handles,
+          // so treat it the same — the restart overlay over a chat that was
+          // connected, the plain connecting state over one that never was —
+          // and try again on the same ladder. The error panel and its Retry
+          // button are for refusals that will not change on their own.
+          if (isGatewayStartingRefusal(err)) {
+            if (wsRef.current === ws) wsRef.current = null
+            try { ws.close() } catch { /* already closing */ }
+            if (connectedOnceRef.current && !skillInstalledRef.current) {
+              skillInstalledRef.current = true
+              reloadReasonRef.current = 'restart'
+              setReloadReason('restart')
+              setReloadingSkill(true)
+              setReloadProgress(0)
+              startReloadProgressTimer()
+            }
+            const budget = !hasEverConnectedRef.current
+              ? INITIAL_CONNECT_MAX_RETRIES
+              : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
+            if (retryCountRef.current < budget) {
+              retryCountRef.current++
+              if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+              retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
+              return
+            }
+          }
           // The fifth terminal-failure path, and it used to be the one that
           // forgot both halves. A gateway that REFUSES the connect frame
           // (protocol skew, a rejected device identity, a denied scope) keeps
@@ -2441,7 +2549,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // omitted — the exact pre-2026.8 frame. Every signed value must match
       // this frame byte for byte, so the shared literals live in consts.
       const clientPlatform = navigator.platform || 'web'
-      const scopes = ['operator.admin', 'operator.approvals', 'operator.pairing']
+      // `operator.questions` is what guards `question.requested` /
+      // `question.resolved` and the `question.*` RPCs. `operator.admin` is a
+      // superset on today's gateway, but a paired device is granted what it
+      // ASKED for, and an unknown scope is filtered out rather than refused
+      // (`normalizeOperatorScopeList`), so naming it costs nothing anywhere.
+      const scopes = ['operator.admin', 'operator.approvals', 'operator.questions', 'operator.pairing']
       const device = buildDeviceConnectParams({
         nonce: challenge?.nonce,
         ts: challenge?.ts,
@@ -2489,8 +2602,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (data.ok) {
             pending.resolve(data.payload)
           } else {
-            const err = data.error as Record<string, unknown> | undefined
-            pending.reject(new Error((err?.message as string) || 'Request failed'))
+            pending.reject(gatewayFrameError(data.error as Record<string, unknown> | undefined))
           }
         }
         return
@@ -2517,6 +2629,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (eventName === 'agent') {
           const payload = data.payload as Record<string, unknown> | undefined
           if (!payload) return
+          // Before the session filter: `settleRun` below words a background
+          // session's failure too, and it needs the same notes.
+          runFailureRef.current.observe(payload)
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
           if (payload.stream === 'tool') {
@@ -2630,8 +2745,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // session filter, which is what would otherwise drop the event. The
           // error branch below never runs for a background session, and a
           // history reload cannot recreate what was never stored.
+          // One sentence per failed run, worded once: the ledger's note is
+          // consumed here and reused by the error branch below.
+          const failureText = state === 'error'
+            ? describeChatFailure(payload.errorMessage, runFailureRef.current.settle(payload), failureWordsRef.current)
+            : undefined
           if (state === 'final' || state === 'aborted' || state === 'error') {
-            settleRun(sk, state === 'error' ? describeChatFailure(payload.errorMessage) : undefined)
+            settleRun(sk, failureText)
           }
           if (sk !== sessionKeyRef.current) return
 
@@ -2731,6 +2851,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // ref is cleared two lines down).
             const finishedRun = runIdRef.current
             applyStreaming('')
+            // A reply another model wrote — the picked one failed and the
+            // gateway's configured fallback answered. The `final` frame does
+            // not say so; the run's lifecycle frames did. One honest line
+            // under the reply, or the owner reads "I'm deepseek" under a
+            // header that says otherwise (a box, 2026-09-17).
+            const fallbackNote = describeFallbackReply(runFailureRef.current.settle(payload))
+            if (fallbackNote) setMessages(prev => [...prev, { role: 'system', text: fallbackNote, timestamp: Date.now() }])
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
@@ -2800,7 +2927,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
+              setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now() }])
             }
           }
         }
@@ -2833,6 +2960,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (forKey && !fromKey && forKey !== sessionKeyRef.current) return
           const card = readApproval(envelope?.approval)
           if (card) setApprovals(prev => mergeApprovalCard(prev, card))
+          return
+        }
+
+        // The agent has STOPPED and is waiting for a person: `ask_user` put a
+        // question on the gateway and is blocked on `question.waitAnswer`
+        // until somebody resolves it. The payload IS the record here (unlike
+        // the approval event, which is an envelope around one).
+        //
+        // Filtered by session, but loosely — see `questionBelongsToSession`:
+        // the record carries the CANONICAL store key, which is the bound key
+        // with the `agent:<id>:` namespace in front of it, so a byte-for-byte
+        // comparison would drop the card for exactly the conversation the
+        // question was asked in.
+        if (eventName === QUESTION_REQUESTED_EVENT) {
+          const card = readQuestionCard(data.payload)
+          if (!card) return
+          if (!questionBelongsToSession(card.sessionKey, sessionKeyRef.current)) return
+          setQuestions(prev => mergeQuestionCard(prev, card))
+          return
+        }
+
+        // NOT filtered on the session, because the event carries no key: it is
+        // `{id, status, answers?}` and nothing more. The id is the filter —
+        // `questionsAfterResolution` leaves a card this surface never drew
+        // alone. Every terminal path arrives here: an answer from another
+        // surface, the agent abandoning its own question when the run is
+        // aborted, and the clock.
+        if (eventName === QUESTION_RESOLVED_EVENT) {
+          const resolution = readQuestionResolution(data.payload)
+          if (!resolution) return
+          setQuestions(prev => questionsAfterResolution(prev, resolution))
           return
         }
       }
@@ -2955,6 +3113,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (!isOpen) return
     return onProvidersChanged(() => { refreshChatModelState() })
+  }, [isOpen, refreshChatModelState])
+
+  // The header names the model the BOX runs, and the box can be told to run
+  // another one from outside this tab: the Settings page in a second window,
+  // the same chat on the phone, an operator on the CLI, a channel command.
+  // Seen on a box (2026-09-17): the model changed under an open popup and its
+  // header kept the old name until a reload. The signal above only spans this
+  // tab, and the gateway's heartbeat does not carry the model — so the popup
+  // re-reads it whenever the owner comes back to the tab, and on a slow tick
+  // while the tab is on screen. The read is two file reads on the box, and the
+  // tick is one a minute (MODEL_STATE_POLL_MS) — the visibility and focus
+  // handlers above are what make a change the owner is actually looking at
+  // appear at once, so the tick only has to catch the case where nothing was
+  // touched in this tab at all.
+  useEffect(() => {
+    if (!isOpen) return
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshChatModelState() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    const tick = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshChatModelState()
+    }, MODEL_STATE_POLL_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+      clearInterval(tick)
+    }
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, and open the first conversation on a box that has an
@@ -3126,6 +3311,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // The approvals belong to the session that is going away. The gateway
     // still holds them; the next subscribe replays whatever is still open.
     setApprovals([])
+    // Same for the agent's own questions, and the same reasoning: the gateway
+    // is still holding them and the next `question.list` replays them, so
+    // nothing is lost by taking a card off a conversation that is gone.
+    setQuestions([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
@@ -3229,6 +3418,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void subscribeSessionApprovals(wsRequest, key, (replay, forKey) => {
       if (forKey !== sessionKeyRef.current) return
       setApprovals(prev => approvalsAfterReplay(prev, replay))
+    })
+    void loadPendingQuestions(wsRequest, key, (pending, forKey) => {
+      if (forKey !== sessionKeyRef.current) return
+      setQuestions(prev => questionsAfterReplay(prev, pending))
     })
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
@@ -3711,10 +3904,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       replyPlayerRef.current?.pause()
       const player = new Audio(src)
       replyPlayerRef.current = player
-      player.addEventListener('ended', done, { once: true })
-      player.addEventListener('error', done, { once: true })
-      // Paused from outside (a release, a newer reply): heard enough.
-      player.addEventListener('pause', done, { once: true })
+      // The document's one speaker (lib/spoken-reply-playback.ts): claimed as
+      // this starts, so a bubble someone pressed falls silent rather than
+      // talking under it, and so the bubble this reply lands in can draw
+      // Stop for it. Named by the bubble's own `src`, not `player.src`, which
+      // the browser has already resolved to an absolute URL.
+      const letGo = () => { releaseSpokenReply(player); done() }
+      player.addEventListener('ended', letGo, { once: true })
+      player.addEventListener('error', letGo, { once: true })
+      // Paused from outside (the owner's Stop, a release, a newer reply, a
+      // bubble pressed): heard enough.
+      player.addEventListener('pause', letGo, { once: true })
+      claimSpokenReply(player, src, { automatic: true, detached: true })
       const started = player.play()
       // A browser that wants the gesture and the sound in the same tick
       // refuses; the bubble's own player is there for exactly that case — and
@@ -3725,7 +3926,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (started && typeof started.catch === 'function') {
         started.catch(() => {
           setAutoplayBlocked(prev => (prev.includes(src) ? prev : [...prev, src]))
-          done()
+          letGo()
         })
       }
       window.setTimeout(done, PLAYBACK_MAX_MS)
@@ -3753,6 +3954,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // first. The box queues syntheses too; a 429 here means that queue is
     // full, which a short wait usually clears.
     const generation = speechGenerationRef.current
+    // Read at the moment the reply QUEUES: if the owner stops a reply, sends a
+    // new prompt or presses another bubble while this one waits its turn, it
+    // is still made and put on its bubble, but it does not start talking.
+    const interruptions = spokenReplyInterruptions()
+    const aloud = () => play && spokenReplyInterruptions() === interruptions
     const chainRef = play ? speakChainRef : clipChainRef
     const previous = chainRef.current
     let release: () => void = () => {}
@@ -3760,7 +3966,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     try {
       await previous
       if (speechGenerationRef.current !== generation) return
-      if (audio.length > 0) { if (play) await playReply(audio[0]); return }
+      if (audio.length > 0) { if (aloud()) await playReply(audio[0]); return }
       // Something may have spoken this reply while the clip waited its turn —
       // the history reconcile, or a gateway that pushed its TTS supplement
       // inside the final and had it merged. Then there is nothing to make.
@@ -3784,7 +3990,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // through, so "Speaking…" never counts the seconds an EARLIER reply was
       // taking; cleared in the same breath as the response, so the line goes
       // the moment the player takes over.
-      if (play) { setSpeakingFor(0); setSpeakingReply(true) }
+      if (aloud()) { setSpeakingFor(0); setSpeakingReply(true) }
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
           res = await fetch('/setup-api/tts/speak', {
@@ -3858,7 +4064,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // result synchronously, which React does not promise.
         return prev
       })
-      if (play) await playReply(url)
+      if (aloud()) await playReply(url)
     } catch { /* the reply is on screen; the voice was a bonus */ }
     finally { release() }
   }, [playReply])
@@ -4008,6 +4214,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const startRecording = useCallback(async () => {
     if (voice.state === 'recording' || voice.state === 'requesting') return
+    // A new question starts here: the last answer stops talking, and does not
+    // end up on the recording either.
+    stopSpokenReply()
     // Read live rather than from `captureAvailability`: the state exists to
     // label the button before anyone clicks, and a stale render must never be
     // what decides whether the microphone is opened.
@@ -4418,6 +4627,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
+  /**
+   * Answer one `ask_user` question through the gateway's own resolver.
+   *
+   * ONE call carrying EVERY question of the request: `validateAnswers` refuses
+   * a resolve that leaves any of them out, so there is no per-question post
+   * here the way there is for a Hermes clarify.
+   *
+   * `question.resolve` is first-answer-wins and answers with the canonical
+   * recorded state, so an owner who answered in Telegram a moment earlier gets
+   * that outcome rather than an error. A refusal leaves the card PENDING with
+   * the gateway's own words on it — the owner may press again, and pressing
+   * again over an answer that did land comes back as the terminal state
+   * rather than as a second answer.
+   */
+  const answerQuestion = useCallback(async (card: QuestionCard, answers: Record<string, string[]>) => {
+    setQuestions(prev => markQuestionBusy(prev, card.id))
+    try {
+      const result = await wsRequest('question.resolve', { id: card.id, answers: { answers } })
+      setQuestions(prev => questionsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setQuestions(prev => questionsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
   // "Allow all": every approval still waiting, answered allow-once, one
   // resolve each and in order — the batch of the consent each card already
   // offers, never a standing allow (see ApprovalPrompt's `pendingCount`).
@@ -4652,7 +4885,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // now, so this is the only gate left.
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined)
+        : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
       settleRun(keyAtSend, failure)
       // It failed in a tab the owner has left: the composer, the caret and
       // the pills on screen belong to the tab they are looking at now, and
@@ -4707,6 +4940,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
     // stream; those handlers paint the reply and end the run.
     if (result.acknowledgedOnly) return
+    // A COMMAND may have changed the model this box is configured to run —
+    // `/model <id> --global` on Hermes writes config.yaml, which is the very
+    // file the header reads. Without this the header kept the old name until
+    // the next visibility change or the 60 s tick, and every message sent in
+    // that window carried the stale model and switched the session back to it.
+    // Fired here, where a harness that answers on the promise has FINISHED the
+    // command; the gateway edition leaves above on `acknowledgedOnly` and is
+    // covered by its own `onProvidersChanged` signal.
+    //
+    // A switch the harness deliberately kept to this conversation writes no
+    // config and is not this call's to find — the route says that one in words,
+    // beside the command's own output.
+    if (isSlashCommandMessage(text)) void refreshChatModelState()
     settleRun(keyAtSend)
     // The reply belongs to a tab the owner has left. The box recorded it
     // before answering, so that tab replays it on return; here it only went
@@ -4751,7 +4997,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // where the batch card appears.
     void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming, refreshChatModelState])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
@@ -4936,6 +5182,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text && attachments.length === 0) return
+    // A new prompt: the reply still speaking stops. Its text and its clip stay
+    // on the bubble, to be played again from the start.
+    stopSpokenReply()
     const currentAttachments = [...attachments]
     setInput('')
     setAttachments([])
@@ -5666,13 +5915,49 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Notify parent of thinking state
   useEffect(() => { onThinkingChange?.(sending) }, [sending, onThinkingChange])
 
+  // Hoisted above the slash hook, which needs it: the menu's `enabled` is the
+  // composer's own `disabled` expression and the two must not drift.
+  const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
+
+  // ── Slash-command autocomplete ──────────────────────────────────────────
+  //
+  // The catalogue is the HARNESS'S, read through the adapter: `commands.list`
+  // on the gateway, `commands.catalog` on Hermes' dashboard. Everything this
+  // surface does with it — when to open, how to filter, which key does what —
+  // lives in the hook, so the full-screen chat gets the same behaviour from the
+  // same four lines rather than a second implementation of it.
+  const slash = useSlashCommands({
+    adapter: harnessLoaded ? adapter : null,
+    status,
+    value: input,
+    setValue: setInput,
+    inputRef,
+    // The SAME expression the textarea's `disabled` uses, not an approximation
+    // of it: the hook's contract is that the menu cannot outlive the composer,
+    // and `status === 'connected'` alone left the greeting window uncovered.
+    enabled: status === 'connected' && !greetingPending,
+  })
+
+  // The HANDLER, not the object it comes on: `useSlashCommands` returns a
+  // fresh literal every render, so a callback that depended on `slash` was
+  // rebuilt on every keystroke and its memo did nothing at all.
+  const slashKeyDown = slash.handleKeyDown
   // Handle Enter to send
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // An IME candidate window owns Enter while it is up; committing a
+    // half-composed word as a message is not a send the owner asked for —
+    // and, checked BEFORE the menu, neither is accepting a command on it.
+    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return
+    // The slash menu gets first refusal: with it open, Enter and Tab ACCEPT the
+    // highlighted command rather than sending, and the Arrows walk the list.
+    // With it closed the hook returns false and this behaves exactly as it
+    // always has.
+    if (slashKeyDown(e)) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
     }
-  }, [sendMessage])
+  }, [sendMessage, slashKeyDown])
 
   const stopHeaderDrag = useCallback((e: React.PointerEvent<HTMLElement>) => {
     e.stopPropagation()
@@ -5713,16 +5998,79 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
   const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
 
-  const greetingPending = isBootstrappingHistory || (sending && messages.length === 0)
-
-  // The microphone. Compact (36px, in the composer's button row) on a big
-  // screen; LARGE on a phone — a 72px round button beside the text box, bottom
-  // right where the thumb already is, because on a phone voice is often the
-  // whole interaction (the owner talks to the box while driving) and a 36px
-  // icon among four others is a target you have to look at to hit. Same
-  // handlers, same disabled rule and the same test ids either way; only the
-  // size and the recording state's weight differ — the large one turns solid
-  // red with a stop square and a pulsing ring, readable at a glance.
+  // Shared actions retain the same behaviour in both responsive layouts.
+  const renderAttachmentButton = () => (
+    (caps.canAttachImages || caps.canAttachDocuments) && (
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        disabled={status !== 'connected'}
+        title={tr('chat.attachFile', 'Attach file')}
+        aria-label={tr('chat.attachFile', 'Attach file')}
+        data-testid="chat-attach"
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
+          cursor: status === 'connected' ? 'pointer' : 'default',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'all 0.15s',
+        }}
+        onMouseEnter={(e) => { if (status === 'connected') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+      >
+        <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>attach_file</span>
+      </button>
+    )
+  )
+  const renderSendButton = () => (
+    sending ? (
+      <button
+        onClick={abort}
+        title={t("chat.stop")}
+        aria-label={t("chat.stop")}
+        data-testid="chat-stop"
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: 'rgba(239,68,68,0.2)', color: '#ef4444',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'background 0.15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.35)'}
+        onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+        </svg>
+      </button>
+    ) : (
+      <button
+        onClick={sendMessage}
+        disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
+        title={t("chat.send")}
+        aria-label={t("chat.send")}
+        data-testid="chat-send"
+        style={{
+          width: 36, height: 36, borderRadius: 10, border: 'none',
+          background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
+          color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
+          cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'all 0.15s',
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
+        </svg>
+      </button>
+    )
+  )
+  // Keep recording/transcription controls reachable even if a draft changes.
+  // Landscape only: in portrait the microphone has a row of its own and the
+  // slot beside the text box is always Send or Stop.
+  const mobileVoiceAction = !portraitComposer && caps.canTranscribe && (
+    voice.state === 'recording' || voice.state === 'requesting' || voice.state === 'transcribing'
+    || (!sending && !input.trim() && attachments.length === 0)
+  )
+  // Compact desktop mic; 44px in-flow phone target with shared recording feedback.
   const renderVoiceButton = (large: boolean) => {
     if (voice.state === 'recording') {
       return (
@@ -5795,6 +6143,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       data-testid="chat-popup"
       // Hook for the phone-sized touch targets in globals.css (.chat-mobile).
       data-chat-mobile={mobile || undefined}
+      data-chat-portrait={portraitComposer || undefined}
       ref={popupRef}
       // On the CAPTURE phase: the header, the pills and the composer all stop
       // their own pointer events, and a click that raises no surface is a click
@@ -6398,7 +6747,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     })}
                   </div>
                 )}
-                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"))) : null}
+                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
                 {isLongUser && (
                   <button
                     type="button"
@@ -6568,6 +6917,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <ClarifyPrompt key={card.requestId} card={card} onAnswer={answerClarify} />
         ))}
 
+        {/* The agent's own `ask_user` question, one card per request.
+            OpenClaw only, and not by a harness check here but by construction:
+            they arrive on the gateway socket, and a Hermes box raises none —
+            its equivalent is the clarify card above. Beside the clarifies for
+            the same reason they sit there: this is the turn STOPPING to ask,
+            not something it has already done. */}
+        {!reloadingSkill && questions.map(card => (
+          <AskUserPrompt key={card.id} card={card} nowMs={questionNow} onAnswer={answerQuestion} />
+        ))}
+
         {/* Outgoing mail, one card per batch. Below the clarifies and above the
             image banner, i.e. at the bottom of the transcript where the turn
             that produced it just ended — this is a decision about what the
@@ -6640,7 +6999,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }}>
               {/* Lifted out HERE, not on the way into state, so an interrupted
                   turn keeps the directive and can still become cards. */}
-              {renderText(streamingEmailRefsText(streaming), t("chat.table"))}
+              {renderText(streamingEmailRefsText(streaming), t("chat.table"), t("chat.detailsSummary"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
               <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
             </div>
@@ -6942,28 +7301,43 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
       )}
 
-      {/* Composer — the shape people know from Claude's own UI: the text
-          box on top, full width, and one row under it with the attach,
-          microphone and picture buttons on the left and, on the right, the
-          provider / model / effort pills beside the send button. */}
+      {/* Desktop keeps the full-width text box over its action/settings row.
+          Phones put attachment and mic/send beside the text, settings below. */}
       <div
         data-testid="chat-composer"
-        data-pickers-open={mobile && pickersOpen ? true : undefined}
+        className="chat-composer"
         style={{
         padding: mobile ? '10px 12px 10px' : '10px 14px 10px',
         borderTop: (attachments.length > 0 || showNewApp) ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
-        {/* On a phone the microphone leaves the button row and stands beside
-            the text box at thumb size — see renderVoiceButton. */}
-        <div style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 10 } : { display: 'contents' }}>
+        {/* Primary phone row: attachment, text, then send/stop (portrait) or
+            microphone-or-send/stop (landscape). */}
+        <div className="chat-composer-primary" data-testid={mobile ? 'chat-composer-primary' : undefined} style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
+        {mobile && renderAttachmentButton()}
         <textarea
           ref={inputRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          // The slash menu tracks the caret as well as the text, so the draft's
+          // setter and the caret move together through one handler.
+          onChange={slash.handleChange}
+          onSelect={slash.handleSelect}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          // The menu is a listbox this textarea OWNS: focus never moves to it,
+          // so the active row has to be announced from here — that is what
+          // `aria-activedescendant` is for, and it is valid on a textbox.
+          //
+          // The textarea deliberately keeps `role="textbox"` rather than
+          // becoming a `combobox` while the menu is up. Swapping an element's
+          // role underneath a screen reader mid-interaction is its own bug, and
+          // the attributes below carry the same three facts a combobox would:
+          // a list exists, here it is, this row is current.
+          aria-haspopup="listbox"
+          aria-controls={slash.open ? slash.listboxId : undefined}
+          aria-activedescendant={slash.activeOptionId}
+          aria-autocomplete="list"
           placeholder={
             status !== 'connected'
               ? t("chat.connectingPlaceholder")
@@ -6990,8 +7364,32 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
-        {caps.canTranscribe && mobile && renderVoiceButton(true)}
+        {mobile && (mobileVoiceAction ? renderVoiceButton(true) : renderSendButton())}
+        {/* Portaled and fixed — this wrapper is `display: contents` on desktop
+            and the chat window clips its content, so an in-flow popover here
+            would be anchored to nothing and cut off by the window. */}
+        {slash.open && (
+          <SlashCommandMenu
+            anchorRef={inputRef}
+            commands={slash.items}
+            activeIndex={slash.activeIndex}
+            listboxId={slash.listboxId}
+            optionId={slash.optionId}
+            onPick={slash.accept}
+            onHover={slash.setActiveIndex}
+            ariaLabel={tr('chat.slash.menuLabel', 'Slash commands')}
+            emptyLabel={tr('chat.slash.noMatches', 'No matching commands')}
+            hermes={harnessId === 'hermes'}
+          />
+        )}
         </div>
+        {/* Portrait phone: the one record/stop toggle, alone and centred on a
+            row of its own across the chat's full width. */}
+        {portraitComposer && caps.canTranscribe && (
+          <div data-testid="chat-composer-voice-row" className="chat-composer-voice-row">
+            {renderVoiceButton(true)}
+          </div>
+        )}
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
             rule and a flex-basis — see the block there. */}
@@ -7001,24 +7399,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             into the user's own bubble and then dropped, so the customer sees
             their screenshot in the transcript and an answer that never looked
             at it. */}
-        {(caps.canAttachImages || caps.canAttachDocuments) && (
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={status !== 'connected'}
-          title={tr('chat.attachFile', 'Attach file')}
-          style={{
-            width: 36, height: 36, borderRadius: 10, border: 'none',
-            background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
-            cursor: status === 'connected' ? 'pointer' : 'default',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0, transition: 'all 0.15s',
-          }}
-          onMouseEnter={(e) => { if (status === 'connected') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
-        </button>
-        )}
+        {!mobile && renderAttachmentButton()}
         {/* Voice input. Shown wherever the box has something to transcribe WITH
             — the route itself is edition-neutral, so what actually decides is
             whether this device holds a ClawBox AI credential. Offering the
@@ -7089,26 +7470,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               paperclip with the whole width empty beside it. Sharing one basis
               (the pills' plus the gap plus the button) makes the break happen
               in front of both or neither, at 3, 4 or 5 buttons. */}
-          {/* Phone: the provider / model / effort pills are a secondary
-              setting, folded behind one button so the row under the text box
-              is attach, create, pickers … send, all one size. Opening it lays
-              the pills out as a full-width row of their own (globals.css,
-              [data-chat-mobile]); every picker is still one tap away. */}
-          {mobile && hasPills && (
-            <button
-              type="button"
-              onClick={() => setPickersOpen(o => !o)}
-              aria-expanded={pickersOpen}
-              aria-label={t("chat.modelPickers")}
-              title={t("chat.modelPickers")}
-              data-testid="chat-pickers-toggle"
-              className="chat-pickers-toggle"
-            >
-              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 20 }}>tune</span>
-            </button>
-          )}
           <div className="chat-composer-tail">
-          <div ref={pillsRef} className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
+          <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
             // below — provider → model (scoped to it) → thinking effort. Every
@@ -7403,46 +7766,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           )}
           </>)}
         </div>
-        {sending ? (
-          <button
-            onClick={abort}
-            title={t("chat.stop")}
-            aria-label={t("chat.stop")}
-            data-testid="chat-stop"
-            style={{
-              width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: 'rgba(239,68,68,0.2)', color: '#ef4444',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'background 0.15s',
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.35)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
-          </button>
-        ) : (
-          <button
-            onClick={sendMessage}
-            disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
-            title={t("chat.send")}
-            aria-label={t("chat.send")}
-            data-testid="chat-send"
-            style={{
-              width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
-              color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
-              cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'all 0.15s',
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
-            </svg>
-          </button>
-        )}
+        {!mobile && renderSendButton()}
         </div>
         </div>
       </div>

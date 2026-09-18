@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 // A plain .mjs script, imported for its pure helpers only. Nothing runs on
 // import: scripts/feature-sweep.mjs guards main() on argv[1], so importing it
 // here can never sweep a box.
-import { redact, tally } from "../../../scripts/feature-sweep.mjs";
+import { redact, speechEnginesReport, tally, uiLanguageReadsBack } from "../../../scripts/feature-sweep.mjs";
 
 /**
  * The two pure halves of scripts/feature-sweep.mjs — the only parts that can
@@ -96,5 +96,107 @@ describe("feature-sweep tally", () => {
 
   it("answers for an empty sweep", () => {
     expect(tally([])).toMatchObject({ passed: 0, failed: 0, unproven: 0, total: 0, areas: [] });
+  });
+});
+
+describe("feature-sweep uiLanguageReadsBack", () => {
+  /**
+   * A freshly flashed box has stored no `pref:ui_language`: the desktop takes
+   * its language from the browser until the owner picks one, so the route
+   * answering `{}` is the route WORKING. Read with the plain `ok("ui_language")`
+   * expectation that was `missing field ui_language in {}` — a red check on
+   * every clean device, which is the kind of red that trains an operator to
+   * re-run the sweep until it goes green.
+   */
+  const res = (status: number, body: unknown) => ({
+    status,
+    text: typeof body === "string" ? body : JSON.stringify(body),
+    json: typeof body === "string" ? null : body,
+  });
+
+  it("passes when a language has been chosen", () => {
+    expect(uiLanguageReadsBack(res(200, { ui_language: "de" }))).toBe(true);
+  });
+
+  it("is unproven, never a failure, when no language was ever chosen", () => {
+    const verdict = uiLanguageReadsBack(res(200, {}));
+    expect(verdict).toMatchObject({ unproven: expect.stringContaining("language") });
+  });
+
+  it("is unproven for an explicit null, the way a cleared value reads", () => {
+    expect(uiLanguageReadsBack(res(200, { ui_language: null }))).toMatchObject({
+      unproven: expect.any(String),
+    });
+  });
+
+  it("still fails when the route itself is broken", () => {
+    // The point of the change is to stop excusing a clean box, not to stop
+    // noticing a route that no longer answers.
+    expect(uiLanguageReadsBack(res(500, { error: "boom" }))).toContain("expected 200");
+    expect(uiLanguageReadsBack(res(200, "<html>login</html>"))).toContain("expected a JSON object");
+    expect(uiLanguageReadsBack(res(200, ["en"]))).toContain("expected a JSON object");
+  });
+
+  it("fails on a stored value that is not a language", () => {
+    // `sanitizePreferences` drops a value the write rules would refuse, so
+    // anything non-string arriving here is the route breaking its contract.
+    expect(uiLanguageReadsBack(res(200, { ui_language: 42 }))).toContain("ui_language");
+    expect(uiLanguageReadsBack(res(200, { ui_language: "" }))).toContain("ui_language");
+  });
+});
+
+describe("feature-sweep speechEnginesReport", () => {
+  /**
+   * A box with no speech engine configured answers `activeEngine: null` beside
+   * an `engines` list where nothing is `configured` — the route WORKING. Read
+   * with the plain `ok("engines", "activeEngine")` expectation that failed the
+   * release-gate sweep on every box without a voice engine.
+   */
+  const res = (status: number, body: unknown) => ({
+    status,
+    text: typeof body === "string" ? body : JSON.stringify(body),
+    json: typeof body === "string" ? null : body,
+  });
+  const engine = (id: string, configured: boolean) => ({ id, configured });
+
+  it("passes when an engine is active", () => {
+    expect(speechEnginesReport(res(200, {
+      activeEngine: "local",
+      engines: [engine("local", true), engine("cloud", false)],
+    }))).toBe(true);
+  });
+
+  it("is unproven, never a failure, when nothing on the box can speak", () => {
+    const verdict = speechEnginesReport(res(200, {
+      activeEngine: null,
+      engines: [engine("local", false), engine("cloud", false)],
+    }));
+    expect(verdict).toMatchObject({ unproven: expect.stringContaining("nothing can speak") });
+  });
+
+  it("is unproven for an empty engine list too", () => {
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [] }))).toMatchObject({
+      unproven: expect.any(String),
+    });
+  });
+
+  it("fails when an engine is configured and none is active — drift, not an empty box", () => {
+    expect(speechEnginesReport(res(200, {
+      activeEngine: null,
+      engines: [engine("local", true), engine("cloud", false)],
+    }))).toContain("activeEngine");
+  });
+
+  it("still fails when the route itself is broken", () => {
+    expect(speechEnginesReport(res(500, { error: "boom" }))).toContain("expected 200");
+    expect(speechEnginesReport(res(200, "<html>login</html>"))).toContain("expected a JSON object");
+    expect(speechEnginesReport(res(200, { activeEngine: "local" }))).toContain("engines");
+    expect(speechEnginesReport(res(200, { activeEngine: 7, engines: [engine("local", true)] }))).toContain("activeEngine");
+  });
+
+  it("fails on a malformed engine entry rather than excusing it as an empty box", () => {
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [null] }))).toContain("invalid `engines` entry");
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [{}] }))).toContain("invalid `engines` entry");
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [{ id: "local", configured: "yes" }] }))).toContain("invalid `engines` entry");
   });
 });

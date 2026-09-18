@@ -25,7 +25,17 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 
 const PROXY = "https://clawbox.com/api/ai";
 const TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
-const CLOUD = { provider: "openai", model: TRANSCRIBE_MODEL };
+// The row's OWN bearer. Its provider is `openai` — the only bundled
+// media-understanding provider that speaks the proxy's transcription API — and
+// its credential used to be the ClawBox AI token the image migration wrote onto
+// `models.providers.openai.apiKey`. That key is gone (an apiKey there pins the
+// whole provider to API-key auth on the pinned core and hides a ChatGPT
+// sign-in), so the row names the auth profile ClawBox already writes for the
+// ClawBox AI subscription instead.
+const TRANSCRIBE_AUTH_PROFILE = "deepseek:default";
+const CLOUD = { provider: "openai", model: TRANSCRIBE_MODEL, profile: TRANSCRIBE_AUTH_PROFILE };
+/** The same row as every box in the field still carries it, before the profile. */
+const LEGACY_CLOUD = { provider: "openai", model: TRANSCRIBE_MODEL };
 const OURS = [CLOUD];
 /** The on-box row Settings adds (src/lib/stt-preference.ts builds it). */
 const LOCAL_CLI = {
@@ -315,6 +325,77 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
       // CLI row pointing at nothing would cost every voice note its timeout.
       const { cfg } = migrate({});
       expect(audio(cfg)!.models).toEqual(OURS);
+    });
+  });
+
+  describe("the bearer the row carries", () => {
+    // The seed only ever runs where there is NO list, so every box paired
+    // before this change carries a cloud row with no `profile` — and that row
+    // lost its credential the moment the image migration stopped writing
+    // `models.providers.openai.apiKey`. Without the repair below, channel voice
+    // notes on every existing box are refused before upload.
+
+    it("pins the profile to the one the transcribe route names", () => {
+      const preference = readFileSync(
+        path.resolve(process.cwd(), "src/lib/stt-preference.ts"),
+        "utf-8",
+      );
+
+      expect(preference).toContain(`"${TRANSCRIBE_AUTH_PROFILE}"`);
+      expect(POLICY).toContain(`CLAWBOX_TRANSCRIBE_AUTH_PROFILE = "${TRANSCRIBE_AUTH_PROFILE}"`);
+    });
+
+    it("gives the row a box already carries its own profile", () => {
+      const { cfg, changed, log } = migrate({
+        tools: { media: { audio: { baseUrl: PROXY, models: [LEGACY_CLOUD] } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(audio(cfg)!.models).toEqual([CLOUD]);
+      expect(log).toContain("its own auth profile");
+    });
+
+    it("repairs the row without disturbing a saved engine order", () => {
+      const { cfg, changed } = migrate({
+        tools: { media: { audio: { baseUrl: PROXY, models: [LOCAL_CLI, LEGACY_CLOUD] } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(audio(cfg)!.models).toEqual([LOCAL_CLI, CLOUD]);
+    });
+
+    it("is idempotent — a row that already names it is left alone", () => {
+      const { changed, log } = migrate({
+        tools: { media: { audio: { baseUrl: PROXY, models: [CLOUD] } } },
+      });
+
+      expect(changed).toBe(false);
+      expect(log).not.toContain("its own auth profile");
+    });
+
+    it("never touches a list this migration does not recognise", () => {
+      const owner = {
+        baseUrl: PROXY,
+        models: [{ type: "cli", command: "/usr/local/bin/whisper-cpp", args: ["{{MediaPath}}"] }],
+      };
+      const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual(owner);
+    });
+
+    it("leaves a row that names the owner's OWN profile alone", () => {
+      // Our row is recognised by exact equality, so a cloud row the owner has
+      // pointed at their own OpenAI profile is theirs, not ours — and the
+      // repair must not overwrite the profile they chose. Pinned so a looser
+      // predicate cannot quietly start doing that.
+      const owned = { provider: "openai", model: TRANSCRIBE_MODEL, profile: "openai:default" };
+      const { cfg, changed } = migrate({
+        tools: { media: { audio: { baseUrl: PROXY, models: [owned] } } },
+      });
+
+      expect(changed).toBe(false);
+      expect(audio(cfg)!.models).toEqual([owned]);
     });
   });
 });

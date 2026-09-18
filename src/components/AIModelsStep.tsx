@@ -605,7 +605,7 @@ export default function AIModelsStep({
   // through a ref rather than a forward reference; the hook's own start/stop/
   // reset identities are stable.
   const clawaiFinishRef = useRef<{
-    complete: () => void;
+    complete: (warning?: string) => void;
     error: (message: string) => void;
     configuring: () => void;
   }>({ complete: () => {}, error: () => {}, configuring: () => {} });
@@ -616,7 +616,10 @@ export default function AIModelsStep({
     onStart: () => setStatus(null),
     onBusyChange: setSaving,
     onConfiguring: () => clawaiFinishRef.current.configuring(),
-    onComplete: () => clawaiFinishRef.current.complete(),
+    // The warning travels: a ClawBox AI sign-in is a `subscription` save, so it
+    // takes the doctor stop and the deferred session sweep — the one path most
+    // likely to produce the sentence, and until now the one that dropped it.
+    onComplete: (warning) => clawaiFinishRef.current.complete(warning),
     onError: (message) => clawaiFinishRef.current.error(message),
   });
   // Stable identities (see the hook) — pulled out so effects/callbacks can

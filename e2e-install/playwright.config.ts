@@ -25,6 +25,14 @@ export default defineConfig({
   expect: { timeout: 120_000 },
   use: {
     baseURL: `http://localhost:${CLAWBOX_PORT}`,
+    // US English, pinned. A freshly installed box stores no `pref:ui_language`
+    // — that is correct behaviour, and the desktop then takes its language from
+    // the browser (`detectLocale` in src/lib/i18n.tsx). These specs drive the
+    // real UI by its English copy ("Continue with Ethernet", "Next"), so the
+    // browser's language is part of the fixture rather than whatever the runner
+    // happens to be set to: unpinned, the same install reads German on a German
+    // machine and every by-name locator fails.
+    locale: "en-US",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     actionTimeout: 60_000,

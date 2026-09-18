@@ -173,15 +173,39 @@ describe("applyClawaiCloudDefaults", () => {
     expect(writeProvider).not.toHaveBeenCalled();
   });
 
-  it("does not move the index on a box whose owner has memory search switched off", async () => {
+  /**
+   * The Memory Shard switch is ClawBox's consent to run index PASSES over the
+   * owner's folders. It has never governed WHICH embedder the agent searches
+   * with: `ensure-local-embeddings.sh` writes the on-device one into
+   * `memory.search` at every gateway start with no regard for it. Gating the
+   * cloud half on it meant a freshly onboarded box — the switch is off on a new
+   * box — kept the local embedder for good while the Settings card said the
+   * target was the cloud, with no reason beside it and nothing that would ever
+   * move it. That was every box on the rig after onboarding and linking.
+   */
+  it("moves the index onto the cloud on a box that has not switched memory search on yet", async () => {
     shardEnabled.mockResolvedValue(false);
     const applied = await applyClawaiCloudDefaults();
-    expect(applied.moved).not.toContain("embeddings");
-    expect(switchToCloud).not.toHaveBeenCalled();
+    expect(applied.moved).toContain("embeddings");
+    expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
   });
 
   it("keeps the switch when only the rebuild could not start", async () => {
     startIndex.mockResolvedValue({ accepted: false, declined: "running" } as never);
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("embeddings");
+    expect(applied.failed).toEqual([]);
+  });
+
+  /**
+   * And the rebuild declining BECAUSE the switch is off is the ordinary case on
+   * such a box: there is no index to rebuild. The switch itself has landed, so
+   * the first pass the owner ever runs builds under the cloud identity instead
+   * of building under the local one and being invalidated at the next boot.
+   */
+  it("treats a rebuild declined for the switch being off as a completed move", async () => {
+    shardEnabled.mockResolvedValue(false);
+    startIndex.mockResolvedValue({ accepted: false, declined: "disabled" } as never);
     const applied = await applyClawaiCloudDefaults();
     expect(applied.moved).toContain("embeddings");
     expect(applied.failed).toEqual([]);
@@ -268,6 +292,27 @@ describe("readCloudDefaultsStatus", () => {
     store.set("stt_primary", "local");
     const status = await readCloudDefaultsStatus();
     expect(status.capabilities.stt).toEqual({ source: "local", target: "local", ownerChoice: true, reason: "owner" });
+  });
+
+  /**
+   * TASK-860. `source` is what the box IS doing and `target` what the rule says
+   * it should — so the two disagreeing is the card's way of saying "this will
+   * move". On an unlinked box nothing will ever move transcription to the
+   * cloud, and reporting `source: "cloud"` there put a permanent, unactionable
+   * drift on the card over a box that was answering every recording on its own
+   * engine.
+   */
+  it("says an unlinked box hears on its own engine, agreeing with the target", async () => {
+    token.mockResolvedValue(null);
+    entitlement.mockResolvedValue(null);
+    const status = await readCloudDefaultsStatus();
+    expect(status.linked).toBe(false);
+    expect(status.capabilities.stt).toEqual({
+      source: "local",
+      target: "local",
+      ownerChoice: false,
+      reason: "not_linked",
+    });
   });
 
   it("calls the index local on the edition that indexes on the box", async () => {

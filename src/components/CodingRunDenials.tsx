@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ALLOW_RULE_REFUSAL_KEYS, isAllowRuleRefusal } from "@/lib/coding-permission-rules";
+import { type RunInputs } from "./CodingRunInputs";
 import { BTN_QUIET, BTN_SECONDARY, INSET_SURFACE } from "./coding-agent-ui";
 
 /**
@@ -56,6 +57,7 @@ export function denialRows(denials?: RunDenial[], deniedActions?: string[]): Run
 
 export default function CodingRunDenials({
   runId,
+  inputs,
   denials,
   deniedActions,
   resumable,
@@ -63,6 +65,10 @@ export default function CodingRunDenials({
   onResume,
 }: {
   runId: string;
+  /** Where this run's readable inputs are, so a refusal can say where a file
+   *  the run needed should have been put. Absent on a record written before
+   *  the hand-over existed, and then the note is left off entirely. */
+  inputs?: RunInputs | null;
   denials?: RunDenial[];
   deniedActions?: string[];
   /** True when this run can be resumed in place — only a paused run can. */
@@ -241,6 +247,18 @@ export default function CodingRunDenials({
       <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
         {t("codingAgent.deniedHelp")}
       </p>
+      {/* Where a file a run may read actually lives. The refusal that brought
+          the owner here is very often a read of an asset the assistant made
+          for the task and left in its own media folder — which no rule can
+          ever open, so "Allow next time" is not the answer and this is. */}
+      {inputs?.dir && inputs?.shared && (
+        <p
+          className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed break-all"
+          data-testid="coding-agent-denied-inputs"
+        >
+          {t("codingAgent.deniedInputs", { folder: inputs.dir, shared: inputs.shared })}
+        </p>
+      )}
     </div>
   );
 }

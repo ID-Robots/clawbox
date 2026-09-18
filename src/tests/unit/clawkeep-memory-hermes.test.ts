@@ -329,20 +329,155 @@ describe("which arm runs the pass", () => {
 
   it("still drives the OpenClaw CLI, argv for argv, where there IS an OpenClaw", async () => {
     // The regression guard for "additive": the other arm must be untouched.
+    // Pinned WITHOUT a terminal host, which is the argv it has always had.
+    absent.value = false;
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(clawkeepDir, "no-such-script");
+    try {
+      const { startMemoryIndex } = await lib();
+      const started = await startMemoryIndex("full", "manual");
+      expect(started.accepted).toBe(true);
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].cmd).toBe("flock");
+      expect(spawned[0].args).toEqual([
+        "--no-fork", "-n", "-E", "75",
+        // The migration lock `scripts/ensure-local-embeddings.sh` also takes; its
+        // path is derived from the box's layout, so only its shape is pinned.
+        expect.stringMatching(/\.lock$/),
+        "/home/clawbox/.npm-global/bin/openclaw",
+        "memory", "index", "--agent", "main", "--force",
+      ]);
+      await settledMemoryRun(clawkeepDir);
+    } finally {
+      delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+    }
+  });
+
+  it("runs the same command on a terminal, with the one flag that makes its reporter print", async () => {
+    // `script` is the terminal. Everything after `exec` is the argv above,
+    // quoted for sh, plus `--verbose` — the reporter's `line` face.
+    absent.value = false;
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = "/bin/sh";
+    try {
+      const { startMemoryIndex } = await lib();
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].cmd).toBe("/bin/sh");
+      const [q, e, c, command, typescript] = spawned[0].args;
+      expect([q, e, c, typescript]).toEqual(["-q", "-e", "-c", "/dev/null"]);
+      expect(command).toMatch(
+        /^exec 'flock' '--no-fork' '-n' '-E' '75' '[^']+\.lock' '\/home\/clawbox\/\.npm-global\/bin\/openclaw' 'memory' 'index' '--agent' 'main' '--force' '--verbose'$/,
+      );
+      await settledMemoryRun(clawkeepDir);
+    } finally {
+      delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+    }
+  });
+});
+
+/**
+ * The bar, at the seam.
+ *
+ * Progress rides on the run-state FILE, because that file is the only thing
+ * every reader of a run shares — the route, the scheduler, and the second copy
+ * of this module Next compiles into the same web server (see
+ * `src/lib/process-store.ts`). So what is pinned here is what lands on disk
+ * and what comes back out of `readMemoryRunState`, not an in-memory channel.
+ *
+ * And the other arm: `openclaw memory index` writes its progress through a
+ * terminal reporter, so it has numbers only when it runs on a pseudo-terminal
+ * (clawkeep-memory.test.ts drives that end to end). At dispatch it has counted
+ * nothing, and without a terminal it never does — the field stays null and the
+ * card draws a bar with no percentage rather than one it made up.
+ */
+describe("how far the pass has got", () => {
+  const statePath = () => path.join(clawkeepDir, "memory-index-state.json");
+
+  async function readState(): Promise<Record<string, unknown>> {
+    return JSON.parse(await fsp.readFile(statePath(), "utf8").catch(() => "{}")) as Record<string, unknown>;
+  }
+
+  it("puts files done, files found and chunks on the running record", async () => {
+    for (let i = 0; i < 80; i += 1) {
+      fs.writeFileSync(path.join(source, `note-${i}.md`), `Paragraph ${i}.\n\n`.repeat(60));
+    }
+    const local = await import("@/lib/memory-index-local");
+    await local.writeLocalSources([source]);
+    const { startMemoryIndex } = await lib();
+    await startMemoryIndex("full", "manual");
+
+    let seen: { filesDone?: number; filesTotal?: number; chunks?: number } | null = null;
+    for (let i = 0; i < 400 && !seen; i += 1) {
+      const state = await readState();
+      if (state.status === "running" && state.progress) {
+        seen = state.progress as { filesDone?: number; filesTotal?: number; chunks?: number };
+      }
+      if (state.status !== "running") break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(seen, "a running pass must say how far it has got").toBeTruthy();
+    expect(seen!.filesTotal).toBe(80);
+    expect(seen!.filesDone).toBeGreaterThanOrEqual(0);
+    expect(seen!.filesDone).toBeLessThanOrEqual(80);
+    expect(typeof seen!.chunks).toBe("number");
+    await settledMemoryRun(clawkeepDir);
+  });
+
+  it("takes the bar back off the record when the pass ends", async () => {
+    // A settled run with a bar on it is a card drawing progress over work that
+    // is finished. The final write also has to WIN: it is a rename, and a
+    // report still in flight would otherwise land on top of it for good.
+    fs.writeFileSync(path.join(source, "notes.md"), "The deposit is two months' rent.");
+    const local = await import("@/lib/memory-index-local");
+    await local.writeLocalSources([source]);
+    const { startMemoryIndex, readMemoryRunState } = await lib();
+    await startMemoryIndex("full", "manual");
+    const final = await settledMemoryRun(clawkeepDir);
+    expect(final.status).toBe("succeeded");
+
+    // Settled for long enough that any late report would have landed.
+    await new Promise((r) => setTimeout(r, 120));
+    const state = await readState();
+    expect(state.status).toBe("succeeded");
+    expect(state.progress).toBeNull();
+    expect((await readMemoryRunState()).progress).toBeNull();
+  });
+
+  it("answers null on the OpenClaw arm at dispatch, before its CLI has counted anything", async () => {
     absent.value = false;
     const { startMemoryIndex } = await lib();
     const started = await startMemoryIndex("full", "manual");
     expect(started.accepted).toBe(true);
-    expect(spawned).toHaveLength(1);
-    expect(spawned[0].cmd).toBe("flock");
-    expect(spawned[0].args).toEqual([
-      "--no-fork", "-n", "-E", "75",
-      // The migration lock `scripts/ensure-local-embeddings.sh` also takes; its
-      // path is derived from the box's layout, so only its shape is pinned.
-      expect.stringMatching(/\.lock$/),
-      "/home/clawbox/.npm-global/bin/openclaw",
-      "memory", "index", "--agent", "main", "--force",
-    ]);
+    expect(started.run.progress).toBeNull();
     await settledMemoryRun(clawkeepDir);
+  });
+
+  it("refuses a bar read off disk that would draw past its own end", async () => {
+    // The file is written by another copy of this module while a pass runs, so
+    // it is read as untrusted like everything else here: a fraction over 1 is
+    // the one value that makes the bar visibly lie.
+    const { readMemoryRunState } = await lib();
+    await fsp.writeFile(statePath(), JSON.stringify({
+      status: "running",
+      mode: "full",
+      trigger: "manual",
+      startedAtMs: Date.now(),
+      childPid: process.pid,
+      progress: { filesDone: 9_000, filesTotal: 12, chunks: -4 },
+    }));
+    const run = await readMemoryRunState();
+    expect(run.progress).toEqual({ filesDone: 12, filesTotal: 12, chunks: 0 });
+  });
+
+  it("ignores a bar on a record that is not running", async () => {
+    const { readMemoryRunState } = await lib();
+    await fsp.writeFile(statePath(), JSON.stringify({
+      status: "succeeded",
+      mode: "full",
+      trigger: "manual",
+      startedAtMs: Date.now() - 1_000,
+      finishedAtMs: Date.now(),
+      progress: { filesDone: 3, filesTotal: 9, chunks: 40 },
+    }));
+    expect((await readMemoryRunState()).progress).toBeNull();
   });
 });

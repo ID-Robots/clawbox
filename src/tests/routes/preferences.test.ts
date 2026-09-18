@@ -279,4 +279,174 @@ describe("/setup-api/preferences", () => {
       expect(res.status).toBe(400);
     });
   });
+
+  /**
+   * The KEY half of the rules. `isAllowed` tested a PREFIX and nothing else,
+   * so everything after that prefix was free — any length, any character. Both
+   * writes in this route put a caller-supplied name onto an object
+   * (`result[key]` on the read, `entries["pref:" + key]` on the write), and the
+   * write one lands in config.json, so a caller with a session could park
+   * unbounded arbitrary names in the owner's store; CodeQL flagged both sinks
+   * (js/remote-property-injection, alerts #300 and #301 on main). The name is
+   * now rebuilt from a bounded alphabet the way project ids already are, so
+   * what reaches the object is made of those characters and no more than that
+   * many of them. A name that does not survive the rebuild is skipped, exactly
+   * as a name with the wrong prefix already was.
+   */
+  describe("preference key shape", () => {
+    const LONG_KEY = `ui_${"a".repeat(300)}`;
+    const ODD_KEY = "ui_a b";
+
+    it("does not serve a stored name longer than a preference name may be", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${LONG_KEY}`]: "x" });
+      const res = await GET(
+        new Request(`http://localhost/setup-api/preferences?keys=wp_opacity,${LONG_KEY}`),
+      );
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not serve a stored name spelled with characters a name may not carry", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${ODD_KEY}`]: "x" });
+      const res = await GET(
+        new Request(
+          `http://localhost/setup-api/preferences?keys=wp_opacity,${encodeURIComponent(ODD_KEY)}`,
+        ),
+      );
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not serve such a name through all=1 either", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${LONG_KEY}`]: "x" });
+      const res = await GET(new Request("http://localhost/setup-api/preferences?all=1"));
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("refuses the whole write for an over-long name rather than dropping it", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, [LONG_KEY]: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      // Whole, not partial: the legal key beside it did not land either.
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses the whole write for a name spelled with characters a name may not carry", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, [ODD_KEY]: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("does not quote the refused name back in the body", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ [ODD_KEY]: "x" }),
+      }));
+      expect(JSON.stringify(await res.json())).not.toContain(ODD_KEY);
+    });
+
+    it("still SKIPS a name this door does not own, as it always has", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, "bad prefix": "x" }),
+      }));
+      expect(await res.json()).toEqual({ ok: true });
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("still stores the one name this product builds at runtime", async () => {
+      await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ app_EMoamEEZ73f0CkXaXp7hrann_settings: { autostart: true } }),
+      }));
+      expect(mockSetMany).toHaveBeenCalledWith({
+        "pref:app_EMoamEEZ73f0CkXaXp7hrann_settings": { autostart: true },
+      });
+    });
+  });
+
+  /**
+   * The COUNT half of the rules. The name is bounded in shape and the value in
+   * size, but until this existed one POST could name as many of them as it
+   * liked: the middleware admits the MCP bearer here, and the bearer is a file
+   * anything running as the box's user can read, so a prompt-injected turn
+   * could park thousands of legal names in config.json — a file `config.get()`
+   * re-reads and re-parses synchronously on every call, which is the desktop,
+   * Settings and the setup wizard all at once. Two caps, both the shape the
+   * read side and the KV route already use.
+   */
+  describe("write size", () => {
+    const bodyOf = (count: number, prefix = "ui_k") =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`${prefix}${i}`, "x"]));
+    const storeOf = (count: number) =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`pref:ui_stored${i}`, "x"]));
+
+    it("refuses a body naming more keys than one write may carry", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(bodyOf(33)),
+      }));
+      expect(res.status).toBe(400);
+      // Refused BEFORE the loop, so nothing was validated or accumulated.
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("stores a body at exactly that cap", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(bodyOf(32)),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts what the body NAMES, not what survives the prefix filter", async () => {
+      // 33 names, only one of which this door owns. The bound is on the work
+      // the request asks for, like MAX_KEYS_PER_READ.
+      const body = { ...bodyOf(32, "not_a_pref_"), wp_opacity: 80 };
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses a write that would grow the store past the names it may hold", async () => {
+      mockGetAll.mockResolvedValue({ ...storeOf(500), other_config_key: 1 });
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ ui_brand_new: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("still stores a name the store ALREADY holds when it is at that cap", async () => {
+      // The cap is on new names, not on writes: a box that reached it must
+      // still be able to change its wallpaper.
+      mockGetAll.mockResolvedValue({ ...storeOf(499), "pref:wp_opacity": 10 });
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80 }),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("does not read the store for a body that stores nothing", async () => {
+      // A body this door owns no name in never pays for the count.
+      mockGetAll.mockClear();
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ "not-a-preference": 1 }),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockGetAll).not.toHaveBeenCalled();
+    });
+  });
+
 });

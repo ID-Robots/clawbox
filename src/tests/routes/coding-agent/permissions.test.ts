@@ -143,10 +143,18 @@ describe("who may read and change the rules", () => {
 });
 
 describe("GET", () => {
-  it("answers the list and the cap, and nothing else", async () => {
+  it("answers the list, the cap and where a file for a run goes — and nothing else", async () => {
+    const { sharedInputsDir } = await import("@/lib/coding-run-inputs");
     const res = await route.GET(request({ cookie: ownerCookie() }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ allowRules: [RULE], maxAllowRules: 32 });
+    // The shared folder is here because the rules card raises the question
+    // ("a run was refused a file — where does the file go?") and must not
+    // compose a path of this box's own.
+    expect(await res.json()).toEqual({
+      allowRules: [RULE],
+      maxAllowRules: 32,
+      sharedInputsDir: sharedInputsDir(),
+    });
   });
 
   it("reports a store it could not read rather than an empty list", async () => {
