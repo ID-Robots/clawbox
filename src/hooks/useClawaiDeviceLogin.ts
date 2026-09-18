@@ -20,7 +20,13 @@ export interface ClawaiDeviceLoginOptions {
   onBusyChange?: (busy: boolean) => void;
   /** Token landed; the device is finishing configuration. */
   onConfiguring?: () => void;
-  onComplete: () => void;
+  /**
+   * The save landed. `warning` is what it could NOT do — the configure route's
+   * own sentence, carried through the session record because the configure
+   * runs off the request that started it — and a host that renders a warning
+   * shows that instead of a plain success.
+   */
+  onComplete: (warning?: string) => void;
   onError: (message: string) => void;
 }
 
@@ -93,12 +99,12 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
       // `unknown` on `error`, deliberately: the poll route relays a failure
       // raised four hops upstream, and the type here was never a guarantee
       // about what is in the field — only about what this file expected.
-      const data = await response.json().catch(() => ({})) as { status?: string; error?: unknown };
+      const data = await response.json().catch(() => ({})) as { status?: string; error?: unknown; warning?: unknown };
 
       if (data.status === "complete") {
         stop();
         cbRef.current.onBusyChange?.(false);
-        cbRef.current.onComplete();
+        cbRef.current.onComplete(typeof data.warning === "string" && data.warning.trim() ? data.warning : undefined);
         return;
       }
       if (data.status === "configuring") {

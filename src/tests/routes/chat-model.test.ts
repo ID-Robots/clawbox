@@ -548,6 +548,39 @@ describe("/setup-api/chat/model", () => {
     );
   });
 
+  /**
+   * The sibling of the configure route's own fix: the sweep does not THROW
+   * when the gateway refuses a session — it counts it into `sessionsSkipped`
+   * and returns — so a `try/catch` around it read an absent exception as a
+   * successful sweep and this route answered with no warning at all over a
+   * chat still pinned to the previous model.
+   */
+  it("says so when the gateway refused the sessions the sweep asked it to re-point", async () => {
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValueOnce({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 1 });
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning).toMatch(/keeps its previous model/);
+  });
+
+  it("stays quiet when there was no session to re-point", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+  });
+
   it("keeps the session sweep when an automatic switch changes provider", async () => {
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
