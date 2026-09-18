@@ -88,15 +88,21 @@ whether it is paired, enabled but unpaired, or actively receiving.
 
 ## Email
 
-**Settings → Channels → Email** connects a mailbox and offers three modes: **Send only**,
-**Read on demand** and **Answer senders**.
+**Settings → Channels → Email** connects a mailbox and offers three modes, under *What the
+assistant may do with this mailbox*:
+
+| Mode | What it allows |
+|---|---|
+| **Send only** | The assistant can send email from this account. It never opens the mailbox. |
+| **Read on demand** | It can also look at recent messages, but only when you ask it to. It never checks the mailbox on its own. |
+| **Answer senders** | It watches the mailbox and replies to the people you list, without asking you first. Hermes edition only. |
 
 <Warning>
-**Ask me before sending** is the switch that decides this, and it is on by default. While
-it is on, every message the assistant writes waits as a draft in **Settings → Email** and
-in the chat, where you read it and choose **Send it** or **Delete it without sending**.
-You can also have every waiting draft posted to a second Telegram bot with an Approve
-button, so you can send it without opening the page. Turn the switch off and the assistant
+Whether the assistant may put a message on the wire by itself is one switch: **Ask me
+before sending**, on by default. While it is on, every message the assistant writes waits
+as a draft in **Settings → Email** and in the chat, where you read it and choose **Send
+it** or **Delete it without sending**. You can also have every waiting draft posted to a
+second Telegram bot with an Approve button, so you can send it without opening the page. Turn the switch off and the assistant
 sends on its own — the panel says so under the switch.
 
 **Answer senders** is separate and is not covered by that switch: in that mode the Hermes
