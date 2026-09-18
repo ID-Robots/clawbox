@@ -102,6 +102,27 @@ function childEnv(): Record<string, string> {
   };
 }
 
+/**
+ * `env` with the same library directories in FRONT of whatever
+ * LD_LIBRARY_PATH it already carried, for a child that inherits the web
+ * server's environment on purpose: the size fetcher /setup-api/whisper spawns
+ * needs HOME for the Hugging Face cache and any proxy the server was given,
+ * which the clean `childEnv()` above would drop.
+ *
+ * clawbox-setup.service sets no LD_LIBRARY_PATH, so the fetcher's
+ * `import faster_whisper` failed with "libctranslate2.so.4: cannot open shared
+ * object file" and no size could be downloaded from Settings on a Jetson —
+ * measured on an Orin (board 1791626120943, beta 0a175513) whose engine had
+ * just been installed and enabled from the same panel.
+ *
+ * An inherited value goes behind and is left out when empty: an empty entry
+ * means "the current directory" to the loader.
+ */
+export function withWhisperLibraryPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const inherited = env.LD_LIBRARY_PATH;
+  return { ...env, LD_LIBRARY_PATH: inherited ? `${ldLibraryPath()}:${inherited}` : ldLibraryPath() };
+}
+
 async function exists(p: string): Promise<boolean> {
   try {
     await fs.access(p);
