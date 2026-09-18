@@ -17,15 +17,163 @@
 // survives the trim that drops `session_search`.
 
 import { apiGet } from "../lib/api";
-import { ToolError } from "../lib/errors";
-import { json, text, type Registrar } from "../lib/register";
+import { redact, ToolError } from "../lib/errors";
+import { json, text, type Ed, type Registrar } from "../lib/register";
 import { zInt, zText } from "../lib/schema";
 
 interface SearchBody {
   results?: { path?: unknown; snippet?: unknown; score?: unknown }[];
 }
 
+/**
+ * What GET /setup-api/clawkeep/memory answers (`ClawKeepMemoryStatus` in
+ * src/lib/clawkeep-memory.ts). Declared here rather than imported: that module
+ * spawns processes and reaches the `@/` alias, which mcp/tsconfig.json keeps
+ * out of this stdio process. Every field is optional because an older build
+ * answers fewer of them, and a missing one is reported as unknown, not as zero.
+ */
+interface MemoryStatusBody {
+  available?: boolean;
+  provider?: string;
+  model?: string;
+  location?: string;
+  health?: string;
+  semanticAvailable?: boolean;
+  indexIdentity?: string;
+  enabled?: boolean;
+  setupComplete?: boolean;
+  planGate?: { satisfied?: boolean; plan?: string | null; message?: string };
+  sourceCount?: number;
+  files?: number;
+  chunks?: number;
+  pendingFiles?: number;
+  failedItems?: number;
+  dirty?: boolean;
+  error?: string;
+  errorCode?: string;
+  run?: {
+    status?: string;
+    mode?: string;
+    trigger?: string;
+    startedAtMs?: number;
+    finishedAtMs?: number;
+    durationMs?: number;
+    errorCode?: string;
+    progress?: { filesDone?: number; filesTotal?: number; chunks?: number } | null;
+  };
+  schedule?: { enabled?: boolean; frequency?: string; timeOfDay?: string; weekday?: number };
+  nextRunAtMs?: number;
+}
+
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function isoMinute(ms: number | undefined): string | null {
+  return typeof ms === "number" && ms > 0 ? `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC` : null;
+}
+
+/** How far an indexing pass has got, from the counts the device writes while it runs. */
+function progressLine(progress: NonNullable<MemoryStatusBody["run"]>["progress"]): string | null {
+  if (!progress) return null;
+  const done = typeof progress.filesDone === "number" ? progress.filesDone : null;
+  const total = typeof progress.filesTotal === "number" ? progress.filesTotal : null;
+  const chunks = typeof progress.chunks === "number" ? `${progress.chunks} chunks in the index so far` : null;
+  if (total === 0) return ["still scanning the folders for files", chunks].filter(Boolean).join("; ");
+  if (done === null || total === null) return chunks;
+  const percent = Math.min(100, Math.round((done / total) * 100));
+  return [`${done} of ${total} files (${percent}%)`, chunks].filter(Boolean).join("; ");
+}
+
+/**
+ * The status, as the fields a model relays plus the one sentence it must act on.
+ *
+ * `searchHint` is the edition's: on Hermes ClawBox owns the index and
+ * `memory_shard_search` reads it; on OpenClaw the index is OpenClaw's and the
+ * agent searches it as part of a turn, so pointing at a tool that is not
+ * registered there would send the model looking for nothing.
+ */
+function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<string, unknown> {
+  const run = s.run ?? {};
+  const running = run.status === "running";
+  const schedule = s.schedule?.enabled
+    ? `${s.schedule.frequency === "weekly" ? `every ${WEEKDAYS[s.schedule.weekday ?? 0] ?? "week"}` : "every day"} at ${s.schedule.timeOfDay ?? "?"} (box time)`
+    : "off — indexing runs only when the owner starts it";
+  const guidance: string[] = [];
+  if (s.enabled === false) {
+    guidance.push("Memory Shard is switched OFF. The owner turns it on in the Memory Shard app — ui_open_app(\"memory-shard\") opens it.");
+  } else if (s.planGate && s.planGate.satisfied === false) {
+    guidance.push("Memory Shard needs a paid ClawBox AI plan, which this box does not have. The owner can change the plan in Settings → Providers; there is no tool for it.");
+  }
+  if (running) {
+    guidance.push("An indexing pass is running. Tell the user how far it has got; do not check again in a loop — ask again only when they do.");
+  } else {
+    guidance.push(
+      "You cannot start indexing: it re-reads and re-embeds the owner's documents and can take hours, so the ClawBox takes it only from the owner."
+      + " If the user wants the index refreshed, open the Memory Shard app with ui_open_app(\"memory-shard\") and tell them to press Reindex there; this tool then shows its progress.",
+    );
+  }
+  if (searchHint && s.enabled !== false) guidance.push("Search the indexed documents with memory_shard_search.");
+  return {
+    switched_on: s.enabled ?? "unknown",
+    setup_complete: s.setupComplete ?? "unknown",
+    health: s.health ?? "unknown",
+    searchable: s.semanticAvailable ?? "unknown",
+    embeddings: { where: s.location ?? "unknown", ...(s.model ? { model: s.model } : {}) },
+    folders: s.sourceCount ?? "unknown",
+    files_indexed: s.files ?? "unknown",
+    chunks: s.chunks ?? "unknown",
+    ...(s.pendingFiles ? { files_waiting: s.pendingFiles } : {}),
+    ...(s.failedItems ? { files_failed: s.failedItems } : {}),
+    ...(s.dirty || s.indexIdentity === "mismatched" ? { needs_reindex: true } : {}),
+    ...(s.errorCode ? { problem: s.errorCode, ...(s.error ? { problem_text: redact(s.error.slice(0, 200)) } : {}) } : {}),
+    indexing: running
+      ? {
+        now: "running",
+        mode: run.mode || "incremental",
+        since: isoMinute(run.startedAtMs),
+        progress: progressLine(run.progress) ?? "the device cannot count this pass's files yet",
+      }
+      : run.status && run.status !== "idle"
+        ? {
+          last_pass: run.status,
+          ...(run.mode ? { mode: run.mode } : {}),
+          ...(isoMinute(run.finishedAtMs) ? { finished: isoMinute(run.finishedAtMs) } : {}),
+          ...(run.errorCode ? { problem: run.errorCode } : {}),
+        }
+        : "no pass has run since the box started",
+    schedule,
+    ...(isoMinute(s.nextRunAtMs) ? { next_scheduled_pass: isoMinute(s.nextRunAtMs) } : {}),
+    guidance: guidance.join(" "),
+  };
+}
+
+function registerMemoryStatus(reg: Registrar, edition: Ed): void {
+  const hermes = edition === "hermes";
+  reg.tool(
+    "memory_shard_status",
+    "Read the state of Memory Shard on this device — the index of the documents and notes in the folders the owner added: whether it is switched on, healthy and searchable, how many folders, files and chunks it holds, whether files are waiting or failed, and whether an indexing pass is running and how far it has got (files done of total, chunks, percent). "
+      + (hermes ? "Search it with memory_shard_search. " : "")
+      + "Use it when the user asks whether their documents are indexed, or how a reindex is going. It changes nothing: starting a reindex is the owner's, in the Memory Shard app.",
+    {},
+    { editions: [edition], readOnly: true },
+    async () => {
+      const status = await apiGet<MemoryStatusBody>("/setup-api/clawkeep/memory", {
+        // The OpenClaw arm boots a CLI process to answer (about eight seconds
+        // on a Jetson, cold); the route answers a recent reading at once when
+        // it has one.
+        timeoutMs: 30_000,
+      });
+      return json(describeMemoryStatus(status, hermes));
+    },
+  );
+}
+
 export function registerMemoryTools(reg: Registrar): void {
+  // Both editions have an index now — OpenClaw's own, or the one ClawBox keeps
+  // where there is no OpenClaw — and the status route answers for whichever it
+  // is. One registration per edition, because the description differs.
+  registerMemoryStatus(reg, "openclaw");
+  registerMemoryStatus(reg, "hermes");
+
   reg.tool(
     "memory_shard_search",
     // The description has two jobs beyond saying what the tool does. It has to

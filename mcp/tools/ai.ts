@@ -141,7 +141,121 @@ const SET_RULES: ErrorRule[] = [
 const IMAGE_GEN_UNAVAILABLE =
   "Picture generation is not available on this ClawBox. It runs on ClawBox AI and this device is not connected to one. Tell the user that in their own language, and that they can connect it in Settings -> AI Providers. Do NOT try to make the picture some other way — not with the terminal, not by writing an SVG or HTML and converting it, not with a Python imaging library. A file made that way cannot be displayed in this chat, so the user would get a broken image instead of an answer.";
 
+/** One allowance window as GET /setup-api/ai-models/usage answers it (`ClawaiUsageWindow`). */
+interface UsageWindow {
+  used?: number;
+  limit?: number;
+  percentUsed?: number;
+  isOverLimit?: boolean;
+  resetAt?: string | null;
+  unavailable?: boolean;
+}
+
+/**
+ * GET /setup-api/ai-models/usage — `normalizeClawaiUsage` in
+ * src/lib/clawai-usage.ts, under `usage`, with the older top-level fields
+ * beside it. Declared here because that module is reached through the app's
+ * `@/` alias, which this stdio process may not import.
+ */
+interface UsageBody {
+  available?: boolean;
+  reason?: "not_connected" | "refused" | "unreachable" | "invalid";
+  timeZone?: string | null;
+  usage?: {
+    shape?: "weekly" | "legacy";
+    plan?: string | null;
+    tierDisplayName?: string | null;
+    weekly?: UsageWindow;
+    burst?: UsageWindow | null;
+    meters?: Record<string, UsageWindow | undefined>;
+    credits?: { balanceCents?: number; usedThisWeekCents?: number; currency?: string; unavailable?: boolean } | null;
+    billingInterval?: "month" | "year" | null;
+    legacy?: { percentUsed?: number; resetIn?: string | null; isOverLimit?: boolean };
+  };
+}
+
+/** What each weekly meter counts, and how to say a number of it. */
+const METERS: Record<string, { label: string; unit: (n: number) => string }> = {
+  images: { label: "pictures", unit: (n) => `${n}` },
+  speechSeconds: { label: "spoken replies", unit: (n) => `${Math.round(n / 60)} min` },
+  audioSeconds: { label: "transcribed audio", unit: (n) => `${Math.round(n / 60)} min` },
+  embeddingsTokens: { label: "memory indexing", unit: (n) => `${n.toLocaleString("en-US")} tokens` },
+};
+
+/** A window as one line: how much is used, whether it is spent, when it frees up. */
+function windowLine(w: UsageWindow | null | undefined, unit: (n: number) => string = (n) => `${n}`): string | null {
+  if (!w) return null;
+  if (w.unavailable) return "could not be read";
+  if (typeof w.limit === "number" && w.limit <= 0) return "not part of this plan";
+  const pct = typeof w.percentUsed === "number" ? `${Math.round(w.percentUsed)}% used` : null;
+  const of = typeof w.used === "number" && typeof w.limit === "number" ? `${unit(w.used)} of ${unit(w.limit)}` : null;
+  const spent = w.isOverLimit ? "USED UP" : null;
+  const frees = w.resetAt && !Number.isNaN(Date.parse(w.resetAt))
+    ? `frees up at ${new Date(Date.parse(w.resetAt)).toISOString().slice(0, 16).replace("T", " ")} UTC`
+    : null;
+  return [spent, pct, of, frees].filter(Boolean).join(", ") || null;
+}
+
+/** The answer when the device has no usage to give — an answer, not a fault. */
+const USAGE_UNAVAILABLE: Record<NonNullable<UsageBody["reason"]>, string> = {
+  not_connected:
+    "This ClawBox is not linked to ClawBox AI, so there is no allowance to read. The owner links it in Settings → Providers.",
+  refused:
+    "ClawBox AI does not share usage details with this box yet. Tell the user they can see them in their account on clawbox.com.",
+  unreachable:
+    "The ClawBox could not reach clawbox.com to read the usage just now. Say so; ask again later only if the user does.",
+  invalid:
+    "clawbox.com answered with usage this ClawBox could not read. Tell the user they can see it in their account on clawbox.com.",
+};
+
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
+  // Both editions: the allowance belongs to the box's ClawBox AI plan, which
+  // either harness spends. READ ONLY for the reason there is no plan switch
+  // (see the file header) — buying credits or changing the plan is billed.
+  reg.tool(
+    "clawbox_ai_usage",
+    "Read how much of this box's ClawBox AI allowance is used: the plan, the weekly chat allowance and the 5-hour burst limit (percent used, whether it is used up, when it frees up), the weekly meters for pictures, spoken replies, transcribed audio and memory indexing, and the prepaid credit balance. Use it when the user asks how much they have left, or when chat, a picture or a coding run was refused for a spent allowance. It changes nothing: the plan and credits are the owner's, in Settings → Providers or on clawbox.com.",
+    {},
+    { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, maxChars: 3_000 },
+    async () => {
+      // Always 200: `available` and `reason` carry every "no", and each is an
+      // ANSWER — a spent tool call here would only teach the harness's circuit
+      // breaker that a working device is failing.
+      const body = await apiGet<UsageBody>("/setup-api/ai-models/usage", { timeoutMs: 15_000 });
+      if (!body.available || !body.usage) {
+        return text(USAGE_UNAVAILABLE[body.reason ?? "invalid"] ?? USAGE_UNAVAILABLE.invalid);
+      }
+      const u = body.usage;
+      const plan = u.tierDisplayName ?? u.plan ?? "unknown";
+      if (u.shape !== "weekly") {
+        const legacy = u.legacy ?? {};
+        return json({
+          plan,
+          used: typeof legacy.percentUsed === "number" ? `${Math.round(legacy.percentUsed)}%` : "unknown",
+          used_up: legacy.isOverLimit === true,
+          ...(legacy.resetIn ? { resets_in: legacy.resetIn } : {}),
+        });
+      }
+      const meters: Record<string, string> = {};
+      for (const [key, meter] of Object.entries(METERS)) {
+        const line = windowLine(u.meters?.[key], meter.unit);
+        if (line) meters[meter.label] = line;
+      }
+      const credits = u.credits && !u.credits.unavailable && typeof u.credits.balanceCents === "number"
+        ? `${(u.credits.balanceCents / 100).toFixed(2)} ${u.credits.currency ?? "EUR"} left${typeof u.credits.usedThisWeekCents === "number" && u.credits.usedThisWeekCents > 0 ? `, ${(u.credits.usedThisWeekCents / 100).toFixed(2)} spent this week` : ""}`
+        : null;
+      return json({
+        plan,
+        ...(u.billingInterval ? { billed: u.billingInterval === "year" ? "yearly" : "monthly" } : {}),
+        weekly_allowance: windowLine(u.weekly) ?? "unknown",
+        ...(u.burst ? { five_hour_limit: windowLine(u.burst) ?? "unknown" } : {}),
+        ...(Object.keys(meters).length ? { this_week: meters } : {}),
+        ...(credits ? { credits } : {}),
+        ...(body.timeZone ? { box_time_zone: body.timeZone } : {}),
+      });
+    },
+  );
+
   // Registered only where the box CANNOT draw. On a linked box the harness's
   // own image tool is present and this would be a second, contradicting tool
   // beside it; on an unlinked one there is no image tool at all, and this is
