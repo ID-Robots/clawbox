@@ -429,7 +429,7 @@ ClawBox is made by **ID Robots Ltd.**, a robotics and AI company based in Plovdi
 [OpenClaw](https://github.com/openclaw/openclaw) is the open-source AI agent. **ClawBox is the dedicated hardware appliance that runs it 24/7**, preconfigured, with OpenClaw OS on top — desktop environment, setup wizard, built-in apps, backups and updates. OpenClaw is the software; ClawBox is the box built for it by ID Robots.
 
 **Does ClawBox need a subscription?**
-No. The hardware is a **one-time purchase (€579)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop, Memory Shard, the Coding Agent and priority support — and you can instead bring your own Claude, GPT, Gemini or OpenRouter key, sign in with a subscription you already pay for, or run entirely on local models with no external account at all.
+No. The hardware is a **one-time purchase (€749)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop, Memory Shard, the Coding Agent and priority support — and you can instead bring your own Claude, GPT, Gemini or OpenRouter key, sign in with a subscription you already pay for, or run entirely on local models with no external account at all.
 
 **Does ClawBox work without internet?**
 Yes, for local models. Gemma 4 ships preinstalled on the box's own llama.cpp, and on the OpenClaw and dual editions **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
