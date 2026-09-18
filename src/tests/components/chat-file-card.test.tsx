@@ -71,4 +71,13 @@ describe("ChatFileCard", () => {
     expect(screen.getByTestId("chat-file-size")).toHaveTextContent("10 B");
     await waitFor(() => expect(screen.getByTestId("chat-file-size")).toHaveTextContent("4.0 KB"));
   });
+
+  it("claims no size for a file the probe found gone, whatever the payload said", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, headers: new Headers() })));
+    const src = `${mediaUrl("/home/clawbox/.openclaw/workspace/gone.pdf")}#name=gone.pdf&size=52000`;
+    render(<ChatFileCard src={src} />);
+    await waitFor(() => expect(screen.getByTestId("chat-file-card")).toHaveStyle({ opacity: "0.55" }));
+    expect(screen.queryByTestId("chat-file-size")).toBeNull();
+    expect(screen.getByText("gone.pdf")).toBeInTheDocument();
+  });
 });
