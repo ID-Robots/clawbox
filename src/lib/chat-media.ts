@@ -90,15 +90,60 @@ export function isImageMedia(source: string): boolean {
 }
 
 /**
+ * The gateway's own chat-media tree. A file the agent sends can arrive as a
+ * ROOT-RELATIVE URL into it rather than as a filesystem path —
+ *
+ *   /api/chat/media/outgoing/agent%3Amain%3Amain/<uuid>/full
+ *
+ * — which the browser reaches same-origin, session-gated, through ClawBox's
+ * `/api/*` gateway proxy (src/app/api/[...path]/route.ts). It is a URL, not a
+ * path: wrapped into `/setup-api/chat/media?path=` it 404s, because that route
+ * only opens files under the media root and the workspace (TASK-892).
+ */
+const GATEWAY_MEDIA_PREFIX = "/api/chat/media/";
+
+/** `/api` is the gateway's API surface, never a directory on this box. */
+const GATEWAY_API_PREFIX = "/api/";
+
+/**
+ * `source` as a same-origin gateway media URL, or null when it is not one.
+ *
+ * Normalised by the URL parser before the prefix is tested, and returned in
+ * that normalised form, so a `..` segment — or its `%2e` or backslash
+ * spelling — cannot walk a URL out of the media tree and onto another
+ * same-origin endpoint: what was checked is exactly what the browser requests.
+ */
+function gatewayMediaUrl(source: string): string | null {
+  if (!source.startsWith(GATEWAY_MEDIA_PREFIX)) return null;
+  try {
+    const parsed = new URL(source, "http://localhost");
+    if (
+      parsed.origin !== "http://localhost"
+      || !parsed.pathname.startsWith(GATEWAY_MEDIA_PREFIX)
+      // The tree itself is not a file.
+      || parsed.pathname.length === GATEWAY_MEDIA_PREFIX.length
+    ) {
+      return null;
+    }
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Browser-reachable URL for a media source.
  *
  * A local absolute path goes through ClawBox's own media route: the desktop
  * cannot read the filesystem, and the gateway's `/__openclaw__/assistant-media`
  * endpoint refuses this tree as "Outside allowed folders". Anything the browser
- * can already address is passed straight through.
+ * can already address — a remote or data URL, or a gateway media URL — is
+ * passed straight through.
  */
 export function mediaUrl(source: string, mimeType?: string): string {
   if (/^(?:https?:|data:)/i.test(source)) return source;
+  const gateway = gatewayMediaUrl(source);
+  if (gateway) return gateway;
   const local = source.startsWith("file://")
     ? source.slice("file://".length)
     : source;
@@ -122,25 +167,114 @@ export function mediaUrl(source: string, mimeType?: string): string {
  * agent's artifact route — so the saved file keeps the name the harness gave
  * it rather than becoming "media", "artifacts" or "route.png" in the downloads
  * folder. The pathname is the last resort, for a URL that names its file the
- * ordinary way.
+ * ordinary way. A name the attachment payload carried (see `withFileMeta`)
+ * beats all of them.
  */
 export function mediaFileName(url: string): string {
-  const FALLBACK = "image.png";
+  return namedFile(url) ?? "image.png";
+}
+
+/** The file name a media URL carries, or null when it carries none. */
+function namedFile(url: string): string | null {
   // A data: URL has no meaningful name, and its "pathname" is the payload.
-  if (url.startsWith("data:")) return FALLBACK;
+  if (url.startsWith("data:")) return null;
+  const carried = fileMeta(url).name;
+  if (carried) return carried;
   try {
     // The base only matters for the relative URLs this app builds; it is never
     // used for anything but parsing.
     const parsed = new URL(url, "http://localhost");
+    // A gateway media URL ends in a variant ("full"), not a name — unless its
+    // last segment plainly is a file name.
+    if (url.startsWith(GATEWAY_MEDIA_PREFIX)) {
+      const last = parsed.pathname.split("/").pop() ?? "";
+      return /\.[a-z0-9]{1,8}$/i.test(last) ? last : null;
+    }
     const source = parsed.searchParams.get("path")
       ?? parsed.searchParams.get("file")
       ?? parsed.pathname;
     // Trailing separators would otherwise yield an empty final segment.
     const base = source.replace(/\/+$/, "").split("/").pop() ?? "";
-    return base || FALLBACK;
+    return base || null;
   } catch {
-    return FALLBACK;
+    return null;
   }
+}
+
+// ── What the payload says about a file ──────────────────────────────────────
+//
+// A file ref is a plain string on every transcript path, so the name and size
+// the attachment payload carried ride on it as a fragment:
+//
+//   /api/chat/media/outgoing/agent%3Amain%3Amain/<uuid>/full#name=report.csv&size=2048
+//
+// For a gateway media URL they are the only name and size there are: the URL
+// ends in "full", and the `/api/*` proxy passes no Content-Length the card
+// could probe for. A fragment rather than a query parameter because it never
+// reaches a server, so neither the gateway nor `/setup-api/chat/media` is asked
+// anything it was not asked before.
+
+/** Longest name kept, the common filesystem limit. */
+const MAX_FILE_NAME = 255;
+
+/** A usable file name from a payload field, or null. */
+function cleanFileName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  // A label may be a whole path; only its last segment names the file. Control
+  // characters never belong in one.
+  const printable = Array.from(value)
+    .filter((ch) => ch.charCodeAt(0) > 0x1f && ch.charCodeAt(0) !== 0x7f)
+    .join("");
+  const leaf = (printable.split(/[\\/]/).pop() ?? "").trim();
+  if (!leaf || leaf === "." || leaf === "..") return null;
+  return leaf.slice(0, MAX_FILE_NAME);
+}
+
+/** A byte count from a payload field — a non-negative integer — or null. */
+function cleanFileSize(value: unknown): number | null {
+  const bytes = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null;
+}
+
+/** The name and size a file ref carries in its fragment. */
+function fileMeta(url: string): { name: string | null; size: number | null } {
+  const hash = url.indexOf("#");
+  if (hash < 0) return { name: null, size: null };
+  const params = new URLSearchParams(url.slice(hash + 1));
+  return { name: cleanFileName(params.get("name")), size: cleanFileSize(params.get("size")) };
+}
+
+/** `url` carrying the payload's name and size, replacing any fragment it had. */
+function withFileMeta(url: string, name: string | null, size: number | null): string {
+  if (!name && size === null) return url;
+  const params = new URLSearchParams();
+  if (name) params.set("name", name);
+  if (size !== null) params.set("size", String(size));
+  return `${url.split("#", 1)[0]}#${params.toString()}`;
+}
+
+// Where an attachment part carries them. `label` is the one a real box has
+// produced — the TTS clip's `label` is its filename — and the other spellings a
+// provider may use are read too, most specific first.
+const NAME_FIELDS = ["fileName", "filename", "name", "label"] as const;
+const SIZE_FIELDS = ["size", "sizeBytes", "bytes", "byteLength", "fileSize"] as const;
+
+function attachmentName(a: Record<string, unknown>): string | null {
+  for (const field of NAME_FIELDS) {
+    const name = cleanFileName(a[field]);
+    if (name) return name;
+  }
+  return null;
+}
+
+function attachmentSize(a: Record<string, unknown>): number | null {
+  for (const field of SIZE_FIELDS) {
+    const size = cleanFileSize(a[field]);
+    if (size !== null) return size;
+  }
+  return null;
 }
 
 /**
@@ -169,15 +303,33 @@ export function splitAssistantMedia(raw: string): { text: string; images: string
 /** Files kept per message. */
 const MAX_FILES_PER_MESSAGE = 8;
 
-/** De-duplicate and cap the file refs attached to one message. */
+/**
+ * De-duplicate and cap the file refs attached to one message.
+ *
+ * Deduplicated on the ref without its fragment: the same file named bare (by a
+ * `MEDIA:` line or `mediaUrls`) and by an attachment part carrying its name and
+ * size is one card, and the spelling that knows the name wins without losing
+ * its place.
+ */
 export function boundedFiles(...groups: string[][]): string[] {
-  return [...new Set(groups.flat())].slice(0, MAX_FILES_PER_MESSAGE);
+  const byRef = new Map<string, string>();
+  for (const ref of groups.flat()) {
+    const bare = ref.split("#", 1)[0];
+    const seen = byRef.get(bare);
+    if (seen === undefined || (seen === bare && ref !== bare)) byRef.set(bare, ref);
+  }
+  return [...byRef.values()].slice(0, MAX_FILES_PER_MESSAGE);
 }
 
-/** Only sources a browser may be pointed at: local paths, https and our data. */
-function acceptableSource(source: string): boolean {
+/**
+ * Only sources a browser may be pointed at: local paths, https, and URLs into
+ * the gateway's own media tree. Anything else under `/api/` is a gateway
+ * endpoint, not a file — read as a path it could only ever draw a dead card.
+ */
+export function acceptableSource(source: string): boolean {
   if (/^https:/i.test(source)) return true;
   if (/^[a-z][a-z0-9+.-]*:/i.test(source)) return source.toLowerCase().startsWith("file://");
+  if (source.startsWith(GATEWAY_API_PREFIX)) return gatewayMediaUrl(source) !== null;
   return source.length > 0;
 }
 
@@ -189,7 +341,13 @@ export function extractFileAttachments(msg: unknown): { images: string[]; files:
   const images: string[] = [];
   const files: string[] = [];
   if (!msg || typeof msg !== "object") return { images, files };
-  const sources: Array<{ url: string; mimeType?: string; kind?: unknown }> = [];
+  const sources: Array<{
+    url: string;
+    mimeType?: string;
+    kind?: unknown;
+    name?: string | null;
+    size?: number | null;
+  }> = [];
   const m = msg as { content?: unknown; mediaUrl?: unknown; mediaUrls?: unknown };
   if (typeof m.mediaUrl === "string") sources.push({ url: m.mediaUrl });
   if (Array.isArray(m.mediaUrls)) {
@@ -200,36 +358,50 @@ export function extractFileAttachments(msg: unknown): { images: string[]; files:
       if (!block || typeof block !== "object") continue;
       const b = block as { type?: unknown; attachment?: unknown };
       if (b.type !== "attachment" || !b.attachment || typeof b.attachment !== "object") continue;
-      const a = b.attachment as { url?: unknown; kind?: unknown; mimeType?: unknown };
+      const a = b.attachment as Record<string, unknown>;
       if (typeof a.url !== "string") continue;
       sources.push({
         url: a.url,
         kind: a.kind,
         mimeType: typeof a.mimeType === "string" ? a.mimeType.toLowerCase() : undefined,
+        name: attachmentName(a),
+        size: attachmentSize(a),
       });
     }
   }
-  for (const { url, kind, mimeType } of sources) {
+  for (const { url, kind, mimeType, name, size } of sources) {
     const source = url.trim();
     if (!acceptableSource(source)) continue;
     // Audio has its own extractor and its own player.
     if (kind === "audio" || mimeType?.startsWith("audio/") || isAudioMedia(source)) continue;
     if (isImageMedia(source)) images.push(mediaUrl(source));
-    else files.push(mediaUrl(source));
+    else files.push(withFileMeta(mediaUrl(source), name ?? null, size ?? null));
   }
   return { images: [...new Set(images)], files: boundedFiles(files) };
 }
 
-/** Human-readable name for a file card: the harness' own filename. */
+/**
+ * Human-readable name for a file card: the name the attachment payload gave
+ * it, else the harness' own filename, else plain "file".
+ */
 export function mediaDisplayName(url: string): string {
-  const name = mediaFileName(url);
-  return name === "image.png" && url.startsWith("data:") ? "file" : name;
+  return namedFile(url) ?? "file";
 }
 
-/** Download URL for a file card: our own route is told to send an attachment. */
+/** Size in bytes the attachment payload gave a file card's ref, or null. */
+export function mediaFileSize(url: string): number | null {
+  return fileMeta(url).size;
+}
+
+/**
+ * Download URL for a file card: our own route is told to send an attachment.
+ * The fragment is the card's own metadata and is dropped, so `download=1`
+ * lands in the query rather than after the `#`.
+ */
 export function mediaDownloadUrl(url: string): string {
-  if (!url.startsWith("/setup-api/chat/media?")) return url;
-  return url.includes("download=1") ? url : `${url}&download=1`;
+  const bare = url.split("#", 1)[0];
+  if (!bare.startsWith("/setup-api/chat/media?")) return bare;
+  return bare.includes("download=1") ? bare : `${bare}&download=1`;
 }
 
 /** `1.4 MB`-style size for a file card. Locale-free on purpose: units are universal. */

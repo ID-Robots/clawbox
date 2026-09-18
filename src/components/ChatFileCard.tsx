@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { useT } from '@/lib/i18n'
-import { formatFileSize, mediaDisplayName, mediaDownloadUrl } from '@/lib/chat-media'
+import { formatFileSize, mediaDisplayName, mediaDownloadUrl, mediaFileSize } from '@/lib/chat-media'
 
 /**
  * A file the agent sent that the chat cannot render inline — a PDF, a zip, a
@@ -10,7 +10,9 @@ import { formatFileSize, mediaDisplayName, mediaDownloadUrl } from '@/lib/chat-m
  *
  * The size comes from a HEAD request against the box's own media route, so the
  * card never downloads the file just to describe it. A remote URL is not
- * probed (CORS would usually refuse it anyway) and simply shows no size.
+ * probed (CORS would usually refuse it anyway), nor is a gateway media URL (the
+ * `/api/*` proxy forwards no Content-Length); either shows the size the
+ * attachment payload carried, if it carried one.
  *
  * Laid out to shrink: the name truncates with an ellipsis and the button keeps
  * its size, so the card holds up in a 320px-wide portrait phone.
@@ -35,6 +37,9 @@ export default function ChatFileCard({ src }: { src: string }) {
     return () => controller.abort()
   }, [src, href])
 
+  // What is on disk beats what the payload said; the payload beats nothing. A
+  // file the probe found gone claims no size at all.
+  const shownSize = missing ? null : size ?? mediaFileSize(src)
   const extension = name.includes('.') ? name.split('.').pop()!.slice(0, 4).toUpperCase() : ''
 
   return (
@@ -71,9 +76,9 @@ export default function ChatFileCard({ src }: { src: string }) {
         >
           {name}
         </div>
-        {size !== null && (
+        {shownSize !== null && (
           <div data-testid="chat-file-size" style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.5)' }}>
-            {formatFileSize(size)}
+            {formatFileSize(shownSize)}
           </div>
         )}
       </div>
