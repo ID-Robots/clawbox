@@ -106,6 +106,14 @@ const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() 
   LLAMACPP_PROXY_BASE_URL: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
 }));
 
+vi.mock("@/lib/openclaw-gateway-ws", () => ({
+  waitForGatewayRpcReady: vi.fn().mockResolvedValue(true),
+  gatewayWsCall: vi.fn(),
+  gatewayWsPatchConfig: vi.fn(),
+  GatewayWsUnavailableError: class GatewayWsUnavailableError extends Error {},
+  GatewayRpcError: class GatewayRpcError extends Error {},
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   // Pure helper — mirror the real implementation (unit-tested in
@@ -962,6 +970,60 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).not.toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands).toContain("config set models.mode merge");
+  });
+
+  /**
+   * The sign-in that migrates the auth store stops the gateway for `doctor`
+   * and nothing restarts it before step 9. The session sweep used to run in
+   * that window, hit "Gateway not reachable (ECONNREFUSED)" and be swallowed
+   * as non-fatal — on a box (2026-09-18) the main session kept its ClawBox AI
+   * pin while the box default became GPT-6 Astra. The sweep must follow the
+   * restart AND the gateway answering RPC, and a sweep that still could not
+   * run must be said in the answer.
+   */
+  it("re-points open chats only after the gateway it stopped answers again", async () => {
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    const order: string[] = [];
+    vi.mocked(restartGateway).mockImplementation(async () => { order.push("restart"); });
+    vi.mocked(waitForGatewayRpcReady).mockImplementation(async () => { order.push("ready"); return true; });
+    mockApplyModelOverrideToAllAgentSessions.mockImplementation(async () => { order.push("sweep"); return { filesUpdated: 1, sessionsUpdated: 1, refused: [] } as unknown as Awaited<ReturnType<typeof applyModelOverrideToAllAgentSessions>>; });
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+    expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai", modelId: "gpt-5.5", source: "user" }),
+    );
+    expect(order).toEqual(["restart", "ready", "sweep"]);
+  });
+
+  it("says so when the open chats could not be re-pointed after the restart", async () => {
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    vi.mocked(waitForGatewayRpcReady).mockResolvedValueOnce(false);
+
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.warning).toMatch(/keeps its previous model/);
+    expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
   });
 
   it("configures subscription auth mode for oauth", async () => {

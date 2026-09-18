@@ -88,6 +88,14 @@ const { parseFullyQualifiedModelImpl } = vi.hoisted(() => ({
   },
 }));
 
+vi.mock("@/lib/openclaw-gateway-ws", () => ({
+  waitForGatewayRpcReady: vi.fn().mockResolvedValue(true),
+  gatewayWsCall: vi.fn(),
+  gatewayWsPatchConfig: vi.fn(),
+  GatewayWsUnavailableError: class GatewayWsUnavailableError extends Error {},
+  GatewayRpcError: class GatewayRpcError extends Error {},
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not

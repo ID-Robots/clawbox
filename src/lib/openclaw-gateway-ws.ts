@@ -209,3 +209,27 @@ export async function gatewayWsPatchConfig(
   const changed = Array.isArray(result.changedPaths) ? result.changedPaths.filter((p): p is string => typeof p === "string") : [];
   return { noop: result.noop === true, changedPaths: changed };
 }
+
+/**
+ * Wait until the gateway ANSWERS a request, not merely listens: for ten to
+ * twenty seconds after its port opens it refuses every connect with "gateway
+ * starting; retry shortly", and a write made in that window is lost with the
+ * refusal. Polls `config.get` (operator.read, no side effect) once a second
+ * within the budget. Answers false rather than throwing: the caller decides
+ * what a gateway that never came back means for its own answer.
+ */
+export async function waitForGatewayRpcReady(budgetMs = 60_000, intervalMs = 1_000): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    try {
+      await gatewayWsCall("config.get", {}, { timeoutMs: 5_000 });
+      return true;
+    } catch (err) {
+      // No shared token means no gateway of ours to wait for (a Hermes-only
+      // box, a test host): waiting out the budget would only delay the answer.
+      if (err instanceof GatewayWsUnavailableError && /no gateway token/.test(err.message)) return false;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+}

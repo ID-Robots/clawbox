@@ -30,6 +30,7 @@ import {
   type OpenClawConfig,
   GatewayNotReadyError,
 } from "@/lib/openclaw-config";
+import { waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -3766,21 +3767,40 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //    Only sweep when this configure call actually set a new primary
     //    (skip for local-only local-AI setups that leave the primary
     //    alone).
-    if (!isLocalScope || shouldPromoteLocalToPrimary) {
+    //
+    //    NOT while the gateway is stopped. A sign-in that went through the
+    //    auth-profile migration stopped the gateway for `doctor` above and
+    //    nothing restarts it before step 9, so this sweep used to run into
+    //    "Gateway not reachable (ECONNREFUSED)" and be swallowed as non-fatal
+    //    — on a box (2026-09-18) the main session kept its old ClawBox AI pin
+    //    while the box default became GPT-6 Astra, and every turn ran on the
+    //    pin under a header that said Astra. The sweep is deferred past the
+    //    restart, and past the gateway ANSWERING, not merely listening.
+    const sweepSessionsToPrimary = async (): Promise<boolean> => {
+      if (isLocalScope && !shouldPromoteLocalToPrimary) return true;
       const parsedPrimary = parseFullyQualifiedModel(config.defaultModel);
-      if (parsedPrimary) {
-        try {
-          await applyModelOverrideToAllAgentSessions({
-            provider: parsedPrimary.provider,
-            modelId: parsedPrimary.modelId,
-            source: "user",
-          });
-        } catch (err) {
-          // Non-fatal: the default change above still takes effect for
-          // brand-new sessions; worst case the user resets the open chat.
-          console.error("[configure] Failed to sweep session overrides:", err);
-        }
+      if (!parsedPrimary) return true;
+      try {
+        await applyModelOverrideToAllAgentSessions({
+          provider: parsedPrimary.provider,
+          modelId: parsedPrimary.modelId,
+          source: "user",
+        });
+        return true;
+      } catch (err) {
+        // The default change above still takes effect for brand-new sessions;
+        // an open chat keeps its pin until the owner picks again. Said in the
+        // answer (step 9), never only here.
+        console.error("[configure] Failed to sweep session overrides:", err);
+        return false;
       }
+    };
+    let sessionSweepDeferred = false;
+    let sessionSweepFailed = false;
+    if (gateway.state === "stopped-for-doctor") {
+      sessionSweepDeferred = true;
+    } else {
+      sessionSweepFailed = !(await sweepSessionsToPrimary());
     }
 
     // 8b. The OFF half of the gate: switch the anthropic plugin off only when
@@ -3904,6 +3924,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // gateway that never comes back is not silent either — the chat the
       // wizard hands off to cannot open a session without one.
       await restartGateway({ awaitReady: !firstRunWizard });
+      if (sessionSweepDeferred) {
+        // The port is open once `awaitReady` returns; the RPC is not. In the
+        // wizard the answer has no consumer and no session to speak of, so the
+        // sweep follows readiness in the background; in Settings it is waited
+        // for, because the chat the owner returns to is the one being re-pointed.
+        if (firstRunWizard) {
+          void waitForGatewayRpcReady().then((ready) => (ready ? sweepSessionsToPrimary() : false));
+        } else if (await waitForGatewayRpcReady()) {
+          sessionSweepFailed = !(await sweepSessionsToPrimary());
+        } else {
+          sessionSweepFailed = true;
+        }
+      }
     } catch (err) {
       console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
       // A gateway that has not finished coming back is NOT a failed configure.
@@ -3977,7 +4010,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning]
+    // A sweep that could not run is said, never swallowed: the box default IS
+    // the new model, but a chat already open keeps the model it was pinned to
+    // until the owner picks again in its header.
+    const sessionSweepWarning = sessionSweepFailed
+      ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
+      : undefined;
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning, sessionSweepWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({

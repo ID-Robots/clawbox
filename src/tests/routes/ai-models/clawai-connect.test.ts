@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+vi.mock("@/lib/openclaw-gateway-ws", () => ({
+  waitForGatewayRpcReady: vi.fn().mockResolvedValue(true),
+  gatewayWsCall: vi.fn(),
+  gatewayWsPatchConfig: vi.fn(),
+  GatewayWsUnavailableError: class GatewayWsUnavailableError extends Error {},
+  GatewayRpcError: class GatewayRpcError extends Error {},
+}));
+
 vi.mock("@/lib/clawai-connect", () => ({
   createClawAiUserCode: vi.fn(() => "ABCD-1234"),
   createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
