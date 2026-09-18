@@ -109,7 +109,9 @@ test.describe("fresh-install setup wizard (UI)", () => {
     await expect(writeDown).toBeVisible({ timeout: 15_000 });
     await expect(writeDown.getByTestId("writedown-system-value")).toHaveText("clawbox-e2e-pass");
     await expect(writeDown.getByTestId("writedown-hotspot-value")).toHaveCount(0);
-    await writeDown.getByTestId("writedown-ack-label").click();
+    // The checkbox itself, not its label: on a build where the input was a
+    // clipped sr-only box the label intercepted this click and it timed out.
+    await writeDown.getByRole("checkbox").click();
     await expect(writeDown.getByTestId("writedown-ack")).toBeChecked();
     await writeDown.getByTestId("writedown-continue").click();
 
