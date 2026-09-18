@@ -18,7 +18,7 @@ installed when you ask for it.
 | **Gemma 4** — the agent model (the provider pickers list it as *Gemma 4 (on-device)*) | installed | included |
 | **Kokoro** — the voice | install from this panel | downloaded on request |
 | **Whisper** — speech to text | install from this panel, in your choice of size | downloaded on request |
-| **Memory search model** — Qwen3 embeddings | fetched in the background when you set up [Memory Shard](/guides/memory-shard) | about 640 MB |
+| **Memory search model** — Qwen3 embeddings | only if you point [Memory Shard](/guides/memory-shard) at the box rather than the cloud | about 640 MB |
 
 <Note>
 This is why updates are quick. Nothing heavy is installed behind your back: an install or
@@ -86,8 +86,9 @@ Use it when nothing may leave the box. Note that it is about the **AI providers*
 
 ## Local versus the cloud
 
-On a box connected to [ClawBox AI](/guides/clawbox-ai), speech-to-text, spoken replies and
-memory indexing default to the cloud your plan covers. The engines on the box remain the
+On a box connected to [ClawBox AI](/guides/clawbox-ai) — on every edition — speech-to-text,
+spoken replies and memory indexing default to the cloud your plan covers. The engines on
+the box remain the
 fallback and remain selectable: pick the box in this panel, or in Memory Shard's settings
 for the index, and the box is what it uses. A choice you make here is never overwritten by
 a later default.
