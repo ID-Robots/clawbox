@@ -38,17 +38,27 @@ import path from "path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { openSqlite } from "@/lib/openclaw-session-store";
-import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl } from "@/lib/embed-server";
-import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
+import {
+  clawaiCredentialGeneration,
+  clawaiCredentialRefused,
+  noteClawaiCredentialRefused,
+  proxyRefusedClawaiCredential,
+} from "@/lib/harness/credentials";
+import {
+  assertEmbedEndpointAllowed,
+  embedderUsable,
+  resolveMemoryEmbedder,
+  type ResolvedEmbedder,
+} from "@/lib/memory-embedder";
 import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
 import { isInside } from "@/lib/file-guard";
 import { readConfig as readOpenclawConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import {
   EXTRA_PATHS_CONFIG_PATH,
   INDEXABLE_EXTENSIONS,
-  LOCAL_EMBEDDING_MODEL,
-  LOCAL_EMBEDDING_PROVIDER,
+  LOCAL_EMBEDDING_DIMENSIONS,
   MEMORY_SHARD_SOURCES_KEY,
   extraPathsOf,
   stringList,
@@ -99,15 +109,41 @@ const CHUNK_OVERLAP = 150;
 const EMBED_BATCH_INPUTS = 16;
 
 /**
- * The ceiling on the whole index.
+ * THE CEILING IS A MEMORY BUDGET, so it is derived from the budget and not
+ * written down as a number.
  *
- * Qwen3-Embedding-0.6B is 1,024 dimensions, so a chunk costs 4 KB of float32:
- * 20,000 chunks is ~80 MB of vectors over ~25 MB of source text, which is a
- * great deal of personal notes and still fits beside the agent on an Orin.
- * Reaching it is reported, never silent — a cap nobody is told about reads as
- * "everything is indexed".
+ * Every chunk costs `dimensions x 4` bytes of float32 twice over — once in the
+ * sqlite blob and once in the vector cache a search loads — and the two
+ * embedders this box can use are not the same width: Qwen3-Embedding-0.6B is
+ * 1,024 dimensions (4 KB a chunk) and the ClawBox AI cloud model is 3,072
+ * (12 KB a chunk). The old flat 20,000 was sized against the first of those —
+ * ~80 MB of vectors over ~25 MB of source text, which is a great deal of
+ * personal notes and still fits beside the agent on an Orin — and the cloud
+ * arm tripled the width underneath it, which would have been ~234 MiB of
+ * vectors in one contiguous allocation on a box with 7.4 GB shared with a
+ * local model and a 2 GB embedder.
+ *
+ * So the BUDGET is the constant now and the ceiling follows the embedder. The
+ * number is exactly what 20,000 chunks of the on-device model weigh, so that
+ * arm is unchanged to the chunk and the cloud arm lands at 6,666.
  */
-export const MAX_INDEX_CHUNKS = 20_000;
+const MAX_LOCAL_INDEX_CHUNKS = 20_000;
+
+const INDEX_VECTOR_BUDGET_BYTES = MAX_LOCAL_INDEX_CHUNKS * LOCAL_EMBEDDING_DIMENSIONS * Float32Array.BYTES_PER_ELEMENT;
+
+/**
+ * How many chunks this box will hold for an embedder of this width.
+ *
+ * Reaching it is reported, never silent — a cap nobody is told about reads as
+ * "everything is indexed". A width that is not a positive number (nothing
+ * resolves one today, but the field is carried rather than computed here)
+ * falls back to the on-device ceiling rather than to zero, because a ceiling
+ * of zero is an index that refuses every file.
+ */
+export function maxIndexChunks(dimensions: number): number {
+  if (!Number.isFinite(dimensions) || dimensions <= 0) return MAX_LOCAL_INDEX_CHUNKS;
+  return Math.max(1, Math.floor(INDEX_VECTOR_BUDGET_BYTES / (dimensions * Float32Array.BYTES_PER_ELEMENT)));
+}
 
 /** One embeddings request's budget. The unit may be cold on the first call. */
 const EMBED_TIMEOUT_MS = 120_000;
@@ -132,10 +168,100 @@ const MAX_INDEXABLE_BYTES = MAX_DOCUMENT_BYTES;
  * file that cannot be READ is the other kind and is counted and stepped over.
  */
 export class EmbeddingUnavailableError extends Error {
-  constructor(detail: string) {
+  /**
+   * The far side said "not now" rather than "no": a rate limit or a server
+   * fault, which the SAME request may well survive a moment later. Carried on
+   * the error rather than decided by the retry loop, because only the place
+   * that read the status knows.
+   */
+  readonly retryable: boolean;
+  /** What `Retry-After` asked for, in milliseconds, when it asked for anything. */
+  readonly retryAfterMs: number | null;
+  constructor(detail: string, retryable = false, retryAfterMs: number | null = null) {
     super(`The embedding model did not answer: ${detail}`);
     this.name = "EmbeddingUnavailableError";
+    this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * A REBUILD IS ~1,250 REQUESTS TO A RATE-LIMITED ENDPOINT, and it starts by
+ * emptying the store.
+ *
+ * Over the network a transient refusal is the EXPECTED case: one `429` or one
+ * `503` at request 500 of a full rebuild used to end the pass with the tables
+ * already emptied, and memory search then answered nothing until some later
+ * scheduled pass happened to succeed — on a box with no armed slot,
+ * indefinitely. So a batch the far side refused with "not now" is asked again,
+ * a bounded number of times, with a widening wait it will honour `Retry-After`
+ * over.
+ *
+ * THE CLOUD ARM ONLY, deliberately. On the loopback proxy the commonest refusal
+ * is the MemAvailable wake guard's 502, and that is not a hiccup — it is the box
+ * saying it cannot hold the model right now, which the pass is meant to respect
+ * by ending. Retrying it would spend the guard's own answer three times over and
+ * push the wake through on a device that had just refused it. A refusal that is
+ * not transient at all (a 4xx that is not 429 — a bad model id, a lapsed plan)
+ * is not retried on either arm: the next attempt would be refused the same way
+ * and the pass would take three times as long to say so.
+ */
+const EMBED_RETRY_ATTEMPTS = 3;
+const EMBED_RETRY_BASE_MS = 1_000;
+/** No `Retry-After` may hold one batch longer than this. */
+const EMBED_RETRY_MAX_WAIT_MS = 30_000;
+/**
+ * …and none may make it shorter than this.
+ *
+ * `Retry-After: 0` is a legal header and `err.retryAfterMs ?? wait` read the
+ * zero as a number rather than as "nothing asked for", so a rate-limited
+ * endpoint answering it was asked three times with NO pause between them —
+ * precisely the hammer the backoff exists to prevent, aimed at the endpoint that
+ * had just asked for room.
+ */
+export const EMBED_RETRY_MIN_WAIT_MS = 1_000;
+
+/**
+ * How long ONE interactive search may take, end to end.
+ *
+ * Sized against the caller that times it: `memory_shard_search` abandons the
+ * call at 60 s (`mcp/tools/memory.ts`), so past that the box is spending a cold
+ * llama.cpp wake on an answer nobody is waiting for any more — and the wake it
+ * started carries on regardless, which is what makes the NEXT search warm. The
+ * search route combines this with the caller's own `request.signal`.
+ */
+export const MEMORY_SEARCH_DEADLINE_MS = 60_000;
+
+/** Is this status the far side saying "not now"? */
+function retryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/** `Retry-After` as milliseconds — seconds or an HTTP date — or null. */
+function retryAfterMs(res: Response): number | null {
+  const raw = res.headers.get("retry-after")?.trim();
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, EMBED_RETRY_MAX_WAIT_MS);
+  const at = Date.parse(raw);
+  if (!Number.isFinite(at)) return null;
+  return Math.min(Math.max(0, at - Date.now()), EMBED_RETRY_MAX_WAIT_MS);
+}
+
+/** Wait, unless the pass is being abandoned — in which case say so at once. */
+async function pauseBeforeRetry(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) throw new IndexPassAbortedError();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new IndexPassAbortedError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** The pass was abandoned — the two-hour budget, or a web server going down. */
@@ -298,6 +424,15 @@ async function openIndexForWrite(): Promise<IndexDb> {
  * answering nothing about a database that is entirely intact. Nothing on this
  * path writes a row.
  */
+/** Is there a store at all? A stat, so asking cannot create one. */
+async function indexStoreExists(): Promise<boolean> {
+  try {
+    return (await fs.stat(LOCAL_INDEX_PATH)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function openIndexForRead(): Promise<IndexDb | null> {
   try {
     if (!(await fs.stat(LOCAL_INDEX_PATH)).isFile()) return null;
@@ -346,27 +481,49 @@ function countOf(db: IndexDb, sql: string, ...params: unknown[]): number {
  * provisioning step, before anything has been embedded. A dimension change is
  * caught on its own, where it becomes known — see `assertDimension`.
  */
-export function localEmbeddingIdentity(): string {
+export function embedderIdentity(embedder: ResolvedEmbedder): string {
   return crypto
     .createHash("sha256")
-    .update(`${LOCAL_EMBEDDING_PROVIDER}|${LOCAL_EMBEDDING_MODEL}|${getEmbedProxyBaseUrl()}|v${SCHEMA_VERSION}`)
+    .update(`${embedder.provider}|${embedder.model}|${embedder.baseUrl}|v${SCHEMA_VERSION}`)
     .digest("hex")
     .slice(0, 16);
+}
+
+/** The identity of the embedder this box uses right now. */
+export async function localEmbeddingIdentity(): Promise<string> {
+  return embedderIdentity(await resolveMemoryEmbedder());
 }
 
 /**
  * Record what the index is built for, without building anything.
  *
- * The Hermes half of `switchToLocalEmbeddings`. On OpenClaw that call points an
- * external client at this box's embedder; here there is no external client to
- * point — ClawBox is the client — so the write that remains is the one fact
- * that would otherwise be missing: which model the vectors about to be written
- * belong to.
+ * The Hermes half of `switchToLocalEmbeddings`/`switchToCloudEmbeddings`. On
+ * OpenClaw those calls point an external client at an embedder; here there is
+ * no external client to point — ClawBox is the client — so the write that
+ * remains is the one fact that would otherwise be missing: which model the
+ * vectors about to be written belong to.
+ *
+ * IT NEVER STAMPS OVER AN INDEX THAT HOLDS SOMETHING. The vectors on disk
+ * belong to the embedder that wrote them, and a switch is exactly when that
+ * stops being the one this returns: stamping the new embedder over them would
+ * report `valid` — the shared parser's `healthy` — for an index whose rows are
+ * the wrong width for every query, so search would answer nothing behind a
+ * green panel. Left alone, the identity reads `mismatched`, the card draws the
+ * amber "Run a full reindex", and the full pass every switch posts rebuilds it.
  */
 export async function stampLocalEmbeddingIdentity(): Promise<void> {
+  // AND IT NEVER CREATES THE STORE. `openIndexForRead`'s own invariant is that
+  // a status read and a search must not leave a database behind on a box whose
+  // owner never switched the feature on, and this call reaches that box now:
+  // the automatic cloud promotion runs at BOOT, unattended, where it used to be
+  // an owner pressing a switch. With no store there is nothing to stamp either
+  // — `identityOf` answers `missing`, and the first pass stamps what it wrote.
+  if (!(await indexStoreExists())) return;
+  const identity = await localEmbeddingIdentity();
   const db = await openIndexForWrite();
   try {
-    metaSet(db, "identity", localEmbeddingIdentity());
+    if (countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) return;
+    metaSet(db, "identity", identity);
     metaSet(db, "schema_version", SCHEMA_VERSION);
   } finally {
     db.close();
@@ -384,10 +541,10 @@ function sourceListKey(sources: readonly string[]): string {
   return crypto.createHash("sha256").update(JSON.stringify([...sources].sort())).digest("hex").slice(0, 16);
 }
 
-function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing" | "mismatched" {
+function identityOf(db: IndexDb, sources: readonly string[], identity: string): "valid" | "missing" | "mismatched" {
   const stored = metaGet(db, "identity");
   if (!stored) return "missing";
-  if (stored !== localEmbeddingIdentity()) return "mismatched";
+  if (stored !== identity) return "mismatched";
   if (countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) return "valid";
   // ZERO CHUNKS IS TWO DIFFERENT STATES, and only one of them is wrong. An
   // index emptied by a rebuild whose first embed failed must not read `valid`,
@@ -453,51 +610,172 @@ function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing
 // ─── embedding ───────────────────────────────────────────────────────────────
 
 /**
- * Embed a batch through THIS BOX'S OWN PROXY, never llama-server directly.
+ * Embed a batch with the embedder this box is pointed at — and at exactly one
+ * of the two addresses that is allowed to be.
  *
- * Going through `/setup-api/local-ai/embed/v1` is what wakes the unit on the
- * first request (and re-arms the idle stop that puts it away again), what
- * restores the Qwen3 query instruction that keeps recall from quietly
- * degrading, and what trims an input too long for the server's batch. A client
- * that talked to port 8081 would have to reimplement all three and would get
- * one of them subtly wrong.
+ * LOCAL goes through THIS BOX'S OWN PROXY, never llama-server directly. Going
+ * through `/setup-api/local-ai/embed/v1` is what wakes the unit on the first
+ * request (and re-arms the idle stop that puts it away again), what restores
+ * the Qwen3 query instruction that keeps recall from quietly degrading, and
+ * what trims an input too long for the server's batch. A client that talked to
+ * port 8081 would have to reimplement all three and would get one of them
+ * subtly wrong.
+ *
+ * CLOUD goes to the ClawBox AI embeddings endpoint with the box's own `claw_`
+ * bearer — the same request the OpenClaw edition's core makes from
+ * `memory.search.remote.*`, and the same one `probeCloudEmbeddings` proved the
+ * box can make before the switch was offered. No `input_type` there: it is an
+ * unknown field on an OpenAI-shaped route, which is why the OpenClaw arm unsets
+ * those two keys rather than leaving them.
+ *
+ * Anywhere else is refused — see `embedEndpointAllowed`.
  */
 async function embedBatch(
   texts: readonly string[],
   inputType: "query" | "document",
   signal: AbortSignal | undefined,
+  embedder: ResolvedEmbedder,
+): Promise<Float32Array[]> {
+  let wait = EMBED_RETRY_BASE_MS;
+  // A QUERY IS SOMEBODY WAITING, and the rebuild's budget is the wrong one for
+  // it: three attempts of up to `EMBED_TIMEOUT_MS` with two waits of up to 30 s
+  // is about seven minutes inside a search the MCP tool abandons at 60 s. A
+  // rebuild retries because the alternative is an emptied index; a query that
+  // cannot be embedded now is answered now, and the person asks again.
+  const attempts = inputType === "query" ? 1 : EMBED_RETRY_ATTEMPTS;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await embedBatchOnce(texts, inputType, signal, embedder);
+    } catch (err) {
+      const transient = err instanceof EmbeddingUnavailableError && err.retryable;
+      if (!transient || attempt >= attempts) throw err;
+      const pause = Math.max(
+        EMBED_RETRY_MIN_WAIT_MS,
+        (err as EmbeddingUnavailableError).retryAfterMs ?? wait,
+      );
+      console.warn(
+        `[memory-index] the embedder answered "not now" (attempt ${attempt}/${attempts}); retrying in ${Math.round(pause / 100) / 10}s`,
+      );
+      await pauseBeforeRetry(pause, signal);
+      wait = Math.min(wait * 2, EMBED_RETRY_MAX_WAIT_MS);
+    }
+  }
+}
+
+/** One request, one answer. The retry above is what decides to ask again. */
+async function embedBatchOnce(
+  texts: readonly string[],
+  inputType: "query" | "document",
+  signal: AbortSignal | undefined,
+  embedder: ResolvedEmbedder,
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
   // The owner's document text is about to become an HTTP body, so where it is
-  // going is checked rather than assumed. `getEmbedProxyBaseUrl()` is built
-  // from `CLAWBOX_LOCAL_AI_PROXY_BASE_URL`/`PORT` and is loopback on every box;
-  // this is what keeps that true if either ever becomes settable from anywhere
-  // less trustworthy. Off-box, the index would be quietly shipping the
-  // customer's files to a third party — so it refuses instead.
-  const endpoint = getEmbedProxyBaseUrl();
-  if (!isLoopbackBaseUrl(endpoint)) {
-    throw new EmbeddingUnavailableError("the embedder endpoint is not on this device");
+  // going is checked rather than assumed — at the moment the socket is opened,
+  // not only where the choice was made.
+  try {
+    assertEmbedEndpointAllowed(embedder.source, embedder.baseUrl);
+  } catch (err) {
+    throw new EmbeddingUnavailableError(err instanceof Error ? err.message : String(err));
   }
+  if (!embedderUsable(embedder)) {
+    // Pointed at the cloud with no credential on the box. Said out loud rather
+    // than quietly embedded on this box instead: that would write vectors from
+    // another model into an index stamped for this one.
+    throw new EmbeddingUnavailableError("this box holds no ClawBox AI credential for the cloud embedder");
+  }
+  const bearer = embedder.source === "cloud" ? embedder.token : getLocalAiToken();
+  // Snapshotted BEFORE the request, so a refusal about a credential the box has
+  // since replaced is dropped rather than remembered against the new one.
+  const generation = clawaiCredentialGeneration();
   let res: Response;
   try {
-    res = await fetch(`${endpoint}/embeddings`, {
+    res = await fetch(embedder.requestUrl, {
       method: "POST",
+      // A REDIRECT IS NOT A DESTINATION THIS BOX CHECKED. The fence above judges
+      // `embedder.baseUrl`, and `fetch` follows a 307/308 on its own — with the
+      // POST method and the body, which here is the owner's document or query
+      // text, carried to wherever the answer pointed. Manual makes the redirect
+      // the ANSWER, so it lands in the `!res.ok` branch below and the pass is
+      // told the embedder did not answer, which is exactly what happened.
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${getLocalAiToken()}`,
+        authorization: `Bearer ${bearer}`,
       },
-      body: JSON.stringify({ model: LOCAL_EMBEDDING_MODEL, input: [...texts], input_type: inputType }),
+      body: JSON.stringify({
+        model: embedder.model,
+        input: [...texts],
+        ...(embedder.labelInputs ? { input_type: inputType } : {}),
+      }),
       signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(EMBED_TIMEOUT_MS)]),
     });
   } catch (err) {
     if (signal?.aborted) throw new IndexPassAbortedError();
-    throw new EmbeddingUnavailableError(err instanceof Error ? err.message : String(err));
+    // THE SOCKET FAILING IS THE COMMONEST TRANSIENT FAILURE, and it never
+    // reaches an HTTP status: a reset connection, a DNS blip, a TLS error or the
+    // `EMBED_TIMEOUT_MS` abort all arrive here. Constructed non-retryable, one
+    // of them at request 200 of a 420-request rebuild ended the pass with
+    // `DELETE FROM chunks` already done — no index at all until some later
+    // scheduled pass happened to succeed. The caller's own abort is separated
+    // one line above, so this cannot swallow a cancelled pass.
+    //
+    // The CLOUD ARM ONLY, the same fence the status rule uses: on the loopback
+    // proxy a failure to connect is the embed unit being down or refusing the
+    // wake, which the pass is meant to respect by ending rather than by dialling
+    // a socket that is not there twice more.
+    throw new EmbeddingUnavailableError(
+      err instanceof Error ? err.message : String(err),
+      embedder.source === "cloud",
+    );
   }
   if (!res.ok) {
+    // A CREDENTIAL THE PROXY ITSELF NAMES AS THE PROBLEM is remembered here, the
+    // same two lines the picture and voice paths already use. Without them
+    // nothing on the EMBEDDING path ever armed `clawaiCredentialRefused()`, so a
+    // box whose credential the proxy refuses — revoked, re-minted on another
+    // device, lost in a migration — and whose owner uses neither of those
+    // features kept reporting `semanticAvailable: true` and `mode: active` while
+    // every pass failed and every search threw: the guard was written and its
+    // input never arrived.
+    //
+    // It has to be the proxy saying so, and `proxyRefusedClawaiCredential` is
+    // the one place that judges it: 401 `missing_token` / 403 `invalid_token`
+    // and nothing else. A bare 401/403 can come from an edge rule or an
+    // interception proxy, and remembering one of those would send a customer
+    // with a good credential to re-pair their box. NOT the proxy's PLAN gate
+    // either, which is also a 403 (`clawai-cloud-defaults-state.ts`: "TTS is
+    // Max-only on the proxy, which answers 403 to Free and Pro") — a plan that
+    // does not cover the cloud embedder is a fact about the ACCOUNT, and this
+    // memo is the one the box acts on by telling the owner to re-link a device
+    // whose credential is perfectly good. 402 is not on the wire here at all:
+    // it is what ClawBox's OWN routes answer (`refusePaidPlan`) and what the
+    // portal answers to a device poll, never what the proxy sends.
+    // Both bodies are cancelled on the way out: the helper reads the clone
+    // only for a 401/403, so a 429 or a 5xx — the statuses the cloud arm
+    // retries up to three times — would otherwise leave two unread bodies
+    // holding their connection out of the fetch pool the next batch needs.
+    const refusalCopy = embedder.source === "cloud" ? res.clone() : null;
+    try {
+      if (refusalCopy && (await proxyRefusedClawaiCredential(refusalCopy))) {
+        await noteClawaiCredentialRefused(res.status, generation);
+      }
+    } finally {
+      // Together, never one after the other: a clone tees the stream, and a
+      // teed branch's cancel settles only once BOTH branches are cancelled.
+      await Promise.all([
+        refusalCopy?.body?.cancel().catch(() => {}),
+        res.body?.cancel().catch(() => {}),
+      ]);
+    }
     // 502 here is the wake being refused — most often the MemAvailable guard
     // in `ensureLocalAiReady`, which is a real answer and not a bug: the box
     // is too busy to hold the model right now.
-    throw new EmbeddingUnavailableError(`HTTP ${res.status}`);
+    throw new EmbeddingUnavailableError(
+      `HTTP ${res.status}`,
+      embedder.source === "cloud" && retryableStatus(res.status),
+      retryAfterMs(res),
+    );
   }
   let payload: unknown;
   try {
@@ -587,7 +865,7 @@ export interface LocalIndexPassResult {
   chunks: number;
   /** Files that could not be read or embedded. Counted, never fatal. */
   failures: number;
-  /** True when MAX_INDEX_CHUNKS stopped the pass short. */
+  /** True when the chunk ceiling (`maxIndexChunks`) stopped the pass short. */
   capped: boolean;
 }
 
@@ -770,6 +1048,17 @@ export async function runLocalIndexPass(
   signal?: AbortSignal,
   onProgress?: LocalIndexProgressReporter,
 ): Promise<LocalIndexPassResult> {
+  // ONE reading of the embedder for the whole pass. Resolved before the store is
+  // opened, so a pass cannot embed its first files with one embedder and its
+  // last with another — a switch landing mid-pass would leave an index of two
+  // widths under a single identity.
+  const embedder = await resolveMemoryEmbedder();
+  const identityNow = embedderIdentity(embedder);
+  // And ONE ceiling, from that embedder's width — the vectors this pass is
+  // about to write are the ones the budget is about. Resolved with the
+  // embedder for the same reason: a ceiling that moved mid-pass would cap the
+  // last files of a run against a different budget from its first.
+  const ceiling = maxIndexChunks(embedder.dimensions);
   const db = await openIndexForWrite();
   try {
     // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
@@ -781,7 +1070,7 @@ export async function runLocalIndexPass(
     const sources = await readLocalSources();
     const scan = await scanSources(sources, signal);
 
-    const identity = identityOf(db, sources);
+    const identity = identityOf(db, sources, identityNow);
     const schema = metaGet(db, "schema_version");
     const rebuild = mode === "full" || identity === "mismatched" || schema !== SCHEMA_VERSION;
     if (rebuild) {
@@ -802,7 +1091,7 @@ export async function runLocalIndexPass(
       // a path about to spend thousands, it is the same call that wakes the
       // unit for them, and a refusal ends the pass (`EmbeddingUnavailableError`)
       // with the index it was going to replace still on disk.
-      await embedBatch([REBUILD_PROBE_TEXT], "document", signal);
+      await embedBatch([REBUILD_PROBE_TEXT], "document", signal, embedder);
       // The identity goes WITH the rows it describes. Stamping it here — before
       // a single vector had been written — meant a rebuild whose first embed
       // failed left a valid identity over an empty index, which the shared
@@ -924,7 +1213,7 @@ export async function runLocalIndexPass(
 
       const pieces = chunkText(text);
       const existing = row ? countOf2(sql.chunksFor, entry.file) : 0;
-      if (chunkCount - existing + pieces.length > MAX_INDEX_CHUNKS) {
+      if (chunkCount - existing + pieces.length > ceiling) {
         // `continue`, not `break`: one large document early in the scan must not
         // shut out the thousand small ones behind it that still fit.
         capped = true;
@@ -937,7 +1226,7 @@ export async function runLocalIndexPass(
         vectors = [];
         for (let at = 0; at < pieces.length; at += EMBED_BATCH_INPUTS) {
           throwIfAborted(signal);
-          vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal));
+          vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal, embedder));
         }
       } catch (err) {
         // The embedder is the shared resource; a failure there is not this
@@ -1048,7 +1337,7 @@ export async function runLocalIndexPass(
     // in one transaction — five autocommits is five fsyncs for six short rows.
     db.exec("BEGIN");
     try {
-      metaSet(db, "identity", localEmbeddingIdentity());
+      metaSet(db, "identity", identityNow);
       metaSet(db, "built_at", String(Date.now()));
       // Everything this pass had to ACCOUNT FOR, which is not the same as what
       // it could open: a document the extractor refused never becomes an
@@ -1076,7 +1365,7 @@ export async function runLocalIndexPass(
     }
     if (capped) {
       console.warn(
-        `[memory-index] the index reached its ${MAX_INDEX_CHUNKS}-chunk ceiling; some files in this pass were not indexed`,
+        `[memory-index] the index reached its ${ceiling}-chunk ceiling; some files in this pass were not indexed`,
       );
     }
     if (scan.unreadableSources.size) {
@@ -1229,13 +1518,39 @@ function assertDimension(db: IndexDb, sample: Float32Array | undefined): boolean
  * comment for why it is worth impersonating rather than parallel-implementing.
  */
 export async function localMemoryStatusJson(): Promise<unknown> {
-  const [sources, provisioning] = await Promise.all([
+  const [sources, provisioning, embedder] = await Promise.all([
     readLocalSources(),
     getEmbedProvisioningStatus().catch(() => null),
+    resolveMemoryEmbedder(),
   ]);
-  // The model on disk is what makes semantic search POSSIBLE; whether it is
-  // awake right now is not the question — the proxy wakes it on demand.
-  const ready = provisioning?.installed === true;
+  // What makes semantic search POSSIBLE, per embedder. On this box that is the
+  // model being on disk — whether it is awake right now is not the question,
+  // the proxy wakes it on demand. In the cloud it is the box holding the
+  // credential the endpoint wants AND that credential not having been REFUSED:
+  // a credential the proxy has rejected (401 `missing_token` / 403
+  // `invalid_token` — revoked, re-minted elsewhere, lost in a migration) sits in
+  // the store looking exactly like a working one, so "a token is present"
+  // reported `semanticAvailable: true` and `mode: active` over a box where every
+  // pass failed and every search threw. `clawaiCredentialRefused()` is the fact
+  // the rest of the box already keeps for the picture and microphone paths; a
+  // refusal expires on its own, so this reports degraded only while one is
+  // actually on record. The GGUF need not be there at all, and reading
+  // `installed` on the cloud arm would report a perfectly good cloud index as
+  // degraded on a box that never downloaded 639 MB it does not use.
+  //
+  // WHAT THIS STILL DOES NOT COVER, said out loud rather than implied: the
+  // proxy's PLAN gate is a 403 too, and it names the plan rather than the
+  // credential, so `proxyRefusedClawaiCredential` refuses it — correctly, since
+  // a refused credential is the one the box tells the owner to re-link. A plan
+  // that lapses after the embedder was pinned to the cloud therefore still
+  // reads as available here. Closing that needs a fact about the ACCOUNT, from
+  // the portal poll that already reads the plan, not a wider reading of a
+  // status on the embedding path.
+  const ready =
+    embedder.source === "cloud"
+      ? embedderUsable(embedder) && clawaiCredentialRefused() === null
+      : provisioning?.installed === true;
+  const identityNow = embedderIdentity(embedder);
   // ONE object literal for both cases, so the "there is no index yet" shape and
   // the real one cannot drift into disagreeing about a field name.
   //
@@ -1243,7 +1558,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
   // cached count is only true while every pass finishes: one that dies partway
   // — the embedder refusing a wake is the common case — leaves the tables and
   // the recorded totals describing different indexes, and this probe is what
-  // the panel believes. Measured at ~0.1 ms warm on a store at its 20,000-chunk
+  // the panel believes. Measured at ~0.1 ms warm on a store at its chunk
   // ceiling (sqlite answers both from `chunks_by_path`), which is not a price
   // worth paying in honesty.
   const db = await openIndexForRead();
@@ -1252,8 +1567,8 @@ export async function localMemoryStatusJson(): Promise<unknown> {
       agentId: "main",
       scan: { totalFiles: db ? Number(metaGet(db, "scan_total_files") ?? 0) : 0 },
       status: {
-        provider: LOCAL_EMBEDDING_PROVIDER,
-        model: LOCAL_EMBEDDING_MODEL,
+        provider: embedder.provider,
+        model: embedder.model,
         files: db ? countOf(db, "SELECT COUNT(*) AS n FROM files") : 0,
         chunks: db ? countOf(db, "SELECT COUNT(*) AS n FROM chunks") : 0,
         dbPath: LOCAL_INDEX_PATH,
@@ -1271,7 +1586,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
           // wizard's own stamp leaves too. `identityOf` is what tells an index
           // that is empty because there was nothing to index from one that is
           // empty because the work did not happen.
-          indexIdentity: { status: db ? identityOf(db, sources) : "missing" },
+          indexIdentity: { status: db ? identityOf(db, sources, identityNow) : "missing" },
         },
       },
     };
@@ -1307,11 +1622,14 @@ let cacheRelease: ReturnType<typeof setTimeout> | null = null;
 /**
  * How long the vectors stay resident after the last search.
  *
- * At the 20,000-chunk ceiling the cache is ~82 MB of float32, and this box has
+ * At the ceiling the cache is ~78 MiB of float32 WHICHEVER embedder this box
+ * uses — that is what `INDEX_VECTOR_BUDGET_BYTES` is, and the ceiling is
+ * derived from it rather than fixed at 20,000, so the cloud model's 3,072
+ * dimensions buy fewer chunks instead of three times the memory. This box has
  * 7.4 GB shared with a local model and a 2 GB embedder. The embedder itself is
  * put away after ten idle minutes (`LOCAL_AI_IDLE_TIMEOUT_MS`); a search index
- * that pinned 82 MB for the life of the process while the model it belongs to
- * was handing memory back would be the odd one out.
+ * that pinned ~78 MiB for the life of the process while the model it belongs
+ * to was handing memory back would be the odd one out.
  */
 const VECTOR_CACHE_IDLE_MS = 10 * 60 * 1000;
 
@@ -1337,9 +1655,10 @@ export function _resetLocalMemoryCacheForTests(): void {
 /**
  * Every vector as ONE Float32Array.
  *
- * 20,000 chunks of 1,024 floats is a 20M-multiply scan, which is tens of
- * milliseconds in JS — no vector extension, no approximate index, and nothing
- * to keep in step with the rows.
+ * The ceiling is a memory budget, so the scan is about the same size on either
+ * embedder: 20,000 chunks of 1,024 floats, or 6,666 of 3,072, is ~20M
+ * multiplies — tens of milliseconds in JS, with no vector extension, no
+ * approximate index and nothing to keep in step with the rows.
  *
  * `iterate`, not `all`, and the bytes go STRAIGHT into the destination. `all`
  * built 20,000 row objects each holding a 4 KB buffer before one could be
@@ -1406,6 +1725,11 @@ export async function searchLocalMemory(
   // Clamped HERE, not only in the two callers: the top-k loop indexes
   // `best[best.length - 1]` and a limit of zero makes that `best[-1]`.
   const want = Math.max(1, Math.min(50, Math.trunc(limit) || 1));
+  // The SAME embedder the last pass wrote with, or the query lands in a space
+  // the stored vectors do not live in. A switch that has not been rebuilt for
+  // yet answers nothing here (the widths differ), which is what the card's
+  // mismatched fingerprint and its "Run a full reindex" are about.
+  const embedder = await resolveMemoryEmbedder();
   const db = await openIndexForRead();
   if (!db) return [];
   try {
@@ -1414,7 +1738,7 @@ export async function searchLocalMemory(
     // for exactly that reason — and loading 82 MB of vectors needs nothing from
     // it. Started first, the wake covers the whole cold load, which is the
     // worst case this feature has: the agent's first search after a restart.
-    const embedding = embedBatch([text], "query", signal);
+    const embedding = embedBatch([text], "query", signal, embedder);
     // A handler on a DERIVED promise, attached before anything can throw: the
     // load below can return early or fail, and an in-flight rejection with
     // nobody listening takes the whole process down. `await embedding` still

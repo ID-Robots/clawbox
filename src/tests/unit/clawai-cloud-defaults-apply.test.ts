@@ -43,11 +43,27 @@ const openclawAbsent = vi.fn(() => false);
 vi.mock("@/lib/openclaw-config", () => ({ openclawIsAbsent: () => openclawAbsent() }));
 
 const switchToCloud = vi.fn(async () => {});
-const embeddingChoice = vi.fn(async () => ({ provider: "openai-compatible", model: "q", baseUrl: "http://127.0.0.1:3000/setup-api/local-ai/embed/v1" }));
+/**
+ * Where the index is embedded, and whether that is WRITTEN DOWN.
+ *
+ * The second half is what a box nobody has pinned turns on: there the answer is
+ * the default rule — the cloud wherever the subscription covers it — and the
+ * applier still owes it the one write that records it, plus the rebuild.
+ */
+const placement = vi.fn(async (_fallback?: unknown) => ({ source: "local" as string, recorded: false }));
+/**
+ * THE PIN, on the edition where ClawBox is the indexer: the one thing on such a
+ * box that records a choice about the embedder. The legacy
+ * `memory_embeddings_choice_source: "owner"` mark does not, because the wizard
+ * that wrote it could only ever post one answer.
+ */
+const embedderPin = vi.fn(async () => null as string | null);
+vi.mock("@/lib/memory-embedder", () => ({ readEmbedderPin: () => embedderPin() }));
+
 const shardEnabled = vi.fn(async () => true);
 vi.mock("@/lib/memory-shard", () => ({
   getMemoryShardEnabled: () => shardEnabled(),
-  readEmbeddingChoice: () => embeddingChoice(),
+  readEmbeddingPlacement: (...a: unknown[]) => placement(...(a as [])),
   switchToCloudEmbeddings: (...a: unknown[]) => switchToCloud(...(a as [])),
 }));
 
@@ -90,7 +106,8 @@ beforeEach(() => {
   syncChannel.mockResolvedValue(true);
   startIndex.mockResolvedValue({ accepted: true });
   voiceState.mockResolvedValue({ choice: "auto" });
-  embeddingChoice.mockResolvedValue({ provider: "openai-compatible", model: "q", baseUrl: "http://127.0.0.1:3000/setup-api/local-ai/embed/v1" });
+  placement.mockResolvedValue({ source: "local", recorded: false });
+  embedderPin.mockResolvedValue(null);
 });
 
 describe("applyClawaiCloudDefaults", () => {
@@ -150,7 +167,7 @@ describe("applyClawaiCloudDefaults", () => {
     // Both halves of transcription already say cloud, so the channel sync has
     // nothing to write — see the loop's note on why it is still asked.
     syncChannel.mockResolvedValue(false);
-    embeddingChoice.mockResolvedValue({ provider: "openai-compatible", model: "text-embedding-3-large", baseUrl: "https://clawbox.test/api/ai" });
+    placement.mockResolvedValue({ source: "cloud", recorded: true });
     voiceProbe.mockResolvedValueOnce({
       config: { tts: { provider: "openai", providers: { openai: { apiKey: "claw_test", baseUrl: "https://clawbox.test/api/ai" } } } },
       probe: { providerConfigured: false, commandPresent: false, engineInstalled: false, engineNames: [] },
@@ -315,11 +332,99 @@ describe("readCloudDefaultsStatus", () => {
     });
   });
 
-  it("calls the index local on the edition that indexes on the box", async () => {
+  it("puts the edition that indexes on the box on the cloud too, where it used to say 'edition'", async () => {
+    // Until 2026-09-18 this answered `{ source: local, target: local, reason:
+    // "edition" }` and never even probed: ClawBox's own index accepted a
+    // loopback endpoint and nothing else. It now accepts this box's ClawBox AI
+    // account as well, so the SKU is no longer a reason to keep a subscriber
+    // off what they pay for.
     openclawAbsent.mockReturnValue(true);
+    placement.mockResolvedValue({ source: "cloud", recorded: false });
     const status = await readCloudDefaultsStatus();
-    expect(status.capabilities.embeddings).toEqual({ source: "local", target: "local", ownerChoice: false, reason: "edition" });
-    // And the probe is never even asked for: the answer could not change it.
-    expect(routeReady).not.toHaveBeenCalled();
+    expect(status.capabilities.embeddings).toEqual({ source: "cloud", target: "cloud", ownerChoice: false, reason: null });
+  });
+
+  it("records the cloud, and rebuilds, on an unpinned box that is already embedding there", async () => {
+    // WHO THAT BOX IS: one whose owner has never been asked, whose default
+    // resolves to the cloud, and whose index — if it has one — was built by the
+    // model on the box. The pin is what stops this happening again at every
+    // boot, and the rebuild is what the move needs. A box that finished the
+    // wizard on the cloud AFTER 2026-09-18 is not in this population: the
+    // wizard posts, so its choice is recorded and the guard below holds.
+    openclawAbsent.mockReturnValue(true);
+    placement.mockResolvedValue({ source: "cloud", recorded: false });
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("embeddings");
+    expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
+    expect(startIndex).toHaveBeenCalledWith("full", "manual");
+  });
+
+  it("promotes a Hermes box carrying the LEGACY owner mark, pin and rebuild and all", async () => {
+    // THE POPULATION THIS UPDATE LANDS ON. Every Hermes box that finished the
+    // Memory Shard wizard before 2026-09-18 carries
+    // `memory_embeddings_choice_source: "owner"` and no pin — the wizard's last
+    // step POSTed the model on this box because it was the only thing the route
+    // could offer there, and the route marks every pick as the owner's.
+    //
+    // Honouring that mark left those boxes in the worst of the three states:
+    // `resolveMemoryEmbedder` ignores it and started sending their documents to
+    // the cloud, while this applier honoured it and so never wrote the pin or
+    // asked for the rebuild — the stored identity stayed the 1,024-dimension
+    // local one, the card read `mismatched`, and memory search answered nothing
+    // at all until some later pass happened to rebuild.
+    openclawAbsent.mockReturnValue(true);
+    store.set("memory_embeddings_choice_source", "owner");
+    embedderPin.mockResolvedValue(null);
+    placement.mockResolvedValue({ source: "cloud", recorded: false });
+
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("embeddings");
+    expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
+    expect(startIndex).toHaveBeenCalledWith("full", "manual");
+    // …and the stale mark is handed back to the applier, so the card stops
+    // reporting an owner choice for a move the owner never made.
+    expect(store.get("memory_embeddings_choice_source")).toBe("auto");
+  });
+
+  it("leaves a box whose owner really picked the model ON THIS BOX exactly where it is", async () => {
+    // The other half of the same rule. A pick made through the settings card
+    // writes the mark AND the pin, and a pin is the thing on this edition that
+    // records a choice. Nothing here may move it.
+    openclawAbsent.mockReturnValue(true);
+    store.set("memory_embeddings_choice_source", "owner");
+    embedderPin.mockResolvedValue("local");
+    placement.mockResolvedValue({ source: "local", recorded: true });
+
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).not.toContain("embeddings");
+    expect(switchToCloud).not.toHaveBeenCalled();
+    expect(startIndex).not.toHaveBeenCalled();
+    expect(store.get("memory_embeddings_choice_source")).toBe("owner");
+  });
+
+  it("still honours the mark on OpenClaw, where the wizard could offer both", async () => {
+    // The edition-specific twist is exactly that: specific. Where OpenClaw is
+    // the embedding client there is no pin, the mark is the whole answer, and a
+    // box whose owner chose the model on it stays on it.
+    openclawAbsent.mockReturnValue(false);
+    store.set("memory_embeddings_choice_source", "owner");
+    placement.mockResolvedValue({ source: "local", recorded: true });
+
+    const status = await readCloudDefaultsStatus();
+    expect(status.capabilities.embeddings).toEqual({
+      source: "local", target: "local", ownerChoice: true, reason: "owner",
+    });
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).not.toContain("embeddings");
+    expect(switchToCloud).not.toHaveBeenCalled();
+  });
+
+  it("leaves a box whose cloud embedder is already recorded alone", async () => {
+    openclawAbsent.mockReturnValue(true);
+    placement.mockResolvedValue({ source: "cloud", recorded: true });
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).not.toContain("embeddings");
+    expect(switchToCloud).not.toHaveBeenCalled();
+    expect(startIndex).not.toHaveBeenCalled();
   });
 });

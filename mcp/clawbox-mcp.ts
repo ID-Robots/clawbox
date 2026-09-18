@@ -63,6 +63,7 @@ import {
 import { registerImprovementTools } from "./tools/improvement";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
+import { registerHermesPluginTools } from "./tools/hermes-plugins";
 import { registerSkillTools } from "./tools/skills";
 import { registerMemoryTools } from "./tools/memory";
 import { registerSystemTools } from "./tools/system";
@@ -195,6 +196,11 @@ export async function buildServer(
   // (see `watchEmailReadability` in main()). Nothing else here is re-asked.
   registerOrientationTools(reg, ctx);
   registerSkillTools(reg);
+  // Hermes-only, and the registrar drops it on OpenClaw. It is next to the skill
+  // family because the two are how a Hermes box gains abilities — but a skill is
+  // re-read per turn and a PLUGIN is scanned once per process, which is the whole
+  // reason this tool has to exist.
+  registerHermesPluginTools(reg);
   registerMemoryTools(reg);
   registerAiTools(reg, ctx);
   registerSystemTools(reg, ctx);

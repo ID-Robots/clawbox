@@ -423,6 +423,25 @@ export async function register() {
     console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
   }
   try {
+    // A Hermes plugin the owner installs after boot never reaches the chat on
+    // its own: Hermes scans for plugins once per process, and the process
+    // serving chat is a long-lived service. Nothing else on the box notices, so
+    // this watches ~/.hermes and bounces the dashboard when the plugin set
+    // really changes — see src/lib/hermes-plugin-reload.ts for why that restart
+    // needs no privilege and must not be given one.
+    //
+    // Starts nothing on a box with no Hermes dashboard (`hasHermesHarness()`).
+    // Its first look is a BASELINE unless the running dashboard is demonstrably
+    // BEHIND the files AND those files were touched after it started — the
+    // `register-mcp.sh` case, true at most once per dashboard — so an ordinary
+    // web-server restart never restarts the owner's chat backend.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { startHermesPluginWatcher } = require('./lib/hermes-plugin-reload')
+    startHermesPluginWatcher()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the Hermes plugin watcher:', err instanceof Error ? err.message : err)
+  }
+  try {
     // On the OpenClaw arm the memory-status probe boots a whole OpenClaw
     // process (~8 s on a Jetson), so it is paid once, after the boot rush
     // (gateway restart, schedulers, Next's own warm-up) has passed, and the

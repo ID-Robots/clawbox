@@ -23,6 +23,10 @@
  *     person pick records `owner` in this capability's source key, and a box
  *     that predates the key is read through `ownerChoiceFrom`: a stored `local`
  *     could only have come from a person, because nothing else ever wrote one.
+ *     The memory embedder has one edition-specific twist on that — see
+ *     `embeddingsOwnerChoice` — because on the SKU where ClawBox indexes, a
+ *     wizard that could only ever post one answer stamped that key on every box
+ *     that ran it, so the mark there records a click and not a decision.
  *
  * So the worst this can do on a box that was working is point it at a cloud
  * engine its subscription covers, which is what was asked for; and the most it
@@ -30,7 +34,7 @@
  */
 
 import { readClawaiEntitlementTier } from "@/lib/clawai-plan-tier";
-import { readChoiceSource } from "@/lib/clawai-cloud-choice";
+import { clearOwnerChoice, readChoiceSource } from "@/lib/clawai-cloud-choice";
 import { get } from "@/lib/config-store";
 import {
   ownerChoiceFrom,
@@ -48,8 +52,9 @@ import {
 import { invalidateMemoryStatusCache, startMemoryIndex } from "@/lib/clawkeep-memory";
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
-import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
-import { readEmbeddingChoice, switchToCloudEmbeddings } from "@/lib/memory-shard";
+import { readEmbedderPin } from "@/lib/memory-embedder";
+import { readEmbeddingPlacement, switchToCloudEmbeddings } from "@/lib/memory-shard";
+import type { EmbeddingSource } from "@/lib/memory-shard-state";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { createSerialLock } from "@/lib/serial-lock";
 import { syncChannelAudio } from "@/lib/stt-channel";
@@ -105,11 +110,14 @@ async function embeddingsRouteReady(linked: boolean, plan: ClawboxAiPlanTier | n
 export async function readCloudDefaultsFacts(): Promise<CloudDefaultsFacts> {
   const [token, entitlement] = await Promise.all([resolveClawaiToken(), readClawaiEntitlementTier()]);
   const linked = token !== null;
-  // ClawBox is the indexer on the edition with no OpenClaw, and its embedder
-  // client refuses any endpoint that is not loopback — deliberately, because
-  // the owner's document text is the request body there. See the fact's own
-  // docblock; a default may not open that fence.
-  const embeddingsSupported = !openclawIsAbsent();
+  // Both editions since 2026-09-18. The fence the old `false` stood for is
+  // still there — ClawBox's own index sends the owner's text to the loopback
+  // proxy or to this box's ClawBox AI account and nowhere else
+  // (`memory-embedder.ts`) — but it is no longer a reason to keep an edition
+  // off a subscription it pays for. The fact is kept as a KILL SWITCH (see its
+  // own docblock): one `false` here takes every box off the cloud embedder
+  // without touching the rule that reads it.
+  const embeddingsSupported = true;
   return {
     linked,
     entitlement,
@@ -153,15 +161,15 @@ function voiceSourceOf(status: VoiceOutputStatus): CapabilitySource {
   return (status.activeEngine ?? status.preferredEngine ?? "local") === "cloud" ? "cloud" : "local";
 }
 
-/** Where the memory index is embedded right now. */
-async function currentEmbeddingSource(): Promise<CapabilitySource> {
-  if (openclawIsAbsent()) return "local";
-  const { baseUrl } = await readEmbeddingChoice();
-  // No endpoint at all is the on-device answer: the only thing this box points
-  // at without one is its own embedder, and claiming "cloud" over an unset key
-  // would make the applier skip the write that puts it right.
-  if (!baseUrl) return "local";
-  return isLoopbackBaseUrl(baseUrl) ? "local" : "cloud";
+/**
+ * Where the memory index is embedded right now.
+ *
+ * @param fallback the verdict this run already computed, for a box that has
+ *   pinned nothing: the default rule is what decides there, and reading the
+ *   facts a second time to learn it would buy a second probe.
+ */
+async function currentEmbeddingSource(fallback: CapabilitySource): Promise<CapabilitySource> {
+  return (await readEmbeddingPlacement(fallback)).source;
 }
 
 /**
@@ -185,7 +193,7 @@ async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voic
   const [stt, voice, embeddings, owners] = await Promise.all([
     getSttPrimary(),
     readVoiceSnapshot(),
-    currentEmbeddingSource(),
+    currentEmbeddingSource(defaults.embeddings.source),
     readOwnerChoices(),
   ]);
   const tts = voiceSourceOf(voice.status);
@@ -214,21 +222,51 @@ async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voic
  * value only a person could have produced. See `ownerChoiceFrom`.
  */
 async function readOwnerChoices(): Promise<Record<CloudCapability, boolean>> {
-  const [ttsSource, sttSource, embedSource, storedStt, voiceState] = await Promise.all([
+  const [ttsSource, sttSource, embedSource, storedStt, voiceState, embedPin] = await Promise.all([
     readChoiceSource("tts"),
     readChoiceSource("stt"),
     readChoiceSource("embeddings"),
     get(STT_PRIMARY_KEY),
     readVoiceState(),
+    openclawIsAbsent() ? readEmbedderPin() : Promise.resolve(null),
   ]);
   return {
     tts: ownerChoiceFrom(ttsSource, voiceState.choice === "local"),
     stt: ownerChoiceFrom(sttSource, storedStt === "local"),
-    // Nothing before this feature recorded an embedding pick — the boot script
-    // wrote the on-device embedder on every box — so there is no earlier
-    // "only a person could have done this" value to grandfather here.
-    embeddings: ownerChoiceFrom(embedSource, false),
+    embeddings: embeddingsOwnerChoice(embedSource, embedPin),
   };
+}
+
+/**
+ * Did the owner choose where the memory index is embedded?
+ *
+ * ON OPENCLAW the mark is the whole answer, as it is for the other two. Nothing
+ * before this feature recorded an embedding pick — the boot script wrote the
+ * on-device embedder on every box — so there is no earlier "only a person could
+ * have done this" value to grandfather.
+ *
+ * ON THE EDITION WHERE CLAWBOX INDEXES, THE MARK ALONE IS NOT A CHOICE, and
+ * reading it as one is what this fixes. Every Hermes box that finished the
+ * Memory Shard wizard before 2026-09-18 carries `memory_embeddings_choice_source:
+ * "owner"` — the wizard's last step POSTed the model on this box because it was
+ * the only thing the route could offer there, and the route marks every pick as
+ * the owner's. Honouring that mark left the whole of that population in the
+ * worst of the three states: `resolveMemoryEmbedder` ignores it and started
+ * sending their documents to the cloud, while this applier honoured it and so
+ * never wrote the pin or asked for the rebuild the move needs — the stored
+ * identity stayed the 1,024-dimension local one, `identityOf` read `mismatched`
+ * and `searchLocalMemory` answered `[]` silently until some later pass happened
+ * to rebuild.
+ *
+ * THE PIN IS WHAT RECORDS A CHOICE THERE (`memory-embedder.ts` says the same
+ * thing from the reader's side), so a mark is honoured only where a pin stands
+ * beside it. A box whose owner picks "On this box" through the settings card
+ * after this change has both — the route writes the mark and
+ * `switchToLocalEmbeddings` writes the pin — and stays local for good.
+ */
+function embeddingsOwnerChoice(recorded: unknown, pin: EmbeddingSource | null): boolean {
+  if (openclawIsAbsent() && pin === null) return false;
+  return ownerChoiceFrom(recorded, false);
 }
 
 /**
@@ -397,12 +435,29 @@ async function promoteTts({ harness, status }: VoiceSnapshot): Promise<boolean> 
  * boot.
  */
 async function promoteEmbeddings(): Promise<boolean> {
-  // Already pointed off the box: nothing to write, and writing anyway would
-  // invalidate a perfectly good index and buy a reindex for nothing.
-  if ((await currentEmbeddingSource()) === "cloud") return false;
+  // Already pointed off the box AND WRITTEN DOWN: nothing to write, and writing
+  // anyway would invalidate a perfectly good index and buy a reindex for
+  // nothing. `recorded` is the second half and it is load-bearing on the
+  // edition where ClawBox indexes: there an unpinned box ALREADY embeds in the
+  // cloud by default, so reading the source alone would have skipped the one
+  // write that records it — and with it the full pass that rebuilds an index
+  // whose vectors were made by the model on the box.
+  const placement = await readEmbeddingPlacement("cloud");
+  if (placement.recorded && placement.source === "cloud") return false;
   const token = await resolveClawaiToken();
   if (!token) return false;
   await switchToCloudEmbeddings(cloudEmbeddingsUrl(), token);
+  // THE APPLIER OWNS THIS CAPABILITY NOW, said out loud in the key that records
+  // who decided. A legacy Hermes box reaches here carrying `owner` from a wizard
+  // that could only ever post one answer (see `embeddingsOwnerChoice`); leaving
+  // that word in place would have the card report an owner choice for a move the
+  // owner never made. `auto` is the truthful value and the one `clearOwnerChoice`
+  // exists to write. It is not what stops a second promotion — the PIN this
+  // switch just wrote is, through `placement.recorded` above — so a write that
+  // fails here costs nothing but the label.
+  await clearOwnerChoice("embeddings").catch((err) => {
+    console.warn("[clawai-cloud-defaults] could not record who chose the embedder:", message(err));
+  });
   invalidateMemoryStatusCache();
   // The rebuild is best-effort and reported separately: the config write has
   // LANDED by now, so a pass that could not start (one already running, the

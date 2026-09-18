@@ -40,17 +40,21 @@ import {
 } from "@/lib/clawai-cloud-embeddings";
 
 const REAL_URL = process.env.CLAWBOX_AI_EMBEDDINGS_URL;
+const REAL_INSECURE = process.env.CLAWBOX_AI_EMBEDDINGS_INSECURE;
 
 beforeEach(() => {
   store.clear();
   forgetCloudEmbeddingsProbe();
   delete process.env.CLAWBOX_AI_EMBEDDINGS_URL;
+  delete process.env.CLAWBOX_AI_EMBEDDINGS_INSECURE;
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   if (REAL_URL === undefined) delete process.env.CLAWBOX_AI_EMBEDDINGS_URL;
   else process.env.CLAWBOX_AI_EMBEDDINGS_URL = REAL_URL;
+  if (REAL_INSECURE === undefined) delete process.env.CLAWBOX_AI_EMBEDDINGS_INSECURE;
+  else process.env.CLAWBOX_AI_EMBEDDINGS_INSECURE = REAL_INSECURE;
 });
 
 function answer(body: unknown, status = 200) {
@@ -127,12 +131,38 @@ describe("cloudEmbeddingsUrl", () => {
     expect(embeddingsBaseUrlOf("https://clawbox.test/api/ai/")).toBe("https://clawbox.test/api/ai");
   });
 
-  it("keeps plain http, which is the LAN staging contract", () => {
-    // Deliberately NOT narrowed to loopback: the override exists so a staging
-    // image can be pointed at a proxy on a trusted LAN. HTTPS outside that is
-    // the operator's to honour — see the trust boundary on `usableEndpoint`.
+  it("refuses plain http off the device, whatever it is pointed at", () => {
+    // The request carries this box's `claw_` bearer and the owner's document
+    // text as its body, so cleartext leaving the device is CWE-319. The earlier
+    // rule accepted any `http:` and left "only on a trusted LAN" to the
+    // operator — a promise nothing here could check, over the one failure that
+    // cannot be undone once it has happened.
     process.env.CLAWBOX_AI_EMBEDDINGS_URL = "http://staging.lan:8080/v1/embeddings";
+    expect(cloudEmbeddingsUrl()).toBe("https://clawbox.test/api/ai/embeddings");
+  });
+
+  it("keeps plain http on THIS DEVICE, where it leaves no interface", () => {
+    process.env.CLAWBOX_AI_EMBEDDINGS_URL = "http://127.0.0.1:8080/v1/embeddings";
+    expect(cloudEmbeddingsUrl()).toBe("http://127.0.0.1:8080/v1/embeddings");
+    process.env.CLAWBOX_AI_EMBEDDINGS_URL = "http://localhost:8080/v1/embeddings";
+    expect(cloudEmbeddingsUrl()).toBe("http://localhost:8080/v1/embeddings");
+  });
+
+  it("keeps the LAN staging lane, but only for an image built to ask for it", () => {
+    // The staging contract did not go away; it became explicit, and it lives
+    // where the address lives — root's environment, never the device store, so
+    // a restored backup or a hand-edited config.json cannot turn cleartext on.
+    process.env.CLAWBOX_AI_EMBEDDINGS_URL = "http://staging.lan:8080/v1/embeddings";
+    process.env.CLAWBOX_AI_EMBEDDINGS_INSECURE = "1";
     expect(cloudEmbeddingsUrl()).toBe("http://staging.lan:8080/v1/embeddings");
+  });
+
+  it("holds the built-in route to the same rule as an override", () => {
+    // `CLAWBOX_AI_PROXY_URL` is env-overridable too, so exempting the address
+    // every unconfigured box uses would have been the way round the rule above.
+    // Nothing usable answers "", which every caller fails closed on.
+    delete process.env.CLAWBOX_AI_EMBEDDINGS_URL;
+    expect(cloudEmbeddingsUrl()).toBe("https://clawbox.test/api/ai/embeddings");
   });
 
   it("refuses an override that is not an http(s) address, and falls back to its own account's route", () => {

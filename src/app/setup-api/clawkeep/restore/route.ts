@@ -11,7 +11,7 @@ import {
 } from "@/lib/clawkeep";
 import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
-import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
+import { bounceHermesDashboardShared } from "@/lib/hermes-bounce-claim";
 import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { waitForPortOpen } from "@/lib/port-probe";
@@ -83,12 +83,20 @@ interface RestartOutcome {
 
 async function restartStateHolder(edition: string): Promise<RestartOutcome> {
   if (edition === "hermes") {
-    // No exception to quote: bounceHermesDashboard() never throws, it answers
-    // which of the three things happened. Say the one the owner can act on
-    // rather than inventing a detail we do not have.
-    const outcome = await bounceHermesDashboard();
+    // No exception to quote: the bounce never throws, it answers which of the
+    // things happened. Say the one the owner can act on rather than inventing a
+    // detail we do not have.
+    //
+    // THROUGH THE SHARED CLAIM, not `bounceHermesDashboard()` directly. This
+    // restore has just rewritten the whole of `~/.hermes` — the plugin
+    // directory, the install ledger and config.yaml — so the plugin watcher is
+    // about to see a new declaration; going round the claim left its gate down
+    // (a window opened over this very bounce) and its baseline behind (a second
+    // bounce eight seconds later). One restore was two chat outages and two
+    // "open a new chat" notices.
+    const outcome = await bounceHermesDashboardShared("a ClawKeep restore replaced ~/.hermes");
     if (outcome === "restarted") return { errors: [], pending: [] };
-    if (outcome === "pending") {
+    if (outcome === "pending" || outcome === "in_flight") {
       const detail = "was restarted and is not serving the restored state yet";
       console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
       return { errors: [], pending: [`${HERMES_DASHBOARD_UNIT}: ${detail}`] };

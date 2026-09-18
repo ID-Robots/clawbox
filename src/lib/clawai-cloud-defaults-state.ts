@@ -65,7 +65,14 @@ export type CloudUnavailableReason =
   | "plan"
   /** The proxy route this capability needs did not answer. */
   | "route_unavailable"
-  /** This edition cannot use the cloud for it at all — see the embeddings note. */
+  /**
+   * This box cannot use the cloud for it at all.
+   *
+   * No edition answers this today — `embeddingsSupported` is a constant `true`
+   * — and the word is kept because that fact is the feature's kill switch: a
+   * build that flips it needs this reason, its note key and the card's branch
+   * to be there already, not written under a live incident.
+   */
   | "edition"
   /** The owner picked the engine on the box. */
   | "owner";
@@ -85,10 +92,17 @@ export interface CloudDefaultsFacts {
   /**
    * This box can point its memory index off the device at all.
    *
-   * False where ClawBox itself is the indexer (the edition with no OpenClaw):
-   * `memory-index-local.ts` refuses any embedder endpoint that is not loopback,
-   * deliberately — the owner's document text is the request body there — and
-   * that fence is not something a default may open.
+   * TRUE ON EVERY EDITION SINCE 2026-09-18, and kept as a fact rather than
+   * deleted because it is the KILL SWITCH for the whole feature: its only
+   * producer (`readCloudDefaultsFacts`) is one line, and a `false` there takes
+   * every box off the cloud embedder — with the `"edition"` reason already
+   * worded in all ten locales — without touching this rule or any caller.
+   *
+   * It used to be false where ClawBox itself is the indexer, because that
+   * client accepted a loopback endpoint and nothing else. It now accepts
+   * exactly two — the loopback proxy and the ClawBox AI endpoint the image was
+   * built with (`memory-embedder.ts`) — so the fence is still a fence and the
+   * SKU is no longer a reason to keep a subscriber off what they pay for.
    */
   embeddingsSupported: boolean;
 }

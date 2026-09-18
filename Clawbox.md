@@ -147,6 +147,13 @@ ClawBox adds no web tools on this harness. Reach the web with whatever your Herm
 - `skill_install(id)` / `skill_uninstall(name)` — add or remove one. You can do this yourself; it is the Hermes answer to the app store.
 - The owner sees the same catalogue in the **Hermes Skills** app on the desktop.
 
+### 🧩 Plugins (they need a restart, and you can order it)
+
+- A **plugin** is not a skill. A skill is read again on every turn; a plugin is scanned **once, when your process starts** — so a plugin installed or enabled while you are running does not reach you, and does not reach a new chat session either.
+- After `hermes plugins install`, `enable`, `disable` or `remove`, call **`hermes_plugins_reload()`**. That is the whole step. Do not try `sudo systemctl restart …` — it is refused, and this tool is the supported way.
+- Verifying a plugin by running `hermes chat -q` proves nothing about **this** chat: that is a separate, fresh process. Only the reload makes the plugin live here.
+- The restart closes the owner's open chat window. Tell them to open a new chat; the box shows them a notice saying the same thing.
+
 ### 🧠 Your own model
 
 - `ai_list_models()` / `ai_set_provider(...)` / `ai_set_model(...)` — the device default in `~/.hermes/config.yaml`.

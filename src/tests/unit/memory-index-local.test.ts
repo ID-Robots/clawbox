@@ -19,7 +19,7 @@ import path from "node:path";
  * real: a real sqlite store on a real temp DATA_DIR, real files on disk.
  */
 
-const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
+const { dataDir, embedCalls, embedFail, refusalNotes, openclawConfig, boxState } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const nodeFs = require("node:fs") as typeof import("node:fs");
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -29,16 +29,37 @@ const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
   return {
     dataDir: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "memory-index-data-")),
     /** Every text that reached the embedder, in order, across the run. */
-    embedCalls: { texts: [] as string[], types: [] as string[] },
+    embedCalls: { texts: [] as string[], types: [] as string[], urls: [] as string[], bearers: [] as string[] },
     /**
      * When `status` is set, an embeddings request answers it instead of a
      * vector. `after` lets that many requests through first, which is how a
      * test reaches the embedder dying PART WAY through a rebuild — the one
      * state where the store really has been emptied.
      */
-    embedFail: { status: 0, after: 0 },
+    embedFail: {
+      status: 0,
+      after: 0,
+      retryAfter: null as string | null,
+      /** The refusal envelope the ClawBox AI proxy sends with a 401 or a 403. */
+      body: null as string | null,
+      /**
+       * The socket itself failing, which is what a Wi-Fi drop, a DNS blip, a
+       * reset connection or the embed timeout look like from here. `status`
+       * cannot express it: those never reach an HTTP status at all.
+       */
+      throwTimes: 0,
+    },
+    /** What `noteClawaiCredentialRefused` was told, if anything. */
+    refusalNotes: [] as number[],
     /** What openclaw.json holds, for the one-time carry-over after a swap. */
     openclawConfig: { value: {} as unknown },
+    /** The box's ClawBox AI credential, and whether the GGUF is on disk. */
+    boxState: {
+      clawaiToken: "claw_test" as string | null,
+      gguf: true,
+      /** The status the ClawBox AI proxy refused this box's credential with. */
+      clawaiRefusedStatus: null as number | null,
+    },
   };
 });
 
@@ -55,18 +76,67 @@ vi.mock("@/lib/config-store", async (importOriginal) => {
 });
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
-  getEmbedProvisioningStatus: async () => ({ installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 1, binPath: "", modelPath: "" }),
+  getEmbedProvisioningStatus: async () => ({ installed: boxState.gguf, binaryAvailable: boxState.gguf, modelAvailable: boxState.gguf, modelBytes: 1, binPath: "", modelPath: "" }),
+}));
+// The cloud half of the same index: where the ClawBox AI embedder is, and the
+// box's own credential for it. Both are read per request by the real resolver.
+vi.mock("@/lib/harness/credentials", () => ({
+  CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
+  resolveClawaiToken: async () => boxState.clawaiToken,
+  // The proxy's own verdict on this box's credential. A lapsed subscription
+  // leaves the token in place and refuses the request, which is the state the
+  // status read must not call `semanticAvailable`.
+  clawaiCredentialRefused: () => boxState.clawaiRefusedStatus,
+  // The generation guard the real store keeps, so a verdict on a credential the
+  // box no longer holds is dropped rather than remembered.
+  clawaiCredentialGeneration: () => 1,
+  // The PROXY'S OWN identification of the credential as the problem — never the
+  // status alone, which an edge rule or a plan gate can also send.
+  //
+  // A DELIBERATE MIRROR of `proxyRefusedClawaiCredential` in
+  // `@/lib/harness/credentials`, down to the status table and the envelope it
+  // parses, and not a convenience stand-in: a mock that accepted one status
+  // more than the helper does had this suite proving a behaviour the product
+  // does not have. The real module cannot be imported here — it re-exports from
+  // `@/lib/hermes-clawai`, which is the whole Hermes adapter graph and imports
+  // this module's own dependencies back — so the contract is pinned where the
+  // real helper runs instead (`harness-credentials.test.ts`, "the statuses the
+  // helper accepts"), and this copy is checked against it there.
+  proxyRefusedClawaiCredential: async (res: Response) => {
+    if (res.status !== 401 && res.status !== 403) return false;
+    const text = await res.text().catch(() => "");
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      return false;
+    }
+    const code = (payload as { error?: { code?: unknown } } | null)?.error?.code;
+    return code === "invalid_token" || code === "missing_token";
+  },
+  noteClawaiCredentialRefused: async (status: number) => { refusalNotes.push(status); },
+}));
+vi.mock("@/lib/clawai-cloud-defaults", () => ({
+  readCloudDefaultsFacts: async () => ({
+    linked: boxState.clawaiToken !== null,
+    entitlement: "pro",
+    embeddingsSupported: true,
+    embeddingsRouteReady: boxState.clawaiToken !== null,
+  }),
 }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "t".repeat(64) }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: async () => openclawConfig.value }));
 
+import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
+  EMBED_RETRY_MIN_WAIT_MS,
   LOCAL_INDEX_PATH,
   _resetLocalMemoryCacheForTests,
   chunkText,
   localEmbeddingIdentity,
   carryMemorySourcesTo,
   localMemoryStatusJson,
+  maxIndexChunks,
   readLocalSources,
   runLocalIndexPass,
   searchLocalMemory,
@@ -89,18 +159,27 @@ function stubVector(text: string): number[] {
 }
 
 function installFetchStub(): void {
-  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init: { body: string; headers: Record<string, string> }) => {
+    if (embedFail.throwTimes > 0) {
+      embedFail.throwTimes -= 1;
+      throw new TypeError("fetch failed");
+    }
     if (embedFail.status) {
       if (embedFail.after > 0) embedFail.after -= 1;
       else {
         const status = embedFail.status;
         embedFail.status = 0;
-        return new Response("nope", { status });
+        return new Response(embedFail.body ?? "nope", {
+          status,
+          headers: embedFail.retryAfter === null ? {} : { "retry-after": embedFail.retryAfter },
+        });
       }
     }
-    const body = JSON.parse(init.body) as { input: string[]; input_type: string };
+    const body = JSON.parse(init.body) as { input: string[]; input_type?: string; model: string };
     embedCalls.texts.push(...body.input);
-    embedCalls.types.push(body.input_type);
+    embedCalls.types.push(body.input_type as string);
+    embedCalls.urls.push(String(url));
+    embedCalls.bearers.push(init.headers.authorization);
     return Response.json({
       data: body.input.map((text, index) => ({ index, embedding: stubVector(text) })),
     });
@@ -123,8 +202,23 @@ beforeEach(async () => {
   fs.mkdirSync(source, { recursive: true });
   embedCalls.texts = [];
   embedCalls.types = [];
+  embedCalls.urls = [];
+  embedCalls.bearers = [];
+  // No subscription unless a test says otherwise, so every case below that is
+  // about the model on this box stays about it. The default-is-cloud rule has
+  // its own tests, here and in memory-embedder.test.ts.
+  boxState.clawaiToken = null;
+  boxState.gguf = true;
+  boxState.clawaiRefusedStatus = null;
+  // The store is module-level in the mock, so a pin one case writes would
+  // otherwise decide the embedder for every case after it.
+  ((await import("@/lib/config-store")) as unknown as { __store: Map<string, unknown> }).__store.clear();
   embedFail.status = 0;
   embedFail.after = 0;
+  embedFail.retryAfter = null;
+  embedFail.body = null;
+  embedFail.throwTimes = 0;
+  refusalNotes.length = 0;
   openclawConfig.value = {};
   installFetchStub();
   _resetLocalMemoryCacheForTests();
@@ -416,6 +510,30 @@ describe("indexing the owner's folders", () => {
     }
   });
 
+  it("refuses a REDIRECT on the embedding request rather than following it with the body", async () => {
+    // THE FENCE CHECKS THE ADDRESS THIS BOX RESOLVED, and `fetch` follows a
+    // 307/308 by itself — with the METHOD and the BODY intact, and the body on
+    // this path is the owner's document text. `redirect: "manual"` is what makes
+    // such an answer land in the `!res.ok` branch below instead of on somebody
+    // else's server.
+    const elsewhere: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: { body: string; redirect?: string }) => {
+      if (init.redirect === "manual") {
+        return new Response(null, {
+          status: 307,
+          headers: { location: "https://elsewhere.example/v1/embeddings" },
+        });
+      }
+      // What the DEFAULT `fetch` does with that answer, spelled out: the same
+      // POST, the same body, at the address the redirect named.
+      elsewhere.push(...(JSON.parse(init.body) as { input: string[] }).input);
+      return Response.json({ data: [{ index: 0, embedding: [1, 0, 0, 0, 0.05] }] });
+    }));
+    write("notes.md", "The deposit is two months' rent.");
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/HTTP 307/);
+    expect(elsewhere).toEqual([]);
+  });
+
   it("ends the pass when the EMBEDDER will not answer, rather than reporting success", async () => {
     // The difference that matters: a file nobody can read is one file's
     // problem, and an embedder that is down is every file's. A pass that
@@ -424,6 +542,322 @@ describe("indexing the owner's folders", () => {
     write("notes.md", "The deposit is two months' rent.");
     embedFail.status = 502;
     await expect(runLocalIndexPass("full")).rejects.toThrow(/embedding model/i);
+  });
+});
+
+describe("the ClawBox AI cloud embedder", () => {
+  it("embeds in the cloud with the box's own credential, and never through the proxy", async () => {
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    const result = await runLocalIndexPass("full");
+
+    expect(result.files).toBe(1);
+    expect(embedCalls.urls.length).toBeGreaterThan(0);
+    for (const url of embedCalls.urls) expect(url).toBe("https://clawbox.test/api/ai/embeddings");
+    for (const bearer of embedCalls.bearers) expect(bearer).toBe("Bearer claw_test");
+    // `input_type` is the loopback proxy's field — it restores Qwen3's query
+    // instruction from it — and an unknown one on an OpenAI-shaped route.
+    expect(embedCalls.types.every((type) => type === undefined)).toBe(true);
+  });
+
+  it("is what a box with a subscription and no pin uses, without being told", async () => {
+    // The owner's ruling of 2026-09-18: the cloud is the DEFAULT, not a
+    // preselection in a wizard. Nothing is stored here at all.
+    boxState.clawaiToken = "claw_test";
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    expect(embedCalls.urls).not.toHaveLength(0);
+    for (const url of embedCalls.urls) expect(url).toBe("https://clawbox.test/api/ai/embeddings");
+  });
+
+  it("indexes on the box itself when nothing links it to a subscription", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    for (const url of embedCalls.urls) expect(url).toBe("http://127.0.0.1/setup-api/local-ai/embed/v1/embeddings");
+  });
+
+  it("ends the pass rather than quietly embedding on the box when the credential is gone", async () => {
+    // A subscription that lapsed, or a credential the portal revoked. Falling
+    // back to the model on this box would write vectors from another model into
+    // an index stamped for the cloud one — a healthy panel over a search that
+    // ranks nothing.
+    await writeEmbedderPin("cloud");
+    boxState.clawaiToken = null;
+    write("notes.md", "The deposit is two months' rent.");
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/ClawBox AI credential/i);
+    expect(embedCalls.texts).toEqual([]);
+  });
+
+  it("searches with the same embedder the index was built by", async () => {
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    embedCalls.urls = [];
+    embedCalls.types = [];
+    const hits = await searchLocalMemory("deposit", 3);
+    expect(hits).not.toHaveLength(0);
+    expect(embedCalls.urls).toEqual(["https://clawbox.test/api/ai/embeddings"]);
+    expect(embedCalls.types).toEqual([undefined]);
+  });
+
+  it("survives one transient refusal mid-rebuild instead of leaving the box with no index", async () => {
+    // A full rebuild is ~1,250 requests to a rate-limited endpoint and it
+    // starts by emptying the store. A single 429 at request 500 used to end the
+    // pass with the tables already wiped, and memory search then answered
+    // nothing until some later scheduled pass happened to succeed — on a box
+    // with no armed slot, indefinitely.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    for (let i = 0; i < 40; i += 1) write(`note-${i}.md`, `The deposit is two months' rent, note ${i}.`);
+    // Past the rebuild probe and into the owner's own documents.
+    embedFail.status = 429;
+    embedFail.after = 2;
+    embedFail.retryAfter = "0";
+
+    const result = await runLocalIndexPass("full");
+    expect(result.files).toBe(40);
+    expect(result.chunks).toBeGreaterThan(0);
+    const hits = await searchLocalMemory("deposit", 3);
+    expect(hits).not.toHaveLength(0);
+  });
+
+  it("survives a dropped CONNECTION mid-rebuild, not only a refused one", async () => {
+    // `retryable` was set from an HTTP STATUS only, so a reset connection, a DNS
+    // blip, a TLS error or the 120 s embed timeout ended the pass — with the
+    // tables already emptied. Over the network those are at least as common as a
+    // 429 and they are the ones a Wi-Fi box actually sees.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    for (let i = 0; i < 40; i += 1) write(`note-${i}.md`, `The deposit is two months' rent, note ${i}.`);
+    embedFail.throwTimes = 1;
+
+    const result = await runLocalIndexPass("full");
+    expect(result.files).toBe(40);
+    expect(result.chunks).toBeGreaterThan(0);
+    expect(await searchLocalMemory("deposit", 3)).not.toHaveLength(0);
+  });
+
+  it("remembers a credential the PROXY named as the problem during an embed", async () => {
+    // L-1's residual. `localMemoryStatusJson` requires `clawaiCredentialRefused()
+    // === null` on the cloud arm, and nothing on the EMBEDDING path ever armed
+    // it — only the picture and voice paths did. So a box whose credential the
+    // proxy refuses — revoked, re-minted elsewhere, corrupted in a migration —
+    // and whose owner uses neither of those features kept reporting a healthy
+    // cloud index while every pass failed and every search threw.
+    //
+    // 403 AND NOT 402, which is what `proxyRefusedClawaiCredential` accepts and
+    // what the ClawBox AI proxy actually sends: 402 is spoken by ClawBox's own
+    // routes (`refusePaidPlan`) and by the portal, never by the proxy.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    embedFail.status = 403;
+    embedFail.body = JSON.stringify({ error: { code: "invalid_token" } });
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/HTTP 403/);
+    expect(refusalNotes).toEqual([403]);
+  });
+
+  it("does not arm the refusal over a status the proxy did not claim as its own", async () => {
+    // A bare 401/403 on the wire can be an edge rule, a rate-limit page or an
+    // interception proxy, and remembering one of those would tell a customer
+    // with a perfectly good credential to re-pair their device.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    embedFail.status = 403;
+    embedFail.body = "<html>Access denied</html>";
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/HTTP 403/);
+    expect(refusalNotes).toEqual([]);
+  });
+
+  it("does not arm the refusal over the proxy's PLAN gate, which is not a credential", async () => {
+    // THE OTHER 403 THE PROXY SENDS, and the reason the guard may never read a
+    // status alone: cloud capabilities are sold per tier and the proxy refuses
+    // an unentitled one with 403 (`clawai-cloud-defaults-state.ts` — "TTS is
+    // Max-only on the proxy, which answers 403 to Free and Pro"). That is a
+    // fact about the PLAN, not about the credential, and recording it as a
+    // refused credential would tell an owner whose token is perfectly good to
+    // re-link the device. The index pass still ends, which is the honest half:
+    // what does not happen is the box concluding its credential is dead.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    embedFail.status = 403;
+    embedFail.body = JSON.stringify({ error: { code: "paid_plan_required" } });
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/HTTP 403/);
+    expect(refusalNotes).toEqual([]);
+  });
+
+  it("asks ONCE for a search query, however transient the refusal", async () => {
+    // The rebuild's retry budget is right for a rebuild and wrong for a person
+    // waiting: three attempts of up to 120 s with two waits of up to 30 s is
+    // ~7 minutes inside a search the MCP tool abandons at 60. A query that
+    // cannot be embedded now is answered now.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    embedCalls.urls = [];
+    embedFail.status = 429;
+    embedFail.retryAfter = "0";
+    await expect(searchLocalMemory("deposit", 3)).rejects.toThrow(/HTTP 429/);
+    expect(embedCalls.urls).toHaveLength(0);
+  });
+
+  it("waits a real interval when the far side asks for `Retry-After: 0`", async () => {
+    // `err.retryAfterMs ?? wait` reads `0` as a number, not as absent, so a
+    // rate-limited endpoint answering `Retry-After: 0` was asked three times
+    // with no pause at all — the hammer the backoff exists to prevent.
+    //
+    // ON A FAKE CLOCK, and a partly fake one on purpose. Measuring the pause by
+    // the wall clock put a real second on every `test:unit` run for one
+    // assertion, and answered a weaker question besides — "at least a second
+    // passed" is true of a pass that slept for any reason. `setTimeout` alone is
+    // faked (`pauseBeforeRetry` is the only timer this pass arms), so the sqlite
+    // and filesystem work either side of it still completes on the real event
+    // loop, which `setImmediate` is kept real to pump.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    embedFail.status = 429;
+    embedFail.retryAfter = "0";
+    // What is asserted is the REQUEST, not that the pass is unfinished: a pass
+    // released early still has its sqlite and filesystem work to do, so "not
+    // settled yet" is true of a retry that has already gone out.
+    const pump = async (turns: number) => {
+      for (let i = 0; i < turns; i += 1) {
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+      }
+    };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let settled = false;
+      const pass = runLocalIndexPass("full").finally(() => { settled = true; });
+      // Let the pass get as far as arming its retry pause. Bounded, so a pass
+      // that never arms one fails on the assertion below rather than hanging.
+      for (let i = 0; i < 200 && vi.getTimerCount() === 0 && !settled; i += 1) {
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+      }
+      expect(vi.getTimerCount()).toBe(1);
+      const asked = embedCalls.urls.length;
+      // A tick SHORT of the floor, and time for a request released early to
+      // actually reach the stub: nothing may have been asked again yet.
+      await vi.advanceTimersByTimeAsync(EMBED_RETRY_MIN_WAIT_MS - 1);
+      await pump(5);
+      expect(embedCalls.urls.length).toBe(asked);
+      expect(settled).toBe(false);
+      // …and the floor itself releases it.
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await pass;
+      expect(embedCalls.urls.length).toBeGreaterThan(asked);
+      expect(result.files).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up on a refusal that is not transient rather than asking three times", async () => {
+    // A 403 is a lapsed plan or a bad credential: the next attempt is refused
+    // the same way, and retrying would make the pass three times as slow to say
+    // so. The pass ends, and the index it was going to replace is still there.
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    embedFail.status = 403;
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/HTTP 403/);
+  });
+
+  it("calls semantic search available in the cloud without the 639 MB model on disk", async () => {
+    boxState.clawaiToken = "claw_test";
+    boxState.gguf = false;
+    await writeEmbedderPin("cloud");
+    const status = await localMemoryStatusJson() as {
+      status: { provider: string; model: string; vector: { semanticAvailable: boolean }; custom: { providerState: { mode: string } } };
+    };
+    expect(status.status.model).toBe("text-embedding-3-large");
+    expect(status.status.provider).toBe("openai-compatible");
+    expect(status.status.vector.semanticAvailable).toBe(true);
+    expect(status.status.custom.providerState.mode).toBe("active");
+  });
+
+  it("does NOT call semantic search available when the proxy has refused this box's credential", async () => {
+    // FALSE SUCCESS, the exact shape. A credential the proxy has rejected —
+    // revoked, re-minted on another device, lost in a migration — sits in the
+    // store looking exactly like a working one, so "a token is present"
+    // reported a healthy cloud index while every pass failed and every search
+    // threw. The refusal the rest of the box already records for the picture
+    // and microphone paths is the fact that answers.
+    boxState.clawaiToken = "claw_test";
+    boxState.clawaiRefusedStatus = 403;
+    await writeEmbedderPin("cloud");
+    const status = await localMemoryStatusJson() as {
+      status: { vector: { semanticAvailable: boolean }; custom: { providerState: { mode: string } } };
+    };
+    expect(status.status.vector.semanticAvailable).toBe(false);
+    expect(status.status.custom.providerState.mode).not.toBe("active");
+  });
+
+  it("reports the index as mismatched the moment the embedder moves, and valid again after the rebuild", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    const read = async () => ((await localMemoryStatusJson()) as { status: { custom: { indexIdentity: { status: string } } } })
+      .status.custom.indexIdentity.status;
+    expect(await read()).toBe("valid");
+
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    expect(await read()).toBe("mismatched");
+    await runLocalIndexPass("full");
+    expect(await read()).toBe("valid");
+  });
+
+  it("never stamps the new embedder over an index the other one built", async () => {
+    // The stamp is for an index about to be built — the wizard's provisioning
+    // step. Over one that HOLDS vectors it would report `valid` for rows every
+    // query misses, which is the one lie this whole identity exists to stop.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    await stampLocalEmbeddingIdentity();
+    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(status.status.custom.indexIdentity.status).toBe("mismatched");
+  });
+
+  it("leaves no database behind on a box whose owner never switched the feature on", async () => {
+    // `openIndexForRead`'s stated invariant, and the boot promotion is what
+    // started reaching this path unattended: on beta the stamp was owner-
+    // initiated only, and it opens the store FOR WRITE, which creates it. With
+    // no index there is nothing to stamp either — the identity reads `missing`
+    // and the first pass stamps what it wrote.
+    expect(fs.existsSync(LOCAL_INDEX_PATH)).toBe(false);
+    await stampLocalEmbeddingIdentity();
+    expect(fs.existsSync(LOCAL_INDEX_PATH)).toBe(false);
+  });
+});
+
+describe("the chunk ceiling, which is a memory budget", () => {
+  it("is the same ~78 MiB of vectors whichever embedder the box uses", () => {
+    // The flat 20,000 was sized against Qwen3's 1,024 dimensions — 4 KB a
+    // chunk, ~80 MB of float32 that fits beside the agent on an Orin. The cloud
+    // model is 3,072 dimensions, so the same 20,000 chunks would have been
+    // ~234 MiB, allocated contiguously by `loadVectors` on the agent's first
+    // search after a restart and pinned for ten minutes after every search.
+    const bytes = (chunks: number, dim: number) => chunks * dim * 4;
+    expect(maxIndexChunks(1024)).toBe(20_000);
+    expect(maxIndexChunks(3072)).toBe(6_666);
+    expect(bytes(maxIndexChunks(3072), 3072)).toBeLessThanOrEqual(bytes(20_000, 1024));
+    // Within one chunk's worth of the budget, not merely under it.
+    expect(bytes(maxIndexChunks(3072), 3072)).toBeGreaterThan(bytes(20_000, 1024) - 3072 * 4);
+  });
+
+  it("falls back to the on-device ceiling for a width it cannot use, never to zero", () => {
+    // A ceiling of zero is an index that refuses every file.
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(maxIndexChunks(bad), String(bad)).toBe(20_000);
+    }
   });
 });
 
@@ -571,7 +1005,7 @@ describe("the index knows what it was built for", () => {
     expect(status.status.custom.indexIdentity.status).toBe("missing");
     expect(status.status.files).toBe(0);
     expect(status.status.chunks).toBe(0);
-    expect(localEmbeddingIdentity()).toHaveLength(16);
+    expect(await localEmbeddingIdentity()).toHaveLength(16);
   });
 
   it("keeps the index it was going to replace when the embedder will not answer", async () => {
