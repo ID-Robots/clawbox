@@ -14,6 +14,8 @@ import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
+import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
+import { ChatProgressCard } from '@/components/ChatProgressCard'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
@@ -157,6 +159,8 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
+  // The same key as state, for what renders from it: the progress card.
+  const [boundSessionKey, setBoundSessionKey] = useState('')
   const runIdRef = useRef<string | null>(null)
   // Timer for the ack-only `chat.history` refetch — see ChatPopup.tsx for
   // the deferred-reply rationale. Single-flight + cleared on unmount so
@@ -298,6 +302,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // gateway socket from a later render.
   const hasLiveConnectionRef = useRef(true)
   useEffect(() => { hasLiveConnectionRef.current = caps.hasLiveConnection }, [caps])
+  // The agent's "Task progress" card for this session — see ChatPopup, which
+  // reads it the same way (TASK-896).
+  const { card: progressCard, onChanged: onProgressCardChanged } = useGatewayProgressCard({
+    request: wsRequest,
+    sessionKey: boundSessionKey,
+    enabled: caps.hasLiveConnection && status === 'connected',
+  })
+  const progressCardChangedRef = useRef(onProgressCardChanged)
+  useEffect(() => { progressCardChangedRef.current = onProgressCardChanged }, [onProgressCardChanged])
 
   /**
    * One place where a finished reply becomes a bubble, whatever produced it.
@@ -439,6 +452,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
+          setBoundSessionKey(mainSessionKey)
           loadHistory()
         },
         reject: (err: Error) => {
@@ -507,6 +521,12 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
         if (eventName === 'connect.challenge') {
           sendConnect(data.payload as Record<string, unknown> | undefined)
+          return
+        }
+
+        // A session's progress card changed; the hook re-reads it when it is ours.
+        if (eventName === PROGRESS_CARD_CHANGED_EVENT) {
+          progressCardChangedRef.current(data.payload)
           return
         }
 
@@ -1338,6 +1358,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
         <div ref={messagesEndRef} />
       </div>
+
+      {/* The agent's progress card, over the composer and in the column —
+          never over the messages or the text box. */}
+      {progressCard && <ChatProgressCard card={progressCard} />}
 
       {/* Hidden file inputs. The filter follows the capability, so a box that can
           look at pictures but not documents never offers one. */}
