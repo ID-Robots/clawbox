@@ -917,7 +917,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                 className="inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"
               />
             )}
-            {saving ? t("connecting") : t("settings.connect")}
+            {saving ? t("saving") : t("credentials.saveAndContinue")}
           </button>
           {/* Beside the button, not buried up the form: the reason is only
               useful where the owner is looking when nothing happens. `status`

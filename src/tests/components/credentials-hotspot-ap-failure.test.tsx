@@ -20,6 +20,7 @@ const STRINGS: Record<string, string> = {
   "credentials.failedSaveHotspot": "Failed to save hotspot settings",
   "credentials.writeDownContinue": "I've saved them — continue",
   "settings.connect": "Connect",
+  "credentials.saveAndContinue": "Save & Continue",
   continue: "Continue",
 };
 
@@ -96,7 +97,7 @@ async function saveStep(onNext: () => void, hostname?: string) {
   fireEvent.change(field(container, "#hotspot-password"), { target: { value: HOTSPOT_PASSWORD } });
   fireEvent.change(field(container, "#hotspot-confirm"), { target: { value: HOTSPOT_PASSWORD } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save & Continue" }));
   fireEvent.click(screen.getByTestId("writedown-ack"));
   fireEvent.click(screen.getByTestId("writedown-continue"));
 

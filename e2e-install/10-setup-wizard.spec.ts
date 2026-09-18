@@ -99,7 +99,7 @@ test.describe("fresh-install setup wizard (UI)", () => {
       await hotspotSwitch.click();
       await expect(hotspotSwitch).toHaveAttribute("aria-checked", "false");
     }
-    await page.getByRole("button", { name: /^Connect$/ }).click();
+    await page.getByRole("button", { name: /^Save & Continue$/ }).click();
 
     // Connect no longer saves: the system password this step sets is
     // write-only afterwards, so the wizard reads it back and waits for a

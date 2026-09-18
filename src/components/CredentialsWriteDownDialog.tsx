@@ -174,10 +174,18 @@ export default function CredentialsWriteDownDialog({
               A real checkbox, visually replaced. The input keeps the semantics,
               the label and the tab stop; the square beside it is what the
               customer sees, and its focus ring is `peer`-driven so the keyboard
-              state stays declarative rather than mirrored into React state. */}
+              state stays declarative rather than mirrored into React state.
+
+              The input is transparent and stretched over the WHOLE row rather
+              than `sr-only`: an `sr-only` input is a clipped 1px box
+              positioned against whatever ancestor happens to be positioned, so
+              a tap or click aimed at the checkbox itself landed on something
+              else (automation timed out on it; a touch screen had only the
+              label's text to aim at). Now the row is one hit area and the
+              pointer lands on the control it means. */}
           <label
             data-testid="writedown-ack-label"
-            className="flex cursor-pointer items-start gap-[var(--s-3)]"
+            className="relative flex cursor-pointer items-start gap-[var(--s-3)]"
             style={{ marginTop: "0.9rem" }}
           >
             <input
@@ -185,7 +193,7 @@ export default function CredentialsWriteDownDialog({
               data-testid="writedown-ack"
               checked={acknowledged}
               onChange={(e) => setAcknowledged(e.target.checked)}
-              className="peer sr-only"
+              className="peer absolute inset-0 m-0 h-full w-full cursor-pointer appearance-none opacity-0"
             />
             <span
               aria-hidden="true"

@@ -1603,12 +1603,12 @@ export async function fillCredentialsStep(page: Page) {
  * interposition is still there.
  */
 export async function submitCredentialsStep(page: Page) {
-  await page.getByRole("button", { name: /^Connect$/ }).click();
+  await page.getByRole("button", { name: /^Save & Continue$/ }).click();
   const writeDown = page.getByTestId("credentials-writedown-dialog");
   await expect(writeDown).toBeVisible({ timeout: 10_000 });
-  // The acknowledgement input is visually replaced, so its own label sits over
-  // it — clicking the label is both what a customer does and the only thing
-  // Playwright can land on.
+  // The acknowledgement input is visually replaced by a transparent input
+  // stretched over its whole label row, so a click on the label (what a
+  // customer does) and a click on the checkbox itself both land on it.
   await writeDown.getByTestId("writedown-ack-label").click();
   await expect(writeDown.getByTestId("writedown-ack")).toBeChecked();
   await writeDown.getByTestId("writedown-continue").click();
