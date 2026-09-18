@@ -9,6 +9,9 @@ interface TunnelInfo {
   installed: boolean;
   service: "active" | "inactive" | "failed" | "activating" | "unknown";
   url: string | null;
+  /** `named` = the box's permanent hostname; `quick` = a *.trycloudflare.com URL. Absent on older servers. */
+  mode?: "named" | "quick" | null;
+  hostname?: string | null;
 }
 
 interface StatusResponse {
@@ -224,6 +227,9 @@ export default function RemoteControlPanel() {
   const tunnelInstalled = status?.tunnel.installed ?? false;
   const svc = status?.tunnel.service ?? "unknown";
   const url = status?.tunnel.url ?? null;
+  // The named tunnel's address never changes, so there is nothing to
+  // regenerate and the label says what the owner is looking at.
+  const named = status?.tunnel.mode === "named";
   const isRunning = svc === "active" && !!url;
   const isStarting = (svc === "active" || svc === "activating") && !url;
   const busy = action !== "idle";
@@ -352,7 +358,7 @@ export default function RemoteControlPanel() {
               id="tunnel-url-label"
               className="block text-[10px] uppercase tracking-widest font-semibold text-[var(--text-muted)] mb-2"
             >
-              {t("remoteControl.tunnelUrlLabel")}
+              {named ? t("remoteControl.namedUrlLabel") : t("remoteControl.tunnelUrlLabel")}
             </div>
             <div className="flex items-start gap-2 mb-3">
               <p
@@ -373,6 +379,11 @@ export default function RemoteControlPanel() {
                 {copied ? t("remoteControl.copied") : t("remoteControl.copy")}
               </button>
             </div>
+            {named && (
+              <p data-testid="remote-control-named-desc" className="text-xs text-[var(--text-muted)] mt-0 mb-3">
+                {t("remoteControl.namedUrlDesc")}
+              </p>
+            )}
 
             {/* Two columns only when a column is wide enough for its label.
                 `sm:grid-cols-2` split on the VIEWPORT, so inside the 576px
@@ -395,6 +406,7 @@ export default function RemoteControlPanel() {
                 {t("remoteControl.addDevice")}
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
               </a>
+              {!named && (
               <button
                 onClick={handleRegenerate}
                 disabled={busy}
@@ -409,6 +421,7 @@ export default function RemoteControlPanel() {
                 </span>
                 {action === "regenerating" ? t("remoteControl.regenerating") : t("remoteControl.regenerate")}
               </button>
+              )}
             </div>
           </div>
 

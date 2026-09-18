@@ -116,6 +116,60 @@ describe("host allow-list parity", () => {
     }
   });
 
+  describe("the box's own named-tunnel hostname", () => {
+    const HOST = "amber-otter-k7m2p9qx4w3n.clawbox.tech";
+    const TOKEN = "eyJhIjoiYWNjb3VudCIsInQiOiJ0dW5uZWwiLCJzIjoic2VjcmV0In0=";
+    const credFile = () => path.join(tmp, "named-tunnel");
+
+    beforeEach(() => {
+      process.env.CLAWBOX_NAMED_TUNNEL_FILE = credFile();
+    });
+    afterEach(() => {
+      delete process.env.CLAWBOX_NAMED_TUNNEL_FILE;
+    });
+
+    async function fresh() {
+      vi.resetModules();
+      const tsMod = await import("@/lib/host-allowlist");
+      delete require_.cache[CJS];
+      return { tsMod, cjsMod: require_(CJS) as CjsModule };
+    }
+
+    it.each([
+      ["a valid credential", `hostname=${HOST}\ntoken=${TOKEN}\n`, true],
+      ["no token line", `hostname=${HOST}\n`, false],
+      ["a malformed token", `hostname=${HOST}\ntoken=short\n`, false],
+      ["a hostname two labels deep", `hostname=x.${HOST}\ntoken=${TOKEN}\n`, false],
+      ["a hostname in another zone", `hostname=box.evil.example\ntoken=${TOKEN}\n`, false],
+      ["no file at all", null, false],
+    ])("both read %s the same way", async (_label, contents, admitted) => {
+      if (contents === null) fs.rmSync(credFile(), { force: true });
+      else fs.writeFileSync(credFile(), contents);
+      const { tsMod, cjsMod } = await fresh();
+      expect(tsMod.isAllowedHostHeader(HOST)).toBe(admitted);
+      expect(cjsMod.isAllowedHostHeader(HOST)).toBe(admitted);
+      expect(cjsMod.isAllowedHostHeader(`${HOST}:443`)).toBe(admitted);
+    });
+
+    it("both refuse every other name in the zone", async () => {
+      fs.writeFileSync(credFile(), `hostname=${HOST}\ntoken=${TOKEN}\n`);
+      const { tsMod, cjsMod } = await fresh();
+      for (const host of ["clawbox.tech", "other-box-abcdefghjkmn.clawbox.tech", `x.${HOST}`, `${HOST}.evil.example`]) {
+        expect(tsMod.isAllowedHostHeader(host), host).toBe(false);
+        expect(cjsMod.isAllowedHostHeader(host), host).toBe(false);
+      }
+    });
+
+    it("a LAN upgrade on the named hostname is admitted like any own name", async () => {
+      fs.writeFileSync(credFile(), `hostname=${HOST}\ntoken=${TOKEN}\n`);
+      const { cjsMod } = await fresh();
+      expect(cjsMod.isAllowedUpgrade({ headers: { host: HOST }, socket: { remoteAddress: "192.168.1.20" } })).toBe(true);
+      expect(
+        cjsMod.isAllowedUpgrade({ headers: { host: "other-box-abcdefghjkmn.clawbox.tech" }, socket: { remoteAddress: "192.168.1.20" } }),
+      ).toBe(false);
+    });
+  });
+
   describe("upgrades", () => {
     const req = (remoteAddress: string | undefined, host: string | undefined) => ({
       headers: host === undefined ? {} : { host },

@@ -21,10 +21,12 @@
 const fs = require("fs");
 const net = require("net");
 const os = require("os");
+const path = require("path");
 const { isLoopback } = require("./proxy-peer.js");
 
 const DEFAULT_ALLOWED_HOSTS = "clawbox.local,10.42.0.1,10.43.0.1,localhost";
 const DEFAULT_ORIGINS_PATH = "/home/clawbox/clawbox/data/control-ui-origins.json";
+const BOX_TUNNEL_SUFFIX = ".clawbox.tech";
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 // Both copied from src/lib/control-ui-origins.ts, which originHostname() below
@@ -146,6 +148,32 @@ function configuredOriginHosts() {
   return hosts;
 }
 
+// The box's own named-tunnel hostname — mirrors readNamedTunnelHostnameSync()
+// in src/lib/named-tunnel.ts: the `hostname=` line of the credential file,
+// exactly one label under clawbox.tech, and only while a `token=` line is
+// there too. The token itself is read past, never kept.
+function namedTunnelHostname() {
+  const file =
+    process.env.CLAWBOX_NAMED_TUNNEL_FILE ||
+    path.join(process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox", "data", "cloudflared", "named-tunnel");
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch {
+    return null;
+  }
+  let hostname = null;
+  let token = null;
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("hostname=")) hostname = line.slice("hostname=".length).trim();
+    else if (line.startsWith("token=")) token = line.slice("token=".length).trim();
+  }
+  if (!hostname || !hostname.endsWith(BOX_TUNNEL_SUFFIX)) return null;
+  if (!LABEL_RE.test(hostname.slice(0, -BOX_TUNNEL_SUFFIX.length))) return null;
+  if (!token || !/^[A-Za-z0-9+/_=-]{32,4096}$/.test(token)) return null;
+  return hostname;
+}
+
 function isAllowedHostname(hostname) {
   if (!hostname) return false;
   if (allowedHostsFromEnv().has(hostname)) return true;
@@ -153,6 +181,7 @@ function isAllowedHostname(hostname) {
   if (hostname.endsWith(".local") && LABEL_RE.test(hostname.slice(0, -".local".length))) return true;
   if (hostname.endsWith(".ts.net") && isLabels(hostname.slice(0, -".ts.net".length), 2)) return true;
   if (hostname === systemHostLabel()) return true;
+  if (hostname === namedTunnelHostname()) return true;
   return configuredOriginHosts().has(hostname);
 }
 
@@ -178,6 +207,7 @@ function isAllowedUpgrade(req) {
 
 module.exports = {
   configuredOriginHosts,
+  namedTunnelHostname,
   isAllowedHostHeader,
   isAllowedHostname,
   isAllowedUpgrade,

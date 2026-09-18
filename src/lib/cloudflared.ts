@@ -21,8 +21,17 @@ export const TUNNEL_URL_FILE = path.join(CLOUDFLARED_DIR, "tunnel.url");
 export const TUNNEL_URL_LOG_FILE = path.join(CLOUDFLARED_DIR, "tunnel-url.log");
 export const TUNNEL_SERVICE = "clawbox-tunnel.service";
 
-/** Shape of a Cloudflare Quick Tunnel hostname — nothing else is ever returned. */
-const TUNNEL_URL_PATTERN = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i;
+/**
+ * The two shapes a published URL can have — nothing else is ever returned: a
+ * Cloudflare Quick Tunnel hostname, or this box's own named-tunnel hostname
+ * (`<boxHandle>.clawbox.tech`, one label, see src/lib/named-tunnel.ts), which
+ * scripts/run-tunnel.sh writes when it runs the named tunnel.
+ */
+const TUNNEL_URL_PATTERN =
+  /^https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)\/?$/i;
+/** The same two shapes, unanchored, for the journal. */
+const TUNNEL_URL_IN_TEXT =
+  /https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)(?![a-z0-9.-])/gi;
 
 export async function isInstalled(): Promise<boolean> {
   try {
@@ -33,7 +42,7 @@ export async function isInstalled(): Promise<boolean> {
   }
 }
 
-/** Read the currently-published *.trycloudflare.com URL, if any. */
+/** Read the currently-published tunnel URL (quick or named), if any. */
 export async function readTunnelUrl(): Promise<string | null> {
   try {
     const raw = (await fs.readFile(TUNNEL_URL_FILE, "utf-8")).trim();
@@ -102,7 +111,7 @@ export async function readTunnelUrlFromJournal(lines = 200): Promise<string | nu
       ["-u", TUNNEL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
       { maxBuffer: 4 * 1024 * 1024 },
     );
-    const found = stdout.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi);
+    const found = stdout.match(TUNNEL_URL_IN_TEXT);
     return found?.length ? found[found.length - 1].replace(/\/+$/, "") : null;
   } catch {
     return null;

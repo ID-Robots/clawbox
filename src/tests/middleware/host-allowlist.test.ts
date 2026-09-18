@@ -184,6 +184,36 @@ describe("middleware Host allow-list", () => {
       expect(res.status).toBe(200);
     });
 
+    describe("the box's own named-tunnel hostname", () => {
+      const HOST = "amber-otter-k7m2p9qx4w3n.clawbox.tech";
+      const writeCredential = (hostname: string) => {
+        const dir = path.join(tmpRoot, "data", "cloudflared");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(
+          path.join(dir, "named-tunnel"),
+          `hostname=${hostname}\ntoken=eyJhIjoiYWNjb3VudCIsInQiOiJ0dW5uZWwiLCJzIjoic2VjcmV0In0=\n`,
+          { mode: 0o600 },
+        );
+      };
+
+      it("admits exactly the hostname the portal handed this box", async () => {
+        writeCredential(HOST);
+        expect((await asOwner(HOST, "/")).status).toBe(200);
+        expect((await asOwner(`${HOST}:443`, "/")).status).toBe(200);
+      });
+
+      it("refuses another box's handle and the bare zone", async () => {
+        writeCredential(HOST);
+        expect((await asOwner("other-box-abcdefghjkmn.clawbox.tech", "/")).status).toBe(403);
+        expect((await asOwner("clawbox.tech", "/")).status).toBe(403);
+        expect((await asOwner(`x.${HOST}`, "/")).status).toBe(403);
+      });
+
+      it("refuses the hostname once the credential is gone", async () => {
+        expect((await asOwner(HOST, "/")).status).toBe(403);
+      });
+    });
+
     it("answers the captive-portal probes on any name", async () => {
       const res = await run("connectivitycheck.gstatic.com", "/generate_204");
       expect(res.status).toBe(302);

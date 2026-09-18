@@ -302,6 +302,7 @@ A webapp always runs in a sandboxed iframe with an opaque origin (`src/lib/webap
 - OpenClaw workspace: `~/.openclaw/workspace` unless `agents.defaults.workspace` moves it (`openclawWorkspaceDir()`) — where `BOOTSTRAP.md`, `USER.md` and `SOUL.md` live
 - Chromium CDP: port `18800`, start page from `~/.cache/clawbox/browser.env`
 - Coding run scope: transient user unit `clawbox-run-<runId>-<token>.scope` (MemoryHigh 3G, MemoryMax 4G); its stream log `data/coding-agent-streams/<runId>.jsonl`
+- Remote access tunnel: `clawbox-tunnel.service` → `scripts/run-tunnel.sh`. A provisioned box runs its NAMED tunnel (`<boxHandle>.clawbox.tech`, credential from the portal heartbeat's `boxTunnel` in `data/cloudflared/named-tunnel`, 0600, token via `TUNNEL_TOKEN` only — `src/lib/named-tunnel.ts`); no credential, a refused token or a named run that dies inside 60 s falls back to the quick tunnel; `data/cloudflared/tunnel.mode` says which
 - Terminal WebSocket: port `3006`
 - Ollama: `http://127.0.0.1:11434` (chat-provider backend only; no Local AI row)
 - Memory embedder: system unit `clawbox-embed.service` (`EMBED_UNIT`), llama-server at `http://127.0.0.1:8081/v1`, reached by OpenClaw through `/setup-api/local-ai/embed/v1`; woken on demand, stopped after `LOCAL_AI_IDLE_TIMEOUT_MS` (10 min) idle; GGUF in `data/embed/models/`

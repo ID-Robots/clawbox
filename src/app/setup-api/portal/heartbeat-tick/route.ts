@@ -4,6 +4,7 @@ import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
 import { isInternalRequest } from "@/lib/internal-token";
 import { applyDeferredLanguagePersona } from "@/lib/language-persona";
 import { refreshCatalogIfDue } from "@/lib/hermes-model-options";
+import { readTunnelMode } from "@/lib/named-tunnel";
 import { pushHeartbeatTick } from "@/lib/portal-heartbeat";
 import { requireSession } from "@/lib/route-auth";
 import { checkTunnelLiveness, markRestarted, mayRestart } from "@/lib/tunnel-liveness";
@@ -84,6 +85,19 @@ export async function GET(request: Request) {
 
   const tunnelUrl = await readTunnelUrl();
   const liveness = await checkTunnelLiveness(tunnelUrl);
+
+  // A NAMED tunnel's hostname does not change on a restart, so restarting
+  // cannot fix one that does not resolve — and it only fails to resolve while
+  // the portal has not yet created (or has just re-created) its DNS record,
+  // which the portal does on a heartbeat. Withholding the heartbeat here would
+  // be the one thing that keeps the record from ever appearing.
+  if (liveness === "dead" && (await readTunnelMode()) === "named") {
+    pushHeartbeatTick(tunnelUrl);
+    return NextResponse.json(
+      { ok: true, tunnel: "dead", restarted: false },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
   if (liveness === "dead") {
     // Do not push. Reporting a hostname we have just proven does not exist is
