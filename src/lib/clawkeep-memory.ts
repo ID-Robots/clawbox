@@ -219,6 +219,10 @@ const TERMINATE_GRACE_MS = 5_000;
  * atomic write per file.
  */
 const PROGRESS_WRITE_EVERY_MS = 1_500;
+/** Writes of the record that says how a pass ended, before giving up on it. */
+const SETTLED_WRITE_ATTEMPTS = 4;
+/** Backoff between them, times the attempt: 0.25 s, 0.5 s, 0.75 s. */
+const SETTLED_WRITE_RETRY_MS = 250;
 
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-schedule.json");
 const RUN_STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-state.json");
@@ -1470,7 +1474,25 @@ export async function startMemoryIndex(
     };
     // See `publishProgress`: no report may still be on its way to the file.
     await progressWritten;
-    await writeRunState(finalState).catch(() => { /* status route will reconcile */ });
+    // Tried more than once: left unwritten, the record says "running" beside a
+    // reaped pid and the next read calls this pass interrupted, whatever it
+    // did. Not for ever, though — the lock and the marker below are released
+    // either way, because holding them over a disk that stays full would
+    // refuse every later run until the web server restarted, and the reconcile
+    // then says "interrupted", which is at worst the owner being told to run
+    // it again.
+    for (let attempt = 1; attempt <= SETTLED_WRITE_ATTEMPTS; attempt += 1) {
+      try {
+        await writeRunState(finalState);
+        break;
+      } catch (err) {
+        if (attempt === SETTLED_WRITE_ATTEMPTS) {
+          console.warn(`[clawkeep-memory] could not record how the ${mode} index run ended:`, err);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, SETTLED_WRITE_RETRY_MS * attempt));
+        }
+      }
+    }
     // Only now: until the settled record is on disk, a reader must not take
     // the reaped pid for a lost run.
     settlingPasses().delete(pass.pid);
