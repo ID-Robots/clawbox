@@ -88,6 +88,9 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Deploying to Vercel (`coding_deploy_preview/production`) | when the coding agent is on AND the owner switched the Vercel integration on | same |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
+| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
+| Vercel status (`coding_vercel_status`) | with the deploy tools: coding agent on AND the Vercel integration on | same |
+| Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Improvement Program (`clawbox_incidents_list`, `clawbox_incident_report`) | yes | yes |
@@ -96,6 +99,21 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 ## Tools
 
 ### Orientation — call these first
+
+At the start of a session: `clawbox_context` once — the field guide, which also
+says how to hand work to the coding agent and then steer and check it — and
+`device_status` before any answer about the device itself. Then, by question:
+
+- **"Build / fix / change this"** with the coding agent on: `coding_project_status`
+  first (which projects exist, how to name each to `coding_agent_run`, whether
+  one is already busy), then `coding_agent_run`.
+- **"What are my runs doing?"**: `coding_run_list`, then `coding_agent_status`
+  with one `run_id` for its summary. Change a run's mind with
+  `coding_run_message`; carry on a paused one with `coding_agent_resume`.
+- **Memory, on-box engines, allowance**: `memory_shard_status`,
+  `local_ai_status`, `clawbox_ai_usage` — each answers "off", "not installed" or
+  "not linked" as an answer, so call them rather than guess.
+
 | Tool | What it does |
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
@@ -580,8 +598,22 @@ tells the run to link them and ship them.
 ### Coding agent (both editions, only while the owner's switch is on)
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
-`coding_run_message` · `coding_secret_list` · `coding_deploy_preview` ·
-`coding_deploy_production`
+`coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
+`coding_project_status` · `coding_secret_list` · `coding_deploy_preview` ·
+`coding_deploy_production` · `coding_vercel_status`
+
+| Tool | What it does |
+|---|---|
+| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once. |
+| `coding_agent_status` | One run in full — its summary, deliverable, pull request, deployment, plan — or, with no `run_id`, the recent ids. `wait_seconds` blocks up to two minutes. |
+| `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says whether the run has it now or gets it at its next step. |
+| `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`. Filter by `status` / `project`. |
+| `coding_agent_resume` | The Resume button, for a `paused` or `gave_up` run the AGENT started — optionally telling it something first (`message`). |
+| `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. |
+| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs, pipeline default and deployment. |
+| `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
+| `coding_deploy_preview` / `coding_deploy_production` | Deploy a project to Vercel (production only where the owner allowed it for that project). |
+| `coding_vercel_status` | Read one project's Vercel link, latest deployment, production domain, production permission and hourly allowance, and pipeline default. |
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
@@ -665,6 +697,18 @@ additionally rate limited per project and the refusal (`rate_limited`) is a
 thing to tell the user rather than retry. There is deliberately no tool for the
 switch, for the reason there is none for the secret store's: one that could
 turn it on would make the owner's answer temporary.
+
+`coding_vercel_status` is the READ half and sits under the same two switches,
+for the same circuit-breaker reason (off, `GET …/vercel/deploy` answers 409
+`vercel_disabled`). It reads that route with `domain=1` — the project's name and
+production domain, one call to Vercel, and a pending deployment is refreshed on
+the way — plus `GET …/pipeline` for the project's pipeline default. There is
+deliberately no WRITE half, and "Vercel toggle" is answered by saying where the
+owner's switches are: the box-wide integration (`POST …/enable`
+`vercelEnabled`), a project's link (`POST …/vercel`), its standing production
+permission (`PUT …/vercel/deploy`) and its pipeline default (`PUT …/pipeline`)
+all require the owner's own browser session on this box's origin, and a tool
+could only be refused by them.
 
 The run lives in the web server (`src/lib/coding-agent.ts`,
 `/setup-api/coding-agent/*`), not in this process: OpenClaw reaps the MCP
@@ -773,6 +817,50 @@ shell tool, not less and not more:
   is execution the agent does not otherwise hold on the Hermes edition, so it
   is the owner's to set in the Coding Agent app.
 
+**Following and moving runs** (`coding_run_list`, `coding_agent_resume`,
+`coding_project_status`, and what `coding_agent_stop` does beyond a live run).
+All four read the SAME record the runs route answers (`GET
+/setup-api/coding-agent/runs`, up to its `MAX_LIMIT` of 30) and the projects
+route answers (`GET …/projects`), so a row cannot disagree with the run's own
+status. What each row field means:
+
+- `branch` / `copy` — the run's own git worktree (`RunWorktree`): `in use`,
+  `kept, not merged home yet`, `kept, could not be merged home: <device's
+  reason>`, `merged into <base>`, `files removed; the work is kept on branch …`,
+  or `removed with its branch — the run left nothing on it`. Bringing a branch
+  home (`POST …/merge`) is the OWNER's button and refuses this bearer.
+- `attempts` — goes at the deliverable, the run's own first turn counted, out of
+  `coding_agent_completion_attempts`; `deliverable.met` is the device's verdict
+  and `missing` its reason — never a `command` deliverable's output, for the
+  reason `coding_agent_status` withholds it.
+- `paused_because` — `paused on purpose`, or which allowance is used up and when
+  it comes back (`pauseReason`).
+- `detached` — a RUNNING run in its own systemd scope (`run.unit`): it keeps
+  working through a restart of the web server and is reattached after one. A
+  message to a reattached run is queued for its next step, because the pipe it
+  would have been written to died with the old server.
+- `left_running` — the run has settled but a process it started is still up
+  (`run.leftover`): usually a server it left listening, which may be what the
+  box serves one of its apps from.
+- `can_resume` — `paused` or `gave_up`, and started by the agent.
+
+`coding_agent_resume` posts `…/resume`, which re-enters the SAME session in the
+same folder (re-creating the run's copy from its branch if the copy was
+removed) through the same gates a start passes. It refuses before calling the
+route when the run is the OWNER's (the route's `runLifecycleRoute` answers this
+bearer 403 for those, whatever their state), when it is not `paused`/`gave_up`
+(a `failed` run that hit a ceiling is sent to `coding_agent_run
+resume_run_id`), and when the allowance that paused it has a known reset time
+still in the future — resuming then only buys the same refusal. With `message`
+the text is queued first (`…/message`), so the run reads it as it goes back in.
+Every other refusal is the route's own sentence (the slot is taken, the folder
+is gone, the account it ran on is no longer connected), carried through as
+CONFLICT / do-not-retry. `coding_agent_stop` on a `paused` run closes it
+(`…/stop` settles it `stopped`; it can no longer be resumed); on a finished run
+with `left_running` it says so and ends the process only with
+`end_leftovers: true` (`…/kill`). Pausing is not offered: it is the owner's
+gesture, and stopping already covers ending a run.
+
 ### Coding team (both editions, the same switch)
 
 `coding_team_run` · `coding_team_status` · `coding_team_stop`
@@ -855,6 +943,142 @@ comments once a day instead of opening a second issue; a search that FAILED
 refuses the send rather than risking a duplicate. At most 5 new issues per box
 per UTC day. The recorded message is labelled to the model as information, not
 instructions, like every other text a subsystem wrote.
+
+### Memory Shard
+
+`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only)
+
+`memory_shard_status` reads `GET /setup-api/clawkeep/memory` — the same status
+the Memory Shard app draws: switched on, set up, the paid-plan gate, health,
+whether semantic search works, where the embeddings run, folders / files /
+chunks, files waiting or failed, whether the index needs a reindex, the last or
+running pass, and the schedule. A RUNNING pass reports its progress from the
+counts the device writes while it runs (`run.progress`, #909/#925): `30 of 120
+files (25%); 800 chunks in the index so far`, or `still scanning the folders`
+while the total is not known yet — never a made-up 0%. Both editions have an
+index now (OpenClaw's own, or the one ClawBox keeps where there is no OpenClaw),
+so the tool is registered on both, with one description per edition: only the
+Hermes one points at `memory_shard_search`, which is Hermes-only because on
+OpenClaw the index is OpenClaw's and it searches it as part of a turn.
+
+**There is no reindex tool.** `POST /setup-api/clawkeep/memory/index` answers
+this bearer 403 `owner_only` on purpose — before that check the assistant could
+start a full re-embed of the owner's documents on its own, an hours-long pass
+that spends the embedding allowance. The status says so, and tells the agent to
+open the app (`ui_open_app("memory-shard")`) for the owner to press Reindex, and
+then to report progress from this tool — not to poll it in a loop. The switch,
+the folders, the provider and the schedule are owner-only for the same reason.
+
+### Local AI (both editions)
+
+`local_ai_status`
+
+The engines that run ON the box — Kokoro (speaks replies), Whisper (transcribes),
+the embedding model behind Memory Shard, the llama.cpp model — from `GET
+/setup-api/local-models`, the per-model inventory the Settings → Local AI tab
+draws (installed, running / idle / on-demand / not-installed /
+not-on-this-edition, disk and memory, the device's own one-line detail, which is
+never a path or a command). Alongside it, which voice and which transcription
+engine the box uses now (`GET /setup-api/tts` `choice`/`activeEngine`, `GET
+/setup-api/stt` `primary`/`chain`). `engine: "whisper"` adds the downloaded
+sizes and free disk (`GET /setup-api/whisper`), `engine: "embeddings"` the
+embedding service's unit state (`GET /setup-api/embed/status`). Each leg past
+the inventory is independent, so one that does not answer costs only its line.
+
+**There is no install tool.** Since 2026-09-15 an install or update puts no
+engine or model on a box but llama.cpp and Gemma 4, so Settings → Local AI's
+Install is the only way Kokoro, Whisper or the embedding model arrives — and
+`POST /setup-api/tts/install`, `POST /setup-api/whisper` and `POST
+/setup-api/embed/install` all answer this bearer 403 `owner_only`: they run a
+root install step and download gigabytes onto the owner's disk. The answer names
+what is not installed and where the owner's button is.
+
+### ClawBox AI usage (both editions)
+
+`clawbox_ai_usage`
+
+`GET /setup-api/ai-models/usage`, the route behind the usage card in Settings →
+Providers: the plan, the weekly allowance and the 5-hour burst limit (percent
+used, whether it is used up, when it frees up, in UTC), the weekly meters
+(pictures, spoken replies, transcribed audio, memory indexing — "not part of
+this plan" where the limit is 0), prepaid credits, and the box's time zone. The
+route always answers 200 with `available`, and the tool turns every "no" into a
+plain answer rather than an error: `not_connected` (link it in Settings →
+Providers), `refused` ("ClawBox AI does not share usage details with this box
+yet" — the card's own words; the owner sees them on clawbox.com), `unreachable`,
+`invalid`. It is the read the coding tools' `paused_because` and a refused chat
+point at. There is no tool that changes the plan or buys credits: both are
+billed, for the reason there is no plan switch (see "AI configuration").
+
+### What the agent deliberately cannot do
+
+The audit behind TASK-899 found these route families with no tool, and each
+stays that way because its route refuses this bearer (owner session, usually
+same-origin too) for a stated reason — a tool would only ever be refused, which
+is also what Hermes' circuit breaker counts against every ClawBox tool:
+
+| Owner's only | Route(s) | Why |
+|---|---|---|
+| Coding agent switch and settings, secrets, permissions, Anthropic/GitHub sign-in, reset | `coding-agent/enable`, `secrets`, `permissions`, `anthropic`, `github-login`, `reset` | consent to a delegated shell and to the owner's credentials |
+| Vercel link, production permission, pipeline default, promote | `coding-agent/vercel`, `PUT …/vercel/deploy`, `POST/PUT …/pipeline`, `…/vercel/promote` | a switch a tool could flip would make the owner's answer temporary |
+| Bringing a run's branch home, the file tree's writes, project import/delete | `coding-agent/merge`, `PUT …/tree`, `projects/*` | the owner's repository and folders |
+| Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
+| Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
+| Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |
+| Improvement Program mode, MCP switch, background jobs | `improvement-program` POST, `harness/mcp`, `background-jobs` | consent |
+
+### Examples and refusal shapes
+
+Every refusal is the `{ error, code, message, next }` envelope; `next` is what
+the agent does instead. Success bodies are shortened here.
+
+```jsonc
+// coding_run_list {"status": "paused"}
+{ "runs": [ { "run_id": "run-k3x9q2ab", "status": "paused", "started_by": "agent",
+    "project": "site", "branch": "clawbox/run-k3x9q2ab", "copy": "kept, not merged home yet",
+    "attempts": "1 of 3", "deliverable": { "kind": "files", "files": ["index.html"], "met": false,
+    "missing": "index.html was not created" }, "paused_because": "paused on purpose", "can_resume": true } ],
+  "notes": "detached: … can_resume: … left_running: … copy: …" }
+
+// coding_agent_resume {"run_id": "run-k3x9q2ab", "message": "index.html goes in the root"}
+"Resumed run run-k3x9q2ab in its own session on branch clawbox/run-k3x9q2ab. It was given your message as it went back in. …"
+// … on the owner's run, or while its allowance is still spent:
+{ "error": true, "code": "CONFLICT", "message": "That run was started by the owner, so only they can resume it.",
+  "next": "Do not retry. Tell the user Resume is on the run's page in the Coding Agent app." }
+{ "error": true, "code": "CONFLICT", "message": "Run run-k3x9q2ab is paused because the weekly ClawBox AI chat allowance is used up; it comes back at 2026-09-21 00:00 UTC. …",
+  "next": "Do not retry now. Tell the user when it comes back; resume it after that if they still want it." }
+
+// coding_agent_stop {"run_id": "run-k3x9q2ab"} on a finished run that left a server up
+"Run run-k3x9q2ab already finished (completed), but something it started is still running … call coding_agent_stop again with end_leftovers set to true."
+
+// coding_project_status {}
+{ "project_folder": "/home/clawbox/projects", "projects": [ { "project": "site", "kind": "folder",
+    "run_it_with": { "directory": "site" }, "last_commit": "2026-09-17 10:30 UTC — Add a dark mode toggle",
+    "on_desktop": true, "app": "server app on port 4230, opened at /apps/site/", "latest_run": "run-k3x9q2ab (completed)",
+    "runs_working": 0, "runs_waiting": 1, "branches_not_merged": 1, "left_running": 0 } ] }
+
+// coding_vercel_status {"directory": "site"}
+"A Vercel project (site) is attached; production is site.example.com.
+The latest preview deployment is ready at https://site-abc.vercel.app.
+You may NOT deploy this project to production: the owner has not allowed it. Offer coding_deploy_preview; …"
+// … with the integration switched off under a live server:
+{ "error": true, "code": "NOT_SUPPORTED_HERE", "message": "This ClawBox has the Vercel integration switched off.", "next": "Tell the user it can be turned on in the Coding Agent app, under Settings, as \"Vercel integration\". …" }
+
+// memory_shard_status {} during a reindex
+{ "switched_on": true, "health": "healthy", "files_indexed": 120, "chunks": 3400,
+  "indexing": { "now": "running", "mode": "full", "progress": "30 of 120 files (25%); 800 chunks in the index so far" },
+  "guidance": "An indexing pass is running. Tell the user how far it has got; do not check again in a loop …" }
+
+// local_ai_status {}
+{ "engines": [ { "id": "kokoro", "name": "Kokoro", "does": "speaks replies aloud", "installed": false, "state": "not-installed" }, … ],
+  "voice": { "chosen": "auto", "speaking_with": "the ClawBox cloud voice" },
+  "guidance": "Not installed here: Kokoro. The owner installs an engine with Install in Settings → Local AI …" }
+
+// clawbox_ai_usage {}
+{ "plan": "Pro", "weekly_allowance": "40% used, 40 of 100, frees up at 2026-09-21 00:00 UTC",
+  "five_hour_limit": "USED UP, 100% used, 10 of 10, frees up at 2026-09-18 15:00 UTC", "credits": "12.50 EUR left" }
+"ClawBox AI does not share usage details with this box yet. Tell the user they can see them in their account on clawbox.com."
+```
 
 ## Safety rules every tool follows
 

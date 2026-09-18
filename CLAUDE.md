@@ -205,7 +205,7 @@ of them kept failing.
 - **`clawbox-mcp.ts`** — server entry: resolve edition → probe capabilities →
   register → connect. Tool families live in `mcp/tools/` (`orientation`,
   `skills`, `ai`, `system`, `desktop`, `browser`, `media`, `email`, `coding`,
-  `coding-agent`) and the shared
+  `coding-agent`, `memory`, `local-ai`, `improvement`) and the shared
   machinery in `mcp/lib/` (`edition`, `guard`, `api`, `errors`, `schema`,
   `register`, `context`, `run-context`, `jobs`, `web`).
   - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
@@ -215,8 +215,12 @@ of them kept failing.
     `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`,
-    `describe_image`,
-    `coding_agent_run/status/stop`, `coding_run_message`, `coding_secret_list` (registered only while the owner's switch is on
+    `describe_image`, `memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`
+    (read-only; installs, reindexing and the plan stay the owner's),
+    `coding_agent_run/status/stop`, `coding_run_message`, `coding_run_list`,
+    `coding_agent_resume`, `coding_project_status`, `coding_secret_list`
+    (`coding_deploy_*` and `coding_vercel_status` also need the owner's Vercel
+    switch) (registered only while the owner's switch is on
     and the `claude-ds` harness is ready — probed at startup, and unlike
     `email_list` never re-probed after it),
     `clawbox_incidents_list`, `clawbox_incident_report` (the ClawBox Improvement
