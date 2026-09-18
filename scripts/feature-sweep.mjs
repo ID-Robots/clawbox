@@ -162,8 +162,10 @@ export function speechEnginesReport(res) {
   }
   const { engines, activeEngine } = res.json;
   if (!Array.isArray(engines)) return `missing \`engines\` array in ${truncate(res.text)}`;
+  const wellFormed = (e) => e !== null && typeof e === "object" && !Array.isArray(e) && typeof e.configured === "boolean";
+  if (!engines.every(wellFormed)) return `invalid \`engines\` entry in ${truncate(res.text)}`;
   if (activeEngine === undefined || activeEngine === null) {
-    const configured = engines.filter((e) => e && typeof e === "object" && e.configured === true);
+    const configured = engines.filter((e) => e.configured);
     if (configured.length === 0) {
       return { unproven: "nothing can speak on this box yet: no speech engine is configured, so there is no active one to report" };
     }

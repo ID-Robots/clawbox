@@ -193,4 +193,10 @@ describe("feature-sweep speechEnginesReport", () => {
     expect(speechEnginesReport(res(200, { activeEngine: "local" }))).toContain("engines");
     expect(speechEnginesReport(res(200, { activeEngine: 7, engines: [engine("local", true)] }))).toContain("activeEngine");
   });
+
+  it("fails on a malformed engine entry rather than excusing it as an empty box", () => {
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [null] }))).toContain("invalid `engines` entry");
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [{}] }))).toContain("invalid `engines` entry");
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [{ id: "local", configured: "yes" }] }))).toContain("invalid `engines` entry");
+  });
 });
