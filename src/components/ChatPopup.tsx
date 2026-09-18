@@ -412,6 +412,7 @@ import {
 } from '@/lib/chat-attachments'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
+import { usePortrait } from '@/lib/use-portrait'
 import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
@@ -905,6 +906,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
+  // A phone held upright gets its own composer: Send/Stop stays beside the
+  // text box and the microphone takes a centred row of its own under it, so
+  // it can never crowd the field. Landscape keeps the one-row composer.
+  const portraitComposer = usePortrait(mobile) && mobile
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -6038,7 +6043,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
   )
   // Keep recording/transcription controls reachable even if a draft changes.
-  const mobileVoiceAction = caps.canTranscribe && (
+  // Landscape only: in portrait the microphone has a row of its own and the
+  // slot beside the text box is always Send or Stop.
+  const mobileVoiceAction = !portraitComposer && caps.canTranscribe && (
     voice.state === 'recording' || voice.state === 'requesting' || voice.state === 'transcribing'
     || (!sending && !input.trim() && attachments.length === 0)
   )
@@ -6115,6 +6122,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       data-testid="chat-popup"
       // Hook for the phone-sized touch targets in globals.css (.chat-mobile).
       data-chat-mobile={mobile || undefined}
+      data-chat-portrait={portraitComposer || undefined}
       ref={popupRef}
       // On the CAPTURE phase: the header, the pills and the composer all stop
       // their own pointer events, and a click that raises no surface is a click
@@ -7278,8 +7286,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
-        {/* Primary phone row: attachment, text, then microphone or send/stop. */}
-        <div className="chat-composer-primary" style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
+        {/* Primary phone row: attachment, text, then send/stop (portrait) or
+            microphone-or-send/stop (landscape). */}
+        <div className="chat-composer-primary" data-testid={mobile ? 'chat-composer-primary' : undefined} style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
         {mobile && renderAttachmentButton()}
         <textarea
           ref={inputRef}
@@ -7348,6 +7357,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           />
         )}
         </div>
+        {/* Portrait phone: the one record/stop toggle, alone and centred on a
+            row of its own across the chat's full width. */}
+        {portraitComposer && caps.canTranscribe && (
+          <div data-testid="chat-composer-voice-row" className="chat-composer-voice-row">
+            {renderVoiceButton(true)}
+          </div>
+        )}
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
             rule and a flex-basis — see the block there. */}
