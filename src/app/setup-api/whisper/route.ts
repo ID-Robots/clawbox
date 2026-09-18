@@ -13,6 +13,7 @@ import { requireSession } from "@/lib/route-auth";
 import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { syncChannelAudio } from "@/lib/stt-channel";
+import { withWhisperLibraryPath } from "@/lib/stt-local";
 import { getSttPrimary, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
 import {
   readWhisperState,
@@ -383,11 +384,18 @@ export async function DELETE(req: Request) {
  * Its own process group, so a timeout ends the download rather than orphaning a
  * multi-hundred-megabyte transfer; stderr is the reason a person reads, kept to
  * its last line so a Python traceback does not become the row's copy.
+ *
+ * The web server's environment plus the whisper-server unit's library path:
+ * `libctranslate2.so.4` lives in ~/.local/lib, which the loader does not
+ * search, and without it the fetcher's `import faster_whisper` fails on every
+ * box whose engine is install-voice.sh's CUDA build — every Jetson (see
+ * `withWhisperLibraryPath`).
  */
 function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     const child = spawn("/usr/bin/python3", [whisperFetchScript(CONFIG_ROOT), size], {
       cwd: path.dirname(whisperFetchScript(CONFIG_ROOT)),
+      env: withWhisperLibraryPath(process.env),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
