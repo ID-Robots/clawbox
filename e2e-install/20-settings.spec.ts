@@ -38,12 +38,24 @@ test.describe("settings actions", () => {
     expect(Object.keys(stats as object)).toContain("temperature");
   });
 
-  test("preferences persist language change", async () => {
+  test("preferences persist language change, and the box ends on US English", async () => {
+    // A freshly installed box stores NO `pref:ui_language`, and that is
+    // correct: only an explicit pick writes the key (`setLocale` in
+    // src/lib/i18n.tsx), and until then the desktop takes its language from
+    // the browser — which this suite pins to en-US in playwright.config.ts.
+    // So nothing is asserted about the value before the first write, only that
+    // the route answers with a preferences object; a re-run against a
+    // container this spec has already touched finds "en" here rather than
+    // nothing, and both are fine.
+    const before = await getPreferences();
+    expect(before.ui_language === undefined || typeof before.ui_language === "string").toBe(true);
+
     await setPreferences({ ui_language: "de" });
     const prefs = await getPreferences();
     expect(prefs.ui_language).toBe("de");
 
-    // Reset for subsequent tests.
+    // Left pinned on US English for every downstream spec, all of which drive
+    // the UI by its English copy.
     await setPreferences({ ui_language: "en" });
     expect((await getPreferences()).ui_language).toBe("en");
   });
