@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { PREFERENCE_KEY_PREFIX, sanitizePreferences, validatePreference } from "@/lib/preference-schema";
+import {
+  PREFERENCE_KEY_PREFIX,
+  safePreferenceKey,
+  sanitizePreferences,
+  validatePreference,
+} from "@/lib/preference-schema";
 import {
   DEFERRED_LANGUAGE_KEY,
   personaFilesFor,
@@ -33,8 +38,20 @@ function isAnonymousReadable(allParam: string | null, keysParam: string | null):
 // Allowed preference keys (prefix-based whitelist)
 const ALLOWED_PREFIXES = ["wp_", "desktop_", "ui_", "app_", "installed_", "icon_", "pinned_", "hidden_"];
 
-function isAllowed(key: string) {
-  return ALLOWED_PREFIXES.some((p) => key.startsWith(p));
+/**
+ * The name this route will use for a name the caller sent, or null.
+ *
+ * Two rules, and the second is why this returns a STRING rather than a boolean.
+ * The prefix says which names this door owns; `safePreferenceKey` rebuilds the
+ * name out of a bounded alphabet, so the value that reaches `result[…]` and
+ * `entries[…]` below is made of those characters rather than being the
+ * caller's own string. The prefix test alone left everything after `ui_` free
+ * — any length, any character — and both writes below are on the caller's
+ * side of that gap (CodeQL js/remote-property-injection #300 and #301).
+ */
+function allowedKey(key: string): string | null {
+  if (!ALLOWED_PREFIXES.some((p) => key.startsWith(p))) return null;
+  return safePreferenceKey(key);
 }
 
 // The prefix whose WRITES need the person, not the agent. `installed_apps` and
@@ -111,7 +128,7 @@ export async function GET(req: Request) {
       { status: 400 },
     );
   }
-  const keys = named.filter(isAllowed);
+  const keys = named.map(allowedKey).filter((key): key is string => key !== null);
   // One read of the store rather than one per key: config.get() re-reads and
   // re-parses the whole file synchronously on every call, so the work of a
   // request would otherwise follow the length of its `keys` parameter.
@@ -156,8 +173,13 @@ export async function POST(req: Request) {
     }
     const entries: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(body)) {
-      if (!isAllowed(key)) continue;
-      const check = validatePreference(key, value);
+      // A name that does not pass is SKIPPED, exactly as a name with the wrong
+      // prefix already was, rather than failing the request: the two are the
+      // same kind of "this door does not own that name", and a 400 here would
+      // start refusing whole desktop writes over one stray entry.
+      const safeKey = allowedKey(key);
+      if (!safeKey) continue;
+      const check = validatePreference(safeKey, value);
       if (!check.ok) {
         // The reason is built from the rejected key, which is caller-supplied
         // and only prefix-checked — bound and sanitise it like any other
@@ -165,7 +187,7 @@ export async function POST(req: Request) {
         console.error(`[preferences] Rejected write: ${logSafe(check.reason ?? "")}`);
         return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }
-      entries[`${PREFERENCE_KEY_PREFIX}${key}`] = value;
+      entries[`${PREFERENCE_KEY_PREFIX}${safeKey}`] = value;
     }
     if (Object.keys(entries).length > 0) {
       await config.setMany(entries);

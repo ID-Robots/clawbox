@@ -85,6 +85,61 @@ const CONTROL_CHARACTERS_GLOBAL = new RegExp(CONTROL_CHARACTERS.source, "g");
 /** How a preference is spelled in the config store. */
 export const PREFERENCE_KEY_PREFIX = "pref:";
 
+/**
+ * Longest a preference NAME may be, and the alphabet it may be spelled with.
+ *
+ * The names are not a closed set — most of them hold live desktop state and a
+ * new one appears whenever the desktop grows a field, and one is assembled at
+ * runtime (`app_<appId>_settings`, src/components/InstalledAppSettings.tsx) —
+ * so the rule on a name is a shape, the way `checkShape` is the rule on a
+ * value. 128 leaves room for that runtime name at its widest: `app_` plus a
+ * 64-character app id (APP_ID_RE) plus `_settings`, and headroom after it.
+ */
+export const MAX_PREFERENCE_KEY_LENGTH = 128;
+
+/** Names that exist on every object literal, whatever the store holds. */
+const INHERITED_NAMES: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
+/** The alphabet APP_ID_RE already uses — every name this product writes is in it. */
+const PREFERENCE_KEY_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+
+/**
+ * A preference name rebuilt character by character out of that alphabet, or
+ * null for a name that does not survive the rebuild.
+ *
+ * REBUILT rather than merely tested, the way project ids are (`safeProjectId`
+ * in src/lib/code-projects.ts) and for the same reason: both doors onto a
+ * preference put the name on an object — `result[key]` on the read side and
+ * `entries["pref:" + key]`, which lands in config.json, on the write side —
+ * and a `.test()` guard leaves the CALLER's own string in play at the sink.
+ * What reaches the object is made of these characters and no more than this
+ * many of them.
+ *
+ * Until this existed the only rule on a name was the route's PREFIX check, so
+ * everything after `ui_` was free: any length, any character, stored as sent.
+ * A caller with a session could park unbounded arbitrary names in the owner's
+ * config.json, and static analysis rightly flagged both writes
+ * (CodeQL js/remote-property-injection, alerts #300 and #301).
+ */
+export function safePreferenceKey(key: unknown): string | null {
+  if (typeof key !== "string" || key.length < 1 || key.length > MAX_PREFERENCE_KEY_LENGTH) {
+    return null;
+  }
+  // The three names that are a property of every object literal. They are
+  // spelled entirely from the alphabet below, so the rebuild alone would hand
+  // them back, and none of them is a preference this box stores. Refusing them
+  // here means a caller of this function may accumulate into a plain `{}` —
+  // `sanitizePreferenceWrites` does — without that being load-bearing.
+  if (INHERITED_NAMES.has(key)) return null;
+  let safe = "";
+  for (const ch of key) {
+    const at = PREFERENCE_KEY_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += PREFERENCE_KEY_ALPHABET[at];
+  }
+  return safe;
+}
+
 // A Map rather than an object literal: lookup is by own entry only, so a key
 // named after something on Object.prototype (`constructor`, `toString`) reads
 // as "no domain" instead of resolving to a value that is not a list.
@@ -143,6 +198,14 @@ function checkShape(value: unknown, depth: number): string | null {
  * cannot be stored) and on read (so junk stored earlier is not served).
  */
 export function validatePreference(key: string, value: unknown): PreferenceCheck {
+  // The name first: a value cannot rescue a name this box does not store, and
+  // every later rule here is keyed by the name. The reason deliberately does
+  // not quote it — it is returned in a 400 body and logged, and the name is
+  // caller-supplied.
+  if (safePreferenceKey(key) === null) {
+    return { ok: false, reason: "is not a preference name this box stores" };
+  }
+
   const domain = CLOSED_DOMAINS.get(key);
   if (domain) {
     if (typeof value === "string" && domain.includes(value)) return { ok: true };
@@ -210,6 +273,9 @@ export type PreferenceOutcome = { ok: true; value: unknown } | { ok: false };
  * does not hold.
  */
 export function sanitizePreferenceValue(key: string, value: unknown): PreferenceOutcome {
+  // A name that does not pass has nothing to keep part of: pruning members
+  // changes the value, never the name, so answer before walking it.
+  if (safePreferenceKey(key) === null) return { ok: false };
   if (validatePreference(key, value).ok) return { ok: true, value };
 
   const pruned = keepPassingMembers(value);

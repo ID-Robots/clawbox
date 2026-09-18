@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_PREFERENCE_KEY_LENGTH,
   MAX_PREFERENCE_STRING_LENGTH,
   PREFERENCE_LANGUAGES,
   boundPreferenceText,
@@ -7,6 +8,7 @@ import {
   sanitizePreferences,
   sanitizePreferenceValue,
   sanitizePreferenceWrites,
+  safePreferenceKey,
   validatePreference,
 } from "@/lib/preference-schema";
 
@@ -229,4 +231,73 @@ describe("preference-schema", () => {
       expect(validatePreference("ui_user_name", bounded).ok).toBe(true);
     });
   });
+
+  /**
+   * The rule on the NAME. Until it existed the only check was the route's
+   * prefix test, so everything after `ui_` was free — and both preference
+   * doors put that name on an object, the write one landing it in config.json.
+   */
+  describe("preference names", () => {
+    it("keeps every name this product actually writes", () => {
+      for (const key of [
+        "ui_language",
+        "ui_user_name",
+        "wp_opacity",
+        "wp_bg_color",
+        "desktop_open_windows",
+        "installed_apps",
+        "installed_meta",
+        "icon_grid",
+        "pinned_apps",
+        "hidden_installed",
+        // Assembled at runtime from an app id (APP_ID_RE allows `-` too).
+        "app_EMoamEEZ73f0CkXaXp7hrann_settings",
+        "app_my-app_settings",
+      ]) {
+        expect(safePreferenceKey(key)).toBe(key);
+      }
+    });
+
+    it("refuses a name longer than a name may be, and keeps the longest legal one", () => {
+      const longest = `ui_${"a".repeat(MAX_PREFERENCE_KEY_LENGTH - 3)}`;
+      expect(longest).toHaveLength(MAX_PREFERENCE_KEY_LENGTH);
+      expect(safePreferenceKey(longest)).toBe(longest);
+      expect(safePreferenceKey(`${longest}a`)).toBeNull();
+    });
+
+    it("refuses a name that is not a string, or is empty", () => {
+      expect(safePreferenceKey("")).toBeNull();
+      expect(safePreferenceKey(undefined)).toBeNull();
+      expect(safePreferenceKey(42)).toBeNull();
+    });
+
+    it("refuses a name spelled with anything outside the alphabet", () => {
+      for (const key of ["ui_a b", "ui_a.b", `ui_a${CONTROL}b`, "ui_a/b", "ui_a:b", "__proto__"]) {
+        expect(safePreferenceKey(key)).toBeNull();
+      }
+    });
+
+    it("refuses such a name at the value rules too, without quoting it back", () => {
+      const check = validatePreference("ui_a b", "x");
+      expect(check.ok).toBe(false);
+      expect(check.reason).not.toContain("ui_a b");
+    });
+
+    it("drops such a name at the machine door rather than writing it out again", () => {
+      const out = sanitizePreferenceWrites({
+        "pref:wp_opacity": 80,
+        "pref:ui_a b": "x",
+        [`pref:ui_${"a".repeat(300)}`]: "x",
+        // Not a preference at all: the other namespaces pass through untouched.
+        "openclaw_token": "keep me",
+      });
+      expect(out).toEqual({ "pref:wp_opacity": 80, "openclaw_token": "keep me" });
+    });
+
+    it("does not serve such a name back on the read path", () => {
+      expect(sanitizePreferences({ wp_opacity: 80, "ui_a b": "x" })).toEqual({ wp_opacity: 80 });
+      expect(sanitizePreferenceValue("ui_a b", "x").ok).toBe(false);
+    });
+  });
+
 });

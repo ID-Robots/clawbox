@@ -279,4 +279,74 @@ describe("/setup-api/preferences", () => {
       expect(res.status).toBe(400);
     });
   });
+
+  /**
+   * The KEY half of the rules. `isAllowed` tested a PREFIX and nothing else,
+   * so everything after that prefix was free — any length, any character. Both
+   * writes in this route put a caller-supplied name onto an object
+   * (`result[key]` on the read, `entries["pref:" + key]` on the write), and the
+   * write one lands in config.json, so a caller with a session could park
+   * unbounded arbitrary names in the owner's store; CodeQL flagged both sinks
+   * (js/remote-property-injection, alerts #300 and #301 on main). The name is
+   * now rebuilt from a bounded alphabet the way project ids already are, so
+   * what reaches the object is made of those characters and no more than that
+   * many of them. A name that does not survive the rebuild is skipped, exactly
+   * as a name with the wrong prefix already was.
+   */
+  describe("preference key shape", () => {
+    const LONG_KEY = `ui_${"a".repeat(300)}`;
+    const ODD_KEY = "ui_a b";
+
+    it("does not serve a stored name longer than a preference name may be", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${LONG_KEY}`]: "x" });
+      const res = await GET(
+        new Request(`http://localhost/setup-api/preferences?keys=wp_opacity,${LONG_KEY}`),
+      );
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not serve a stored name spelled with characters a name may not carry", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${ODD_KEY}`]: "x" });
+      const res = await GET(
+        new Request(
+          `http://localhost/setup-api/preferences?keys=wp_opacity,${encodeURIComponent(ODD_KEY)}`,
+        ),
+      );
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not serve such a name through all=1 either", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${LONG_KEY}`]: "x" });
+      const res = await GET(new Request("http://localhost/setup-api/preferences?all=1"));
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not store an over-long name", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, [LONG_KEY]: "x" }),
+      }));
+      expect(await res.json()).toEqual({ ok: true });
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("does not store a name spelled with characters a name may not carry", async () => {
+      await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, [ODD_KEY]: "x" }),
+      }));
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("still stores the one name this product builds at runtime", async () => {
+      await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ app_EMoamEEZ73f0CkXaXp7hrann_settings: { autostart: true } }),
+      }));
+      expect(mockSetMany).toHaveBeenCalledWith({
+        "pref:app_EMoamEEZ73f0CkXaXp7hrann_settings": { autostart: true },
+      });
+    });
+  });
+
 });
