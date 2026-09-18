@@ -5327,15 +5327,28 @@ remove_shadowing_system_openclaw() {
       rm -rf "$parked" || echo "  WARN: could not remove $parked" >&2
     fi
     # What a tree removed by hand leaves: a launcher that points into an install
-    # that is no longer there. Dead either way, and `readlink -f` cannot resolve
-    # it, so it is judged on the link's own text.
+    # that is no longer there. `readlink -f` cannot resolve it — the tree is
+    # gone — so the target is normalised WITHOUT requiring it to exist
+    # (`readlink -m`) and must fall under THIS prefix's own tree. The link's
+    # text alone is not evidence: `/opt/vendor/lib/node_modules/openclaw/…` on a
+    # volume that is not mounted right now carries the same words and is
+    # somebody else's install. Never a launcher a package owns, and where
+    # `readlink -m` is not to be had the launcher is left alone.
     if [ -L "$launcher" ] && [ ! -e "$launcher" ] && [ ! -e "$tree" ]; then
-      case "$(readlink "$launcher" 2>/dev/null || true)" in
-        */lib/node_modules/openclaw/*)
-          echo "  Removing a dangling OpenClaw launcher left behind at $launcher"
-          rm -f "$launcher" || echo "  WARN: could not remove $launcher" >&2
-          ;;
-      esac
+      target="$(readlink -m "$launcher" 2>/dev/null || true)"
+      tree_real="$(readlink -m "$tree" 2>/dev/null || true)"
+      if [ -n "$target" ] && [ -n "$tree_real" ]; then
+        case "$target" in
+          "$tree_real"/*)
+            if command -v dpkg >/dev/null 2>&1 && dpkg -S "$launcher" >/dev/null 2>&1; then
+              echo "  NOTE: a package owns $launcher — leaving it to the package manager"
+            else
+              echo "  Removing a dangling OpenClaw launcher left behind at $launcher"
+              rm -f "$launcher" || echo "  WARN: could not remove $launcher" >&2
+            fi
+            ;;
+        esac
+      fi
     fi
     [ -d "$tree" ] && [ ! -L "$tree" ] || continue
     if ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"openclaw"' "$tree/package.json" 2>/dev/null; then

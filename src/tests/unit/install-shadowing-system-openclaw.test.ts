@@ -293,14 +293,52 @@ describe("remove_shadowing_system_openclaw", () => {
     }
   });
 
-  it("leaves a dangling launcher that points anywhere else", () => {
-    // An unmounted /opt volume, somebody's own wrapper target: not ours.
+  it("leaves a dangling launcher that points anywhere else — even one whose text says lib/node_modules/openclaw", () => {
+    // A vendor's core on an /opt volume that is not mounted right now. The
+    // words in the link are the same as npm's; the install is somebody else's,
+    // so the target has to fall under THIS prefix's tree, not merely read like one.
     const box = makeBox();
     try {
-      symlinkSync("/opt/not-mounted/openclaw/bin/openclaw", launcherOf(box.usr));
+      symlinkSync("/opt/vendor-not-mounted/lib/node_modules/openclaw/bin/openclaw", launcherOf(box.usr));
+      symlinkSync("/opt/not-mounted/openclaw/bin/openclaw", launcherOf(box.usrLocal));
       const r = run(box);
       expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim()).toBe("FINISHED");
       expect(isLink(launcherOf(box.usr))).toBe(true);
+      expect(isLink(launcherOf(box.usrLocal))).toBe(true);
+    } finally {
+      rmSync(box.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never removes a dangling launcher a package owns", () => {
+    const box = makeBox();
+    try {
+      npmGlobalInstall(box.usr, "2026.7.1-2");
+      rmSync(treeOf(box.usr), { recursive: true, force: true });
+      const r = run(box, { dpkgOwns: launcherOf(box.usr) });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/a package owns .*bin\/openclaw/);
+      expect(isLink(launcherOf(box.usr))).toBe(true);
+    } finally {
+      rmSync(box.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears a dangling launcher behind a linked prefix", () => {
+    // The same like-with-like rule as the live tree: /usr/local on another disk.
+    const box = makeBox();
+    try {
+      const real = path.join(box.dir, "nvme", "local");
+      mkdirSync(path.join(real, "bin"), { recursive: true });
+      const linked = path.join(box.dir, "linked-local");
+      symlinkSync(real, linked);
+      npmGlobalInstall(linked, "2026.7.1-2");
+      rmSync(treeOf(real), { recursive: true, force: true });
+      const r = run(box, { args: [linked] });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/dangling OpenClaw launcher/);
+      expect(isLink(launcherOf(real))).toBe(false);
     } finally {
       rmSync(box.dir, { recursive: true, force: true });
     }

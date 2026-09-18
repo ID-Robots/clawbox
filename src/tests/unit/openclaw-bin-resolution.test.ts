@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 /**
  * 2026-09-18 — "Credential migration failed. The subscription sign-in was
@@ -177,11 +178,57 @@ describe("nothing freezes the resolver's answer at import", () => {
     });
   }
 
+  /**
+   * Does evaluating this initializer CALL findOpenclawBin()? Scope-aware on
+   * purpose: a regex on the line either misses a capture that is not the bare
+   * form (`process.env.OPENCLAW_BIN || findOpenclawBin()`) or, widened, flags
+   * the fix itself — `const openclawBin = (): string => findOpenclawBin()` is
+   * a module-level declaration too, and it captures nothing. A function body
+   * is not evaluated at import, so the walk stops at one.
+   */
+  function callsResolverWhenEvaluated(node: ts.Node): boolean {
+    if (ts.isFunctionLike(node)) return false;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "findOpenclawBin") {
+      return true;
+    }
+    return ts.forEachChild(node, callsResolverWhenEvaluated) ?? false;
+  }
+
+  function moduleScopeCaptures(file: string, text: string): string[] {
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+    return source.statements
+      .filter(ts.isVariableStatement)
+      .flatMap((statement) => [...statement.declarationList.declarations])
+      .filter((declaration) => declaration.initializer && callsResolverWhenEvaluated(declaration.initializer))
+      .map((declaration) => declaration.name.getText(source));
+  }
+
+  it("recognises a capture by what it evaluates, not by how the line is spelled", () => {
+    const captured = (code: string) => moduleScopeCaptures("fixture.ts", code);
+    expect(captured("const A = findOpenclawBin();")).toEqual(["A"]);
+    expect(captured("export const B = process.env.OPENCLAW_BIN || findOpenclawBin();")).toEqual(["B"]);
+    expect(captured("let C = path.dirname(findOpenclawBin());")).toEqual(["C"]);
+    // Per-call lookups, at module scope and inside a function: neither captures.
+    expect(captured("const openclawBin = (): string => findOpenclawBin();")).toEqual([]);
+    expect(captured("function f() { const bin = findOpenclawBin(); return bin; }")).toEqual([]);
+    expect(captured("const o = { bin() { return findOpenclawBin(); } };")).toEqual([]);
+  });
+
   it("no module-scope capture outside the configure route's sentinel", () => {
     const captures = sources(SRC)
-      .filter((file) => /^(?:export )?(?:const|let|var) \w+ = findOpenclawBin\(\);/m.test(readFileSync(file, "utf-8")))
-      .map((file) => path.relative(SRC, file))
+      .map((file) => ({ file, text: readFileSync(file, "utf-8") }))
+      // Parsing is the expensive half; only a file that names the resolver can capture it.
+      .filter(({ text }) => text.includes("findOpenclawBin"))
+      .filter(({ file, text }) => moduleScopeCaptures(file, text).length > 0)
+      .map(({ file }) => path.relative(SRC, file))
       .filter((file) => !ALLOWED.has(file));
     expect(captures).toEqual([]);
+  });
+
+  it("the sentinel is still there to be exempted", () => {
+    // An exemption for a capture that no longer exists is a hole, not a rule.
+    const [allowed] = [...ALLOWED];
+    const file = path.join(SRC, allowed);
+    expect(moduleScopeCaptures(file, readFileSync(file, "utf-8"))).toEqual(["OPENCLAW_BIN"]);
   });
 });
