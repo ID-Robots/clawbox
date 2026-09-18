@@ -107,22 +107,31 @@ let hostnameCache: { signature: string; hostname: string | null } | null = null;
 
 export function readNamedTunnelHostnameSync(): string | null {
   const file = namedTunnelCredentialPath();
-  let signature: string;
+  // One descriptor for both the identity and the bytes, so what is cached is
+  // what was read — never a stat of one file and the contents of its successor.
+  let fd: number;
   try {
-    const st = fs.statSync(file);
-    signature = `${file}:${st.ino}:${st.size}:${st.mtimeMs}`;
+    fd = fs.openSync(file, "r");
   } catch {
     return null;
   }
-  if (hostnameCache?.signature === signature) return hostnameCache.hostname;
-  let hostname: string | null = null;
   try {
-    hostname = parseCredential(fs.readFileSync(file, "utf-8"))?.hostname ?? null;
+    const st = fs.fstatSync(fd);
+    const signature = `${file}:${st.ino}:${st.size}:${st.mtimeMs}`;
+    if (hostnameCache?.signature === signature) return hostnameCache.hostname;
+    let hostname: string | null = null;
+    try {
+      hostname = parseCredential(fs.readFileSync(fd, "utf-8"))?.hostname ?? null;
+    } catch {
+      hostname = null;
+    }
+    hostnameCache = { signature, hostname };
+    return hostname;
   } catch {
-    hostname = null;
+    return null;
+  } finally {
+    fs.closeSync(fd);
   }
-  hostnameCache = { signature, hostname };
-  return hostname;
 }
 
 /**
