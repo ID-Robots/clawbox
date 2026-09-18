@@ -258,11 +258,28 @@ describe("preference-schema", () => {
       }
     });
 
+    /**
+     * Written against the WIDEST name this product can assemble rather than
+     * against the constant: a fixture derived from MAX_PREFERENCE_KEY_LENGTH
+     * passes at any value of it, so a later "tidy-up" could lower the bound to
+     * 64 with every test still green — and an app whose id is long would
+     * silently stop being able to save its settings.
+     */
+    it("leaves room for the widest name this product assembles", () => {
+      const widest = `app_${"a".repeat(64)}_settings`; // APP_ID_RE caps an id at 64
+      expect(widest).toHaveLength(77);
+      expect(MAX_PREFERENCE_KEY_LENGTH).toBeGreaterThanOrEqual(77);
+      expect(safePreferenceKey(widest)).toBe(widest);
+    });
+
     it("refuses a name longer than a name may be, and keeps the longest legal one", () => {
       const longest = `ui_${"a".repeat(MAX_PREFERENCE_KEY_LENGTH - 3)}`;
       expect(longest).toHaveLength(MAX_PREFERENCE_KEY_LENGTH);
       expect(safePreferenceKey(longest)).toBe(longest);
       expect(safePreferenceKey(`${longest}a`)).toBeNull();
+      // A hard-coded over-length literal too, so the reject side does not move
+      // with the constant either.
+      expect(safePreferenceKey(`ui_${"a".repeat(300)}`)).toBeNull();
     });
 
     it("refuses a name that is not a string, or is empty", () => {

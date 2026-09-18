@@ -38,19 +38,28 @@ function isAnonymousReadable(allParam: string | null, keysParam: string | null):
 // Allowed preference keys (prefix-based whitelist)
 const ALLOWED_PREFIXES = ["wp_", "desktop_", "ui_", "app_", "installed_", "icon_", "pinned_", "hidden_"];
 
+/** Does this door own that name at all? The prefix, and only the prefix. */
+function isAllowed(key: string) {
+  return ALLOWED_PREFIXES.some((p) => key.startsWith(p));
+}
+
 /**
- * The name this route will use for a name the caller sent, or null.
+ * The name this route will READ under, or null.
  *
  * Two rules, and the second is why this returns a STRING rather than a boolean.
  * The prefix says which names this door owns; `safePreferenceKey` rebuilds the
- * name out of a bounded alphabet, so the value that reaches `result[…]` and
- * `entries[…]` below is made of those characters rather than being the
- * caller's own string. The prefix test alone left everything after `ui_` free
- * — any length, any character — and both writes below are on the caller's
- * side of that gap (CodeQL js/remote-property-injection #300 and #301).
+ * name out of a bounded alphabet, so the value that reaches `result[…]` below
+ * is made of those characters rather than being the caller's own string. The
+ * prefix test alone left everything after `ui_` free — any length, any
+ * character — and both of this route's writes were on the caller's side of
+ * that gap (CodeQL js/remote-property-injection #300 and #301).
+ *
+ * The READ filters, as it always has for a name with the wrong prefix: a query
+ * that names something unreadable is answered with what IS readable rather
+ * than refused. The write does not — see the POST handler.
  */
-function allowedKey(key: string): string | null {
-  if (!ALLOWED_PREFIXES.some((p) => key.startsWith(p))) return null;
+function readableKey(key: string): string | null {
+  if (!isAllowed(key)) return null;
   return safePreferenceKey(key);
 }
 
@@ -128,7 +137,7 @@ export async function GET(req: Request) {
       { status: 400 },
     );
   }
-  const keys = named.map(allowedKey).filter((key): key is string => key !== null);
+  const keys = named.map(readableKey).filter((key): key is string => key !== null);
   // One read of the store rather than one per key: config.get() re-reads and
   // re-parses the whole file synchronously on every call, so the work of a
   // request would otherwise follow the length of its `keys` parameter.
@@ -142,9 +151,12 @@ export async function GET(req: Request) {
 
 // POST /setup-api/preferences  { wp_opacity: 80, wp_bg_color: "#111" }
 //
-// Every value is validated before it is stored. The request is rejected whole
-// rather than partially applied — a caller that sent an impossible value
-// should learn that, not have the rest of its bundle silently land.
+// Every name and every value is validated before it is stored. The request is
+// rejected whole rather than partially applied — a caller that sent an
+// impossible name or an impossible value should learn that, not have the rest
+// of its bundle silently land. A name this door does not own at all (the wrong
+// prefix) is a different thing and is still skipped: the caller was not asking
+// this route to store it.
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -173,17 +185,31 @@ export async function POST(req: Request) {
     }
     const entries: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(body)) {
-      // A name that does not pass is SKIPPED, exactly as a name with the wrong
-      // prefix already was, rather than failing the request: the two are the
-      // same kind of "this door does not own that name", and a 400 here would
-      // start refusing whole desktop writes over one stray entry.
-      const safeKey = allowedKey(key);
-      if (!safeKey) continue;
+      // A name with the wrong prefix is not this door's to write and is
+      // skipped, as it always has been. A name WITH the prefix but spelled
+      // impossibly is this door's and is refused, like an impossible value:
+      // the caller meant a preference, so it should learn that the write did
+      // not land rather than read `ok: true` over it — the desktop's own
+      // writer branches on nothing but the response (page.tsx's
+      // usePreferenceWriter, InstalledAppSettings), which is exactly how a
+      // dropped write would have been rendered as "Saved".
+      if (!isAllowed(key)) continue;
+      const safeKey = safePreferenceKey(key);
+      if (!safeKey) {
+        // The name is NOT quoted back: it is caller-supplied, and this body is
+        // both returned and logged.
+        console.error("[preferences] Rejected write: name outside the preference alphabet");
+        return NextResponse.json(
+          { error: "preference name is not one this box stores" },
+          { status: 400 },
+        );
+      }
       const check = validatePreference(safeKey, value);
       if (!check.ok) {
-        // The reason is built from the rejected key, which is caller-supplied
-        // and only prefix-checked — bound and sanitise it like any other
-        // request-derived log field.
+        // The reason is built from the rejected key. That key is now bounded
+        // and alphabet-only (`safePreferenceKey` above), so `logSafe` is the
+        // second rule rather than the only one — kept because this line must
+        // stay safe whatever the reason is built from next.
         console.error(`[preferences] Rejected write: ${logSafe(check.reason ?? "")}`);
         return NextResponse.json({ error: check.reason ?? "Invalid preference value" }, { status: 400 });
       }

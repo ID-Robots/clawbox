@@ -321,20 +321,39 @@ describe("/setup-api/preferences", () => {
       expect(await res.json()).toEqual({ wp_opacity: 80 });
     });
 
-    it("does not store an over-long name", async () => {
+    it("refuses the whole write for an over-long name rather than dropping it", async () => {
       const res = await POST(new Request("http://localhost/setup-api/preferences", {
         method: "POST",
         body: JSON.stringify({ wp_opacity: 80, [LONG_KEY]: "x" }),
       }));
-      expect(await res.json()).toEqual({ ok: true });
-      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+      expect(res.status).toBe(400);
+      // Whole, not partial: the legal key beside it did not land either.
+      expect(mockSetMany).not.toHaveBeenCalled();
     });
 
-    it("does not store a name spelled with characters a name may not carry", async () => {
-      await POST(new Request("http://localhost/setup-api/preferences", {
+    it("refuses the whole write for a name spelled with characters a name may not carry", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
         method: "POST",
         body: JSON.stringify({ wp_opacity: 80, [ODD_KEY]: "x" }),
       }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("does not quote the refused name back in the body", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ [ODD_KEY]: "x" }),
+      }));
+      expect(JSON.stringify(await res.json())).not.toContain(ODD_KEY);
+    });
+
+    it("still SKIPS a name this door does not own, as it always has", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, "bad prefix": "x" }),
+      }));
+      expect(await res.json()).toEqual({ ok: true });
       expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
     });
 
