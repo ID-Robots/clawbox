@@ -157,12 +157,27 @@ describe("coding_run_list", () => {
       attempts: "2 of 3",
       deliverable: { kind: "files", files: ["index.html"], met: false, missing: "index.html was not created" },
       messages_waiting: 1,
-      can_resume: true,
     });
+    // Paused for an allowance that is not back until 2099: not resumable yet.
+    expect(runs[0]).not.toHaveProperty("can_resume");
     expect(String(runs[0].paused_because)).toMatch(/daily image allowance is used up; it comes back at 06:00 UTC/);
     expect(runs[1]).toMatchObject({ run_id: "run-live0001", detached: true, copy: "in use" });
     expect(runs[2]).toMatchObject({ run_id: "run-done0001", left_running: true });
     expect(String(runs[2].copy)).toMatch(/files removed; the work is kept on branch/);
+  });
+
+  it("does not mark a run resumable while the allowance that paused it is still spent", async () => {
+    apiGet.mockResolvedValue({
+      runs: [
+        { ...RUN, id: "run-spent001", status: "paused", pauseReason: { kind: "allowance", meter: "weekly", resetsAt: "2099-01-01T00:00:00.000Z", message: "x" } },
+        { ...RUN, id: "run-back0001", status: "paused", pauseReason: { kind: "allowance", meter: "weekly", resetsAt: "2000-01-01T00:00:00.000Z", message: "x" } },
+      ],
+    });
+    const out = await harness().call("coding_run_list", { status: "all", limit: 10 });
+    if (out.isError) throw new Error("expected a list");
+    const { runs } = JSON.parse(out.text) as { runs: Record<string, unknown>[] };
+    expect(runs[0]).not.toHaveProperty("can_resume");
+    expect(runs[1]).toMatchObject({ can_resume: true });
   });
 
   it("filters by status and project, and says so when nothing matches", async () => {
@@ -237,6 +252,26 @@ describe("coding_agent_resume", () => {
     expect(apiPost.mock.calls.map((c) => c[0])).toEqual(["/setup-api/coding-agent/message", "/setup-api/coding-agent/resume"]);
     expect(apiPost.mock.calls[0][1]).toEqual({ runId: RUN.id, text: "index.html goes in the root" });
     expect(out.text).toMatch(/given your message/);
+  });
+
+  it("says the message is already queued when the resume itself is refused", async () => {
+    // The message goes onto the record before the resume is asked for and stays
+    // there; without this line a retry sends the same correction twice.
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "paused" } });
+    apiPost
+      .mockResolvedValueOnce({ queued: true, delivered: false })
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "Another run is using that folder.", kind: "busy" })));
+    const out = await harness().call("coding_agent_resume", { run_id: RUN.id, message: "use blue" });
+    if (!out.isError) throw new Error("expected a refusal");
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/Another run is using that folder/);
+    expect(out.error.message).toMatch(/already queued .* do not send it again/);
+
+    apiPost.mockReset();
+    apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "busy", kind: "busy" })));
+    const bare = await harness().call("coding_agent_resume", { run_id: RUN.id });
+    if (!bare.isError) throw new Error("expected a refusal");
+    expect(bare.error.message).not.toMatch(/queued/);
   });
 
   it("refuses the owner's run without touching it", async () => {

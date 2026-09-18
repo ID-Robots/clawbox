@@ -105,7 +105,9 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
   }
   if (running) {
     guidance.push("An indexing pass is running. Tell the user how far it has got; do not check again in a loop — ask again only when they do.");
-  } else {
+  } else if (s.enabled !== false) {
+    // Not while it is off: the index route refuses a pass then (409
+    // `disabled`), so sending the owner to Reindex would send them to a refusal.
     guidance.push(
       "You cannot start indexing: it re-reads and re-embeds the owner's documents and can take hours, so the ClawBox takes it only from the owner."
       + " If the user wants the index refreshed, open the Memory Shard app with ui_open_app(\"memory-shard\") and tell them to press Reindex there; this tool then shows its progress.",

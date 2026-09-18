@@ -22,7 +22,7 @@
 
 import { basename } from "path";
 import { apiGet, apiPost, apiTry } from "../lib/api";
-import { ApiError, redact, ToolError, type ErrorRule } from "../lib/errors";
+import { ApiError, classifyError, redact, ToolError, type ErrorRule } from "../lib/errors";
 import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zOptText, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
@@ -856,7 +856,9 @@ function runRow(run: RunPayload, vercel: boolean): Record<string, unknown> {
     ...(run.pipeline && typeof run.pipeline.status === "string" ? { pipeline: run.pipeline.status } : {}),
     ...(run.review && typeof run.review.state === "string" ? { pull_request: `#${run.review.prNumber} ${run.review.state}` } : {}),
     ...(vercel && run.vercel && typeof run.vercel.phase === "string" ? { deployment: run.vercel.phase } : {}),
-    ...((run.status === "paused" || run.status === "gave_up") && run.source === "agent" ? { can_resume: true } : {}),
+    // Not while the allowance that paused it is still spent: coding_agent_resume
+    // refuses that case itself, and a row saying otherwise invites the call.
+    ...((run.status === "paused" || run.status === "gave_up") && run.source === "agent" && !allowanceStillSpent(run) ? { can_resume: true } : {}),
   };
 }
 
@@ -1463,17 +1465,29 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         // is taken, the folder is gone, the account it was opened on is no
         // longer connected — and each is something to tell the user, not to
         // retry. Carried through; the envelope scrubs paths and secrets from it.
+        let refusal: unknown = err;
         if (err instanceof ApiError && (err.status === 409 || err.status === 400 || (err.status === 404 && !/coding run/i.test(err.body)))) {
-          throw new ToolError(
+          refusal = new ToolError(
             "CONFLICT",
             routeReason(err) ?? "The ClawBox would not resume that run as things stand.",
             RESUME_NEXT,
           );
+        } else if (err instanceof ApiError && err.status === 404) {
+          refusal = new ToolError("NOT_FOUND", "There is no coding run with that id on this ClawBox.", STATUS_RULES[0].next);
         }
-        if (err instanceof ApiError && err.status === 404) {
-          throw new ToolError("NOT_FOUND", "There is no coding run with that id on this ClawBox.", STATUS_RULES[0].next);
+        // The message went onto the run's record BEFORE the resume was asked
+        // for, and a refused resume does not take it back: it waits there for
+        // the next resume. Unsaid, the retry this refusal may invite sends it a
+        // second time, and the run reads the same correction twice.
+        if (told) {
+          const e = classifyError(refusal, "coding_agent_resume");
+          throw new ToolError(
+            e.code,
+            `${e.message} Your message is already queued on the run and it reads it when it is next resumed — do not send it again.`,
+            e.next,
+          );
         }
-        throw err;
+        throw refusal;
       }
       return text(
         `Resumed run ${run_id} in its own session${res.run?.worktree ? ` on branch ${res.run.worktree.branch}` : ""}.`

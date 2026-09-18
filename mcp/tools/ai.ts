@@ -174,23 +174,32 @@ interface UsageBody {
   };
 }
 
+/** How "used of limit" is said for one window — the card's `countOf` / `minutesOf` / `tokensOf`. */
+type OfLine = (used: number, limit: number) => string;
+const countOf: OfLine = (used, limit) => `${used} of ${limit}`;
+const minutesOf: OfLine = (used, limit) => `${Math.round(used / 60)} of ${Math.round(limit / 60)} min`;
+/** The weekly pool, the burst ceiling and the indexing meter count tokens. */
+const tokensOf: OfLine = (used, limit) => `${used.toLocaleString("en-US")} of ${limit.toLocaleString("en-US")} tokens`;
+
 /** What each weekly meter counts, and how to say a number of it. */
-const METERS: Record<string, { label: string; unit: (n: number) => string }> = {
-  images: { label: "pictures", unit: (n) => `${n}` },
-  speechSeconds: { label: "spoken replies", unit: (n) => `${Math.round(n / 60)} min` },
-  audioSeconds: { label: "transcribed audio", unit: (n) => `${Math.round(n / 60)} min` },
-  embeddingsTokens: { label: "memory indexing", unit: (n) => `${n.toLocaleString("en-US")} tokens` },
+const METERS: Record<string, { label: string; of: OfLine }> = {
+  images: { label: "pictures", of: countOf },
+  speechSeconds: { label: "spoken replies", of: minutesOf },
+  audioSeconds: { label: "transcribed audio", of: minutesOf },
+  embeddingsTokens: { label: "memory indexing", of: tokensOf },
 };
 
 /** A window as one line: how much is used, whether it is spent, when it frees up. */
-function windowLine(w: UsageWindow | null | undefined, unit: (n: number) => string = (n) => `${n}`): string | null {
+function windowLine(w: UsageWindow | null | undefined, ofLine: OfLine = countOf): string | null {
   if (!w) return null;
   if (w.unavailable) return "could not be read";
   if (typeof w.limit === "number" && w.limit <= 0) return "not part of this plan";
   const pct = typeof w.percentUsed === "number" ? `${Math.round(w.percentUsed)}% used` : null;
-  const of = typeof w.used === "number" && typeof w.limit === "number" ? `${unit(w.used)} of ${unit(w.limit)}` : null;
+  const of = typeof w.used === "number" && typeof w.limit === "number" ? ofLine(w.used, w.limit) : null;
   const spent = w.isOverLimit ? "USED UP" : null;
-  const frees = w.resetAt && !Number.isNaN(Date.parse(w.resetAt))
+  // Only a window holding usage has anything to free up — the usage card's own
+  // rule; an empty one's reset instant means nothing.
+  const frees = typeof w.used === "number" && w.used > 0 && w.resetAt && !Number.isNaN(Date.parse(w.resetAt))
     ? `frees up at ${new Date(Date.parse(w.resetAt)).toISOString().slice(0, 16).replace("T", " ")} UTC`
     : null;
   return [spent, pct, of, frees].filter(Boolean).join(", ") || null;
@@ -238,7 +247,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       }
       const meters: Record<string, string> = {};
       for (const [key, meter] of Object.entries(METERS)) {
-        const line = windowLine(u.meters?.[key], meter.unit);
+        const line = windowLine(u.meters?.[key], meter.of);
         if (line) meters[meter.label] = line;
       }
       const credits = u.credits && !u.credits.unavailable && typeof u.credits.balanceCents === "number"
@@ -247,8 +256,8 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       return json({
         plan,
         ...(u.billingInterval ? { billed: u.billingInterval === "year" ? "yearly" : "monthly" } : {}),
-        weekly_allowance: windowLine(u.weekly) ?? "unknown",
-        ...(u.burst ? { five_hour_limit: windowLine(u.burst) ?? "unknown" } : {}),
+        weekly_allowance: windowLine(u.weekly, tokensOf) ?? "unknown",
+        ...(u.burst ? { five_hour_limit: windowLine(u.burst, tokensOf) ?? "unknown" } : {}),
         ...(Object.keys(meters).length ? { this_week: meters } : {}),
         ...(credits ? { credits } : {}),
         ...(body.timeZone ? { box_time_zone: body.timeZone } : {}),

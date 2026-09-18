@@ -128,9 +128,17 @@ export function registerLocalAiTools(reg: Registrar): void {
         .map(engineRow);
       const missing = rows.filter((r) => r.installed === false && r.state !== "not-on-this-edition").map((r) => r.name);
       const unreadable = (inventory.unavailable ?? []).filter((id) => engine === "all" || id === engine);
+      // The inventory leaves the embeddings row OUT until the device has asked
+      // the memory index once (a cold peek answers nothing, and the Local AI tab
+      // simply polls). Neither failed nor absent — an agent reading an empty row
+      // set as "there is no embedding model" would tell the user something false.
+      const embeddingsPending = wants("embeddings")
+        && !rows.some((r) => r.id === "embeddings")
+        && !unreadable.includes("embeddings");
       return json({
         engines: rows,
         ...(unreadable.length ? { could_not_read: unreadable } : {}),
+        ...(embeddingsPending ? { not_read_yet: "embeddings — the device is still reading the memory index; ask again in a moment" } : {}),
         ...(voice
           ? {
             voice: {

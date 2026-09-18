@@ -852,7 +852,9 @@ bearer 403 for those, whatever their state), when it is not `paused`/`gave_up`
 (a `failed` run that hit a ceiling is sent to `coding_agent_run
 resume_run_id`), and when the allowance that paused it has a known reset time
 still in the future — resuming then only buys the same refusal. With `message`
-the text is queued first (`…/message`), so the run reads it as it goes back in.
+the text is queued first (`…/message`), so the run reads it as it goes back in;
+a resume refused after that says the message is already queued, so a retry does
+not send it twice. `can_resume` is left off a run whose allowance is still spent.
 Every other refusal is the route's own sentence (the slot is taken, the folder
 is gone, the account it ran on is no longer connected), carried through as
 CONFLICT / do-not-retry. `coding_agent_stop` on a `paused` run closes it
@@ -984,6 +986,9 @@ engine the box uses now (`GET /setup-api/tts` `choice`/`activeEngine`, `GET
 sizes and free disk (`GET /setup-api/whisper`), `engine: "embeddings"` the
 embedding service's unit state (`GET /setup-api/embed/status`). Each leg past
 the inventory is independent, so one that does not answer costs only its line.
+The inventory leaves the embeddings row out until the device has read the
+memory index once; the answer then says `not_read_yet` rather than implying
+there is no embedding model.
 
 **There is no install tool.** Since 2026-09-15 an install or update puts no
 engine or model on a box but llama.cpp and Gemma 4, so Settings → Local AI's
@@ -1075,8 +1080,8 @@ You may NOT deploy this project to production: the owner has not allowed it. Off
   "guidance": "Not installed here: Kokoro. The owner installs an engine with Install in Settings → Local AI …" }
 
 // clawbox_ai_usage {}
-{ "plan": "Pro", "weekly_allowance": "40% used, 40 of 100, frees up at 2026-09-21 00:00 UTC",
-  "five_hour_limit": "USED UP, 100% used, 10 of 10, frees up at 2026-09-18 15:00 UTC", "credits": "12.50 EUR left" }
+{ "plan": "Pro", "weekly_allowance": "40% used, 40 of 100 tokens, frees up at 2026-09-21 00:00 UTC",
+  "five_hour_limit": "USED UP, 100% used, 10 of 10 tokens, frees up at 2026-09-18 15:00 UTC", "credits": "12.50 EUR left" }
 "ClawBox AI does not share usage details with this box yet. Tell the user they can see them in their account on clawbox.com."
 ```
 

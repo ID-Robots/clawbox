@@ -144,6 +144,8 @@ describe("memory_shard_status", () => {
     if (out.isError) return;
     expect(out.text).toMatch(/switched OFF/);
     expect(out.text).not.toMatch(/Search the indexed documents/);
+    // The index route refuses a pass while it is off, so no Reindex advice.
+    expect(out.text).not.toMatch(/Reindex/);
   });
 });
 
@@ -175,6 +177,23 @@ describe("local_ai_status", () => {
     expect(s.transcription).toMatchObject({ first_choice: "on the box (Whisper)", tried_in_order: ["local", "cloud"] });
     expect(s.guidance).toMatch(/Not installed here: Kokoro/);
     expect(s.guidance).toMatch(/Settings → Local AI/);
+  });
+
+  it("says the embeddings row is not read yet instead of leaving it out silently", async () => {
+    // The inventory omits the row until the device has asked the memory index
+    // once; an empty answer read as "no embedding model" would be false.
+    apiGet.mockResolvedValue({ models: INVENTORY.models.filter((m) => m.id !== "embeddings"), unavailable: [] });
+    apiTry.mockResolvedValue(null);
+    const out = await harness("openclaw").call("local_ai_status", { engine: "embeddings" });
+    if (out.isError) throw new Error("expected a status");
+    const s = JSON.parse(out.text) as { engines: unknown[]; not_read_yet?: string };
+    expect(s.engines).toEqual([]);
+    expect(s.not_read_yet).toMatch(/still reading the memory index/);
+
+    apiGet.mockResolvedValue(INVENTORY);
+    const warm = await harness("openclaw").call("local_ai_status", { engine: "all" });
+    if (warm.isError) throw new Error("expected a status");
+    expect(JSON.parse(warm.text)).not.toHaveProperty("not_read_yet");
   });
 
   it("narrows to one engine and adds what only that engine's route knows", async () => {
@@ -224,12 +243,30 @@ describe("clawbox_ai_usage", () => {
     expect(u).toMatchObject({
       plan: "Pro",
       billed: "monthly",
-      weekly_allowance: "40% used, 40 of 100, frees up at 2026-09-21 00:00 UTC",
-      five_hour_limit: "USED UP, 100% used, 10 of 10, frees up at 2026-09-18 15:00 UTC",
-      this_week: { pictures: "6% used, 3 of 50", "spoken replies": "17% used, 10 min of 60 min", "memory indexing": "not part of this plan" },
+      weekly_allowance: "40% used, 40 of 100 tokens, frees up at 2026-09-21 00:00 UTC",
+      five_hour_limit: "USED UP, 100% used, 10 of 10 tokens, frees up at 2026-09-18 15:00 UTC",
+      this_week: { pictures: "6% used, 3 of 50", "spoken replies": "17% used, 10 of 60 min", "memory indexing": "not part of this plan" },
       credits: "12.50 EUR left, 1.00 spent this week",
       box_time_zone: "Europe/Sofia",
     });
+  });
+
+  it("gives an empty window no reset time, as the usage card does", async () => {
+    apiGet.mockResolvedValue({
+      available: true,
+      usage: {
+        shape: "weekly",
+        plan: "pro",
+        weekly: { used: 0, limit: 1000, percentUsed: 0, isOverLimit: false, resetAt: "2026-09-21T00:00:00.000Z", unavailable: false },
+        burst: null,
+        meters: {},
+        credits: null,
+        billingInterval: null,
+      },
+    });
+    const out = await harness("openclaw").call("clawbox_ai_usage", {});
+    if (out.isError) throw new Error("expected an answer");
+    expect(JSON.parse(out.text).weekly_allowance).toBe("0% used, 0 of 1,000 tokens");
   });
 
   it("answers the portal refusing the box as an answer, with where the owner can look", async () => {
