@@ -12,6 +12,8 @@ import {
   formatFileSize,
   mediaDownloadUrl,
   mediaDisplayName,
+  mediaFileSize,
+  acceptableSource,
 } from "@/lib/chat-media";
 
 // The exact reply shape the image tool produced on the device: a caption, a
@@ -20,6 +22,13 @@ const REAL_REPLY =
   "Here's your cat! \u{1F431}\n\nMEDIA:/home/clawbox/.openclaw/media/tool-image-generation/image-1---84d24458-84ba-4d45-b90f-de4476c32c31.png";
 const REAL_PATH =
   "/home/clawbox/.openclaw/media/tool-image-generation/image-1---84d24458-84ba-4d45-b90f-de4476c32c31.png";
+
+// The URL OpenClaw handed the desktop for a file the agent sent (TASK-892,
+// board 1791626120943): ROOT-RELATIVE, into the gateway's own media tree, and
+// ending in a variant rather than a name. The session key's colons arrive
+// percent-encoded — the broken card's href double-encoded them as `%253A`.
+const GATEWAY_URL =
+  "/api/chat/media/outgoing/agent%3Amain%3Amain/7c9e6679-7425-40de-944b-e07fc1f90ae7/full";
 
 describe("chat-media", () => {
   describe("splitMediaDirectives", () => {
@@ -134,6 +143,70 @@ describe("chat-media", () => {
         "/setup-api/chat/media?path=%2Fa%2Fb%3Fc%3D1.png",
       );
     });
+
+    it("passes a root-relative gateway media URL through — it is a URL, not a path", () => {
+      // Wrapped as `/setup-api/chat/media?path=/api/chat/media/…` it 404'd:
+      // that route opens files under the media root and the workspace, and a
+      // URL path is neither.
+      expect(mediaUrl(GATEWAY_URL)).toBe(GATEWAY_URL);
+      expect(mediaUrl(GATEWAY_URL, "text/csv")).toBe(GATEWAY_URL);
+      expect(mediaUrl(`${GATEWAY_URL}?v=2`)).toBe(`${GATEWAY_URL}?v=2`);
+    });
+
+    it("normalises a gateway URL, and wraps one whose dot-segments leave the media tree", () => {
+      expect(mediaUrl("/api/chat/media/outgoing/x/../y/full")).toBe("/api/chat/media/outgoing/y/full");
+      for (const escape of [
+        "/api/chat/media/../../setup-api/files",
+        "/api/chat/media/%2e%2e/%2E%2E/setup-api/files",
+        "/api/chat/media/x\\..\\..\\..\\setup-api/files",
+      ]) {
+        // Never handed to the browser as a same-origin URL; as a path, the
+        // media route refuses it like any other file outside its roots.
+        expect(mediaUrl(escape), escape).toBe(
+          `/setup-api/chat/media?path=${encodeURIComponent(escape)}`,
+        );
+      }
+    });
+
+    it("passes through only the media tree, not the rest of the gateway API", () => {
+      expect(mediaUrl("/api/chat/media/")).toBe(
+        `/setup-api/chat/media?path=${encodeURIComponent("/api/chat/media/")}`,
+      );
+      expect(mediaUrl("/api/sessions/x")).toBe(
+        `/setup-api/chat/media?path=${encodeURIComponent("/api/sessions/x")}`,
+      );
+    });
+  });
+
+  describe("acceptableSource", () => {
+    it("accepts a gateway media URL, a local path, https and file://", () => {
+      for (const source of [
+        GATEWAY_URL,
+        "/home/clawbox/.openclaw/workspace/report.csv",
+        "report.csv",
+        "https://example.com/a.pdf",
+        "file:///w/a.pdf",
+      ]) {
+        expect(acceptableSource(source), source).toBe(true);
+      }
+    });
+
+    it("refuses a gateway API URL that is not a file in its media tree", () => {
+      for (const source of [
+        "/api/sessions/list",
+        "/api/chat/media/",
+        "/api/chat/media/../../setup-api/files",
+        "/api/chat/media/%2e%2e/%2e%2e/setup-api/files",
+      ]) {
+        expect(acceptableSource(source), source).toBe(false);
+      }
+    });
+
+    it("still refuses non-https schemes and nothing at all", () => {
+      for (const source of ["javascript:alert(1)", "http://10.0.0.1/x.pdf", "data:text/html,hi", ""]) {
+        expect(acceptableSource(source), source).toBe(false);
+      }
+    });
   });
 
   describe("mediaFileName", () => {
@@ -163,6 +236,20 @@ describe("chat-media", () => {
     it("falls back rather than yielding an empty name", () => {
       expect(mediaFileName("/setup-api/chat/media?path=%2F")).toBe("image.png");
       expect(mediaFileName("")).toBe("image.png");
+    });
+
+    it("never names a gateway file after its variant segment", () => {
+      // The card read "full" — the last segment of the URL, not a name.
+      expect(mediaFileName(GATEWAY_URL)).toBe("image.png");
+      expect(mediaDisplayName(GATEWAY_URL)).toBe("file");
+      // A gateway URL whose last segment plainly is a name keeps it.
+      expect(mediaFileName("/api/chat/media/outgoing/s/7c9e/cat.png")).toBe("cat.png");
+    });
+
+    it("uses the name the attachment payload carried, over anything the URL says", () => {
+      expect(mediaFileName(`${GATEWAY_URL}#name=report.csv&size=2048`)).toBe("report.csv");
+      expect(mediaFileName(`${mediaUrl("/w/7c9e-report.csv")}#name=report.csv`)).toBe("report.csv");
+      expect(mediaFileName(`${GATEWAY_URL}#name=Q3+report+%C3%A9t%C3%A9.csv`)).toBe("Q3 report été.csv");
     });
   });
 
@@ -355,6 +442,62 @@ describe("chat-media", () => {
       expect(extractFileAttachments({ mediaUrls: urls }).files).toHaveLength(8);
       expect(boundedFiles(["a", "a", "b"])).toEqual(["a", "b"]);
     });
+
+    it("keeps a gateway file downloadable, with the name and size its part carried", () => {
+      const msg = {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here is the report." },
+          {
+            type: "attachment",
+            attachment: { url: GATEWAY_URL, kind: "document", mimeType: "text/csv", label: "report.csv", size: 2048 },
+          },
+        ],
+      };
+      const { images, files } = extractFileAttachments(msg);
+      expect(images).toEqual([]);
+      expect(files).toEqual([`${GATEWAY_URL}#name=report.csv&size=2048`]);
+      expect(mediaDisplayName(files[0])).toBe("report.csv");
+      expect(mediaFileSize(files[0])).toBe(2048);
+      // The href the browser follows: the gateway URL itself, same-origin via
+      // the /api proxy — not the media route, which answered 404.
+      expect(mediaDownloadUrl(files[0])).toBe(GATEWAY_URL);
+    });
+
+    it("reads the name and size a provider spells differently, and cleans them", () => {
+      const part = (attachment: Record<string, unknown>) => ({
+        content: [{ type: "attachment", attachment: { url: GATEWAY_URL, ...attachment } }],
+      });
+      const one = (attachment: Record<string, unknown>) => extractFileAttachments(part(attachment)).files[0];
+      // The most specific field wins; a label that is a path keeps its leaf.
+      expect(mediaDisplayName(one({ fileName: "a.csv", label: "Quarterly" }))).toBe("a.csv");
+      expect(mediaDisplayName(one({ label: "/tmp/run/out/summary.pdf" }))).toBe("summary.pdf");
+      expect(mediaDisplayName(one({ label: "C:\\out\\summary.pdf" }))).toBe("summary.pdf");
+      expect(mediaDisplayName(one({ name: "bad\u0000name\n.txt" }))).toBe("badname.txt");
+      expect(mediaFileSize(one({ sizeBytes: "4096" }))).toBe(4096);
+      // Nothing usable: no fragment at all, and the card falls back cleanly.
+      for (const junk of [{ size: -1 }, { size: 1.5 }, { size: "12kb" }, { label: ".." }, { label: "  " }, { name: 7 }]) {
+        expect(one(junk), JSON.stringify(junk)).toBe(GATEWAY_URL);
+      }
+      expect(mediaDisplayName(GATEWAY_URL)).toBe("file");
+    });
+
+    it("draws one card when a file is named both bare and by its attachment part", () => {
+      const named = `${GATEWAY_URL}#name=report.csv&size=2048`;
+      const msg = {
+        mediaUrls: [GATEWAY_URL, "/w/other.zip"],
+        content: [{ type: "attachment", attachment: { url: GATEWAY_URL, label: "report.csv", size: 2048 } }],
+      };
+      expect(extractFileAttachments(msg).files).toEqual([named, route("/w/other.zip")]);
+      // The same merge the chat runs over directive files and structured ones.
+      expect(boundedFiles([GATEWAY_URL, "/b"], [named])).toEqual([named, "/b"]);
+      expect(boundedFiles([named], [GATEWAY_URL])).toEqual([named]);
+    });
+
+    it("drops a gateway API URL that is not a file", () => {
+      const msg = { mediaUrls: ["/api/sessions/list", "/api/chat/media/../../setup-api/files"] };
+      expect(extractFileAttachments(msg)).toEqual({ images: [], files: [] });
+    });
   });
 
   describe("file card helpers", () => {
@@ -371,6 +514,18 @@ describe("chat-media", () => {
       expect(mediaDownloadUrl(mediaDownloadUrl(url))).toBe(`${url}&download=1`);
       expect(mediaDownloadUrl("https://example.com/a.pdf")).toBe("https://example.com/a.pdf");
       expect(mediaDisplayName(url)).toBe("report final.pdf");
+    });
+
+    it("keeps download=1 in the query when the ref carries a name", () => {
+      const url = mediaUrl("/w/7c9e-report.pdf");
+      expect(mediaDownloadUrl(`${url}#name=report.pdf&size=10`)).toBe(`${url}&download=1`);
+      expect(mediaDownloadUrl(`${GATEWAY_URL}#name=report.pdf`)).toBe(GATEWAY_URL);
+    });
+
+    it("reads no size from a ref that carries none", () => {
+      expect(mediaFileSize(mediaUrl("/w/a.pdf"))).toBeNull();
+      expect(mediaFileSize(GATEWAY_URL)).toBeNull();
+      expect(mediaFileSize(`${GATEWAY_URL}#size=abc`)).toBeNull();
     });
   });
 });
