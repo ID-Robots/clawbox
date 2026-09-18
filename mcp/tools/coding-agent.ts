@@ -1594,7 +1594,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       };
       // `runs` is partial twice over — the ten newest, then whatever fits the
       // answer — and a list that does not say so reads as the project's whole
-      // history. An unreadable run list is not an empty one either.
+      // history. An unreadable run list is not an empty one either. The pointer
+      // carries a `limit`: coding_run_list's default is these same ten.
+      const listAll = Math.min(allMine.length, MAX_LISTED_RUNS);
       return text(fitJson(
         (kept, omittedByBudget) => {
           const omitted = allMine.length - mine.length + omittedByBudget;
@@ -1602,7 +1604,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
             ...detail,
             runs: kept,
             ...(omitted
-              ? { runs_not_listed: `${omitted} older run(s) of this project are not listed — coding_run_list with project "${found.folder}" lists them` }
+              ? { runs_not_listed: `${omitted} older run(s) of this project are not listed — coding_run_list with project "${found.folder}" and limit ${listAll} lists them` }
               : {}),
             ...(runs === null ? { note: "The run list could not be read, so this project's runs and run counts are unknown." } : {}),
           };

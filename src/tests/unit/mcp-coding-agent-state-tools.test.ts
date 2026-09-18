@@ -518,7 +518,8 @@ describe("coding_project_status", () => {
     if (out.isError) throw new Error("expected the project");
     const detail = JSON.parse(out.text) as { runs: { run_id: string }[]; runs_not_listed?: string };
     expect(detail.runs).toHaveLength(10);
-    expect(detail.runs_not_listed).toMatch(/^4 older run\(s\) .*coding_run_list with project "site"/);
+    // With a limit: coding_run_list's default would list these same ten again.
+    expect(detail.runs_not_listed).toMatch(/^4 older run\(s\) .*coding_run_list with project "site" and limit 14 /);
 
     // Rows too big for the answer: the ones dropped to fit are counted too.
     const big = Array.from({ length: 10 }, (_, i) => ({
