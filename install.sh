@@ -5302,7 +5302,7 @@ promote_staged_openclaw_core() {
 # environment variable: the suites hand it a tmp dir, and nothing a caller
 # exports can point a root `rm -rf` somewhere new.
 remove_shadowing_system_openclaw() {
-  local prefix tree launcher entry target version managed_real removed
+  local prefix tree tree_real parked launcher entry target version managed_real removed
   if [ ! -x "$OPENCLAW_BIN" ]; then
     echo "  The managed OpenClaw core is not in place ($OPENCLAW_BIN) — leaving any system-wide install alone"
     return 0
@@ -5311,8 +5311,21 @@ remove_shadowing_system_openclaw() {
   [ "$#" -gt 0 ] || set -- /usr /usr/local
   for prefix in "$@"; do
     tree="$prefix/lib/node_modules/openclaw"
+    parked="$prefix/lib/node_modules/.openclaw-shadow-removed"
     launcher="$prefix/bin/openclaw"
     [ "$prefix" = "$NPM_PREFIX" ] && continue
+    # A removal that was cut short — the box stopped inside the `rm -rf` below —
+    # is FINISHED here, not disowned. `rm -rf` unlinks package.json long before
+    # the bulk of the tree (measured on the box's ext4: 4th, ahead of the 187 MB
+    # dist/ and the 323 MB node_modules/), so a half-deleted tree left under its
+    # own name would fail the identity check below on every later run and sit
+    # under /usr for good. The tree is therefore PARKED under a name only this
+    # function writes — one rename, after every check has passed — and deleted
+    # from there.
+    if [ -d "$parked" ] && [ ! -L "$parked" ]; then
+      echo "  Finishing an earlier removal of a second OpenClaw core under $prefix"
+      rm -rf "$parked" || echo "  WARN: could not remove $parked" >&2
+    fi
     # What a tree removed by hand leaves: a launcher that points into an install
     # that is no longer there. Dead either way, and `readlink -f` cannot resolve
     # it, so it is judged on the link's own text.
@@ -5329,8 +5342,15 @@ remove_shadowing_system_openclaw() {
       echo "  NOTE: $tree does not look like an npm install of openclaw — leaving it alone"
       continue
     fi
+    # LIKE WITH LIKE. `readlink -f` answers canonical paths, and the prefix as
+    # typed is not one wherever a component of it is a link (/usr/local moved
+    # to another disk). Compared against the typed tree, the managed launcher's
+    # target never matched — so a box hand-wired onto that core lost its only
+    # one — and neither did the launchers below.
+    tree_real="$(readlink -f "$tree" 2>/dev/null || true)"
+    [ -n "$tree_real" ] || tree_real="$tree"
     case "$managed_real" in
-      "$tree"/*)
+      "$tree_real"/*)
         echo "  NOTE: the managed launcher resolves into $tree — leaving it alone"
         continue
         ;;
@@ -5347,20 +5367,25 @@ remove_shadowing_system_openclaw() {
     echo "  Removing a second OpenClaw core (${version:-unknown version}) under $prefix: it shadows the managed one at $NPM_PREFIX for everything that runs without ~/.npm-global on its PATH, and no update ever moves it"
     removed=1
     # The launchers first, and only the symlinks that resolve into THIS tree:
-    # with the tree gone they would dangle, and `[ -e ]` on a dangling link is
-    # false, so they would be invisible to the next run of this function.
+    # they are what shadows, and once the tree has moved they dangle, which
+    # `readlink -f` cannot resolve and `[ -e ]` cannot see.
     for entry in "$prefix"/bin/*; do
       [ -L "$entry" ] || continue
       target="$(readlink -f "$entry" 2>/dev/null || true)"
       case "$target" in
-        "$tree"/*) rm -f "$entry" || removed=0 ;;
+        "$tree_real"/*) rm -f "$entry" || removed=0 ;;
       esac
     done
-    rm -rf "$tree" || removed=0
-    if [ "$removed" -ne 1 ] || [ -e "$tree" ]; then
-      echo "  WARN: could not remove the second OpenClaw core under $prefix; ClawBox itself runs the managed one, but a root shell still finds this one first" >&2
+    if mv "$tree" "$parked"; then
+      rm -rf "$parked" || removed=0
+    else
+      removed=0
     fi
-    if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+    if [ "$removed" -ne 1 ] || [ -e "$tree" ] || [ -e "$parked" ]; then
+      echo "  WARN: could not remove the second OpenClaw core under $prefix; ClawBox itself runs the managed one, but a root shell still finds this one first" >&2
+    elif [ -e "$launcher" ] || [ -L "$launcher" ]; then
+      # Only after a removal that WORKED: a launcher still there then is one the
+      # loop above judged not to be a link into that install.
       echo "  NOTE: $launcher is not a link into that install — leaving it alone" >&2
     fi
   done

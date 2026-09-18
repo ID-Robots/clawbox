@@ -140,11 +140,16 @@ describe("remove_shadowing_system_openclaw", () => {
     }
   });
 
-  it("never removes an install a package owns", () => {
+  // Either half is enough: a package can ship the tree and create its launcher
+  // in postinst, where dpkg does not own it — or the other way round.
+  it.each([
+    ["the launcher", (box: Box) => launcherOf(box.usr)],
+    ["the tree", (box: Box) => path.join(treeOf(box.usr), "package.json")],
+  ])("never removes an install a package owns — %s", (_what, owned) => {
     const box = makeBox();
     try {
       npmGlobalInstall(box.usr, "2026.7.1-2");
-      const r = run(box, { dpkgOwns: launcherOf(box.usr) });
+      const r = run(box, { dpkgOwns: owned(box) });
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout).toMatch(/a package owns the OpenClaw install/);
       expect(existsSync(treeOf(box.usr))).toBe(true);
@@ -219,14 +224,57 @@ describe("remove_shadowing_system_openclaw", () => {
   });
 
   it("never treats the managed prefix as a second core, even when it is named", () => {
-    const box = makeBox();
+    // The managed launcher is a plain FILE here (a wrapper), so the
+    // resolves-into guard cannot be what saves the tree: only the prefix guard
+    // can, and it is the silent one.
+    const box = makeBox({ managed: false });
     try {
+      npmGlobalInstall(box.managed, "2026.9.3");
+      rmSync(launcherOf(box.managed));
+      writeFileSync(launcherOf(box.managed), "#!/usr/bin/env bash\necho 'OpenClaw 2026.9.3'\n");
+      chmodSync(launcherOf(box.managed), 0o755);
       const r = run(box, { args: [box.managed] });
       expect(r.status, r.stderr).toBe(0);
-      expect(existsSync(treeOf(box.managed))).toBe(true);
-      expect(isLink(launcherOf(box.managed))).toBe(true);
+      expect(r.stdout.trim()).toBe("FINISHED");
+      expect(existsSync(path.join(treeOf(box.managed), "package.json"))).toBe(true);
     } finally {
       rmSync(box.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("compares like with like behind a linked prefix: the launchers go, and a managed launcher wired into that core keeps it", () => {
+    // /usr/local moved to another disk: the prefix as typed is not canonical,
+    // and `readlink -f` answers canonical paths.
+    const box = makeBox();
+    try {
+      const real = path.join(box.dir, "nvme", "local");
+      mkdirSync(path.join(real, "bin"), { recursive: true });
+      const linked = path.join(box.dir, "linked-local");
+      symlinkSync(real, linked);
+      npmGlobalInstall(linked, "2026.7.1-2");
+      const r = run(box, { args: [linked] });
+      expect(r.status, r.stderr).toBe(0);
+      expect(existsSync(treeOf(real))).toBe(false);
+      expect(isLink(launcherOf(real))).toBe(false);
+      expect(r.stderr).not.toMatch(/is not a link into that install/);
+    } finally {
+      rmSync(box.dir, { recursive: true, force: true });
+    }
+    const wired = makeBox({ managed: false });
+    try {
+      const real = path.join(wired.dir, "nvme", "local");
+      mkdirSync(path.join(real, "bin"), { recursive: true });
+      const linked = path.join(wired.dir, "linked-local");
+      symlinkSync(real, linked);
+      npmGlobalInstall(linked, "2026.9.3");
+      mkdirSync(path.join(wired.managed, "bin"), { recursive: true });
+      symlinkSync(path.join(treeOf(linked), "openclaw.mjs"), launcherOf(wired.managed));
+      const r = run(wired, { args: [linked] });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/managed launcher resolves into/);
+      expect(existsSync(path.join(treeOf(real), "package.json"))).toBe(true);
+    } finally {
+      rmSync(wired.dir, { recursive: true, force: true });
     }
   });
 
@@ -240,6 +288,67 @@ describe("remove_shadowing_system_openclaw", () => {
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout).toMatch(/dangling OpenClaw launcher/);
       expect(isLink(launcherOf(box.usr))).toBe(false);
+    } finally {
+      rmSync(box.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a dangling launcher that points anywhere else", () => {
+    // An unmounted /opt volume, somebody's own wrapper target: not ours.
+    const box = makeBox();
+    try {
+      symlinkSync("/opt/not-mounted/openclaw/bin/openclaw", launcherOf(box.usr));
+      const r = run(box);
+      expect(r.status, r.stderr).toBe(0);
+      expect(isLink(launcherOf(box.usr))).toBe(true);
+    } finally {
+      rmSync(box.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("finishes a removal that was cut short, instead of disowning what is left", () => {
+    // The box stopped inside the delete. `rm -rf` unlinks package.json long
+    // before the bulk of the tree, so a half-deleted tree under its own name
+    // would fail the identity check for ever; parked, the next run sweeps it.
+    const box = makeBox();
+    try {
+      const parked = path.join(box.usr, "lib", "node_modules", ".openclaw-shadow-removed");
+      mkdirSync(path.join(parked, "dist"), { recursive: true });
+      writeFileSync(path.join(parked, "dist", "leftover.js"), "// 187 MB of this\n");
+      const r = run(box);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/Finishing an earlier removal/);
+      expect(existsSync(parked)).toBe(false);
+    } finally {
+      rmSync(box.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("parks the tree with one rename before deleting it", () => {
+    const box = makeBox();
+    try {
+      npmGlobalInstall(box.usr, "2026.7.1-2");
+      const parked = path.join(box.usr, "lib", "node_modules", ".openclaw-shadow-removed");
+      // The delete is what gets cut short: with `rm -rf` failing, the tree must
+      // already be under the parked name, whole, for the next run to finish.
+      const r = spawnSync("bash", ["-c", [
+        "set -euo pipefail",
+        `NPM_PREFIX=${JSON.stringify(box.managed)}`,
+        `OPENCLAW_BIN=${JSON.stringify(launcherOf(box.managed))}`,
+        "dpkg() { return 1; }",
+        'rm() { case "$1" in -rf) return 1 ;; *) command rm "$@" ;; esac; }',
+        shellFunction("remove_shadowing_system_openclaw"),
+        `remove_shadowing_system_openclaw ${JSON.stringify(box.usr)}`,
+      ].join("\n")], { encoding: "utf-8", timeout: 20_000 });
+      expect(r.status, r.stderr).toBe(0);
+      expect(existsSync(treeOf(box.usr))).toBe(false);
+      expect(existsSync(path.join(parked, "package.json"))).toBe(true);
+      expect(isLink(launcherOf(box.usr))).toBe(false);
+      expect(r.stderr).toMatch(/WARN: could not remove the second OpenClaw core/);
+      // …and the next run does.
+      const again = run(box);
+      expect(again.status, again.stderr).toBe(0);
+      expect(existsSync(parked)).toBe(false);
     } finally {
       rmSync(box.dir, { recursive: true, force: true });
     }
@@ -264,6 +373,9 @@ describe("remove_shadowing_system_openclaw", () => {
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout).toContain("FINISHED");
       expect(r.stderr).toMatch(/WARN: could not remove the second OpenClaw core/);
+      // The launcher it failed to delete IS a link into that install: saying it
+      // was "left alone" because it is not would be the opposite of the truth.
+      expect(r.stderr).not.toMatch(/is not a link into that install/);
     } finally {
       rmSync(box.dir, { recursive: true, force: true });
     }

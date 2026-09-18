@@ -1472,7 +1472,7 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
 }
 
 /** The one install command this card may print — see the note in SystemCard. */
-const OPENCLAW_INSTALL_COMMAND = "npm install -g openclaw --prefix ~/.npm-global";
+const OPENCLAW_INSTALL_COMMAND = "sudo bash ~/clawbox/install.sh --step openclaw_install";
 
 function SystemCard({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
@@ -1485,12 +1485,18 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
             `npm install -g openclaw` would be an instruction that contradicts
             their SKU and fixes nothing.
 
-            WITH THE PREFIX, always. The distro npm's default prefix is /usr, so
-            the bare command fails EACCES as the box's user and, retried with
-            sudo, leaves a SECOND root-owned core at /usr/bin/openclaw that no
-            update ever moves — the core the web server then ran instead of the
-            managed one (2026-09-18, "Credential migration failed"). The
-            managed prefix is the one install.sh and the gateway use. */}
+            THE DEVICE'S OWN STEP, never a bare `npm install -g openclaw`. The
+            distro npm's default prefix is /usr, so the bare command fails
+            EACCES as the box's user and, retried with sudo, leaves a SECOND
+            root-owned core at /usr/bin/openclaw that no update ever moves —
+            the core the web server then ran instead of the managed one
+            (2026-09-18, "Credential migration failed"). Adding `--prefix
+            ~/.npm-global` would land in the right place with the wrong core:
+            npm's `latest`, not the PIN, under a gateway that restarts into it
+            within seconds, which the next update then downgrades over state a
+            newer core migrated — the same failure in time rather than in
+            space. `openclaw_install` installs the pinned core, staged and
+            gated, into the prefix the gateway runs. */}
         {status.agent !== "hermes" && !status.openclawInstalled && (
           <li>
             <code className="bg-[var(--bg-elevated)] px-1 rounded">openclaw</code>{" "}

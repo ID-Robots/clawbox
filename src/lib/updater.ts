@@ -1729,7 +1729,7 @@ async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
   try {
-    await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
+    await execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout: DOCTOR_FIX_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
@@ -1824,7 +1824,7 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   let accepted = true;
   let text: string;
   try {
-    const { stdout } = await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
+    const { stdout } = await execFile(openclawBin(), ["config", "validate", "--json"], {
       timeout: 60_000,
       maxBuffer: 2 * 1024 * 1024,
       // SIGKILL at the deadline, the counterpart of the `-k 5` the boot
@@ -2751,7 +2751,7 @@ async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<vo
   if (switchedOff) {
     try {
       await execFile(
-        OPENCLAW_BIN,
+        openclawBin(),
         ["plugins", "enable", switchedOff, "--accept-capabilities"],
         { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
       );
@@ -2871,7 +2871,7 @@ async function reinstallManagedPluginPayload(
   for (const spec of specs) {
     try {
       await execFile(
-        OPENCLAW_BIN,
+        openclawBin(),
         ["plugins", "install", spec, "--force", "--accept-capabilities"],
         { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
       );
@@ -2910,7 +2910,7 @@ async function reinstallManagedPluginPayload(
 async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
   try {
     await execFile(
-      OPENCLAW_BIN,
+      openclawBin(),
       ["plugins", "enable", pluginId, "--accept-capabilities"],
       { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
     );
@@ -3455,7 +3455,15 @@ let cachedTargetVersion: string | null = null;
 let targetVersionCacheTime = 0;
 const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
 
-const OPENCLAW_BIN = findOpenclawBin();
+// ASKED PER CALL, never frozen at import. `findOpenclawBin()` remembers only the
+// MANAGED core's path; a fallback answer ("openclaw", or a second core under
+// /usr) describes a box whose managed core is not there YET, and a constant
+// captured while that was true outlives it for the life of the web server —
+// this module is loaded at boot by instrumentation. install.sh now REMOVES a
+// second core under /usr during `openclaw_install`, so a frozen copy of that
+// path would be an ENOENT for the doctor and the validate that follow it in
+// the OpenClaw-only flow, which restarts no web server (2026-09-18).
+const openclawBin = (): string => findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 
@@ -3676,7 +3684,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // which is correct: there is no OpenClaw version to report on Hermes).
     openclawIsAbsent()
       ? readPkgVersion(OPENCLAW_PKG)
-      : execFile(OPENCLAW_BIN, ["--version"], { timeout: 10_000 })
+      : execFile(openclawBin(), ["--version"], { timeout: 10_000 })
           .then(({ stdout }) => stdout.trim() || null)
           // Fallback: read version from the installed package.json
           .catch(() => readPkgVersion(OPENCLAW_PKG)),

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * 2026-09-18 — "Credential migration failed. The subscription sign-in was
@@ -152,5 +153,35 @@ describe("installedOpenclawCoreGeneration follows the same binary", () => {
     const { installedOpenclawCoreGeneration, installedOpenclawCoreVersion } = await import("@/lib/openclaw-core-generation");
     expect(await installedOpenclawCoreVersion()).toBe("2026.9.3");
     expect(await installedOpenclawCoreGeneration()).toBe("v2");
+  });
+});
+
+describe("nothing freezes the resolver's answer at import", () => {
+  // "Only the managed path is cached" is a property of findOpenclawBin(), and a
+  // module-level `const OPENCLAW_BIN = findOpenclawBin()` takes it away again:
+  // updater.ts is loaded at web-server boot, so a fallback captured there — the
+  // bare name on a box before its core lands, or the second core under /usr
+  // that install.sh now REMOVES mid-update — was what doctor and `config
+  // validate` were spawned with until the next restart.
+  const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  // The one capture left, and why it may stay: it is a SENTINEL. Both of its
+  // uses hand `config set` to runCommand, which recognises the constant and
+  // reroutes to runOpenclawConfigSet — the live resolver.
+  const ALLOWED = new Set([path.join("app", "setup-api", "ai-models", "configure", "route.ts")]);
+
+  function sources(dir: string): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return entry.name === "tests" ? [] : sources(full);
+      return /\.tsx?$/.test(entry.name) ? [full] : [];
+    });
+  }
+
+  it("no module-scope capture outside the configure route's sentinel", () => {
+    const captures = sources(SRC)
+      .filter((file) => /^(?:export )?(?:const|let|var) \w+ = findOpenclawBin\(\);/m.test(readFileSync(file, "utf-8")))
+      .map((file) => path.relative(SRC, file))
+      .filter((file) => !ALLOWED.has(file));
+    expect(captures).toEqual([]);
   });
 });
