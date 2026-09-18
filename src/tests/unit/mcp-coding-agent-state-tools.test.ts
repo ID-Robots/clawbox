@@ -180,6 +180,19 @@ describe("coding_run_list", () => {
     expect(runs[1]).toMatchObject({ can_resume: true });
   });
 
+  it("names a team worker's project, not the team's worktree folder", async () => {
+    // A worker has no worktree of its own on the record; its directory is the
+    // team's `<project>/.clawbox/worktrees/<task>-<attempt>`.
+    apiGet.mockResolvedValue({
+      runs: [{ ...RUN, id: "run-worker01", worktree: null, directory: "/home/clawbox/projects/site/.clawbox/worktrees/task-2-1" }],
+    });
+    const out = await harness().call("coding_run_list", { status: "all", project: "site", limit: 10 });
+    if (out.isError) throw new Error("expected a list");
+    const { runs } = JSON.parse(out.text) as { runs: Record<string, unknown>[] };
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ run_id: "run-worker01", project: "site" });
+  });
+
   it("filters by status and project, and says so when nothing matches", async () => {
     apiGet.mockResolvedValue({ runs: [RUN, { ...RUN, id: "run-other001", projectId: "shop", worktree: null, directory: "/x/shop" }] });
     const shop = await harness().call("coding_run_list", { project: "shop", status: "all", limit: 10 });

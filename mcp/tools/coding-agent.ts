@@ -762,10 +762,27 @@ const MAX_LISTED_RUNS = 30;
 /** The status filter: every status the record can hold, and "all". */
 const RUN_FILTERS = ["all", ...RUN_STATUSES] as const;
 
+/** Where the box keeps worktrees inside a project (`WORKTREES_DIR` in src/lib/coding-team-worktree.ts). */
+const WORKTREES_SEGMENT = "/.clawbox/worktrees/";
+
+/**
+ * The project folder a run's work belongs to.
+ *
+ * A run with a copy of its own names its project on `worktree.project`. A TEAM
+ * worker does not — its worktree is the team's, `worktree` is null, and
+ * `directory` is `<project>/.clawbox/worktrees/<task>-<attempt>` — so the
+ * project is the part in front of the box's worktree folder.
+ */
+function runHome(run: RunPayload): string {
+  const dir = run.worktree?.project ?? run.directory;
+  const at = dir.indexOf(WORKTREES_SEGMENT);
+  return at > 0 ? dir.slice(0, at) : dir;
+}
+
 /** The folder a run belongs to, the way the owner names the project. */
 function runProject(run: RunPayload): string {
   if (run.projectId) return run.projectId;
-  return basename(run.worktree?.project ?? run.directory);
+  return basename(runHome(run));
 }
 
 /**
@@ -907,7 +924,7 @@ interface ProjectPayload {
 function runInProject(run: RunPayload, project: ProjectPayload): boolean {
   if (project.kind === "codeProject") return run.projectId === project.folder;
   if (run.projectId) return false;
-  const home = run.worktree?.project ?? run.directory;
+  const home = runHome(run);
   if (home === project.directory || home.startsWith(`${project.directory}/`)) return true;
   return basename(home) === project.folder;
 }
