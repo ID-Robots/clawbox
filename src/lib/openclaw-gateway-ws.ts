@@ -209,3 +209,82 @@ export async function gatewayWsPatchConfig(
   const changed = Array.isArray(result.changedPaths) ? result.changedPaths.filter((p): p is string => typeof p === "string") : [];
   return { noop: result.noop === true, changedPaths: changed };
 }
+
+/**
+ * The gateway's OWN readiness contract, on its own HTTP port. `/startupz`
+ * answers 200 `{ok:true,status:"started"}` once the gateway has finished
+ * starting and 503 `{ok:false,status:"starting",pendingReason}` until then
+ * (`gateway-http-route-contracts.ts`, `server-http-probes.ts` in the pinned
+ * core), and the aggregate boolean needs no auth. The core polls exactly this
+ * surface for the same question — `waitForGatewayHttpReadiness` in
+ * `cli/daemon-cli/restart-health-probe.ts`, behind `openclaw update`'s own
+ * verification — which is why this waits on it rather than on an answer of
+ * ClawBox's own invention.
+ *
+ * `/startupz` and not `/readyz`, deliberately: readiness folds in CHANNEL
+ * health, so a box whose Telegram channel is down answers 503 there for as
+ * long as it is down, and a wait for the gateway to accept an RPC would spend
+ * its whole budget over a gateway perfectly able to answer one. The startup
+ * probe is the exact gate — the connect admission refuses with "gateway
+ * starting; retry shortly" on `isStartupPending()`, the same state
+ * `createStartupChecker` reports here.
+ */
+const STARTUP_PROBE_PATH = "/startupz";
+/** One probe. Loopback and answered off a state flag; anything slower is a
+ *  gateway that is not answering yet, which is what the poll is for. */
+const STARTUP_PROBE_TIMEOUT_MS = 2_000;
+const STARTUP_POLL_INTERVAL_MS = 500;
+
+async function gatewayHasStarted(timeoutMs: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${GATEWAY_PORT}${STARTUP_PROBE_PATH}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    // Consumed although nothing here reads it: undici holds the socket open
+    // until the body is, and this is a poll rather than a single request.
+    await res.text().catch(() => "");
+    return res.status === 200;
+  } catch {
+    // Nothing listening yet, or the probe outlived its own deadline. Both are
+    // "not started", and neither is a fact the caller can act on separately.
+    return false;
+  }
+}
+
+/**
+ * Wait until the gateway ANSWERS a request, not merely listens: for ten to
+ * twenty seconds after its port opens it refuses every connect with "gateway
+ * starting; retry shortly", and a write made in that window is lost with the
+ * refusal.
+ *
+ * The BUDGET is the caller's, with no default — this module cannot choose one
+ * for a device it knows nothing about, and the one budget ClawBox has for
+ * "how long may a gateway take to come back" is `gatewayReadyWaitMs()`, which
+ * lives above this module (and carries the `GATEWAY_READY_WAIT_MS` escape
+ * hatch). A hardcoded 60 s here was twice that budget with no way to change
+ * it, on a request a person is watching through a tunnel that gives up at 100.
+ *
+ * Answers false rather than throwing: the caller decides what a gateway that
+ * has not come back yet means for its own answer. No token is read anywhere on
+ * this path — the probe is unauthenticated, so a box whose shared token this
+ * server cannot use (a `${ENV}` interpolation, a SecretRef, an unreadable
+ * openclaw.json) is waited for like any other rather than reported as one that
+ * will never answer.
+ */
+export async function waitForGatewayRpcReady(budgetMs: number, intervalMs = STARTUP_POLL_INTERVAL_MS): Promise<boolean> {
+  // A malformed budget must not become an unbounded hot spin — `waitForPortOpen`
+  // guards its own the same way. Zero means "one probe, then give up".
+  const budget = Number.isFinite(budgetMs) && budgetMs > 0 ? budgetMs : 0;
+  const deadline = Date.now() + budget;
+  for (;;) {
+    // ONE probe may not outlive the WHOLE wait, and a spent budget still asks
+    // once, at full length: "give up at once" must not become "never ask".
+    const left = deadline - Date.now();
+    const probeMs = left > 0 ? Math.min(STARTUP_PROBE_TIMEOUT_MS, left) : STARTUP_PROBE_TIMEOUT_MS;
+    if (await gatewayHasStarted(probeMs)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+  }
+}

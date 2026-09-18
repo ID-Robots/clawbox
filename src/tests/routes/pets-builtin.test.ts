@@ -71,7 +71,7 @@ describe("GET /setup-api/pets?gallery=1", () => {
     expect(clawd).toBeDefined();
     expect(clawd?.installed).toBe(true);
     expect(clawd?.builtin).toBe(true);
-    expect(clawd?.displayName).toBe("Vibrant Clawd");
+    expect(clawd?.displayName).toBe("ClawBox crab");
     expect(clawd?.submittedBy).toBe("ID-Robots");
     // It leads the list: it is the default and the one tile that needs no
     // internet, so it is not buried under thirteen downloads.
@@ -99,6 +99,32 @@ describe("GET /setup-api/pets?gallery=1", () => {
     const body = await gallery();
     expect(body.placeholder).toBe("crab");
     expect(body.activeSlug).toBe("vibrant-clawd");
+  }, 30_000);
+
+  it("calls the pack ClawBox SHIPS by the name ClawBox ships it under", async () => {
+    // A box whose owner picked the crab before the rename keeps a materialised
+    // copy naming it "Vibrant Clawd", and `materialiseBuiltinPet` skips a
+    // destination that exists — so the gallery, which prefers the installed
+    // copy's name, went on showing the old one. For a slug ClawBox ships, the
+    // name is ClawBox's own answer; only the BODY still comes from the owner's
+    // copy, which is the precedence `loadPet` applies and is left alone.
+    const dir = path.join(tmpHome, "data", "pets", "vibrant-clawd");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "pet.json"), JSON.stringify({
+      id: "vibrant-clawd",
+      displayName: "Vibrant Clawd",
+      spritesheetPath: "spritesheet.webp",
+      frameWidth: 64,
+      frameHeight: 64,
+    }));
+    fs.copyFileSync(
+      path.join(process.cwd(), "public", "pets", "vibrant-clawd", "spritesheet.webp"),
+      path.join(dir, "spritesheet.webp"),
+    );
+
+    const crab = (await gallery()).pets.find((p) => p.slug === "vibrant-clawd");
+    expect(crab?.installed).toBe(true);
+    expect(crab?.displayName).toBe("ClawBox crab");
   }, 30_000);
 });
 

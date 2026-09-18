@@ -8,9 +8,11 @@
 // Today there is exactly one: `vibrant-clawd`, the ClawBox crab as a nine-state
 // Petdex pack (public/pets/vibrant-clawd/, credit and sheet geometry in
 // CREDIT.txt beside it). It is the brand body — what an OpenClaw or dual box
-// wears with no pet picked, where the still crab PNG used to be drawn — and it
-// is also an ordinary gallery tile the owner can pick, un-pick and come back
-// to, on both editions.
+// wears with no pet picked, where the still crab PNG used to be drawn — so on
+// those editions it is not a tile BESIDE the crab in the picker: it is the crab
+// tile, first in the grid and selected by default. On a Hermes-only box, where
+// the bare desktop wears the egg instead, it stays an ordinary gallery tile the
+// owner can pick, un-pick and come back to.
 //
 // Deliberately free of Node imports: the picker, the mascot and `pet-client`
 // all read these names in the browser. Where the bytes are on disk is a server
@@ -33,7 +35,12 @@ export interface BuiltinPet {
 export const BUILTIN_PETS: readonly BuiltinPet[] = [
   {
     slug: VIBRANT_CLAWD_SLUG,
-    displayName: "Vibrant Clawd",
+    // The crab's own name, not the pack's working title: this IS the ClawBox
+    // crab (owner, 2026-09-18), it is the first tile in the picker, and the
+    // `hermes pets` CLI, the TUI and the upstream desktop app read the same
+    // name out of pet.json. The SLUG stays `vibrant-clawd` — it is the
+    // directory every store already holds the pack under.
+    displayName: "ClawBox crab",
     kind: "creature",
     submittedBy: "ID-Robots",
     version: "2.1.0",

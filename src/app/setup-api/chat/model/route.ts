@@ -1549,9 +1549,18 @@ export async function POST(request: Request) {
     //    running different models" use case has no UI today.
     //    Automatic ClawBox alias normalization preserves unrelated session
     //    pins; the chat patches its own session to Flash when it connects.
+    //    A sweep that could not run is SAID, never only logged — the sibling of
+    //    the same fix in /setup-api/ai-models/configure. Two ways it fails and
+    //    only one of them throws: on an OpenClaw 2 agent (the sqlite store,
+    //    every current box) a session the gateway refuses is caught inside
+    //    `patchChunk`, counted into `sessionsSkipped` and returned normally, so
+    //    the `try` alone answered 200 over a chat still pinned to the old
+    //    model. `sessionsUpdated === 0` with nothing skipped is not a failure:
+    //    it is a box with no session to repoint.
+    let sweepWarning: string | undefined;
     if (parsed && !automaticClawboxAliasNormalization) {
       try {
-        await applyModelOverrideToAllAgentSessions(
+        const sweep = await applyModelOverrideToAllAgentSessions(
           {
             provider: parsed.provider,
             modelId: parsed.modelId,
@@ -1559,11 +1568,18 @@ export async function POST(request: Request) {
           },
           { skipUserTagged: false },
         );
+        if (sweep.sessionsSkipped > 0) {
+          console.warn(
+            `[chat/model] The gateway would not re-point ${sweep.sessionsSkipped} session(s); they keep their previous model`,
+          );
+          sweepWarning = "Saved, but a chat that was already open keeps its previous model — pick the model again in its header.";
+        }
       } catch (err) {
         // Non-fatal: the default change (step 1) still takes effect
         // for brand-new sessions. Worst case the user has to /reset
         // the open chat. Log and continue.
         console.error("[chat/model] Failed to sweep session overrides:", err);
+        sweepWarning = "Saved, but a chat that was already open keeps its previous model — pick the model again in its header.";
       }
     }
     if (parsed) {
@@ -1603,8 +1619,11 @@ export async function POST(request: Request) {
     // and the gateway picks the new primary up for new sessions about a
     // second after the write.
     const nextState = await loadChatModelState();
+    // One `warning` field, both producers: the disarm failure and the sweep,
+    // joined the way the configure route joins its own.
+    const warning = [disarmWarning, sweepWarning].filter(Boolean).join(" ");
     return NextResponse.json(
-      { ...nextState, ...(disarmWarning ? { warning: disarmWarning } : {}) },
+      { ...nextState, ...(warning ? { warning } : {}) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {

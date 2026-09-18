@@ -1,4 +1,5 @@
-// Cuts the still crab out of the bundled Vibrant Clawd spritesheet.
+// Cuts the still crab out of the bundled ClawBox crab spritesheet (the
+// `vibrant-clawd` pack — the slug is the directory name, the pack is the crab).
 //
 //   node scripts/generate-crab-still.mjs
 //

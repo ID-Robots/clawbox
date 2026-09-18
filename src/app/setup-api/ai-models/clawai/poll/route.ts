@@ -131,6 +131,9 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
         ...session,
         status: "complete",
         error: null,
+        // Hermes applies the credential itself, with no configure route and no
+        // session sweep behind it, so there is nothing here that can warn.
+        warning: null,
         completedAt: Date.now(),
       });
       return;
@@ -162,10 +165,25 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
       return;
     }
 
+    // The BODY of a successful configure, not just `response.ok`: a save can
+    // land and still not have done all of it — the session sweep this sign-in
+    // defers past the gateway restart is exactly that — and reading only the
+    // status dropped the one sentence that says so on the primary sign-in path
+    // of these boxes. Best effort: an unreadable body is a save that landed,
+    // never an error, so it costs the warning and nothing else.
+    let warning: string | null = null;
+    try {
+      const configured = await configureResponse.json() as { warning?: unknown };
+      if (typeof configured.warning === "string" && configured.warning.trim()) warning = configured.warning;
+    } catch (err) {
+      console.warn("[clawai/poll] Could not read the configure answer's warning:", err instanceof Error ? err.message : err);
+    }
+
     await writeClawAiSession({
       ...session,
       status: "complete",
       error: null,
+      warning,
       completedAt: Date.now(),
     });
   } catch (err) {
@@ -185,7 +203,10 @@ export async function POST() {
   // UI sees the resolved state on its very next poll tick after a long
   // outage / browser sleep / disconnected fetch.
   if (session.status === "complete") {
-    return NextResponse.json({ status: "complete" });
+    // The warning rides beside the status, the way `error` does, so the panel
+    // that renders it (`showSuccessAndContinue` → `saveWarning`) gets the same
+    // sentence the pasted-key and provider-OAuth paths already show.
+    return NextResponse.json({ status: "complete", ...(session.warning ? { warning: session.warning } : {}) });
   }
   if (session.status === "error" && session.error) {
     return NextResponse.json({ status: "error", error: session.error });
