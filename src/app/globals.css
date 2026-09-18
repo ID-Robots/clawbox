@@ -2219,6 +2219,21 @@ input[type="range"].appearance-none::-moz-range-track {
   padding: 10px 12px !important;
 }
 [data-chat-mobile] .chat-voice-large { box-shadow: none; }
+/* Portrait phone: the microphone alone on its own row, centred across the
+ * chat's full width, a 56px thumb target; Send/Stop keeps the slot beside the
+ * text box. Landscape never renders this row. */
+[data-chat-mobile] .chat-composer-voice-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+}
+[data-chat-mobile] .chat-composer-voice-row .chat-voice-large {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+}
+[data-chat-mobile] .chat-composer-voice-row .chat-voice-large .material-symbols-rounded { font-size: 30px !important; }
 [data-chat-mobile] .chat-voice-large .material-symbols-rounded { font-size: 24px !important; }
 [data-chat-mobile] .chat-composer-row { flex-wrap: nowrap; gap: 6px; min-width: 0; }
 [data-chat-mobile] .chat-composer-row > button {

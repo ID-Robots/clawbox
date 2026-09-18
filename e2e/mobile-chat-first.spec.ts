@@ -113,6 +113,9 @@ async function installFakeGatewaySocket(page: Page) {
               },
             });
           }, 20);
+          // A test that needs a reply IN FLIGHT (the Stop control on screen)
+          // sets this; the owner's turn then starts and never finishes.
+          if (sent !== "hi" && (window as unknown as { __holdReplies?: boolean }).__holdReplies) return;
           setTimeout(() => {
             emit({
               type: "event",
@@ -210,16 +213,50 @@ for (const locale of ["bg", "de"]) {
         await expect(page.getByTestId("voice-record")).toBeEnabled();
         await expect(pills.nth(1)).toContainText(modelLabel);
 
-        async function assertLayout() {
+        // A phone held upright (TASK-894) gets the microphone on a row of its
+        // own; landscape keeps it in the input row beside the field.
+        const portrait = viewport.height > viewport.width;
+        async function assertLayout(typing: boolean) {
           const geometry = await composer.evaluate(el => {
             const primary = el.querySelector(".chat-composer-primary")!.getBoundingClientRect();
+            const voiceRowEl = el.querySelector(".chat-composer-voice-row");
+            const voiceRow = voiceRowEl ? (() => {
+              const r = voiceRowEl.getBoundingClientRect();
+              const mic = voiceRowEl.querySelector("button")!.getBoundingClientRect();
+              return {
+                top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+                buttons: voiceRowEl.querySelectorAll("button").length,
+                micCentre: mic.left + mic.width / 2, micWidth: mic.width, micHeight: mic.height,
+              };
+            })() : null;
+            const primaryOrder = [...el.querySelector(".chat-composer-primary")!.children]
+              .map(node => node.getAttribute("data-testid") ?? node.tagName);
+            const composerBox = el.getBoundingClientRect();
             const buttons = [...el.querySelectorAll("button, textarea")].map(node => {
               const r = node.getBoundingClientRect();
               return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
             });
             const pills = [...el.querySelectorAll(".header-dropdown-trigger")].map(node => node.getBoundingClientRect().y);
-            return { buttons, pills, primaryBottom: primary.bottom, scrollWidth: el.scrollWidth, width: el.clientWidth };
+            return {
+              buttons, pills, primaryBottom: primary.bottom, scrollWidth: el.scrollWidth, width: el.clientWidth,
+              voiceRow, primaryOrder, composerCentre: composerBox.left + composerBox.width / 2,
+            };
           });
+          if (portrait) {
+            // attachment → field → Send, the microphone alone, centred, under it.
+            expect(geometry.primaryOrder).toEqual(["chat-attach", "TEXTAREA", "chat-send"]);
+            expect(geometry.voiceRow).not.toBeNull();
+            const row = geometry.voiceRow!;
+            expect(row.buttons).toBe(1);
+            expect(row.top).toBeGreaterThanOrEqual(geometry.primaryBottom);
+            expect(Math.abs(row.micCentre - geometry.composerCentre)).toBeLessThan(1);
+            expect(row.micWidth).toBeGreaterThanOrEqual(48);
+            expect(row.micHeight).toBeGreaterThanOrEqual(48);
+            expect(Math.min(...geometry.pills)).toBeGreaterThanOrEqual(row.bottom);
+          } else {
+            expect(geometry.voiceRow).toBeNull();
+            expect(geometry.primaryOrder[2]).toBe(typing ? "chat-send" : "voice-record");
+          }
           expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
           for (const box of geometry.buttons) {
             expect(box.x).toBeGreaterThanOrEqual(0);
@@ -236,12 +273,12 @@ for (const locale of ["bg", "de"]) {
           expect(Math.min(...geometry.pills)).toBeGreaterThanOrEqual(geometry.primaryBottom);
           expect(Math.max(...geometry.pills) - Math.min(...geometry.pills)).toBeLessThan(1);
         }
-        await assertLayout();
+        await assertLayout(false);
         await page.screenshot({ path: testInfo.outputPath("composer-idle.png") });
         await primary.locator("textarea").fill(locale === "bg" ? "Напиши кратък отговор" : "Schreibe eine kurze Antwort");
         await expect(primary.getByTestId("chat-send")).toBeVisible();
-        await expect(page.getByTestId("voice-record")).toHaveCount(0);
-        await assertLayout();
+        await expect(page.getByTestId("voice-record")).toHaveCount(portrait ? 1 : 0);
+        await assertLayout(true);
         await page.screenshot({ path: testInfo.outputPath("composer-typing.png") });
         // Truncated values still open a full, usable picker inside the viewport.
         await pills.nth(1).click();
@@ -272,8 +309,9 @@ test.describe("on a phone", () => {
     await expect(record).toBeVisible();
     await expect(record).toBeEnabled();
     const box = await record.boundingBox();
-    expect(box?.width).toBe(44);
-    expect(box?.height).toBe(44);
+    // Upright, the microphone is alone on its own row at 56px (TASK-894).
+    expect(box?.width).toBe(56);
+    expect(box?.height).toBe(56);
     // Inside the screen, in the lower part where a thumb reaches.
     expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390);
     expect(box?.y ?? 0).toBeGreaterThan(844 / 2);
@@ -327,10 +365,57 @@ test.describe("on a phone", () => {
     await expect(stop).toBeVisible();
     await expect(stop).toHaveClass(/chat-voice-large--recording/);
     const box = await stop.boundingBox();
-    expect(box?.width).toBe(44);
+    expect(box?.width).toBe(56);
+    // The one control toggles: the stop stands where the microphone stood.
+    await expect(page.getByTestId("chat-composer-voice-row")).toContainText("stop");
+    await expect(page.getByTestId("voice-record")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("phone-recording.png") });
   });
 });
+
+for (const { locale, viewport } of [
+  { locale: "en", viewport: { width: 390, height: 844 } },
+  { locale: "bg", viewport: { width: 360, height: 800 } },
+]) {
+  test.describe(`portrait composer with a reply in flight, ${locale} ${viewport.width}x${viewport.height}`, () => {
+    test.use({ viewport, hasTouch: true, isMobile: true });
+
+    test("puts the red Stop in Send's slot beside the field and keeps the microphone alone", async ({ page }, testInfo) => {
+      await page.addInitScript(() => { (window as unknown as { __holdReplies?: boolean }).__holdReplies = true; });
+      await installFakeGatewaySocket(page);
+      await installClawboxMocks(page, { ...SETUP, preferences: { ...SETUP.preferences, ui_language: locale } });
+      await page.goto("/");
+      await chatOpen(page);
+      await expect(page.getByTestId("voice-record")).toBeEnabled();
+
+      const primary = page.getByTestId("chat-composer-primary");
+      const field = primary.locator("textarea");
+      await field.fill(locale === "bg" ? "Напиши кратък отговор" : "Write a short answer");
+      const sendBox = (await primary.getByTestId("chat-send").boundingBox())!;
+      await primary.getByTestId("chat-send").click();
+
+      const stop = primary.getByTestId("chat-stop");
+      await expect(stop).toBeVisible();
+      await expect(page.getByTestId("chat-send")).toHaveCount(0);
+      // The same slot Send had: the thumb does not move.
+      const stopBox = (await stop.boundingBox())!;
+      expect(Math.abs(stopBox.x - sendBox.x)).toBeLessThan(1);
+      expect(Math.abs(stopBox.y - sendBox.y)).toBeLessThan(1);
+      // Immediately right of the field, on the field's row.
+      const fieldBox = (await field.boundingBox())!;
+      expect(stopBox.x).toBeGreaterThanOrEqual(fieldBox.x + fieldBox.width);
+      expect(stopBox.x - (fieldBox.x + fieldBox.width)).toBeLessThanOrEqual(12);
+      expect(stopBox.y + stopBox.height).toBeLessThanOrEqual(fieldBox.y + fieldBox.height + 1);
+      await expect(stop).toHaveCSS("color", "rgb(239, 68, 68)");
+
+      const voiceRow = page.getByTestId("chat-composer-voice-row");
+      await expect(voiceRow.locator("button")).toHaveCount(1);
+      const micBox = (await voiceRow.locator("button").boundingBox())!;
+      expect(micBox.y).toBeGreaterThanOrEqual(fieldBox.y + fieldBox.height);
+      await page.screenshot({ path: testInfo.outputPath("portrait-in-flight.png") });
+    });
+  });
+}
 
 test.describe("on a big screen", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
