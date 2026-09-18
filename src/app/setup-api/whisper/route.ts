@@ -388,7 +388,8 @@ export async function DELETE(req: Request) {
  * The web server's environment plus the whisper-server unit's library path:
  * `libctranslate2.so.4` lives in ~/.local/lib, which the loader does not
  * search, and without it the fetcher's `import faster_whisper` fails on every
- * box that has the engine (see `withWhisperLibraryPath`).
+ * box whose engine is install-voice.sh's CUDA build — every Jetson (see
+ * `withWhisperLibraryPath`).
  */
 function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
