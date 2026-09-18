@@ -19,7 +19,7 @@ import path from "node:path";
  * real: a real sqlite store on a real temp DATA_DIR, real files on disk.
  */
 
-const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
+const { dataDir, embedCalls, embedFail, openclawConfig, boxState } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const nodeFs = require("node:fs") as typeof import("node:fs");
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -29,7 +29,7 @@ const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
   return {
     dataDir: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "memory-index-data-")),
     /** Every text that reached the embedder, in order, across the run. */
-    embedCalls: { texts: [] as string[], types: [] as string[] },
+    embedCalls: { texts: [] as string[], types: [] as string[], urls: [] as string[], bearers: [] as string[] },
     /**
      * When `status` is set, an embeddings request answers it instead of a
      * vector. `after` lets that many requests through first, which is how a
@@ -39,6 +39,8 @@ const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
     embedFail: { status: 0, after: 0 },
     /** What openclaw.json holds, for the one-time carry-over after a swap. */
     openclawConfig: { value: {} as unknown },
+    /** The box's ClawBox AI credential, and whether the GGUF is on disk. */
+    boxState: { clawaiToken: "claw_test" as string | null, gguf: true },
   };
 });
 
@@ -55,11 +57,26 @@ vi.mock("@/lib/config-store", async (importOriginal) => {
 });
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
-  getEmbedProvisioningStatus: async () => ({ installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 1, binPath: "", modelPath: "" }),
+  getEmbedProvisioningStatus: async () => ({ installed: boxState.gguf, binaryAvailable: boxState.gguf, modelAvailable: boxState.gguf, modelBytes: 1, binPath: "", modelPath: "" }),
+}));
+// The cloud half of the same index: where the ClawBox AI embedder is, and the
+// box's own credential for it. Both are read per request by the real resolver.
+vi.mock("@/lib/harness/credentials", () => ({
+  CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
+  resolveClawaiToken: async () => boxState.clawaiToken,
+}));
+vi.mock("@/lib/clawai-cloud-defaults", () => ({
+  readCloudDefaultsFacts: async () => ({
+    linked: boxState.clawaiToken !== null,
+    entitlement: "pro",
+    embeddingsSupported: true,
+    embeddingsRouteReady: boxState.clawaiToken !== null,
+  }),
 }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "t".repeat(64) }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: async () => openclawConfig.value }));
 
+import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
   LOCAL_INDEX_PATH,
   _resetLocalMemoryCacheForTests,
@@ -89,7 +106,7 @@ function stubVector(text: string): number[] {
 }
 
 function installFetchStub(): void {
-  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init: { body: string; headers: Record<string, string> }) => {
     if (embedFail.status) {
       if (embedFail.after > 0) embedFail.after -= 1;
       else {
@@ -98,9 +115,11 @@ function installFetchStub(): void {
         return new Response("nope", { status });
       }
     }
-    const body = JSON.parse(init.body) as { input: string[]; input_type: string };
+    const body = JSON.parse(init.body) as { input: string[]; input_type?: string; model: string };
     embedCalls.texts.push(...body.input);
-    embedCalls.types.push(body.input_type);
+    embedCalls.types.push(body.input_type as string);
+    embedCalls.urls.push(String(url));
+    embedCalls.bearers.push(init.headers.authorization);
     return Response.json({
       data: body.input.map((text, index) => ({ index, embedding: stubVector(text) })),
     });
@@ -123,6 +142,16 @@ beforeEach(async () => {
   fs.mkdirSync(source, { recursive: true });
   embedCalls.texts = [];
   embedCalls.types = [];
+  embedCalls.urls = [];
+  embedCalls.bearers = [];
+  // No subscription unless a test says otherwise, so every case below that is
+  // about the model on this box stays about it. The default-is-cloud rule has
+  // its own tests, here and in memory-embedder.test.ts.
+  boxState.clawaiToken = null;
+  boxState.gguf = true;
+  // The store is module-level in the mock, so a pin one case writes would
+  // otherwise decide the embedder for every case after it.
+  ((await import("@/lib/config-store")) as unknown as { __store: Map<string, unknown> }).__store.clear();
   embedFail.status = 0;
   embedFail.after = 0;
   openclawConfig.value = {};
@@ -427,6 +456,104 @@ describe("indexing the owner's folders", () => {
   });
 });
 
+describe("the ClawBox AI cloud embedder", () => {
+  it("embeds in the cloud with the box's own credential, and never through the proxy", async () => {
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    const result = await runLocalIndexPass("full");
+
+    expect(result.files).toBe(1);
+    expect(embedCalls.urls.length).toBeGreaterThan(0);
+    for (const url of embedCalls.urls) expect(url).toBe("https://clawbox.test/api/ai/embeddings");
+    for (const bearer of embedCalls.bearers) expect(bearer).toBe("Bearer claw_test");
+    // `input_type` is the loopback proxy's field — it restores Qwen3's query
+    // instruction from it — and an unknown one on an OpenAI-shaped route.
+    expect(embedCalls.types.every((type) => type === undefined)).toBe(true);
+  });
+
+  it("is what a box with a subscription and no pin uses, without being told", async () => {
+    // The owner's ruling of 2026-09-18: the cloud is the DEFAULT, not a
+    // preselection in a wizard. Nothing is stored here at all.
+    boxState.clawaiToken = "claw_test";
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    expect(embedCalls.urls).not.toHaveLength(0);
+    for (const url of embedCalls.urls) expect(url).toBe("https://clawbox.test/api/ai/embeddings");
+  });
+
+  it("indexes on the box itself when nothing links it to a subscription", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    for (const url of embedCalls.urls) expect(url).toBe("http://127.0.0.1/setup-api/local-ai/embed/v1/embeddings");
+  });
+
+  it("ends the pass rather than quietly embedding on the box when the credential is gone", async () => {
+    // A subscription that lapsed, or a credential the portal revoked. Falling
+    // back to the model on this box would write vectors from another model into
+    // an index stamped for the cloud one — a healthy panel over a search that
+    // ranks nothing.
+    await writeEmbedderPin("cloud");
+    boxState.clawaiToken = null;
+    write("notes.md", "The deposit is two months' rent.");
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/ClawBox AI credential/i);
+    expect(embedCalls.texts).toEqual([]);
+  });
+
+  it("searches with the same embedder the index was built by", async () => {
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    embedCalls.urls = [];
+    embedCalls.types = [];
+    const hits = await searchLocalMemory("deposit", 3);
+    expect(hits).not.toHaveLength(0);
+    expect(embedCalls.urls).toEqual(["https://clawbox.test/api/ai/embeddings"]);
+    expect(embedCalls.types).toEqual([undefined]);
+  });
+
+  it("calls semantic search available in the cloud without the 639 MB model on disk", async () => {
+    boxState.clawaiToken = "claw_test";
+    boxState.gguf = false;
+    await writeEmbedderPin("cloud");
+    const status = await localMemoryStatusJson() as {
+      status: { provider: string; model: string; vector: { semanticAvailable: boolean }; custom: { providerState: { mode: string } } };
+    };
+    expect(status.status.model).toBe("text-embedding-3-large");
+    expect(status.status.provider).toBe("openai-compatible");
+    expect(status.status.vector.semanticAvailable).toBe(true);
+    expect(status.status.custom.providerState.mode).toBe("active");
+  });
+
+  it("reports the index as mismatched the moment the embedder moves, and valid again after the rebuild", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    const read = async () => ((await localMemoryStatusJson()) as { status: { custom: { indexIdentity: { status: string } } } })
+      .status.custom.indexIdentity.status;
+    expect(await read()).toBe("valid");
+
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    expect(await read()).toBe("mismatched");
+    await runLocalIndexPass("full");
+    expect(await read()).toBe("valid");
+  });
+
+  it("never stamps the new embedder over an index the other one built", async () => {
+    // The stamp is for an index about to be built — the wizard's provisioning
+    // step. Over one that HOLDS vectors it would report `valid` for rows every
+    // query misses, which is the one lie this whole identity exists to stop.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    await stampLocalEmbeddingIdentity();
+    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(status.status.custom.indexIdentity.status).toBe("mismatched");
+  });
+});
+
 describe("finding things again", () => {
   it("ranks the document that actually answers the question first", async () => {
     write("lease.md", "The deposit is two months' rent, returned within 30 days.");
@@ -571,7 +698,7 @@ describe("the index knows what it was built for", () => {
     expect(status.status.custom.indexIdentity.status).toBe("missing");
     expect(status.status.files).toBe(0);
     expect(status.status.chunks).toBe(0);
-    expect(localEmbeddingIdentity()).toHaveLength(16);
+    expect(await localEmbeddingIdentity()).toHaveLength(16);
   });
 
   it("keeps the index it was going to replace when the embedder will not answer", async () => {

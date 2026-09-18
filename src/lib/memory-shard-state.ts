@@ -85,6 +85,20 @@ export const EXTRA_PATHS_CONFIG_PATH = "memory.search.extraPaths";
  */
 export const MEMORY_SHARD_SOURCES_KEY = "memory_shard_sources";
 
+/**
+ * Where the index is embedded on that same edition: `"cloud"` | `"local"`.
+ *
+ * The counterpart of OpenClaw's `memory.search.provider`/`.remote.baseUrl`, for
+ * the same reason the line above exists — the thing that INDEXES owns the
+ * setting, and on this SKU that is ClawBox. A WORD and never an address: see
+ * `src/lib/memory-embedder.ts`, which is the only reader and writer of it.
+ *
+ * Absent is not "local". Absent is "nobody has pinned this box", which the
+ * cloud-defaults resolver answers — the cloud whenever the box's subscription
+ * covers it (the owner's ruling of 2026-09-18).
+ */
+export const MEMORY_SHARD_EMBEDDER_KEY = "memory_shard_embedder";
+
 /** Documents ClawBox can turn into Markdown for the indexer. */
 export const EXTRACTABLE_EXTENSIONS = [".pdf", ".docx", ".odt", ".rtf", ".txt"] as const;
 
@@ -135,9 +149,13 @@ export interface EmbedderChoiceStatus {
   /** Where the index is embedded right now. */
   source: EmbeddingSource;
   /**
-   * False on the edition where ClawBox itself is the indexer: its embedder
-   * client refuses any endpoint that is not loopback, because the owner's
-   * document text is the request body there.
+   * This box can point its memory index at the ClawBox AI cloud at all.
+   *
+   * True on every edition since 2026-09-18. It used to be false where ClawBox
+   * itself is the indexer, because that client accepted only a loopback
+   * endpoint; it now accepts exactly two — the loopback proxy and the ClawBox
+   * AI endpoint the image was built with — so the fence is still a fence and
+   * the owner's choice is the same one on both editions.
    */
   cloudSupported: boolean;
   /** Linked, on a paid ClawBox AI plan, and the cloud embedder answered this box. */

@@ -38,17 +38,20 @@ import path from "path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { openSqlite } from "@/lib/openclaw-session-store";
-import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl } from "@/lib/embed-server";
-import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
+import {
+  assertEmbedEndpointAllowed,
+  embedderUsable,
+  resolveMemoryEmbedder,
+  type ResolvedEmbedder,
+} from "@/lib/memory-embedder";
 import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
 import { isInside } from "@/lib/file-guard";
 import { readConfig as readOpenclawConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import {
   EXTRA_PATHS_CONFIG_PATH,
   INDEXABLE_EXTENSIONS,
-  LOCAL_EMBEDDING_MODEL,
-  LOCAL_EMBEDDING_PROVIDER,
   MEMORY_SHARD_SOURCES_KEY,
   extraPathsOf,
   stringList,
@@ -346,27 +349,42 @@ function countOf(db: IndexDb, sql: string, ...params: unknown[]): number {
  * provisioning step, before anything has been embedded. A dimension change is
  * caught on its own, where it becomes known — see `assertDimension`.
  */
-export function localEmbeddingIdentity(): string {
+export function embedderIdentity(embedder: ResolvedEmbedder): string {
   return crypto
     .createHash("sha256")
-    .update(`${LOCAL_EMBEDDING_PROVIDER}|${LOCAL_EMBEDDING_MODEL}|${getEmbedProxyBaseUrl()}|v${SCHEMA_VERSION}`)
+    .update(`${embedder.provider}|${embedder.model}|${embedder.baseUrl}|v${SCHEMA_VERSION}`)
     .digest("hex")
     .slice(0, 16);
+}
+
+/** The identity of the embedder this box uses right now. */
+export async function localEmbeddingIdentity(): Promise<string> {
+  return embedderIdentity(await resolveMemoryEmbedder());
 }
 
 /**
  * Record what the index is built for, without building anything.
  *
- * The Hermes half of `switchToLocalEmbeddings`. On OpenClaw that call points an
- * external client at this box's embedder; here there is no external client to
- * point — ClawBox is the client — so the write that remains is the one fact
- * that would otherwise be missing: which model the vectors about to be written
- * belong to.
+ * The Hermes half of `switchToLocalEmbeddings`/`switchToCloudEmbeddings`. On
+ * OpenClaw those calls point an external client at an embedder; here there is
+ * no external client to point — ClawBox is the client — so the write that
+ * remains is the one fact that would otherwise be missing: which model the
+ * vectors about to be written belong to.
+ *
+ * IT NEVER STAMPS OVER AN INDEX THAT HOLDS SOMETHING. The vectors on disk
+ * belong to the embedder that wrote them, and a switch is exactly when that
+ * stops being the one this returns: stamping the new embedder over them would
+ * report `valid` — the shared parser's `healthy` — for an index whose rows are
+ * the wrong width for every query, so search would answer nothing behind a
+ * green panel. Left alone, the identity reads `mismatched`, the card draws the
+ * amber "Run a full reindex", and the full pass every switch posts rebuilds it.
  */
 export async function stampLocalEmbeddingIdentity(): Promise<void> {
+  const identity = await localEmbeddingIdentity();
   const db = await openIndexForWrite();
   try {
-    metaSet(db, "identity", localEmbeddingIdentity());
+    if (countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) return;
+    metaSet(db, "identity", identity);
     metaSet(db, "schema_version", SCHEMA_VERSION);
   } finally {
     db.close();
@@ -384,10 +402,10 @@ function sourceListKey(sources: readonly string[]): string {
   return crypto.createHash("sha256").update(JSON.stringify([...sources].sort())).digest("hex").slice(0, 16);
 }
 
-function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing" | "mismatched" {
+function identityOf(db: IndexDb, sources: readonly string[], identity: string): "valid" | "missing" | "mismatched" {
   const stored = metaGet(db, "identity");
   if (!stored) return "missing";
-  if (stored !== localEmbeddingIdentity()) return "mismatched";
+  if (stored !== identity) return "mismatched";
   if (countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) return "valid";
   // ZERO CHUNKS IS TWO DIFFERENT STATES, and only one of them is wrong. An
   // index emptied by a rebuild whose first embed failed must not read `valid`,
@@ -453,40 +471,61 @@ function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing
 // ─── embedding ───────────────────────────────────────────────────────────────
 
 /**
- * Embed a batch through THIS BOX'S OWN PROXY, never llama-server directly.
+ * Embed a batch with the embedder this box is pointed at — and at exactly one
+ * of the two addresses that is allowed to be.
  *
- * Going through `/setup-api/local-ai/embed/v1` is what wakes the unit on the
- * first request (and re-arms the idle stop that puts it away again), what
- * restores the Qwen3 query instruction that keeps recall from quietly
- * degrading, and what trims an input too long for the server's batch. A client
- * that talked to port 8081 would have to reimplement all three and would get
- * one of them subtly wrong.
+ * LOCAL goes through THIS BOX'S OWN PROXY, never llama-server directly. Going
+ * through `/setup-api/local-ai/embed/v1` is what wakes the unit on the first
+ * request (and re-arms the idle stop that puts it away again), what restores
+ * the Qwen3 query instruction that keeps recall from quietly degrading, and
+ * what trims an input too long for the server's batch. A client that talked to
+ * port 8081 would have to reimplement all three and would get one of them
+ * subtly wrong.
+ *
+ * CLOUD goes to the ClawBox AI embeddings endpoint with the box's own `claw_`
+ * bearer — the same request the OpenClaw edition's core makes from
+ * `memory.search.remote.*`, and the same one `probeCloudEmbeddings` proved the
+ * box can make before the switch was offered. No `input_type` there: it is an
+ * unknown field on an OpenAI-shaped route, which is why the OpenClaw arm unsets
+ * those two keys rather than leaving them.
+ *
+ * Anywhere else is refused — see `embedEndpointAllowed`.
  */
 async function embedBatch(
   texts: readonly string[],
   inputType: "query" | "document",
   signal: AbortSignal | undefined,
+  embedder: ResolvedEmbedder,
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
   // The owner's document text is about to become an HTTP body, so where it is
-  // going is checked rather than assumed. `getEmbedProxyBaseUrl()` is built
-  // from `CLAWBOX_LOCAL_AI_PROXY_BASE_URL`/`PORT` and is loopback on every box;
-  // this is what keeps that true if either ever becomes settable from anywhere
-  // less trustworthy. Off-box, the index would be quietly shipping the
-  // customer's files to a third party — so it refuses instead.
-  const endpoint = getEmbedProxyBaseUrl();
-  if (!isLoopbackBaseUrl(endpoint)) {
-    throw new EmbeddingUnavailableError("the embedder endpoint is not on this device");
+  // going is checked rather than assumed — at the moment the socket is opened,
+  // not only where the choice was made.
+  try {
+    assertEmbedEndpointAllowed(embedder.source, embedder.baseUrl);
+  } catch (err) {
+    throw new EmbeddingUnavailableError(err instanceof Error ? err.message : String(err));
   }
+  if (!embedderUsable(embedder)) {
+    // Pointed at the cloud with no credential on the box. Said out loud rather
+    // than quietly embedded on this box instead: that would write vectors from
+    // another model into an index stamped for this one.
+    throw new EmbeddingUnavailableError("this box holds no ClawBox AI credential for the cloud embedder");
+  }
+  const bearer = embedder.source === "cloud" ? embedder.token : getLocalAiToken();
   let res: Response;
   try {
-    res = await fetch(`${endpoint}/embeddings`, {
+    res = await fetch(embedder.requestUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${getLocalAiToken()}`,
+        authorization: `Bearer ${bearer}`,
       },
-      body: JSON.stringify({ model: LOCAL_EMBEDDING_MODEL, input: [...texts], input_type: inputType }),
+      body: JSON.stringify({
+        model: embedder.model,
+        input: [...texts],
+        ...(embedder.labelInputs ? { input_type: inputType } : {}),
+      }),
       signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(EMBED_TIMEOUT_MS)]),
     });
   } catch (err) {
@@ -770,6 +809,12 @@ export async function runLocalIndexPass(
   signal?: AbortSignal,
   onProgress?: LocalIndexProgressReporter,
 ): Promise<LocalIndexPassResult> {
+  // ONE reading of the embedder for the whole pass. Resolved before the store is
+  // opened, so a pass cannot embed its first files with one embedder and its
+  // last with another — a switch landing mid-pass would leave an index of two
+  // widths under a single identity.
+  const embedder = await resolveMemoryEmbedder();
+  const identityNow = embedderIdentity(embedder);
   const db = await openIndexForWrite();
   try {
     // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
@@ -781,7 +826,7 @@ export async function runLocalIndexPass(
     const sources = await readLocalSources();
     const scan = await scanSources(sources, signal);
 
-    const identity = identityOf(db, sources);
+    const identity = identityOf(db, sources, identityNow);
     const schema = metaGet(db, "schema_version");
     const rebuild = mode === "full" || identity === "mismatched" || schema !== SCHEMA_VERSION;
     if (rebuild) {
@@ -802,7 +847,7 @@ export async function runLocalIndexPass(
       // a path about to spend thousands, it is the same call that wakes the
       // unit for them, and a refusal ends the pass (`EmbeddingUnavailableError`)
       // with the index it was going to replace still on disk.
-      await embedBatch([REBUILD_PROBE_TEXT], "document", signal);
+      await embedBatch([REBUILD_PROBE_TEXT], "document", signal, embedder);
       // The identity goes WITH the rows it describes. Stamping it here — before
       // a single vector had been written — meant a rebuild whose first embed
       // failed left a valid identity over an empty index, which the shared
@@ -937,7 +982,7 @@ export async function runLocalIndexPass(
         vectors = [];
         for (let at = 0; at < pieces.length; at += EMBED_BATCH_INPUTS) {
           throwIfAborted(signal);
-          vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal));
+          vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal, embedder));
         }
       } catch (err) {
         // The embedder is the shared resource; a failure there is not this
@@ -1048,7 +1093,7 @@ export async function runLocalIndexPass(
     // in one transaction — five autocommits is five fsyncs for six short rows.
     db.exec("BEGIN");
     try {
-      metaSet(db, "identity", localEmbeddingIdentity());
+      metaSet(db, "identity", identityNow);
       metaSet(db, "built_at", String(Date.now()));
       // Everything this pass had to ACCOUNT FOR, which is not the same as what
       // it could open: a document the extractor refused never becomes an
@@ -1229,13 +1274,19 @@ function assertDimension(db: IndexDb, sample: Float32Array | undefined): boolean
  * comment for why it is worth impersonating rather than parallel-implementing.
  */
 export async function localMemoryStatusJson(): Promise<unknown> {
-  const [sources, provisioning] = await Promise.all([
+  const [sources, provisioning, embedder] = await Promise.all([
     readLocalSources(),
     getEmbedProvisioningStatus().catch(() => null),
+    resolveMemoryEmbedder(),
   ]);
-  // The model on disk is what makes semantic search POSSIBLE; whether it is
-  // awake right now is not the question — the proxy wakes it on demand.
-  const ready = provisioning?.installed === true;
+  // What makes semantic search POSSIBLE, per embedder. On this box that is the
+  // model being on disk — whether it is awake right now is not the question,
+  // the proxy wakes it on demand. In the cloud it is the box holding the
+  // credential the endpoint wants; the GGUF need not be there at all, and
+  // reading `installed` there would report a perfectly good cloud index as
+  // degraded on a box that never downloaded 639 MB it does not use.
+  const ready = embedder.source === "cloud" ? embedderUsable(embedder) : provisioning?.installed === true;
+  const identityNow = embedderIdentity(embedder);
   // ONE object literal for both cases, so the "there is no index yet" shape and
   // the real one cannot drift into disagreeing about a field name.
   //
@@ -1252,8 +1303,8 @@ export async function localMemoryStatusJson(): Promise<unknown> {
       agentId: "main",
       scan: { totalFiles: db ? Number(metaGet(db, "scan_total_files") ?? 0) : 0 },
       status: {
-        provider: LOCAL_EMBEDDING_PROVIDER,
-        model: LOCAL_EMBEDDING_MODEL,
+        provider: embedder.provider,
+        model: embedder.model,
         files: db ? countOf(db, "SELECT COUNT(*) AS n FROM files") : 0,
         chunks: db ? countOf(db, "SELECT COUNT(*) AS n FROM chunks") : 0,
         dbPath: LOCAL_INDEX_PATH,
@@ -1271,7 +1322,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
           // wizard's own stamp leaves too. `identityOf` is what tells an index
           // that is empty because there was nothing to index from one that is
           // empty because the work did not happen.
-          indexIdentity: { status: db ? identityOf(db, sources) : "missing" },
+          indexIdentity: { status: db ? identityOf(db, sources, identityNow) : "missing" },
         },
       },
     };
@@ -1406,6 +1457,11 @@ export async function searchLocalMemory(
   // Clamped HERE, not only in the two callers: the top-k loop indexes
   // `best[best.length - 1]` and a limit of zero makes that `best[-1]`.
   const want = Math.max(1, Math.min(50, Math.trunc(limit) || 1));
+  // The SAME embedder the last pass wrote with, or the query lands in a space
+  // the stored vectors do not live in. A switch that has not been rebuilt for
+  // yet answers nothing here (the widths differ), which is what the card's
+  // mismatched fingerprint and its "Run a full reindex" are about.
+  const embedder = await resolveMemoryEmbedder();
   const db = await openIndexForRead();
   if (!db) return [];
   try {
@@ -1414,7 +1470,7 @@ export async function searchLocalMemory(
     // for exactly that reason — and loading 82 MB of vectors needs nothing from
     // it. Started first, the wake covers the whole cold load, which is the
     // worst case this feature has: the agent's first search after a restart.
-    const embedding = embedBatch([text], "query", signal);
+    const embedding = embedBatch([text], "query", signal, embedder);
     // A handler on a DERIVED promise, attached before anything can throw: the
     // load below can return early or fail, and an in-flight rejection with
     // nobody listening takes the whole process down. `await embedding` still

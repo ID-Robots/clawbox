@@ -14,14 +14,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const OPENCLAW_PACKAGE_JSON = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 const PROXY_URL = "http://127.0.0.1/setup-api/local-ai/embed/v1";
+const CLOUD_ENDPOINT = "https://clawbox.test/api/ai/embeddings";
 const TOKEN = "t".repeat(64);
 
-const { runOpenclawConfigSetBatch, readFile, openclawIsAbsent, stampLocalEmbeddingIdentity, readConfig } = vi.hoisted(() => ({
+const { runOpenclawConfigSetBatch, readFile, openclawIsAbsent, stampLocalEmbeddingIdentity, readConfig, writeEmbedderPin } = vi.hoisted(() => ({
   runOpenclawConfigSetBatch: vi.fn(async () => ""),
   openclawIsAbsent: vi.fn(() => false),
   stampLocalEmbeddingIdentity: vi.fn(async () => {}),
   readFile: vi.fn<(path: string, encoding: string) => Promise<string>>(),
   readConfig: vi.fn<() => Promise<Record<string, unknown>>>(),
+  /** The word ClawBox's own store keeps on the SKU where it is the indexer. */
+  writeEmbedderPin: vi.fn(async (_source: string) => {}),
 }));
 
 vi.mock("fs/promises", () => ({ readFile }));
@@ -50,8 +53,27 @@ vi.mock("@/lib/embed-server", () => ({
 vi.mock("@/lib/local-ai-token", () => ({
   getLocalAiToken: () => TOKEN,
 }));
+vi.mock("@/lib/memory-embedder", async (importOriginal) => ({
+  // The fence is the real one: this file is about what each edition WRITES, and
+  // a stubbed fence would let a cloud switch record an endpoint it must refuse.
+  ...(await importOriginal<typeof import("@/lib/memory-embedder")>()),
+  writeEmbedderPin,
+  readEmbedderPin: vi.fn(async () => null),
+  defaultEmbedderSource: vi.fn(async () => "local" as const),
+}));
+vi.mock("@/lib/clawai-cloud-embeddings", () => ({
+  CLOUD_EMBEDDING_MODEL: "text-embedding-3-large",
+  CLOUD_EMBEDDING_PROVIDER: "openai-compatible",
+  cloudEmbeddingsUrl: () => CLOUD_ENDPOINT,
+  embeddingsBaseUrlOf: (endpoint: string) => endpoint.replace(/\/+$/, "").replace(/\/embeddings$/, ""),
+}));
+vi.mock("@/lib/harness/credentials", () => ({
+  CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
+  resolveClawaiToken: async () => "claw_test",
+}));
 
-import { embeddingConfigHome, readEmbeddingChoice, switchToLocalEmbeddings } from "@/lib/memory-shard";
+import { embeddingConfigHome, readEmbeddingChoice, readEmbeddingPlacement, switchToCloudEmbeddings, switchToLocalEmbeddings } from "@/lib/memory-shard";
+import { defaultEmbedderSource, readEmbedderPin } from "@/lib/memory-embedder";
 import { LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_PROVIDER } from "@/lib/memory-shard-state";
 
 /** Everything the embedder needs, and the provider LAST — the switch itself. */
@@ -77,6 +99,7 @@ beforeEach(() => {
   readFile.mockReset();
   readConfig.mockReset().mockResolvedValue({});
   stampLocalEmbeddingIdentity.mockClear();
+  writeEmbedderPin.mockClear();
   openclawIsAbsent.mockReturnValue(false);
 });
 
@@ -215,13 +238,93 @@ describe("switchToLocalEmbeddings", () => {
 
   it("writes NOTHING into openclaw.json on the edition that has no OpenClaw", async () => {
     // There is no external client to point at the embedder on that SKU —
-    // ClawBox is the client — so the only thing left to record is which model
-    // the vectors about to be written belong to. Spawning the CLI there would
-    // be spawning a binary that is not installed.
+    // ClawBox is the client — so what is recorded is where ClawBox should embed
+    // and which model the vectors about to be written belong to. Spawning the
+    // CLI there would be spawning a binary that is not installed.
     openclawIsAbsent.mockReturnValue(true);
     await switchToLocalEmbeddings();
+    expect(writeEmbedderPin).toHaveBeenCalledWith("local");
     expect(stampLocalEmbeddingIdentity).toHaveBeenCalledTimes(1);
     expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
     expect(readFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("switchToCloudEmbeddings on the edition that has no OpenClaw", () => {
+  beforeEach(() => openclawIsAbsent.mockReturnValue(true));
+
+  it("records the WORD and nothing else — no address, no copy of the credential", async () => {
+    await switchToCloudEmbeddings(CLOUD_ENDPOINT, "claw_test");
+    expect(writeEmbedderPin).toHaveBeenCalledWith("cloud");
+    expect(stampLocalEmbeddingIdentity).toHaveBeenCalledTimes(1);
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    for (const [[stored]] of writeEmbedderPin.mock.calls.map((call) => [call])) {
+      expect(stored).toBe("cloud");
+    }
+  });
+
+  it("refuses an endpoint that is not this box's own ClawBox AI account", async () => {
+    // The fence, checked where the choice is RECORDED as well as where the
+    // socket is opened: everything the owner has indexed is the body of those
+    // requests.
+    await expect(switchToCloudEmbeddings("https://someone-elses-server.example/v1/embeddings", "claw_test"))
+      .rejects.toThrow(/ClawBox AI account/i);
+    expect(writeEmbedderPin).not.toHaveBeenCalled();
+    expect(stampLocalEmbeddingIdentity).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty credential rather than recording a cloud it cannot reach", async () => {
+    await expect(switchToCloudEmbeddings(CLOUD_ENDPOINT, "   ")).rejects.toThrow(/credential/i);
+    expect(writeEmbedderPin).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `readEmbeddingPlacement` — the ONE reader of where the index is embedded, and
+ * the only one that can say whether that is written down.
+ *
+ * Two arms because the thing that INDEXES owns the setting, and `recorded` is
+ * what stops the automatic promotion rebuilding the index at every boot.
+ */
+describe("readEmbeddingPlacement", () => {
+  const pin = vi.mocked(readEmbedderPin);
+  const fallback = vi.mocked(defaultEmbedderSource);
+
+  beforeEach(() => {
+    pin.mockReset().mockResolvedValue(null);
+    fallback.mockReset().mockResolvedValue("local");
+    installedCore("2026.9.1");
+  });
+
+  it("reads openclaw.json where the core is the embedding client", async () => {
+    readConfig.mockResolvedValue({ memory: { search: { remote: { baseUrl: PROXY_URL } } } });
+    expect(await readEmbeddingPlacement()).toEqual({ source: "local", recorded: true });
+
+    readConfig.mockResolvedValue({ memory: { search: { remote: { baseUrl: "https://clawbox.test/api/ai" } } } });
+    expect(await readEmbeddingPlacement()).toEqual({ source: "cloud", recorded: true });
+  });
+
+  it("calls an OpenClaw box with no endpoint at all unwritten, so the default still has its write to make", async () => {
+    readConfig.mockResolvedValue({});
+    expect(await readEmbeddingPlacement()).toEqual({ source: "local", recorded: false });
+  });
+
+  it("reads the pin where ClawBox is the indexer", async () => {
+    openclawIsAbsent.mockReturnValue(true);
+    pin.mockResolvedValue("cloud");
+    expect(await readEmbeddingPlacement()).toEqual({ source: "cloud", recorded: true });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("answers the default rule for a box nobody has pinned — the cloud where the subscription covers it", async () => {
+    openclawIsAbsent.mockReturnValue(true);
+    fallback.mockResolvedValue("cloud");
+    expect(await readEmbeddingPlacement()).toEqual({ source: "cloud", recorded: false });
+  });
+
+  it("takes a verdict the caller already worked out rather than paying for the probe twice", async () => {
+    openclawIsAbsent.mockReturnValue(true);
+    expect(await readEmbeddingPlacement("cloud")).toEqual({ source: "cloud", recorded: false });
+    expect(fallback).not.toHaveBeenCalled();
   });
 });

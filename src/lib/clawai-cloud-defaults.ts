@@ -48,8 +48,7 @@ import {
 import { invalidateMemoryStatusCache, startMemoryIndex } from "@/lib/clawkeep-memory";
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
-import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
-import { readEmbeddingChoice, switchToCloudEmbeddings } from "@/lib/memory-shard";
+import { readEmbeddingPlacement, switchToCloudEmbeddings } from "@/lib/memory-shard";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { createSerialLock } from "@/lib/serial-lock";
 import { syncChannelAudio } from "@/lib/stt-channel";
@@ -109,7 +108,12 @@ export async function readCloudDefaultsFacts(): Promise<CloudDefaultsFacts> {
   // client refuses any endpoint that is not loopback — deliberately, because
   // the owner's document text is the request body there. See the fact's own
   // docblock; a default may not open that fence.
-  const embeddingsSupported = !openclawIsAbsent();
+  // Both editions since 2026-09-18. The fence the old `false` stood for is
+  // still there — ClawBox's own index sends the owner's text to the loopback
+  // proxy or to this box's ClawBox AI account and nowhere else
+  // (`memory-embedder.ts`) — but it is no longer a reason to keep an edition
+  // off a subscription it pays for.
+  const embeddingsSupported = true;
   return {
     linked,
     entitlement,
@@ -153,15 +157,15 @@ function voiceSourceOf(status: VoiceOutputStatus): CapabilitySource {
   return (status.activeEngine ?? status.preferredEngine ?? "local") === "cloud" ? "cloud" : "local";
 }
 
-/** Where the memory index is embedded right now. */
-async function currentEmbeddingSource(): Promise<CapabilitySource> {
-  if (openclawIsAbsent()) return "local";
-  const { baseUrl } = await readEmbeddingChoice();
-  // No endpoint at all is the on-device answer: the only thing this box points
-  // at without one is its own embedder, and claiming "cloud" over an unset key
-  // would make the applier skip the write that puts it right.
-  if (!baseUrl) return "local";
-  return isLoopbackBaseUrl(baseUrl) ? "local" : "cloud";
+/**
+ * Where the memory index is embedded right now.
+ *
+ * @param fallback the verdict this run already computed, for a box that has
+ *   pinned nothing: the default rule is what decides there, and reading the
+ *   facts a second time to learn it would buy a second probe.
+ */
+async function currentEmbeddingSource(fallback: CapabilitySource): Promise<CapabilitySource> {
+  return (await readEmbeddingPlacement(fallback)).source;
 }
 
 /**
@@ -185,7 +189,7 @@ async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voic
   const [stt, voice, embeddings, owners] = await Promise.all([
     getSttPrimary(),
     readVoiceSnapshot(),
-    currentEmbeddingSource(),
+    currentEmbeddingSource(defaults.embeddings.source),
     readOwnerChoices(),
   ]);
   const tts = voiceSourceOf(voice.status);
@@ -397,9 +401,15 @@ async function promoteTts({ harness, status }: VoiceSnapshot): Promise<boolean> 
  * boot.
  */
 async function promoteEmbeddings(): Promise<boolean> {
-  // Already pointed off the box: nothing to write, and writing anyway would
-  // invalidate a perfectly good index and buy a reindex for nothing.
-  if ((await currentEmbeddingSource()) === "cloud") return false;
+  // Already pointed off the box AND WRITTEN DOWN: nothing to write, and writing
+  // anyway would invalidate a perfectly good index and buy a reindex for
+  // nothing. `recorded` is the second half and it is load-bearing on the
+  // edition where ClawBox indexes: there an unpinned box ALREADY embeds in the
+  // cloud by default, so reading the source alone would have skipped the one
+  // write that records it — and with it the full pass that rebuilds an index
+  // whose vectors were made by the model on the box.
+  const placement = await readEmbeddingPlacement("cloud");
+  if (placement.recorded && placement.source === "cloud") return false;
   const token = await resolveClawaiToken();
   if (!token) return false;
   await switchToCloudEmbeddings(cloudEmbeddingsUrl(), token);

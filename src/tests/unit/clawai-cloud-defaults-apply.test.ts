@@ -43,11 +43,18 @@ const openclawAbsent = vi.fn(() => false);
 vi.mock("@/lib/openclaw-config", () => ({ openclawIsAbsent: () => openclawAbsent() }));
 
 const switchToCloud = vi.fn(async () => {});
-const embeddingChoice = vi.fn(async () => ({ provider: "openai-compatible", model: "q", baseUrl: "http://127.0.0.1:3000/setup-api/local-ai/embed/v1" }));
+/**
+ * Where the index is embedded, and whether that is WRITTEN DOWN.
+ *
+ * The second half is what a box nobody has pinned turns on: there the answer is
+ * the default rule — the cloud wherever the subscription covers it — and the
+ * applier still owes it the one write that records it, plus the rebuild.
+ */
+const placement = vi.fn(async (_fallback?: unknown) => ({ source: "local" as string, recorded: false }));
 const shardEnabled = vi.fn(async () => true);
 vi.mock("@/lib/memory-shard", () => ({
   getMemoryShardEnabled: () => shardEnabled(),
-  readEmbeddingChoice: () => embeddingChoice(),
+  readEmbeddingPlacement: (...a: unknown[]) => placement(...(a as [])),
   switchToCloudEmbeddings: (...a: unknown[]) => switchToCloud(...(a as [])),
 }));
 
@@ -90,7 +97,7 @@ beforeEach(() => {
   syncChannel.mockResolvedValue(true);
   startIndex.mockResolvedValue({ accepted: true });
   voiceState.mockResolvedValue({ choice: "auto" });
-  embeddingChoice.mockResolvedValue({ provider: "openai-compatible", model: "q", baseUrl: "http://127.0.0.1:3000/setup-api/local-ai/embed/v1" });
+  placement.mockResolvedValue({ source: "local", recorded: false });
 });
 
 describe("applyClawaiCloudDefaults", () => {
@@ -150,7 +157,7 @@ describe("applyClawaiCloudDefaults", () => {
     // Both halves of transcription already say cloud, so the channel sync has
     // nothing to write — see the loop's note on why it is still asked.
     syncChannel.mockResolvedValue(false);
-    embeddingChoice.mockResolvedValue({ provider: "openai-compatible", model: "text-embedding-3-large", baseUrl: "https://clawbox.test/api/ai" });
+    placement.mockResolvedValue({ source: "cloud", recorded: true });
     voiceProbe.mockResolvedValueOnce({
       config: { tts: { provider: "openai", providers: { openai: { apiKey: "claw_test", baseUrl: "https://clawbox.test/api/ai" } } } },
       probe: { providerConfigured: false, commandPresent: false, engineInstalled: false, engineNames: [] },
@@ -315,11 +322,35 @@ describe("readCloudDefaultsStatus", () => {
     });
   });
 
-  it("calls the index local on the edition that indexes on the box", async () => {
+  it("puts the edition that indexes on the box on the cloud too, where it used to say 'edition'", async () => {
+    // Until 2026-09-18 this answered `{ source: local, target: local, reason:
+    // "edition" }` and never even probed: ClawBox's own index accepted a
+    // loopback endpoint and nothing else. It now accepts this box's ClawBox AI
+    // account as well, so the SKU is no longer a reason to keep a subscriber
+    // off what they pay for.
     openclawAbsent.mockReturnValue(true);
+    placement.mockResolvedValue({ source: "cloud", recorded: false });
     const status = await readCloudDefaultsStatus();
-    expect(status.capabilities.embeddings).toEqual({ source: "local", target: "local", ownerChoice: false, reason: "edition" });
-    // And the probe is never even asked for: the answer could not change it.
-    expect(routeReady).not.toHaveBeenCalled();
+    expect(status.capabilities.embeddings).toEqual({ source: "cloud", target: "cloud", ownerChoice: false, reason: null });
+  });
+
+  it("records the cloud, and rebuilds, on an unpinned box that is already embedding there", async () => {
+    // The pin is what stops this happening at every boot, and the rebuild is
+    // what an index built by the model on the box needs after the move.
+    openclawAbsent.mockReturnValue(true);
+    placement.mockResolvedValue({ source: "cloud", recorded: false });
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).toContain("embeddings");
+    expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
+    expect(startIndex).toHaveBeenCalledWith("full", "manual");
+  });
+
+  it("leaves a box whose cloud embedder is already recorded alone", async () => {
+    openclawAbsent.mockReturnValue(true);
+    placement.mockResolvedValue({ source: "cloud", recorded: true });
+    const applied = await applyClawaiCloudDefaults();
+    expect(applied.moved).not.toContain("embeddings");
+    expect(switchToCloud).not.toHaveBeenCalled();
+    expect(startIndex).not.toHaveBeenCalled();
   });
 });
