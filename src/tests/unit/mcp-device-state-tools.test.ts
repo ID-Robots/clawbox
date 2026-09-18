@@ -147,6 +147,33 @@ describe("memory_shard_status", () => {
     // The index route refuses a pass while it is off, so no Reindex advice.
     expect(out.text).not.toMatch(/Reindex/);
   });
+
+  it("points at memory_shard_search only while its embeddings are there, whatever the plan", async () => {
+    // Enabled with an index but no embedding model: a search fails at the
+    // embedder (503), so the tool says not to call it rather than inviting it.
+    apiGet.mockResolvedValue({ ...MEMORY, semanticAvailable: false, health: "degraded" });
+    const noModel = await harness("hermes").call("memory_shard_status", {});
+    if (noModel.isError) throw new Error("expected a status");
+    const s = JSON.parse(noModel.text) as { searchable: unknown; guidance: string };
+    expect(s.searchable).toBe(false);
+    expect(s.guidance).not.toMatch(/Search the indexed documents/);
+    expect(s.guidance).toMatch(/memory_shard_search cannot answer yet/);
+
+    // A lapsed plan does not stop the search route, so it does not stop the hint.
+    apiGet.mockResolvedValue({ ...MEMORY, planGate: { satisfied: false, plan: "free", message: "" } });
+    const lapsed = await harness("hermes").call("memory_shard_status", {});
+    if (lapsed.isError) throw new Error("expected a status");
+    expect(lapsed.text).toMatch(/paid ClawBox AI plan/);
+    expect(lapsed.text).toMatch(/Search the indexed documents with memory_shard_search/);
+
+    // An older device that does not say either way gets no promise.
+    const older: Partial<typeof MEMORY> = { ...MEMORY };
+    delete older.semanticAvailable;
+    apiGet.mockResolvedValue(older);
+    const unknown = await harness("hermes").call("memory_shard_status", {});
+    if (unknown.isError) throw new Error("expected a status");
+    expect(unknown.text).not.toMatch(/memory_shard_search/);
+  });
 });
 
 describe("local_ai_status", () => {

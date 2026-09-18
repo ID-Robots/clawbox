@@ -1440,13 +1440,17 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         );
       }
       let told = false;
+      // `delivered: true` means a live session already read it in this turn,
+      // so nothing is left waiting on the record for a later resume.
+      let delivered = false;
       if (message) {
-        const queued = await apiPost<{ queued?: boolean }>(
+        const queued = await apiPost<{ queued?: boolean; delivered?: boolean }>(
           "/setup-api/coding-agent/message",
           { runId: run_id, text: message },
           { timeoutMs: 15_000, rules: MESSAGE_RULES },
         );
         told = queued.queued === true;
+        delivered = queued.delivered === true;
       }
       let res: { run?: RunPayload };
       try {
@@ -1495,8 +1499,11 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         // The message went onto the run's record BEFORE the resume was asked
         // for, and a refused resume does not take it back: it waits there for
         // the next resume. Unsaid, the retry this refusal may invite sends it a
-        // second time, and the run reads the same correction twice.
-        if (told) {
+        // second time, and the run reads the same correction twice. Not said of
+        // a run the device no longer has (nothing will read it) nor of one a
+        // live session already read (nothing is waiting).
+        const gone = refusal instanceof ToolError && refusal.code === "NOT_FOUND";
+        if (told && !delivered && !gone) {
           const e = classifyError(refusal, "coding_agent_resume");
           throw new ToolError(
             e.code,
@@ -1568,7 +1575,8 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           ? apiTry<VercelStatusPayload>("/setup-api/coding-agent/vercel/deploy", { query, timeoutMs: 20_000 })
           : Promise.resolve(null),
       ]);
-      const mine = runs ? runs.filter((r) => runInProject(r, found)).slice(0, 10) : [];
+      const allMine = runs ? runs.filter((r) => runInProject(r, found)) : [];
+      const mine = allMine.slice(0, 10);
       const detail: Record<string, unknown> = {
         ...projectRow(found, runs),
         directory: found.directory,
@@ -1584,7 +1592,24 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           : {}),
         runs: mine.map((r) => runRow(r, ctx.codingVercel)),
       };
-      return text(fitJson((kept) => ({ ...detail, runs: kept }), detail.runs as Record<string, unknown>[], LIST_MAX_CHARS));
+      // `runs` is partial twice over — the ten newest, then whatever fits the
+      // answer — and a list that does not say so reads as the project's whole
+      // history. An unreadable run list is not an empty one either.
+      return text(fitJson(
+        (kept, omittedByBudget) => {
+          const omitted = allMine.length - mine.length + omittedByBudget;
+          return {
+            ...detail,
+            runs: kept,
+            ...(omitted
+              ? { runs_not_listed: `${omitted} older run(s) of this project are not listed — coding_run_list with project "${found.folder}" lists them` }
+              : {}),
+            ...(runs === null ? { note: "The run list could not be read, so this project's runs and run counts are unknown." } : {}),
+          };
+        },
+        detail.runs as Record<string, unknown>[],
+        LIST_MAX_CHARS,
+      ));
     },
   );
 

@@ -37,7 +37,7 @@ vi.mock("../../../mcp/lib/api", async () => {
 
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { registerCodingAgentTools } from "../../../mcp/tools/coding-agent";
-import { ApiError } from "../../../mcp/lib/errors";
+import { ApiError, ToolError } from "../../../mcp/lib/errors";
 import { BANNED_DESCRIPTION_RE, LIST_MAX_CHARS, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
 
@@ -287,6 +287,39 @@ describe("coding_agent_resume", () => {
     expect(bare.error.message).not.toMatch(/queued/);
   });
 
+  it("says nothing is waiting when the message was read at once, or the run is gone", async () => {
+    // A live session read it in this turn: nothing is left for a later resume.
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "paused" } });
+    apiPost
+      .mockResolvedValueOnce({ queued: true, delivered: true })
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "Another run is using that folder.", kind: "busy" })));
+    const read = await harness().call("coding_agent_resume", { run_id: RUN.id, message: "use blue" });
+    if (!read.isError) throw new Error("expected a refusal");
+    expect(read.error.message).toMatch(/Another run is using that folder/);
+    expect(read.error.message).not.toMatch(/queued/);
+
+    // The run vanished between the message and the resume: nothing will read it.
+    apiPost.mockReset();
+    apiPost
+      .mockResolvedValueOnce({ queued: true, delivered: false })
+      .mockRejectedValueOnce(new ApiError(404, JSON.stringify({ error: "No such coding run." })));
+    const gone = await harness().call("coding_agent_resume", { run_id: RUN.id, message: "use blue" });
+    if (!gone.isError) throw new Error("expected NOT_FOUND");
+    expect(gone.error.code).toBe("NOT_FOUND");
+    expect(gone.error.message).not.toMatch(/queued/);
+  });
+
+  it("still says the message is queued when the resume times out", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "paused" } });
+    apiPost
+      .mockResolvedValueOnce({ queued: true, delivered: false })
+      .mockRejectedValueOnce(new ToolError("TIMEOUT", "The ClawBox did not confirm the resume in time.", "Do not resume it again."));
+    const out = await harness().call("coding_agent_resume", { run_id: RUN.id, message: "use blue" });
+    if (!out.isError) throw new Error("expected a timeout");
+    expect(out.error.message).toMatch(/did not confirm the resume/);
+    expect(out.error.message).toMatch(/already queued .* do not send it again/);
+  });
+
   it("refuses the owner's run without touching it", async () => {
     apiGet.mockResolvedValue({ run: { ...RUN, status: "paused", source: "owner" } });
     const out = await harness().call("coding_agent_resume", { run_id: RUN.id, message: "hello" });
@@ -475,6 +508,50 @@ describe("coding_project_status", () => {
     if (off.isError) throw new Error("expected the project");
     expect(off.text).not.toMatch(/vercel/i);
     expect(apiTry).not.toHaveBeenCalledWith("/setup-api/coding-agent/vercel/deploy", expect.anything());
+  });
+
+  it("says how many of a named project's runs it left out, by count or by size", async () => {
+    apiGet.mockResolvedValue(PROJECTS);
+    const many = Array.from({ length: 14 }, (_, i) => ({ ...RUN, id: `run-${String(i).padStart(8, "0")}` }));
+    apiTry.mockImplementation(async (path: string) => (path === "/setup-api/coding-agent/runs" ? { runs: many } : null));
+    const out = await harness().call("coding_project_status", { project: "site" });
+    if (out.isError) throw new Error("expected the project");
+    const detail = JSON.parse(out.text) as { runs: { run_id: string }[]; runs_not_listed?: string };
+    expect(detail.runs).toHaveLength(10);
+    expect(detail.runs_not_listed).toMatch(/^4 older run\(s\) .*coding_run_list with project "site"/);
+
+    // Rows too big for the answer: the ones dropped to fit are counted too.
+    const big = Array.from({ length: 10 }, (_, i) => ({
+      ...RUN,
+      id: `run-${String(i).padStart(8, "0")}`,
+      task: `task ${i} ${"x".repeat(70)}`,
+      deliverable: { kind: "paths", paths: Array.from({ length: 10 }, (_, j) => `src/deeply/nested/folder/file-${j}.ts`) },
+      deliverableCheck: { ok: false, missing: "m".repeat(200), checkedAt: 1 },
+    }));
+    apiTry.mockImplementation(async (path: string) => (path === "/setup-api/coding-agent/runs" ? { runs: big } : null));
+    const cut = await harness().call("coding_project_status", { project: "site" });
+    if (cut.isError) throw new Error("expected the project");
+    expect(cut.text.length).toBeLessThanOrEqual(LIST_MAX_CHARS);
+    const fitted = JSON.parse(cut.text) as { runs: unknown[]; runs_not_listed?: string };
+    expect(fitted.runs.length).toBeLessThan(10);
+    expect(fitted.runs_not_listed).toMatch(new RegExp(`^${10 - fitted.runs.length} older run`));
+
+    // Every run shown: no line about the rest.
+    apiTry.mockImplementation(async (path: string) => (path === "/setup-api/coding-agent/runs" ? { runs: [RUN] } : null));
+    const all = await harness().call("coding_project_status", { project: "site" });
+    if (all.isError) throw new Error("expected the project");
+    expect(all.text).not.toMatch(/runs_not_listed/);
+  });
+
+  it("does not pass an unreadable run list off as a project with no runs", async () => {
+    apiGet.mockResolvedValue(PROJECTS);
+    apiTry.mockResolvedValue(null);
+    const out = await harness().call("coding_project_status", { project: "site" });
+    if (out.isError) throw new Error("expected the project");
+    const detail = JSON.parse(out.text) as { runs: unknown[]; runs_working: unknown; note?: string };
+    expect(detail.runs).toEqual([]);
+    expect(detail.runs_working).toBe("unknown");
+    expect(detail.note).toMatch(/could not be read/);
   });
 
   it("names the projects that do exist when asked for one that does not", async () => {

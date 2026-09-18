@@ -113,7 +113,15 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
       + " If the user wants the index refreshed, open the Memory Shard app with ui_open_app(\"memory-shard\") and tell them to press Reindex there; this tool then shows its progress.",
     );
   }
-  if (searchHint && s.enabled !== false) guidance.push("Search the indexed documents with memory_shard_search.");
+  // Only on a positive reading of both: an enabled shard whose embedding model
+  // is not ready still has an index, and a search then fails at the embedder
+  // (503). The plan gate is deliberately not consulted — the search route does
+  // not enforce it, so a shard enabled before a plan lapsed stays searchable.
+  if (searchHint && s.enabled === true && s.semanticAvailable === true) {
+    guidance.push("Search the indexed documents with memory_shard_search.");
+  } else if (searchHint && s.enabled === true && s.semanticAvailable === false) {
+    guidance.push("memory_shard_search cannot answer yet: the embeddings it searches with are not available on this box (searchable: false). Do not call it until this tool says searchable: true.");
+  }
   return {
     switched_on: s.enabled ?? "unknown",
     setup_complete: s.setupComplete ?? "unknown",
