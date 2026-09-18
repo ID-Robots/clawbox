@@ -231,6 +231,33 @@ describe("ChatProgressCard — the fold", () => {
     expect(css).toMatch(/@media \(max-height: 760px\) \{ \.chat-progress-body \{ max-height: min\(220px, 28dvh\); \} \}/);
     expect(css).toMatch(/@media \(max-width: 640px\) \{ \.chat-progress-body \{ max-height: min\(240px, 30dvh\); \} \}/);
   });
+
+  // Seen at 390px in German and Bulgarian: the title and "Updated…" never
+  // shrank, so the time was cut mid-word and the step vanished. The header now
+  // gives way in order — the summary first, the time last and with an ellipsis
+  // — and on a narrow card puts both under the title. jsdom has no layout, so
+  // this pins the structure and the rules that produce it.
+  it("lets the header give way on a narrow card instead of cutting the time off", () => {
+    render(<ChatProgressCard card={card()} />);
+    const section = screen.getByTestId("chat-progress-card");
+    expect(section.className).toContain("chat-progress-card");
+    expect(screen.getByTestId("chat-progress-card-title").className).toContain("chat-progress-title");
+    const time = screen.getByTestId("chat-progress-card-updated");
+    const summary = screen.getByTestId("chat-progress-card-summary");
+    expect(time.className).toContain("chat-progress-time");
+    expect(summary.className).toContain("chat-progress-summary");
+    // Neither carries an inline flex-shrink that would override the stylesheet's order.
+    expect(time.style.flexShrink).toBe("");
+    expect(summary.style.flexShrink).toBe("");
+    expect(time.parentElement).toBe(summary.parentElement);
+    expect(time.parentElement?.className).toContain("chat-progress-meta");
+
+    const css = section.querySelector("style")?.textContent ?? "";
+    expect(css).toContain(".chat-progress-card { container: chat-progress / inline-size; }");
+    expect(css).toContain(".chat-progress-time, .chat-progress-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
+    expect(css).toContain(".chat-progress-summary { flex-shrink: 1000; }");
+    expect(css).toMatch(/@container chat-progress \(max-width: 400px\) \{[^}]*\.chat-progress-head \{ flex-direction: column;/);
+  });
 });
 
 describe("useGatewayProgressCard", () => {

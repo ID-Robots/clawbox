@@ -67,6 +67,20 @@ const CARD_CSS = `
   .chat-progress-indeterminate { animation: none; transform: translateX(75%); }
 }
 .chat-progress-body a:focus-visible, .chat-progress-toggle:focus-visible { outline: 2px solid ${CORAL}; outline-offset: 2px; }
+.chat-progress-card { container: chat-progress / inline-size; }
+.chat-progress-head { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
+.chat-progress-title { flex-shrink: 0; }
+.chat-progress-meta { display: contents; }
+.chat-progress-sep { flex-shrink: 0; }
+.chat-progress-time, .chat-progress-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-progress-time { flex-shrink: 1; }
+.chat-progress-summary { flex-shrink: 1000; }
+@container chat-progress (max-width: 400px) {
+  .chat-progress-head { flex-direction: column; align-items: stretch; gap: 1px; }
+  .chat-progress-title { overflow: hidden; text-overflow: ellipsis; }
+  .chat-progress-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; }
+  .chat-progress-meta > .chat-progress-sep:first-child { display: none; }
+}
 `;
 
 export function ChatProgressCard({ card }: { card: ProgressCard }) {
@@ -133,6 +147,7 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
 
   return (
     <section
+      className="chat-progress-card"
       data-testid="chat-progress-card"
       data-collapsed={collapsed ? "true" : "false"}
       data-revision={card.revision}
@@ -158,33 +173,42 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
           <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 17, color: CORAL, flexShrink: 0 }}>
             checklist
           </span>
-          <span style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "baseline", gap: 6, overflow: "hidden", whiteSpace: "nowrap" }}>
-            <span data-testid="chat-progress-card-title" style={{ fontWeight: 600, color: TITLE_FG, flexShrink: 0 }}>
+          {/* One line where it fits. On a narrow card (a phone, a long locale)
+              the time and summary move under the title; either way the summary
+              gives way first and the time last, with an ellipsis, never cut. */}
+          <span className="chat-progress-head">
+            <span data-testid="chat-progress-card-title" className="chat-progress-title" style={{ fontWeight: 600, color: TITLE_FG }}>
               {t("chat.progressCard.title")}
             </span>
-            {agoText !== null && (
-              <>
-                <span aria-hidden="true" style={{ color: MUTED_FG, flexShrink: 0 }}>·</span>
-                <time
-                  data-testid="chat-progress-card-updated"
-                  dateTime={updatedIso}
-                  title={updatedFull}
-                  style={{ color: MUTED_FG, fontSize: 11.5, flexShrink: 0 }}
-                >
-                  {t("chat.progressCard.updated", { ago: agoText })}
-                </time>
-              </>
-            )}
-            {summary && (
-              <>
-                <span aria-hidden="true" style={{ color: MUTED_FG, flexShrink: 0 }}>·</span>
-                <span
-                  data-testid="chat-progress-card-summary"
-                  style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", color: "rgba(255,255,255,0.72)" }}
-                >
-                  {summary}
-                </span>
-              </>
+            {(agoText !== null || summary) && (
+              <span className="chat-progress-meta">
+                {agoText !== null && (
+                  <>
+                    <span className="chat-progress-sep" aria-hidden="true" style={{ color: MUTED_FG }}>·</span>
+                    <time
+                      data-testid="chat-progress-card-updated"
+                      className="chat-progress-time"
+                      dateTime={updatedIso}
+                      title={updatedFull}
+                      style={{ color: MUTED_FG, fontSize: 11.5 }}
+                    >
+                      {t("chat.progressCard.updated", { ago: agoText })}
+                    </time>
+                  </>
+                )}
+                {summary && (
+                  <>
+                    <span className="chat-progress-sep" aria-hidden="true" style={{ color: MUTED_FG }}>·</span>
+                    <span
+                      data-testid="chat-progress-card-summary"
+                      className="chat-progress-summary"
+                      style={{ color: "rgba(255,255,255,0.72)" }}
+                    >
+                      {summary}
+                    </span>
+                  </>
+                )}
+              </span>
             )}
           </span>
           {total > 0 && (
