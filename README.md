@@ -270,7 +270,7 @@ Full documentation: **[editions](https://docs.clawbox.com/editions/overview)** �
 
 **Layer 4 — AI agent integration.** The agent operates the device through MCP tools — shell, files, real-browser control, app installs, system power, preferences, email drafts you approve, picture and audio generation, and a code assistant that builds and deploys desktop webapps. The `clawbox-cli.ts` wrapper (run through Bun) exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.com/technical/agent-interface).**
 
-**Layer 5 — The cloud your plan covers.** On a box linked to ClawBox AI, speech-to-text, spoken replies and memory embeddings default to the service the plan already pays for instead of engines on the device — on **every** edition; the engines stay the fallback and stay selectable, and a choice made by hand is never overwritten. The memory index will only ever talk to two addresses, checked per request: the loopback embedder proxy on the device, or this box's own ClawBox AI endpoint. The matrix is in [AI Providers](https://docs.clawbox.com/technical/ai-providers).
+**Layer 5 — The cloud your plan covers.** On a box linked to ClawBox AI, speech-to-text, spoken replies and memory embeddings default to the service the plan already pays for instead of engines on the device — on **every** edition; the engines stay the fallback and stay selectable, and a choice made by hand is never overwritten. On the edition where ClawBox owns the memory index itself, the index talks to two addresses only, checked per request: the loopback embedder proxy on the device, or this box's own ClawBox AI endpoint. The matrix is in [AI Providers](https://docs.clawbox.com/technical/ai-providers).
 
 ---
 

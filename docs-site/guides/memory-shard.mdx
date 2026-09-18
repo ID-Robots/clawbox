@@ -72,7 +72,8 @@ before you press anything. Search keeps working on the old index until the new o
 When the cloud option cannot be picked, the card names the reason: the box is not
 connected to ClawBox AI, the plan does not cover the cloud model, the service did not
 answer this box (in which case it is retried on its own and the model on the box works
-meanwhile), or you picked the model on the box yourself.
+meanwhile). Picking the model on the box yourself is not a refusal: the cloud stays
+selectable, and nothing moves your index back on its own.
 
 <Note>
 The card names the model your index was actually built with, which is not always one of
@@ -86,12 +87,14 @@ index becomes the body of those requests. If that is not what you want, pick **O
 box** — it is a first-class option on every edition, and nothing about it depends on a
 subscription once the model is downloaded.
 
-Those are the only two places the index will send anything. Every indexing pass and every
-search checks the address it is about to use and refuses any other: the box's own model,
-reached on the device itself, or the ClawBox AI endpoint belonging to this box's own
-account. What is stored is which of the two you chose — never an address, and never a copy
-of a credential — so a restored backup or a hand-edited configuration file cannot redirect
-where your documents go.
+On the edition where ClawBox owns the index itself, those are the only two places it will
+send anything. Every indexing pass and every search checks the address it is about to use
+and refuses any other: the box's own model, reached on the device itself, or the ClawBox AI
+endpoint belonging to this box's own account. What is stored is which of the two you chose —
+never an address, and never a copy of a credential. On the OpenClaw edition the choice is
+written into OpenClaw's own memory-search configuration as an endpoint and a key, which is
+why an embedder pointed there by hand shows up above as **Cloud** under its own model's
+name.
 </Warning>
 
 ## What you see while it runs
