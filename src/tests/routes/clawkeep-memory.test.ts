@@ -57,6 +57,10 @@ beforeAll(async () => {
   // A binary that exits non-zero with no output: the status probe must turn
   // that into an explicit "unavailable", never into a 500.
   process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
+  // The migration lock's path is read once, when the module loads — so it is
+  // set here, before the handlers are imported, or an index run would try the
+  // box's own `~/clawbox/data`, which a CI runner does not have.
+  process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(TEST_ROOT, "embed.lock");
   await fs.mkdir(DATA_DIR, { recursive: true });
   statusGET = (await import("@/app/setup-api/clawkeep/memory/route")).GET;
   indexPOST = (await import("@/app/setup-api/clawkeep/memory/index/route")).POST;
@@ -69,6 +73,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.CLAWKEEP_DATA_DIR;
   delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+  delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
   await fs.rm(TEST_ROOT, { recursive: true, force: true });
 });
 
@@ -249,6 +254,65 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     }));
     expect(JSON.stringify(await res.json())).not.toContain(String(process.pid));
   });
+});
+
+describe("the bar on an OpenClaw box, across the HTTP boundary", () => {
+  /**
+   * The acceptance, end to end through the real handlers: a Full reindex
+   * started by POST, and the status GET the card polls reporting how far it
+   * has got while it runs. The "CLI" behaves like the real one's reporter —
+   * it prints the counts only when stderr is a terminal and only for
+   * `--verbose` — and answers `memory status` the way the rest of this suite
+   * does, by failing, so the numbers can only have come from the pass.
+   */
+  it("reports files done of total and chunks in run.progress while the pass runs, and none after", async () => {
+    const agentDb = path.join(TEST_ROOT, "agents", "main", "agent", "openclaw-agent.sqlite");
+    await fs.mkdir(path.dirname(agentDb), { recursive: true });
+    const bin = path.join(TEST_ROOT, "fake-openclaw.mjs");
+    await fs.writeFile(bin, [
+      `#!${process.execPath}`,
+      "import { DatabaseSync } from 'node:sqlite';",
+      "if (!process.argv.includes('index')) process.exit(1);",
+      "const on = process.stderr.isTTY === true && process.argv.includes('--verbose');",
+      `const db = new DatabaseSync(${JSON.stringify(agentDb)} + '.memory-reindex-' + crypto.randomUUID());`,
+      "db.exec('PRAGMA journal_mode = WAL');",
+      "db.exec('CREATE TABLE memory_index_chunks (id TEXT PRIMARY KEY)');",
+      "const add = db.prepare('INSERT INTO memory_index_chunks VALUES (?)');",
+      "const say = (n) => { if (on) process.stderr.write('\\r\\x1b[2KIndexing memory files\\u2026 ' + n + '/6 \\u00b7 elapsed 0:0' + n + ' ' + Math.round(n / 6 * 100) + '%'); };",
+      "say(0);",
+      "for (let n = 1; n <= 6; n += 1) { await new Promise((r) => setTimeout(r, 500)); add.run('a' + n); add.run('b' + n); say(n); }",
+      "db.close();",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = bin;
+    process.env.CLAWKEEP_MEMORY_AGENT_DB = agentDb;
+    try {
+      const started = await indexPOST(new NextRequest("http://localhost/x", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "full" }),
+      }));
+      expect(started.status).toBe(200);
+      expect((await started.json()).accepted).toBe(true);
+
+      const seen: Array<{ filesDone: number; filesTotal: number; chunks: number }> = [];
+      let last: { run: { status: string; progress: unknown } } | null = null;
+      for (let i = 0; i < 300; i += 1) {
+        last = await (await statusGET()).json();
+        if (last!.run.status !== "running") break;
+        const progress = last!.run.progress as { filesDone: number; filesTotal: number; chunks: number } | null;
+        if (progress && progress.filesTotal > 0) seen.push(progress);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(last!.run.status).toBe("succeeded");
+      expect(last!.run.progress).toBeNull();
+      expect(seen.length).toBeGreaterThan(1);
+      expect(seen.every((p) => p.filesTotal === 6 && p.filesDone <= 6)).toBe(true);
+      expect(new Set(seen.map((p) => p.filesDone)).size).toBeGreaterThan(1);
+      expect(Math.max(...seen.map((p) => p.chunks))).toBeGreaterThan(0);
+    } finally {
+      process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
+      delete process.env.CLAWKEEP_MEMORY_AGENT_DB;
+    }
+  }, 30_000);
 });
 
 describe("the owner gate on the two routes that spend the box's time", () => {

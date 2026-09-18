@@ -761,70 +761,200 @@ describe("how a run ends", () => {
   });
 });
 
+describe("how far an OpenClaw pass has got", () => {
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+    delete process.env.CLAWKEEP_MEMORY_AGENT_DB;
+    delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+  });
+
+  /**
+   * A stand-in for `openclaw memory index` that behaves like the real CLI's
+   * reporter: `createCliProgress` prints NOTHING unless stderr is a terminal,
+   * and draws its `line` face only for `--verbose`. So the numbers can only
+   * reach the card if the pass is run on a pseudo-terminal with that flag —
+   * which is exactly what the bytes below demand. It also writes chunks into
+   * a scratch index as it goes, the way a full reindex does.
+   */
+  async function fakeIndexer(total: number): Promise<{ script: string; db: string }> {
+    const db = path.join(tmpDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+    await fs.mkdir(path.dirname(db), { recursive: true });
+    const script = path.join(tmpDir, "fake-index.mjs");
+    await fs.writeFile(script, [
+      `#!${process.execPath}`,
+      "import { DatabaseSync } from 'node:sqlite';",
+      "const verbose = process.argv.includes('--verbose');",
+      "const tty = process.stderr.isTTY === true;",
+      `const scratch = new DatabaseSync(${JSON.stringify(db)} + '.memory-reindex-' + crypto.randomUUID());`,
+      "scratch.exec('PRAGMA journal_mode = WAL');",
+      "scratch.exec('CREATE TABLE memory_index_chunks (id TEXT PRIMARY KEY)');",
+      "const add = scratch.prepare('INSERT INTO memory_index_chunks VALUES (?)');",
+      `const total = ${total};`,
+      "const say = (done) => { if (tty && verbose) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/${total} \\u00b7 elapsed 0:0${done % 10} ${Math.round(done / total * 100)}%`); };",
+      "say(0);",
+      "for (let done = 1; done <= total; done += 1) {",
+      "  await new Promise((r) => setTimeout(r, 400));",
+      "  add.run('a' + done); add.run('b' + done);",
+      "  say(done);",
+      "}",
+      "scratch.close();",
+      "process.stderr.write('\\r\\x1b[2KMemory index updated (main): ' + total + ' files indexed.\\r\\n');",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    return { script, db };
+  }
+
+  it("publishes files done of total and the chunks written while the pass runs, then clears them", async () => {
+    const { script, db } = await fakeIndexer(8);
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
+    vi.resetModules();
+    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+
+    const seen: Array<{ filesDone: number; filesTotal: number; chunks: number }> = [];
+    for (let i = 0; i < 400; i += 1) {
+      const run = await readMemoryRunState();
+      if (run.status !== "running") break;
+      if (run.progress && run.progress.filesTotal > 0) seen.push(run.progress);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const settled = await settledMemoryRun(tmpDir);
+    expect(settled.status).toBe("succeeded");
+
+    // A real fraction, with the total the CLI's scan found.
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.every((p) => p.filesTotal === 8)).toBe(true);
+    expect(seen.every((p) => p.filesDone <= p.filesTotal)).toBe(true);
+    // It MOVES — the whole complaint was a bar with no numbers for the length
+    // of the pass.
+    const done = seen.map((p) => p.filesDone);
+    expect(Math.max(...done)).toBeGreaterThan(Math.min(...done));
+    for (let i = 1; i < done.length; i += 1) expect(done[i]).toBeGreaterThanOrEqual(done[i - 1]);
+    // Chunks come from the scratch index the pass is building.
+    expect(Math.max(...seen.map((p) => p.chunks))).toBeGreaterThan(0);
+    // And a finished run carries no bar.
+    expect((await readMemoryRunState()).progress).toBeNull();
+  });
+
+  it("falls back to the bar with no numbers when there is no terminal to run it on", async () => {
+    const { script, db } = await fakeIndexer(3);
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
+    vi.resetModules();
+    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    const totals = new Set<number>();
+    for (let i = 0; i < 200; i += 1) {
+      const run = await readMemoryRunState();
+      if (run.status !== "running") break;
+      totals.add(run.progress?.filesTotal ?? 0);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    // The run still happens — only the numbers are missing, and no total is
+    // ever invented for it.
+    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+    expect([...totals]).toEqual([0]);
+  });
+});
+
 describe("the process the run supervises", () => {
-  it("is the indexer itself, not a flock wrapper around it", async () => {
-    /**
-     * util-linux `flock` defaults to forking the command and waiting on it.
-     * Without `--no-fork` the pid this module records and signals would be the
-     * WRAPPER: the timeout handler and the failed-state-write cleanup would
-     * kill it and leave `openclaw memory index` running unsupervised, while
-     * the lock it was holding is released along with the wrapper — the exact
-     * opposite of what both paths are for.
-     *
-     * The same goes one level down: the installed `openclaw` is a launcher
-     * that re-spawns the real CLI as a grandchild unless OPENCLAW_NO_RESPAWN
-     * is set, and only forwards SIGTERM to it. The fake binary here does the
-     * same, so a run that forgets the opt-out records the launcher's pid and
-     * fails this.
-     *
-     * Asserted against the real spawn, by giving the run a "binary" that
-     * writes its own pid: with `--no-fork` and the opt-out that pid is the
-     * child we recorded.
-     */
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+    delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+  });
+
+  /**
+   * util-linux `flock` defaults to forking the command and waiting on it.
+   * Without `--no-fork` the process this module records and signals would be
+   * a WRAPPER: the timeout handler and the failed-state-write cleanup would
+   * kill it and leave `openclaw memory index` running unsupervised, while the
+   * lock it was holding is released along with the wrapper — the exact
+   * opposite of what both paths are for.
+   *
+   * The same goes one level down: the installed `openclaw` is a launcher that
+   * re-spawns the real CLI as a grandchild unless OPENCLAW_NO_RESPAWN is set,
+   * and only forwards SIGTERM to it. The fake binary here does the same, so a
+   * run that forgets the opt-out puts a launcher in between and fails these.
+   *
+   * Asserted against the real spawn, by giving the run a "binary" that writes
+   * its own pid and its parent's, and records the SIGTERM it receives.
+   */
+  async function whoAmI(): Promise<{ marker: string; termed: string }> {
     const marker = path.join(tmpDir, "who-am-i");
+    const termed = path.join(tmpDir, "termed");
     const script = path.join(tmpDir, "fake-index");
-    // Lives just long enough for the module to record its pid; the test then
-    // waits for it to exit before the fixture directory is torn down.
     await fs.writeFile(script, [
       "#!/bin/sh",
       'if [ -z "$OPENCLAW_NO_RESPAWN" ] && [ -z "$FAKE_INNER" ]; then FAKE_INNER=1 "$0" "$@" & wait; exit 0; fi',
-      `printf '%s' "$$" > ${JSON.stringify(marker)}`,
-      "sleep 0.5",
+      `trap 'printf TERM > ${JSON.stringify(termed)}; exit 143' TERM`,
+      `printf '%s %s' "$$" "$PPID" > ${JSON.stringify(marker)}`,
+      // Short sleeps, so the trap runs promptly when the signal lands.
+      "i=0; while [ $i -lt 10 ]; do sleep 0.1; i=$((i+1)); done",
       "",
     ].join("\n"), { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
     process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
-    vi.resetModules();
-    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    return { marker, termed };
+  }
 
-    const { accepted } = await startMemoryIndex("full", "manual");
-    expect(accepted).toBe(true);
+  async function recorded(marker: string): Promise<{ self: number; parent: number; childPid: number }> {
     for (let i = 0; i < 100 && !(await fs.readFile(marker, "utf8").catch(() => "")); i++) {
       await new Promise((r) => setTimeout(r, 20));
     }
-    const execPid = Number(await fs.readFile(marker, "utf8"));
-    expect(execPid).toBeGreaterThan(0);
-
-    // Settle before asserting and before the fixture directory is torn down —
-    // the run writes the lock and the state file from its own close handler,
-    // and racing that is how this test used to fail the suite with ENOTEMPTY.
-    let persisted: { childPid: number; status: string } | null = null;
-    for (let i = 0; i < 200; i++) {
-      persisted = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8"));
-      if (persisted && persisted.childPid) break;
-      await new Promise((r) => setTimeout(r, 20));
+    const [self, parent] = (await fs.readFile(marker, "utf8")).split(" ").map(Number);
+    let childPid = 0;
+    for (let i = 0; i < 200 && !childPid; i++) {
+      childPid = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")).childPid;
+      if (!childPid) await new Promise((r) => setTimeout(r, 20));
     }
-    // The pid this module recorded is the one the script saw as its own — so
-    // the thing we supervise and signal is the indexer, not a wrapper.
-    expect(persisted?.childPid).toBe(execPid);
-    for (let i = 0; i < 200; i++) {
-      const now = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8"));
-      if (now.status !== "running") break;
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    return { self, parent, childPid };
+  }
 
-    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
-    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+  it("on a terminal, is the terminal host the indexer runs directly under — no flock, shell or launcher between", async () => {
+    const { marker } = await whoAmI();
+    vi.resetModules();
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    const { self, parent, childPid } = await recorded(marker);
+    expect(self).toBeGreaterThan(0);
+    // `script` execs the command through `sh -c 'exec …'` and flock execs the
+    // CLI, so the indexer's parent is the very process this module recorded.
+    expect(childPid).toBe(parent);
+    expect(childPid).not.toBe(self);
+    // Settle before the fixture directory is torn down — the run writes the
+    // lock and the state file from its own close handler.
+    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+  });
+
+  it("on a terminal, hands the SIGTERM it is sent on to the indexer", async () => {
+    const { marker, termed } = await whoAmI();
+    vi.resetModules();
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    const { childPid } = await recorded(marker);
+    // Never signal pid 0: on Unix that targets this whole process group.
+    expect(childPid).toBeGreaterThan(0);
+    process.kill(childPid, "SIGTERM");
+    await settledMemoryRun(tmpDir);
+    expect(await fs.readFile(termed, "utf8")).toBe("TERM");
+  });
+
+  it("without a terminal, is the indexer itself", async () => {
+    const { marker } = await whoAmI();
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
+    vi.resetModules();
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    const { self, childPid } = await recorded(marker);
+    expect(self).toBeGreaterThan(0);
+    expect(childPid).toBe(self);
+    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
   });
 });
 

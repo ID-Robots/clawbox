@@ -110,13 +110,15 @@ const SETTLE_READS = 3;
  * The bar the owner watches while a pass runs.
  *
  * Two faces, and which one is drawn is decided by the box and never guessed
- * at: a pass ClawBox runs itself counts the files its scan found and the ones
- * it has finished with, so the bar is a real fraction with a percentage;
- * `openclaw memory index` reports its own progress to a terminal reporter that
- * is a no-op on the pipe this box spawns it down, so that arm sends no numbers
- * and gets a sweeping bar with no percentage at all. Inventing one from a
- * clock — the obvious alternative — is a bar that reaches 100% and then keeps
- * the owner waiting, which is worse than the nothing this replaces.
+ * at: when the pass can count — ClawBox's own indexer, and `openclaw memory
+ * index` run on a pseudo-terminal, where its reporter prints the files done
+ * of the files found (see `openclaw-index-progress.ts`) — the bar is a real
+ * fraction with a percentage, in the same shape from either; when it cannot —
+ * a scan still walking, or a box with no terminal host, whose CLI then prints
+ * nothing — it sends no numbers and gets a sweeping bar with no percentage at
+ * all. Inventing one from a clock — the obvious alternative — is a bar that
+ * reaches 100% and then keeps the owner waiting, which is worse than the
+ * nothing this replaces.
  *
  * Files are the fraction and chunks are only a figure beside it: how many
  * chunks a pass will write is not knowable until it has read every file, so a
