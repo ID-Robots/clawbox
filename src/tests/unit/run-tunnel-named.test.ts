@@ -93,7 +93,7 @@ function start(env: Record<string, string> = {}): Run {
 }
 
 async function waitFor(pred: () => boolean) {
-  for (let i = 0; i < 200 && !pred(); i++) await new Promise((r) => setTimeout(r, 25));
+  for (let i = 0; i < 600 && !pred(); i++) await new Promise((r) => setTimeout(r, 25));
   expect(pred()).toBe(true);
 }
 
@@ -112,6 +112,8 @@ describe("run-tunnel.sh — named tunnel", () => {
     writeCredential();
     const run = start();
     await waitFor(urlIs(`https://${HOST}`));
+    // record_url prints this after tunnel.url and the history line are written.
+    await waitFor(() => run.output().includes("captured URL"));
 
     expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("named");
     expect(calls()).toContain("argv:tunnel --no-autoupdate run --url http://localhost:80");

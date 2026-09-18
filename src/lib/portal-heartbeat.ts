@@ -167,8 +167,9 @@ async function restartTunnelIfRunning(reason: string): Promise<void> {
   try {
     const state = await getTunnelServiceState();
     if (state !== "active" && state !== "activating") return;
-    await startTunnelService();
+    const { bootPersisted, bootPersistWarning } = await startTunnelService();
     console.log(`[portal-heartbeat] restarted the tunnel: ${reason}`);
+    if (!bootPersisted) console.warn(`[portal-heartbeat] ${bootPersistWarning}`);
   } catch (err) {
     console.warn("[portal-heartbeat] tunnel restart failed:", err instanceof Error ? err.message : err);
   }
