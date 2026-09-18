@@ -30,8 +30,13 @@ const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
     dataDir: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "memory-index-data-")),
     /** Every text that reached the embedder, in order, across the run. */
     embedCalls: { texts: [] as string[], types: [] as string[] },
-    /** When set, the next embeddings request answers this HTTP status. */
-    embedFail: { status: 0 },
+    /**
+     * When `status` is set, an embeddings request answers it instead of a
+     * vector. `after` lets that many requests through first, which is how a
+     * test reaches the embedder dying PART WAY through a rebuild — the one
+     * state where the store really has been emptied.
+     */
+    embedFail: { status: 0, after: 0 },
     /** What openclaw.json holds, for the one-time carry-over after a swap. */
     openclawConfig: { value: {} as unknown },
   };
@@ -86,9 +91,12 @@ function stubVector(text: string): number[] {
 function installFetchStub(): void {
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
     if (embedFail.status) {
-      const status = embedFail.status;
-      embedFail.status = 0;
-      return new Response("nope", { status });
+      if (embedFail.after > 0) embedFail.after -= 1;
+      else {
+        const status = embedFail.status;
+        embedFail.status = 0;
+        return new Response("nope", { status });
+      }
     }
     const body = JSON.parse(init.body) as { input: string[]; input_type: string };
     embedCalls.texts.push(...body.input);
@@ -116,6 +124,7 @@ beforeEach(async () => {
   embedCalls.texts = [];
   embedCalls.types = [];
   embedFail.status = 0;
+  embedFail.after = 0;
   openclawConfig.value = {};
   installFetchStub();
   _resetLocalMemoryCacheForTests();
@@ -530,14 +539,46 @@ describe("the index knows what it was built for", () => {
     expect(localEmbeddingIdentity()).toHaveLength(16);
   });
 
+  it("keeps the index it was going to replace when the embedder will not answer", async () => {
+    // A full reindex is the remedy the amber banner names, and it used to
+    // DESTROY what it was asked to repair: the tables were emptied on the first
+    // statement, and the commonest refusal on this box is the embedder
+    // declining to wake — the 502 `ensureLocalAiReady` answers below its
+    // MemAvailable floor, a busy Orin saying "not now". The owner pressed the
+    // one button the card offered and lost every vector until some later pass
+    // happened to succeed. The rebuild asks for one embedding before it deletes
+    // anything, so a refusal now costs nothing at all.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    const before = await localMemoryStatusJson() as { status: { chunks: number } };
+    expect(before.status.chunks).toBeGreaterThan(0);
+
+    embedFail.status = 502;
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/embedding model/i);
+
+    const status = await localMemoryStatusJson() as {
+      status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(status.status.files).toBe(1);
+    expect(status.status.chunks).toBe(before.status.chunks);
+    expect(status.status.custom.indexIdentity.status).toBe("valid");
+
+    _resetLocalMemoryCacheForTests();
+    expect(await searchLocalMemory("deposit", 5)).not.toHaveLength(0);
+  });
+
   it("does not report a rebuild whose embedder died as a healthy empty index", async () => {
-    // The exact sequence: an owner with a mismatched index presses Index now,
-    // the tables are emptied, and the first embed gets the 502 the MemAvailable
-    // guard answers a wake with. Before, the identity had already been stamped
-    // over the empty tables and the panel went green.
+    // The other half, which the readiness check above cannot cover: the model
+    // answered, the tables were emptied, and it stopped answering part way
+    // through. The identity is stamped at the END of a pass precisely so this
+    // leaves an index that reads as needing a rebuild rather than as a green
+    // panel over a search that finds nothing.
     write("notes.md", "The deposit is two months' rent.");
     await runLocalIndexPass("full");
     embedFail.status = 502;
+    // The readiness check is the request that gets through; the first document
+    // is the one that is refused.
+    embedFail.after = 1;
     await expect(runLocalIndexPass("full")).rejects.toThrow(/embedding model/i);
 
     const status = await localMemoryStatusJson() as {

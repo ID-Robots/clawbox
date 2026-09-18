@@ -112,6 +112,13 @@ export const MAX_INDEX_CHUNKS = 20_000;
 /** One embeddings request's budget. The unit may be cold on the first call. */
 const EMBED_TIMEOUT_MS = 120_000;
 
+/**
+ * What a rebuild embeds to prove the model is there, before it empties the
+ * store. Nothing of the owner's — the point is to spend the cheapest possible
+ * request on the question — and it is never written to the index.
+ */
+const REBUILD_PROBE_TEXT = "clawbox memory index readiness check";
+
 /** A document over this size is not read. The extractor's own bound, shared
  *  rather than repeated, so the two cannot drift into disagreeing. */
 const MAX_INDEXABLE_BYTES = MAX_DOCUMENT_BYTES;
@@ -737,7 +744,8 @@ interface PendingFile {
  * unchanged is not even read, and one that was touched without being edited is
  * read, hashed, and left alone. `full` (and an identity that no longer matches)
  * empties the store first, because the vectors then on disk answer to a
- * different model.
+ * different model — but only once the embedder has answered one request, so a
+ * reindex that cannot run leaves the index it was going to replace.
  *
  * A file that cannot be read is counted and stepped over. The EMBEDDER failing
  * ends the pass — see `EmbeddingUnavailableError`.
@@ -762,6 +770,24 @@ export async function runLocalIndexPass(
     const schema = metaGet(db, "schema_version");
     const rebuild = mode === "full" || identity === "mismatched" || schema !== SCHEMA_VERSION;
     if (rebuild) {
+      // THE EMBEDDER ANSWERS BEFORE A WORKING INDEX IS THROWN AWAY.
+      //
+      // A rebuild deletes every row and then embeds the owner's folders again,
+      // so from the first statement until the pass succeeds there is no index
+      // at all. The commonest way this box refuses a pass is the embedder
+      // declining to WAKE — `ensureLocalAiReady` answers 502 below
+      // `EMBED_WAKE_MIN_AVAILABLE_MB` of MemAvailable, which is a busy Orin
+      // saying "not now" rather than anything being wrong — and a Full reindex
+      // pressed at that moment emptied an index that was working, failed, and
+      // left memory search finding nothing until some later pass happened to
+      // succeed. The owner's remedy for an amber card destroyed what the card
+      // was complaining about.
+      //
+      // One request, before anything is deleted. It costs a single embedding on
+      // a path about to spend thousands, it is the same call that wakes the
+      // unit for them, and a refusal ends the pass (`EmbeddingUnavailableError`)
+      // with the index it was going to replace still on disk.
+      await embedBatch([REBUILD_PROBE_TEXT], "document", signal);
       // The identity goes WITH the rows it describes. Stamping it here — before
       // a single vector had been written — meant a rebuild whose first embed
       // failed left a valid identity over an empty index, which the shared
