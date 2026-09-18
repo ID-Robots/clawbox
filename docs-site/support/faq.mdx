@@ -8,11 +8,13 @@ summary: "Frequently asked questions about ClawBox hardware, software, and subsc
   <Accordion title="Does ClawBox run OpenClaw or Hermes Agent?">
     Either — you choose when you order. **ClawBox (Connect)** ships running OpenClaw.
     **ClawBox Hermes Edition** ships running Hermes Agent by Nous Research. Both are
-    €579 and identical hardware; they are separate products at checkout, so your box
+    €749 and identical hardware; they are separate products at checkout, so your box
     arrives already set up with the agent you picked.
 
-    You are not locked in. Switching between OpenClaw and Hermes Agent on a box you
-    already own takes a single click on the device — no reflash and no second box.
+    You are not locked in. **Settings → Harness** re-makes a box you already own as
+    the other edition — no reflash and no second box. It takes a few minutes, needs an
+    internet connection and the **Max** plan, and the same button switches back. See
+    [Switching editions](/editions/switching).
   </Accordion>
   <Accordion title="Does the Hermes Edition need a ClawBox AI subscription?">
     No. ClawBox Hermes Edition does not include or require a ClawBox AI plan. The Pro
@@ -27,19 +29,41 @@ summary: "Frequently asked questions about ClawBox hardware, software, and subsc
   </Accordion>
   <Accordion title="Which AI models can it run?">
     ClawBox AI by default, plus Claude, GPT, Gemini, and OpenRouter as first-class
-    options. Local Ollama / llama.cpp models are supported too. See
-    [Choose Your AI Provider](/setup/choose-ai-provider).
+    options — with your own API key, or by signing in with a Claude Pro/Max, ChatGPT
+    Plus/Pro or Google One AI Premium subscription you already pay for. Models that run
+    on the box itself are supported too. See
+    [Choose Your AI Provider](/setup/choose-ai-provider) and [Local AI](/guides/local-ai).
+  </Accordion>
+  <Accordion title="Can it use my own documents?">
+    Yes. [Memory Shard](/guides/memory-shard) indexes your notes, your past conversations
+    and any folders you point it at — PDFs, Word and OpenDocument files included — so the
+    assistant can search them. It needs a Pro or Max plan, and you choose whether the
+    index is built in the ClawBox AI cloud or entirely on the box.
+  </Accordion>
+  <Accordion title="Can it work without the internet?">
+    Partly. The desktop, the terminal, files, your webapps and a model running on the box
+    all work offline. On the **OpenClaw and dual** editions, once the box's own model is
+    primary or fallback, **Local-only mode** in **Settings → Local AI** routes every request
+    to the box and switches the cloud providers off; the Hermes edition has no equivalent
+    switch, and you point it at the box's model in its provider settings instead. Anything
+    that reaches a cloud provider, a messaging channel or an update obviously does not.
+  </Accordion>
+  <Accordion title="Can it read a message out loud?">
+    Yes — **Settings → Voice → Spoken replies**, which is off until you turn it on. A box
+    on the Max plan speaks with the ClawBox AI cloud voice; any box can install a voice of
+    its own from **Settings → Local AI**. See [Chat](/guides/chat#voice).
   </Accordion>
   <Accordion title="What's the difference between Connect and Workstation?">
-    **ClawBox Connect** (Jetson Orin Nano, €579) is a low-power always-on assistant.
+    **ClawBox Connect** (Jetson Orin Nano, €749) is a low-power always-on assistant.
     **ClawBox Workstation** (DGX Spark, €5,499) is a personal AI supercomputer that runs
     large models locally. Full comparison on the
     [Workstation page](/hardware/clawbox-workstation).
   </Accordion>
   <Accordion title="Which chat apps does it support?">
-    Telegram and the on-device web chat are the managed ClawBox paths today.
-    Advanced users can add other OpenClaw channels manually when their installed
-    OpenClaw version and plugins support them. See [Messaging Channels](/guides/messaging-channels).
+    Telegram, Discord, WhatsApp, email and the on-device web chat all have guided setup
+    in **Settings → Channels**. Advanced users can add other OpenClaw channels manually
+    when their installed OpenClaw version and plugins support them. See
+    [Messaging Channels](/guides/messaging-channels).
   </Accordion>
   <Accordion title="How much power does it use?">
     ClawBox Connect draws ~7–15 W (about €39/year in electricity). ClawBox Workstation

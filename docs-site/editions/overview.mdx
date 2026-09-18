@@ -6,18 +6,20 @@ summary: "Every ClawBox ships as one edition — OpenClaw, Hermes, or Dual. What
 
 The same ClawBox hardware ships in one of three **editions**. The edition decides
 which AI agent runs the box, which apps appear on the desktop, and which tools
-the agent gets. It is chosen when the device is produced and does not change
-afterwards.
+the agent gets. It is chosen when the device is produced — and on a box you
+already own you can change it from the device, with the **Max** plan. See
+[Switching editions](/editions/switching).
 
 ## The three editions
 
-| | Agent | Capability store | Desktop | Built-in wallpapers |
+| Edition | Agent | Capability store | Desktop | Built-in wallpapers |
 |---|---|---|---|---|
-| **OpenClaw** — the standard product | OpenClaw gateway | App Store | OpenClaw Control UI | ClawBox + Deep Space |
-| **Hermes** | Hermes Agent by Nous Research | Hermes Skills | Hermes dashboard | Hermes + Deep Space |
+| **OpenClaw** — the standard product | OpenClaw gateway | App Store | OpenClaw Control UI | Lobster Orbital (default), ClawBox, Hermes, Deep Space |
+| **Hermes** | Hermes Agent by Nous Research | Hermes Skills | Hermes dashboard | Hermes (default), Deep Space |
 | **Dual** — premium | Both, switchable at runtime | Both | Both | The active agent's, + Deep Space |
 
-Wallpapers you upload yourself are on every edition.
+Wallpapers you upload yourself are on every edition, and so is the
+[mascot pet picker](/guides/appearance#mascot-pet).
 
 <Columns cols={2}>
   <Card title="Hermes Edition" href="/editions/hermes" icon="feather">
@@ -63,10 +65,12 @@ web server resolves it per request, the installer reads it on every update, and
 the agent's MCP server reads it once at startup.
 
 <Note>
-The edition is a property of the install, not a setting. Nothing in the desktop,
-Settings or the API changes it, and updates never change it. Moving a device
-from one edition to another is a production operation — the device is reflashed.
-Talk to support before you plan around it.
+The edition is a property of the install, not a setting you flip: updates never
+change it, and nothing else in the desktop or the API touches it either. The one
+way to change it on a device you own is **Settings → Harness**, which reinstalls
+the box as the other edition and re-bakes this file — a deliberate, Max-plan
+operation that takes minutes and reloads the desktop. See
+[Switching editions](/editions/switching).
 </Note>
 
 If you are installing OpenClaw OS on your own Jetson, set `CLAWBOX_EDITION`
@@ -95,14 +99,16 @@ Re-running the installer with the edition the device already is — or with no
 re-install and update path and is unaffected. `dual` counts as its own edition
 here, so moving to or from it is a change like any other.
 
-The installer does not migrate an edition. It will stop and disable the harness
-the device is leaving — two agents on one box conflict over shared resources such
-as the Telegram bot token, so that half is not left to chance — but each harness
-keeps its AI provider sign-in in its own configuration file, and signing in does
-not carry across. A device installed over the top of another edition ends up with
-no usable model while still reporting that setup is complete, which is why the
-transition is refused rather than half performed. Changing a device's edition is
-a reflash.
+The installer does not migrate an edition on its own. It will stop and disable the
+harness the device is leaving — two agents on one box conflict over shared
+resources such as the Telegram bot token, so that half is not left to chance —
+but each harness keeps its AI provider sign-in in its own configuration file, and
+signing in does not carry across. A device installed over the top of another
+edition ends up with no usable model while still reporting that setup is
+complete, which is why a bare `CLAWBOX_EDITION` change is refused rather than
+half performed. The supported way to change a device's edition is
+[Settings → Harness](/editions/switching), which runs the installer's own steps in
+the right order and carries the credentials it can across.
 
 If an edition's units are ever found running on a device that does not belong to
 that edition, the installer reports them and brings them down. To keep them
@@ -141,7 +147,10 @@ OpenClaw device it is the other way round.
 Nearly everything else. The setup wizard, the desktop environment and its
 windows, Terminal, Files, Coding, Remote Desktop, the browser automation,
 webapps and the code assistant, System Update, updates, networking and
-mDNS, and the login model are all edition-independent.
+mDNS, and the login model are all edition-independent. So are
+[Memory Shard](/guides/memory-shard), [Local AI](/guides/local-ai), the
+[mascot pet](/guides/appearance), the [chat](/guides/chat) and the four guided
+[messaging channels](/guides/messaging-channels).
 
 ## What differs
 
@@ -150,4 +159,7 @@ mDNS, and the login model are all edition-independent.
 - **How AI providers are configured** — see [AI Providers on Hermes](/editions/hermes-providers).
 - **The agent's own tool set** — some [MCP tools](/technical/agent-interface) exist on one edition only.
 - **Telegram plumbing** — the messages and the pairing-approval flow work the same way for you; the process behind them is the harness's own.
-- **ClawKeep backups** — OpenClaw and dual only. ClawKeep archives the OpenClaw agent through the `openclaw` CLI, which a Hermes box does not ship, so the ClawKeep app there reports the feature as unavailable on this edition.
+- **What a ClawKeep backup archives** — every edition backs up, and the backup daemon picks its backend from the agent the box runs: the OpenClaw agent through the `openclaw` CLI, the Hermes agent through the daemon's own Hermes backend. A snapshot can only be restored onto a box running the agent that wrote it.
+- **Who owns the memory index** — on OpenClaw it is the agent's own and the agent searches it while answering; on Hermes, ClawBox builds it and gives the agent a search tool for it. See [Memory Shard](/guides/memory-shard#how-the-assistant-uses-it).
+- **Spoken replies on messaging channels** — OpenClaw and dual only. Every edition speaks in the desktop chat.
+- **Receiving email** — Hermes only. Sending mail you approve works on every edition.

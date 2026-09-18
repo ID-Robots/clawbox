@@ -29,7 +29,25 @@ If you are not sure which edition you have, see [Editions](/editions/overview).
     The agent operates the device through the ClawBox MCP server, same as on
     OpenClaw. The tool set is slightly different — see below.
   </Card>
+  <Card title="Memory Shard" href="/guides/memory-shard" icon="brain">
+    Hermes ships no memory index of its own, so ClawBox builds one here and
+    gives the agent a tool to search it — indexed in the ClawBox AI cloud by
+    default wherever your plan covers it, or on the box if you prefer.
+  </Card>
+  <Card title="Email you can receive" href="/guides/messaging-channels#email" icon="envelope">
+    Reading an inbox is a Hermes-edition feature. Sending mail you approve works
+    on every edition.
+  </Card>
+  <Card title="ClawKeep backups" icon="cloud-arrow-up">
+    The backup daemon archives the **Hermes** agent's own state through its own
+    Hermes backend — no `openclaw` CLI is involved. A snapshot only restores onto
+    a box running the agent that wrote it, and the app shows the reason it refused.
+  </Card>
 </Columns>
+
+<Frame caption="Memory Shard on a Hermes-edition box: the index is embedded through the ClawBox AI cloud, with the model on the box as the alternative">
+  <img src="/images/memory-cloud-hermes.webp" alt="Memory Shard settings on a Hermes ClawBox: memory indexing switched on, and the Embedding model card with ClawBox AI cloud selected beside On this box." />
+</Frame>
 
 ## What is absent, on purpose
 
@@ -44,7 +62,6 @@ not exist on the box. Everything that depended on it is gone with it:
 | Gateway web paths (`/api/*`, `/chat`) | Return **404**. |
 | Gateway port `18789` | Closed — nothing is listening. |
 | Apps previously installed from the App Store | Hidden from the desktop. ClawBox webapps you or the agent built stay visible. |
-| **ClawKeep** cloud backups | Not available. ClawKeep archives the OpenClaw agent through the `openclaw` CLI, which this edition does not ship — the app opens and says so. |
 | The CLI update path (`clawbox-cli.ts update`) | **Refused.** It is an OpenClaw-edition tool. Update from **Settings → System Update** instead, which runs the edition-correct installer steps. |
 | The **ClawBox wallpaper** in Settings → Appearance | Not offered. This edition ships the Hermes artwork and Deep Space; the standard product's wallpaper is another product's branding and is not one of the choices. Wallpapers you upload yourself are unaffected. |
 
@@ -61,8 +78,8 @@ Everything else on the desktop is unchanged — Chat, Terminal, Files, Browser,
 Coding, Remote Desktop, System Update, Settings and any webapps — with one
 edition difference inside Settings: **Appearance** offers the Hermes wallpaper
 and Deep Space, not the standard product's ClawBox artwork (see the table
-above). The ClawKeep icon is present but the feature is not available on this
-edition. Two icons are specific to this edition:
+above). ClawKeep is present and works here: it archives this edition's Hermes
+state. Two icons are specific to this edition:
 
 - **Skills** — the [Hermes Skills](/editions/hermes-skills) store.
 - **Hermes** — the Hermes dashboard. It opens through an authenticated proxy on
@@ -78,7 +95,7 @@ providers, skills, Telegram) are all in the ClawBox UI.
 The desktop chat and Telegram both talk to Hermes. Message-by-message you can
 change:
 
-- **Provider** and **model** — the pills in the chat header.
+- **Provider** and **model** — the pills beneath the message box.
 - **Reasoning effort** — the brain icon, eight levels from *None* to *Ultra*.
   This is a per-conversation override; the device default lives in Hermes'
   own configuration. ClawBox AI shows seven: its backend rejects *Ultra*.
@@ -87,8 +104,42 @@ change:
   A provider that accepts no reasoning level at all simply does not show the
   control.
 
+- **Slash commands.** Type `/` in the composer and Hermes' own command catalogue
+  appears, filtered to the commands it says belong in a chat composer. They are
+  executed by Hermes, not handed to the model as text.
+
 Setting the device's default provider and model is a Settings job — see
-[AI Providers on Hermes](/editions/hermes-providers).
+[AI Providers on Hermes](/editions/hermes-providers). The rest of the chat — the
+question and approval cards, spoken replies, picture generation, several
+conversations at once — is the same on both editions and is covered in
+[Chat](/guides/chat).
+
+## Plugins, and when the assistant restarts
+
+Hermes has **skills** and **plugins**, and they load differently. A skill is read
+again as it is needed. A plugin is looked for **once, when the assistant's process
+starts** — so a plugin installed or enabled after that does not reach your chat,
+and does not reach a new conversation either, even while the command line reports
+it as installed and enabled.
+
+The box closes that gap for you. When the set of plugins your box declares
+changes, ClawBox restarts the assistant so it picks them up, and shows a notice
+on the desktop naming the plugin and telling you to open a new chat. The
+assistant can ask for the same restart itself, which is what it does right after
+it installs or enables a plugin for you — and it is told whether the replacement
+is already serving or still on its way back, so it can say the same to you.
+
+<Warning>
+**The restart closes the chat window you have open**, and interrupts a reply that
+is in progress. That is the visible half of the feature rather than a fault — open
+a new chat and the plugin is there. One plugin command is one restart, however many
+files it writes.
+</Warning>
+
+Nothing here needs elevated rights: ClawBox stops a process it already owns and
+the system brings it straight back. If the restart cannot be taken at all, the
+assistant is told so rather than told the plugin is live — the plugin is installed
+but not loaded, and rebooting the box from **Settings** loads it.
 
 ## Telegram
 
@@ -105,10 +156,11 @@ OpenClaw box. A tool that cannot work on the running edition is **not
 registered at all**, so the differences are visible to the agent rather than
 being failures it discovers at call time.
 
-| | OpenClaw | Hermes |
+| Capability | OpenClaw | Hermes |
 |---|---|---|
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
+| Loading a Hermes plugin added after boot | — | `hermes_plugins_reload` |
 | Coding family (`bash`, file tools, web fetch/search) | yes | **no** — Hermes ships its own |
 | Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Everything else | yes | yes |
@@ -125,6 +177,10 @@ The full catalogue is on the [Agent Interface](/technical/agent-interface) page.
 Same as any ClawBox: **Settings → System Update**. Updates keep the edition —
 the installer reads the edition lock on every run and skips every OpenClaw step
 on this SKU.
+
+If you would rather run OpenClaw on this box, **Settings → Harness** re-makes it
+as the OpenClaw edition without a reflash — see
+[Switching editions](/editions/switching).
 
 If an update ever leaves the Hermes side half-provisioned, the installer says so
 and prints the one command that repairs it:
