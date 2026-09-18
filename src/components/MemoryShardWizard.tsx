@@ -260,14 +260,26 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
 
       setPhase("switching-provider");
       setDetail(null);
-      // A box whose index is ALREADY embedded in the cloud has nothing to
-      // switch: the cloud can be picked there whatever the live probe said
-      // (see `cloudEmbedderPickable`), but the route's switch re-checks that
-      // probe and the token and answers 409 on a hiccup — a failed wizard over
-      // an index that was never going to move. The local path always posts:
-      // its owner's-choice mark is what keeps the next boot's cloud default
-      // from moving the index back.
-      const alreadyInCloud = source === "cloud" && embedder?.source === "cloud";
+      // A box whose cloud embedder is ALREADY RECORDED has nothing to switch:
+      // the cloud can be picked there whatever the live probe said (see
+      // `cloudEmbedderPickable`), but the route's switch re-checks that probe
+      // and the token and answers 409 on a hiccup — a failed wizard over an
+      // index that was never going to move. The local path always posts: its
+      // owner's-choice mark is what keeps the next boot's cloud default from
+      // moving the index back.
+      //
+      // `recorded`, NOT `source`, and that is the whole of the fix. Since the
+      // cloud became the default, `source` says "cloud" on a box that has
+      // written nothing down — so this shortcut skipped the POST on every
+      // freshly onboarded, subscribed box, and with it the pin and the owner
+      // mark that POST exists for. The index was then built in the cloud, and
+      // the next web-server restart's automatic promotion saw an unrecorded
+      // box, wrote the pin and asked for a FULL rebuild: hours of re-embedding
+      // paid for twice over an index that was already correct, with memory
+      // search answering nothing throughout. A server that predates the field
+      // sends no `recorded`, which parses to false and makes the wizard post —
+      // the safe direction.
+      const alreadyInCloud = source === "cloud" && embedder?.source === "cloud" && embedder.recorded;
       const provider = alreadyInCloud ? null : await fetch(
         "/setup-api/clawkeep/memory/provider",
         source === "cloud"
@@ -471,8 +483,13 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             {t(source === "cloud" ? "clawkeep.memory.setup.provisionBodyCloud" : "clawkeep.memory.setup.provisionBody")}
           </p>
 
-          {/* The choice is drawn only where both halves exist: the edition that
-              indexes on the box itself has no cloud model to offer. */}
+          {/* The choice is drawn only where both halves exist. Every edition
+              can offer the cloud model since 2026-09-18, so the server this
+              page is talking to answers true — the gate is kept for the one
+              case that still says otherwise: an OLDER server, whose `false`
+              `parseEmbedderChoiceStatus` carries through, where drawing a
+              picker over a route that cannot honour it would be worse than
+              drawing nothing. */}
           {embedder?.cloudSupported && (
             <div className="mt-3" data-testid="memory-shard-source">
               <div className={SEGMENTED_TRACK} role="radiogroup" aria-label={t("clawkeep.memory.embedder.title")}>

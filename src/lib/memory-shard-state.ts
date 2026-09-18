@@ -65,6 +65,17 @@ export const LOCAL_EMBEDDING_MODEL = "qwen3-embedding-0.6b";
  *  OpenAI-compatible client, pointed at ClawBox's local-AI proxy. */
 export const LOCAL_EMBEDDING_PROVIDER = "openai-compatible";
 
+/**
+ * How wide a vector the model on this box answers with.
+ *
+ * Qwen3-Embedding-0.6B is 1,024 dimensions. It is a CONSTANT here rather than a
+ * number in a comment because the index's memory budget is a function of it —
+ * `maxIndexChunks` in `memory-index-local.ts` — and the cloud model is three
+ * times as wide. A width written in prose beside a ceiling derived from it is
+ * how the ceiling came to be sized for a model the box had stopped using.
+ */
+export const LOCAL_EMBEDDING_DIMENSIONS = 1024;
+
 /** The engine, for the sentences that name it ("Qwen 3 via llama.cpp"). */
 export const LOCAL_EMBEDDING_ENGINE = "llama.cpp";
 
@@ -84,6 +95,20 @@ export const EXTRA_PATHS_CONFIG_PATH = "memory.search.extraPaths";
  * copy either way, and no box has two.
  */
 export const MEMORY_SHARD_SOURCES_KEY = "memory_shard_sources";
+
+/**
+ * Where the index is embedded on that same edition: `"cloud"` | `"local"`.
+ *
+ * The counterpart of OpenClaw's `memory.search.provider`/`.remote.baseUrl`, for
+ * the same reason the line above exists — the thing that INDEXES owns the
+ * setting, and on this SKU that is ClawBox. A WORD and never an address: see
+ * `src/lib/memory-embedder.ts`, which is the only reader and writer of it.
+ *
+ * Absent is not "local". Absent is "nobody has pinned this box", which the
+ * cloud-defaults resolver answers — the cloud whenever the box's subscription
+ * covers it (the owner's ruling of 2026-09-18).
+ */
+export const MEMORY_SHARD_EMBEDDER_KEY = "memory_shard_embedder";
 
 /** Documents ClawBox can turn into Markdown for the indexer. */
 export const EXTRACTABLE_EXTENSIONS = [".pdf", ".docx", ".odt", ".rtf", ".txt"] as const;
@@ -135,9 +160,25 @@ export interface EmbedderChoiceStatus {
   /** Where the index is embedded right now. */
   source: EmbeddingSource;
   /**
-   * False on the edition where ClawBox itself is the indexer: its embedder
-   * client refuses any endpoint that is not loopback, because the owner's
-   * document text is the request body there.
+   * …and whether that is WRITTEN DOWN, or is the default rule speaking.
+   *
+   * The half a caller cannot work out afterwards, and the one the wizard's last
+   * step turns on: with no choice recorded the box already embeds in the cloud
+   * wherever its subscription covers it, so a wizard that read `source: "cloud"`
+   * as "nothing to do" finished without writing the pin — and the next boot's
+   * automatic promotion then wrote it and rebuilt an index that was already
+   * correct. False from a server that predates the field, which is the safe
+   * direction: it makes the caller post.
+   */
+  recorded: boolean;
+  /**
+   * This box can point its memory index at the ClawBox AI cloud at all.
+   *
+   * True on every edition since 2026-09-18. It used to be false where ClawBox
+   * itself is the indexer, because that client accepted only a loopback
+   * endpoint; it now accepts exactly two — the loopback proxy and the ClawBox
+   * AI endpoint the image was built with — so the fence is still a fence and
+   * the owner's choice is the same one on both editions.
    */
   cloudSupported: boolean;
   /** Linked, on a paid ClawBox AI plan, and the cloud embedder answered this box. */
@@ -219,6 +260,10 @@ export function parseEmbedderChoiceStatus(raw: unknown): EmbedderChoiceStatus | 
   if (r.source !== "cloud" && r.source !== "local") return null;
   return {
     source: r.source,
+    // An older server sends no such field, and `false` there is the direction
+    // that costs nothing: the caller posts a choice that was already made
+    // rather than skipping the one write that records it.
+    recorded: r.recorded === true,
     cloudSupported: r.cloudSupported === true,
     cloudAvailable: r.cloudAvailable === true,
     // An older server sends no reason at all; null is the generic note.

@@ -31,7 +31,7 @@ import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
-import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
   localMemoryStatusJson,
@@ -832,9 +832,11 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     // openclaw.json is what points the OTHER arm's client at an embedder, and
     // on this SKU there is no such file — asked anyway it answers null, which
     // `providerLocation` reports as "unknown" and the card draws as an
-    // embedder it cannot place. The local arm embeds through this box's own
-    // loopback proxy, so that URL is the answer.
-    local ? Promise.resolve(getEmbedProxyBaseUrl()) : readEmbeddingRemoteBaseUrl(),
+    // embedder it cannot place. The local arm embeds through whichever of its
+    // two endpoints it is pointed at, so THAT url is the answer: the loopback
+    // proxy, or this box's ClawBox AI account. Hard-coded to the proxy, the
+    // card said "On device" over an index being embedded in the cloud.
+    local ? resolveMemoryEmbedder().then((embedder) => embedder.baseUrl) : readEmbeddingRemoteBaseUrl(),
   ]);
   if (!probe.ok) return unavailableStatus(run, schedule);
   try {

@@ -358,3 +358,63 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     expect(mod.clawaiCredentialRefused()).toBeNull();
   });
 });
+
+describe("the statuses the helper accepts", () => {
+  /**
+   * THE CONTRACT ITSELF, pinned where the real helper runs.
+   *
+   * `proxyRefusedClawaiCredential` had no case of its own, and a suite that
+   * stood a WIDER stand-in in for it (`memory-index-local.test.ts`, which cannot
+   * import this module — the proxy-URL re-export drags the whole Hermes adapter
+   * graph back through it) went on proving a behaviour the product does not
+   * have. These cases are what that mirror is checked against: change the table
+   * below and the copy there has to move with it.
+   */
+  async function refused(status: number, body: string): Promise<boolean> {
+    const mod = await import("@/lib/harness/credentials");
+    return mod.proxyRefusedClawaiCredential(new Response(body, { status }));
+  }
+
+  const CREDENTIAL = JSON.stringify({ error: { code: "invalid_token" } });
+
+  it("accepts the two statuses the proxy refuses a credential with, and no others", async () => {
+    expect(await refused(401, JSON.stringify({ error: { code: "missing_token" } }))).toBe(true);
+    expect(await refused(403, CREDENTIAL)).toBe(true);
+    // 402 IS NOT ONE OF THEM. ClawBox's own routes answer 402
+    // `paid_plan_required` (`refusePaidPlan`) and so does the portal's device
+    // poll; the AI proxy does not speak it, and its own plan gate is a 403
+    // ("TTS is Max-only on the proxy, which answers 403 to Free and Pro",
+    // `clawai-cloud-defaults-state.ts`). A caller that read 402 as a dead
+    // credential would send an owner whose token is fine to re-link the box.
+    expect(await refused(402, CREDENTIAL)).toBe(false);
+    // Nor a spent allowance, which belongs to a plan and resets on a clock.
+    expect(await refused(429, CREDENTIAL)).toBe(false);
+    expect(await refused(500, CREDENTIAL)).toBe(false);
+  });
+
+  it("needs the proxy's OWN envelope, never the status alone", async () => {
+    // An edge rule, a captive portal or a CDN anti-bot page all answer 403 with
+    // a page, and the proxy's plan gate answers it with a plan code.
+    expect(await refused(403, "<html>Access denied</html>")).toBe(false);
+    expect(await refused(403, JSON.stringify({ error: { code: "paid_plan_required" } }))).toBe(false);
+    expect(await refused(403, JSON.stringify({ error: {} }))).toBe(false);
+  });
+
+  it("fails closed on a body too big to be an error envelope", async () => {
+    // An interception page is exactly the response a 403 arrives with, on a
+    // device where memory is the scarce thing. Past the cap it is not the
+    // envelope we are looking for.
+    //
+    // A VALID envelope that is merely TOO BIG, so the byte cap is the only
+    // thing left that can answer `false`: the body used to be unparseable JSON,
+    // which the `JSON.parse` guard refuses on its own — the case passed with the
+    // cap removed. `MAX_REFUSAL_BODY_BYTES` is 8 KiB and is not exported (the
+    // module is the contract, not its constants), so the bound is written out
+    // here and asserted rather than imported.
+    const oversize = JSON.stringify({
+      error: { code: "invalid_token", detail: "x".repeat(9 * 1024) },
+    });
+    expect(oversize.length).toBeGreaterThan(8 * 1024);
+    expect(await refused(403, oversize)).toBe(false);
+  });
+});

@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { readEmbeddingChoice, switchToLocalEmbeddings } from "@/lib/memory-shard";
+import { readEmbeddingPlacement, switchToLocalEmbeddings } from "@/lib/memory-shard";
 import { noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
-import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
-import { openclawIsAbsent } from "@/lib/openclaw-config";
 // The PURE half of the cloud-defaults rule (client-safe, one type import
 // behind it): the server half is loaded lazily below with the probe it owns.
 import { resolveClawaiCloudDefaults } from "@/lib/clawai-cloud-defaults-state";
@@ -58,7 +56,6 @@ export async function GET() {
 }
 
 async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
-  const cloudSupported = !openclawIsAbsent();
   // Loaded here rather than at the top: they pull the cloud-defaults resolver,
   // the embedder probe and the provisioning check, and the POST's local path —
   // the one every older caller takes — needs none of them.
@@ -66,30 +63,40 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
     import("@/lib/embed-server"),
     import("@/lib/clawai-cloud-defaults"),
   ]);
-  const [choice, provisioning, facts] = await Promise.all([
-    cloudSupported ? readEmbeddingChoice() : Promise.resolve(null),
+  const [provisioning, facts] = await Promise.all([
     getEmbedProvisioningStatus().catch(() => null),
     // The resolver's own facts, so "the cloud model is on offer here" means the
-    // same thing it means to the default that promotes a box onto it: linked,
-    // a paid plan, and a probe the cloud embedder answered.
-    cloudSupported ? readCloudDefaultsFacts().catch(() => null) : Promise.resolve(null),
+    // same thing it means to the default that puts a box on it: linked, a paid
+    // plan, and a probe the cloud embedder answered.
+    readCloudDefaultsFacts().catch(() => null),
   ]);
-  const baseUrl = choice?.baseUrl ?? null;
-  // No endpoint at all is the on-device answer, the resolver's own rule.
-  const source: EmbeddingSource = cloudSupported && baseUrl && !isLoopbackBaseUrl(baseUrl) ? "cloud" : "local";
   // The SAME verdict the automatic default acts on, reasons and all, rather
   // than a second reading of one of its facts: `embeddingsRouteReady` alone
   // answered false to a box with no credential, an unpaid plan and a proxy that
   // did not answer alike, and the switch could only say "not available on this
-  // box right now" to all three. The edition that indexes on the box itself is
-  // answered without reading the facts — nothing the resolver could say would
-  // change it, and asking would buy an 8 s probe for a fixed answer.
-  const verdict = cloudSupported
-    ? facts && resolveClawaiCloudDefaults(facts).embeddings
-    : ({ source: "local", reason: "edition" } as const);
+  // box right now" to all three.
+  const verdict = facts && resolveClawaiCloudDefaults(facts).embeddings;
+  // And the same verdict again as the DEFAULT for a box nobody has pinned, so
+  // the card cannot say "the cloud is on offer" over a box that is already
+  // embedding there — the owner's ruling of 2026-09-18: with no choice made,
+  // the cloud IS the embedder wherever the subscription covers it. Where the
+  // facts could not be read at all, `local` is passed EXPLICITLY rather than
+  // left to `readEmbeddingPlacement`'s own second reading, which pays for the
+  // probe again and can answer differently: that is how one GET came back
+  // `source: "cloud"` beside `cloudAvailable: false` — a card saying the index
+  // is embedded somewhere it has just said is not on offer.
+  const placement = await readEmbeddingPlacement(verdict?.source ?? "local");
   return {
-    source,
-    cloudSupported,
+    source: placement.source,
+    // Is that WRITTEN DOWN, or the default rule speaking? The wizard's cloud
+    // path needs the difference: with the cloud as the default, `source`
+    // already says "cloud" on a box that has recorded nothing, and a wizard
+    // that read that as "nothing to do" finished without the pin — leaving the
+    // next boot's promotion to write it and rebuild a correct index.
+    recorded: placement.recorded,
+    // Every edition can reach the ClawBox AI endpoint now; the fence that made
+    // this false is two allowed addresses rather than one (`memory-embedder.ts`).
+    cloudSupported: true,
     cloudAvailable: verdict?.source === "cloud",
     // Null, never a guess, when the facts could not be read at all.
     cloudReason: verdict?.reason ?? null,
@@ -173,18 +180,12 @@ async function requestedSource(request: Request): Promise<EmbeddingSource | null
 }
 
 /**
- * Onto the ClawBox AI cloud embedder. Refused where it cannot work rather than
- * written and left to fail: the edition where ClawBox is the indexer refuses a
- * non-loopback embedder by design, and a box the cloud embedder does not answer
- * would report a healthy index that finds nothing.
+ * Onto the ClawBox AI cloud embedder — on either edition, since 2026-09-18.
+ * Refused where it cannot work rather than written and left to fail: a box the
+ * cloud embedder does not answer would report a healthy index that finds
+ * nothing.
  */
 async function switchCloud(): Promise<NextResponse> {
-  if (openclawIsAbsent()) {
-    return NextResponse.json(
-      { error: "This edition indexes memory on the box itself and cannot use the cloud model.", kind: "cloud_unsupported" },
-      { status: 409 },
-    );
-  }
   const [{ readCloudDefaultsFacts }, { resolveClawaiToken }, cloud, { switchToCloudEmbeddings }] = await Promise.all([
     import("@/lib/clawai-cloud-defaults"),
     import("@/lib/harness/credentials"),

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { getMemoryShardEnabled } from "@/lib/memory-shard";
-import { searchLocalMemory } from "@/lib/memory-index-local";
+import { MEMORY_SEARCH_DEADLINE_MS, searchLocalMemory } from "@/lib/memory-index-local";
 
 export const dynamic = "force-dynamic";
 
@@ -65,7 +65,15 @@ export async function GET(request: NextRequest) {
   const limit = Number.isFinite(asked) ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(asked))) : DEFAULT_LIMIT;
 
   try {
-    const results = await searchLocalMemory(query, limit, request.signal);
+    // A DEADLINE OF THE BOX'S OWN, combined with the caller's. `request.signal`
+    // alone is whatever the client does, and a client that simply waits left one
+    // embed attempt holding the request for the whole `EMBED_TIMEOUT_MS`. The
+    // bound is `MEMORY_SEARCH_DEADLINE_MS` — sized against the MCP tool's own
+    // 60 s, past which nothing is listening — and it is a bound, not a
+    // cancellation of the work it started: a cold llama.cpp wake carries on and
+    // makes the next search warm.
+    const deadline = AbortSignal.any([request.signal, AbortSignal.timeout(MEMORY_SEARCH_DEADLINE_MS)]);
+    const results = await searchLocalMemory(query, limit, deadline);
     return NextResponse.json({ results }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     // The embedder not answering is the one failure worth naming: it is the

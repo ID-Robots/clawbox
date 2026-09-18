@@ -69,8 +69,11 @@ vi.mock("@/lib/port-probe", async (orig) => ({
   waitForPortOpen: async () => h.gatewayUp,
 }));
 
-vi.mock("@/lib/hermes-dashboard-control", () => ({
-  bounceHermesDashboard: async () => {
+// The restore bounces through the SHARED CLAIM now, so the plugin watcher
+// cannot open a window over it and its baseline moves with the ~/.hermes this
+// restore has just replaced. Mocked at that seam, which is what the route calls.
+vi.mock("@/lib/hermes-bounce-claim", () => ({
+  bounceHermesDashboardShared: async () => {
     h.bounceCalls += 1;
     return h.bounce;
   },

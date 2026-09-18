@@ -325,7 +325,7 @@ function unescapeDoubleQuoted(body: string): string | null {
  * Single quotes have exactly ONE escape, `''`; a backslash is ordinary data
  * there, and decoding it would invent a value PyYAML never produced.
  */
-function parseYamlScalar(raw: string): string | null {
+export function parseYamlScalar(raw: string): string | null {
   const value = raw.trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
     return unescapeDoubleQuoted(value.slice(1, -1));
@@ -584,6 +584,109 @@ const ANY_KEY_RE = /^( *)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?) *:(?: (.*))?$/;
 
 /** A `#` opens a comment only when a token has just ENDED in front of it. */
 const COMMENT_OPENERS = new Set([" ", '"', "'", "]", "}"]);
+
+/**
+ * A line's VALUE text separated from its trailing `# comment`, for a reader
+ * that holds a whole value rather than one scalar.
+ *
+ * {@link splitTrailingComment} answers the same question for the editor and
+ * deliberately gives up (`closed: false`) on anything whose first character is
+ * not a quote and whose remainder it cannot place — it is about to REWRITE the
+ * value, so a shape it cannot name is one it must not touch. A reader has the
+ * opposite duty: `enabled: [a, b] # owner note` and `- superpowers # installed
+ * 2026-09-18` are both ordinary YAML that a person writes by hand, and a reader
+ * that swallowed the comment into the value invented a plugin name no registry
+ * can ever match — a `stale` that is true for ever and a chat restart that
+ * cannot fix it.
+ *
+ * QUOTE-AWARE, because a `#` inside a quoted scalar is data: `- "weird # name"`
+ * is one name with a hash in it. Scanning for the quote state is the only way
+ * to tell the two apart, which is why this is not a regex — a non-greedy
+ * `/(.*?)\s+#/` cuts `["a # b", c]` at the first hash inside the quotes.
+ */
+export function splitYamlComment(inline: string): { value: string; comment: string } {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < inline.length; i += 1) {
+    const ch = inline[i];
+    if (quote) {
+      // A backslash escapes the next character in a double-quoted scalar only;
+      // in a single-quoted one it is ordinary data and `''` is the escape.
+      if (ch === "\\" && quote === '"') {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        if (quote === "'" && inline[i + 1] === "'") {
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "#" && (i === 0 || COMMENT_OPENERS.has(inline[i - 1]) || inline[i - 1] === "\t")) {
+      return { value: inline.slice(0, i).trimEnd(), comment: inline.slice(i) };
+    }
+  }
+  // An unterminated quote leaves the whole line as the value: this reader has
+  // not established where a comment starts, so it invents neither.
+  return { value: inline.trimEnd(), comment: "" };
+}
+
+/**
+ * The members of a YAML FLOW sequence — `[a, b]`, `["a, b", c]`, `[]` — or null
+ * when `value` is not one.
+ *
+ * `hermes config set plugins.enabled '["a","b"]'` writes this shape, so it is
+ * as real on a box as the block sequence beside it. Members are split on commas
+ * that are not inside a quoted scalar or a nested collection; the members
+ * themselves come back with their quotes still on, for {@link parseYamlScalar}
+ * to resolve. A run this reader cannot close — an unterminated quote, an
+ * unbalanced bracket — is `null` rather than a guess at what it meant.
+ */
+export function parseYamlFlowSequence(value: string): string[] | null {
+  const text = value.trim();
+  if (!text.startsWith("[") || !text.endsWith("]")) return null;
+  const body = text.slice(1, -1);
+  const members: string[] = [];
+  let quote: '"' | "'" | null = null;
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (quote) {
+      if (ch === "\\" && quote === '"') {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        if (quote === "'" && body[i + 1] === "'") {
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[" || ch === "{") depth += 1;
+    else if (ch === "]" || ch === "}") depth -= 1;
+    else if (ch === "," && depth === 0) {
+      members.push(body.slice(start, i));
+      start = i + 1;
+    }
+  }
+  if (quote || depth !== 0) return null;
+  members.push(body.slice(start));
+  return members.map((member) => member.trim()).filter((member) => member.length > 0);
+}
 
 /**
  * Does this STRUCTURE line carry a TAB PyYAML would refuse?
