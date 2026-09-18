@@ -208,6 +208,11 @@ An install is one of three **editions**, chosen when the device is produced:
 | `hermes` | Hermes Agent (Nous Research) | Hermes Skills | The OpenClaw gateway is not installed; its unit is masked and the `openclaw` CLI is absent |
 | `dual` | Both, switchable at runtime | Both | Premium — the switcher requires a licence issued by ID Robots |
 
+<p align="center">
+  <img src=".github/assets/memory-cloud-hermes.webp" alt="Memory Shard settings on a Hermes-edition ClawBox: the embedding model card with ClawBox AI cloud selected and On this box beside it" width="920" /><br/>
+  <sub><strong>Hermes edition</strong> — Memory Shard indexes through the ClawBox AI cloud by default, with the model on the box one tap away.</sub>
+</p>
+
 Select it when you run the installer:
 
 ```bash
