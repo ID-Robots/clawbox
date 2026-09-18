@@ -38,6 +38,11 @@ If you are not sure which edition you have, see [Editions](/editions/overview).
     Reading an inbox is a Hermes-edition feature. Sending mail you approve works
     on every edition.
   </Card>
+  <Card title="ClawKeep backups" icon="cloud-arrow-up">
+    The backup daemon archives the **Hermes** agent's own state through its own
+    Hermes backend — no `openclaw` CLI is involved. A snapshot only restores onto
+    a box running the agent that wrote it, and the app says so.
+  </Card>
 </Columns>
 
 ## What is absent, on purpose
@@ -53,7 +58,6 @@ not exist on the box. Everything that depended on it is gone with it:
 | Gateway web paths (`/api/*`, `/chat`) | Return **404**. |
 | Gateway port `18789` | Closed — nothing is listening. |
 | Apps previously installed from the App Store | Hidden from the desktop. ClawBox webapps you or the agent built stay visible. |
-| **ClawKeep** cloud backups | Available. The backup daemon archives the **Hermes** agent's own state through its Hermes backend, so no `openclaw` CLI is involved. A snapshot written on an OpenClaw box cannot be restored here, and the app says so. |
 | The CLI update path (`clawbox-cli.ts update`) | **Refused.** It is an OpenClaw-edition tool. Update from **Settings → System Update** instead, which runs the edition-correct installer steps. |
 | The **ClawBox wallpaper** in Settings → Appearance | Not offered. This edition ships the Hermes artwork and Deep Space; the standard product's wallpaper is another product's branding and is not one of the choices. Wallpapers you upload yourself are unaffected. |
 
@@ -151,7 +155,7 @@ being failures it discovers at call time.
 |---|---|---|
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
-| Loading a plugin after boot | no plugin system | `hermes_plugins_reload` |
+| Loading a Hermes plugin added after boot | — | `hermes_plugins_reload` |
 | Coding family (`bash`, file tools, web fetch/search) | yes | **no** — Hermes ships its own |
 | Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Everything else | yes | yes |

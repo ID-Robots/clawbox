@@ -239,7 +239,7 @@ coordinate browser control are OpenClaw-only; `skill_*`, `ai_*` and
 `memory_shard_search` and `hermes_plugins_reload` are Hermes-only. See
 [`mcp/README.md`](mcp/README.md) for the authoritative tool matrix.
 
-Hermes scans for plugins **once, when its process starts**, and has no runtime reload, so a
+Hermes scans for its plugins **once, when its process starts**, and has no runtime reload, so a
 plugin installed or enabled after boot reached no chat at all — new sessions included. The
 box closes that itself: a watcher in the web server restarts the agent when the declared
 plugin set changes, `POST /setup-api/hermes/plugins/reload` (owner cookie or the MCP
