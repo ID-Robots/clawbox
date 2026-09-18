@@ -62,7 +62,7 @@ const FRESH_HERMES = { supported: true, edition: "hermes", enabled: false, activ
  *  bundled `vibrant-clawd` pack, flagged `brand`. */
 const BRAND_CRAB = {
   slug: "vibrant-clawd",
-  displayName: "Vibrant Clawd",
+  displayName: "ClawBox crab",
   submittedBy: "ID-Robots",
   revision: "1:1941190",
   frameW: 192,

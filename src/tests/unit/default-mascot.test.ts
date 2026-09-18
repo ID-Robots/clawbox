@@ -61,7 +61,7 @@ describe("the bundled pack", () => {
     const dir = path.join(process.cwd(), "public", "pets", "vibrant-clawd");
     const meta = JSON.parse(fs.readFileSync(path.join(dir, "pet.json"), "utf-8"));
     expect(meta.id).toBe("vibrant-clawd");
-    expect(meta.displayName).toBe("Vibrant Clawd");
+    expect(meta.displayName).toBe("ClawBox crab");
     expect(meta.version).toBe("2.1.0");
     expect(meta.spritesheetPath).toBe("spritesheet.webp");
     // The credit file is part of the deliverable: this is first-party artwork
@@ -75,7 +75,7 @@ describe("the bundled pack", () => {
     expect(installedPets()).toEqual([]); // nothing in the harness's own store
 
     const pet = loadPet("vibrant-clawd");
-    expect(pet?.displayName).toBe("Vibrant Clawd");
+    expect(pet?.displayName).toBe("ClawBox crab");
     expect(pet?.builtin).toBe(true);
     expect(pet?.sheetPath).toBe(path.join(builtinPetDir("vibrant-clawd")!, "spritesheet.webp"));
     expect(builtinInstalledPets().map((p) => p.slug)).toEqual(["vibrant-clawd"]);
@@ -116,7 +116,7 @@ describe("the brand body", () => {
     const { activePetDescriptor } = await loadModule();
     const active = await activePetDescriptor(() => "ID-Robots");
     expect(active?.slug).toBe("vibrant-clawd");
-    expect(active?.displayName).toBe("Vibrant Clawd");
+    expect(active?.displayName).toBe("ClawBox crab");
     expect(active?.brand).toBe(true);
     expect(active?.submittedBy).toBe("ID-Robots");
     // Measured off the real sheet: 8x9 cells of 192x208, with the ragged rows

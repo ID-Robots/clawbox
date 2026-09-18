@@ -75,7 +75,15 @@ export async function GET(request: Request) {
     // offline on a box that has never had a network, and is the default body.
     ...BUILTIN_PETS.map((p) => ({
       slug: p.slug,
-      displayName: installed.get(p.slug)?.displayName || p.displayName,
+      // OURS, not the copy's — the one place the merged-installed precedence
+      // above is deliberately not applied. A box whose owner picked the crab
+      // before it was renamed keeps a materialised `pet.json` still saying
+      // "Vibrant Clawd", and the copy is never refreshed (`materialiseBuiltinPet`
+      // skips a destination that exists), so the gallery went on showing the
+      // old name for a pack ClawBox itself ships and itself names. Only the
+      // NAME is taken back: `installed` still decides whether the pack is
+      // there, and `loadPet` still serves the owner's own copy of the body.
+      displayName: p.displayName,
       kind: p.kind,
       submittedBy: p.submittedBy,
       curated: true,

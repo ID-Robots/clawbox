@@ -1,5 +1,5 @@
-Vibrant Clawd
-=============
+ClawBox crab (pack id `vibrant-clawd`)
+======================================
 
 ClawBox's own mascot, in Petdex pack format. This is FIRST-PARTY artwork —
 drawn for this product by the ClawBox maintainer — which is why it may be
@@ -12,7 +12,7 @@ lets public/pet-egg-sheet.png ride along under its MIT notice.
 Pack
 ----
 id:                  vibrant-clawd
-displayName:         Vibrant Clawd
+displayName:         ClawBox crab
 version:             2.1.0
 spriteVersionNumber: 1
 spritesheetPath:     spritesheet.webp
@@ -43,6 +43,8 @@ Where it is used
   - the desktop mascot wherever the brand crab is worn (openclaw and dual
     editions with no pet picked, or the pet switched off) — hermes-pets.ts
     `brandPetSlug()`;
-  - the pet gallery, on both editions, as a built-in, already-installed tile;
+  - the pet gallery: the FIRST tile, named for the crab and selected by
+    default, wherever the crab is the placeholder; an ordinary built-in,
+    already-installed tile on a Hermes-only box;
   - public/clawbox-crab.png (and its inlined copy, and the docs-site copy) is
     a still of row 0 frame 0, cut by scripts/generate-crab-still.mjs.
