@@ -214,7 +214,6 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
           {total > 0 && (
             <span
               data-testid="chat-progress-card-count"
-              aria-label={t("chat.progressCard.count", { done, total })}
               style={{
                 flexShrink: 0, fontSize: 11, fontWeight: 600, fontVariantNumeric: "tabular-nums",
                 padding: "1px 7px", borderRadius: 999,
@@ -222,7 +221,11 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
                 background: done === total ? "rgba(34,197,94,0.12)" : "rgba(249,115,22,0.14)",
               }}
             >
-              {done}/{total}
+              {/* The words are for assistive tech, the figures for the eye: an
+                  aria-label on a role-less span is prohibited and not reliably
+                  read, so the spoken form is real (visually hidden) text. */}
+              <span aria-hidden="true">{done}/{total}</span>
+              <span className="sr-only" data-testid="chat-progress-card-count-label">{t("chat.progressCard.count", { done, total })}</span>
             </span>
           )}
           <span

@@ -70,7 +70,12 @@ describe("ChatProgressCard — what it draws", () => {
     expect(screen.getByTestId("chat-progress-card-summary")).toHaveTextContent("Repair the session owner");
     const count = screen.getByTestId("chat-progress-card-count");
     expect(count).toHaveTextContent("1/3");
-    expect(count).toHaveAttribute("aria-label", "1 of 3 steps done");
+    // Spoken as words through real hidden text, not an aria-label on a role-less span.
+    expect(count).not.toHaveAttribute("aria-label");
+    expect(within(count).getByTestId("chat-progress-card-count-label")).toHaveTextContent("1 of 3 steps done");
+    expect(within(count).getByTestId("chat-progress-card-count-label")).toHaveClass("sr-only");
+    expect(within(count).getByText("1/3")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByTestId("chat-progress-card-toggle")).toHaveAccessibleName(expect.stringContaining("1 of 3 steps done"));
   });
 
   it("names the note's first line in the header when there is no plan", async () => {
@@ -118,7 +123,7 @@ describe("ChatProgressCard — what it draws", () => {
     // English is the first catalogue loaded; the saved locale lands a moment later.
     await waitFor(() => expect(screen.getByTestId("chat-progress-card-title")).toHaveTextContent("Aufgabenfortschritt"));
     expect(screen.getByTestId("chat-progress-card-updated")).toHaveTextContent("Aktualisiert vor 2 Std.");
-    expect(screen.getByTestId("chat-progress-card-count")).toHaveAttribute("aria-label", "1 von 3 Schritten erledigt");
+    expect(screen.getByTestId("chat-progress-card-count-label")).toHaveTextContent("1 von 3 Schritten erledigt");
   });
 
   it("draws nothing when everything in the note was stripped and there is no plan", () => {
