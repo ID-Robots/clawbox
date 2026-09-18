@@ -57,6 +57,10 @@ beforeAll(async () => {
   // A binary that exits non-zero with no output: the status probe must turn
   // that into an explicit "unavailable", never into a 500.
   process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
+  // The migration lock's path is read once, when the module loads — so it is
+  // set here, before the handlers are imported, or an index run would try the
+  // box's own `~/clawbox/data`, which a CI runner does not have.
+  process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(TEST_ROOT, "embed.lock");
   await fs.mkdir(DATA_DIR, { recursive: true });
   statusGET = (await import("@/app/setup-api/clawkeep/memory/route")).GET;
   indexPOST = (await import("@/app/setup-api/clawkeep/memory/index/route")).POST;
@@ -69,6 +73,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.CLAWKEEP_DATA_DIR;
   delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+  delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
   await fs.rm(TEST_ROOT, { recursive: true, force: true });
 });
 
@@ -280,7 +285,6 @@ describe("the bar on an OpenClaw box, across the HTTP boundary", () => {
       "",
     ].join("\n"), { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = bin;
-    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(TEST_ROOT, "embed.lock");
     process.env.CLAWKEEP_MEMORY_AGENT_DB = agentDb;
     try {
       const started = await indexPOST(new NextRequest("http://localhost/x", {
@@ -306,7 +310,6 @@ describe("the bar on an OpenClaw box, across the HTTP boundary", () => {
       expect(Math.max(...seen.map((p) => p.chunks))).toBeGreaterThan(0);
     } finally {
       process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
-      delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
       delete process.env.CLAWKEEP_MEMORY_AGENT_DB;
     }
   }, 30_000);
