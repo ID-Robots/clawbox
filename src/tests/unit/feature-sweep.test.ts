@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 // A plain .mjs script, imported for its pure helpers only. Nothing runs on
 // import: scripts/feature-sweep.mjs guards main() on argv[1], so importing it
 // here can never sweep a box.
-import { redact, tally, uiLanguageReadsBack } from "../../../scripts/feature-sweep.mjs";
+import { redact, speechEnginesReport, tally, uiLanguageReadsBack } from "../../../scripts/feature-sweep.mjs";
 
 /**
  * The two pure halves of scripts/feature-sweep.mjs — the only parts that can
@@ -142,5 +142,55 @@ describe("feature-sweep uiLanguageReadsBack", () => {
     // anything non-string arriving here is the route breaking its contract.
     expect(uiLanguageReadsBack(res(200, { ui_language: 42 }))).toContain("ui_language");
     expect(uiLanguageReadsBack(res(200, { ui_language: "" }))).toContain("ui_language");
+  });
+});
+
+describe("feature-sweep speechEnginesReport", () => {
+  /**
+   * A box with no speech engine configured answers `activeEngine: null` beside
+   * an `engines` list where nothing is `configured` — the route WORKING. Read
+   * with the plain `ok("engines", "activeEngine")` expectation that failed the
+   * release-gate sweep on every box without a voice engine.
+   */
+  const res = (status: number, body: unknown) => ({
+    status,
+    text: typeof body === "string" ? body : JSON.stringify(body),
+    json: typeof body === "string" ? null : body,
+  });
+  const engine = (id: string, configured: boolean) => ({ id, configured });
+
+  it("passes when an engine is active", () => {
+    expect(speechEnginesReport(res(200, {
+      activeEngine: "local",
+      engines: [engine("local", true), engine("cloud", false)],
+    }))).toBe(true);
+  });
+
+  it("is unproven, never a failure, when nothing on the box can speak", () => {
+    const verdict = speechEnginesReport(res(200, {
+      activeEngine: null,
+      engines: [engine("local", false), engine("cloud", false)],
+    }));
+    expect(verdict).toMatchObject({ unproven: expect.stringContaining("nothing can speak") });
+  });
+
+  it("is unproven for an empty engine list too", () => {
+    expect(speechEnginesReport(res(200, { activeEngine: null, engines: [] }))).toMatchObject({
+      unproven: expect.any(String),
+    });
+  });
+
+  it("fails when an engine is configured and none is active — drift, not an empty box", () => {
+    expect(speechEnginesReport(res(200, {
+      activeEngine: null,
+      engines: [engine("local", true), engine("cloud", false)],
+    }))).toContain("activeEngine");
+  });
+
+  it("still fails when the route itself is broken", () => {
+    expect(speechEnginesReport(res(500, { error: "boom" }))).toContain("expected 200");
+    expect(speechEnginesReport(res(200, "<html>login</html>"))).toContain("expected a JSON object");
+    expect(speechEnginesReport(res(200, { activeEngine: "local" }))).toContain("engines");
+    expect(speechEnginesReport(res(200, { activeEngine: 7, engines: [engine("local", true)] }))).toContain("activeEngine");
   });
 });
