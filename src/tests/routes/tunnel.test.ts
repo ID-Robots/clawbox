@@ -40,6 +40,24 @@ describe("/setup-api/tunnel/status", () => {
     });
   });
 
+  it("passes the named mode and hostname through", async () => {
+    tunnelMock.getTunnelStatus.mockResolvedValue({
+      enabled: true,
+      running: true,
+      tunnelUrl: "https://amber-otter-k7m2p9qx4w3n.clawbox.tech",
+      error: null,
+      service: "active",
+      managedBy: "systemd",
+      mode: "named",
+      hostname: "amber-otter-k7m2p9qx4w3n.clawbox.tech",
+    });
+    tunnelMock.isCloudflaredInstalled.mockResolvedValue(true);
+
+    const mod = await import("@/app/setup-api/tunnel/status/route");
+    const body = await (await mod.GET()).json();
+    expect(body).toMatchObject({ mode: "named", hostname: "amber-otter-k7m2p9qx4w3n.clawbox.tech" });
+  });
+
   /**
    * TASK-453 round 2 (smoke). The route passes the unit state and the URL
    * straight through, so support can tell "off" from "on, run by systemd" —

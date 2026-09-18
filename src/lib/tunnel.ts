@@ -15,6 +15,7 @@ import {
   readTunnelUrl,
   readTunnelUrlFromJournal,
 } from "@/lib/cloudflared";
+import { type TunnelMode, readNamedTunnelCredential, readTunnelMode } from "@/lib/named-tunnel";
 
 const execAsync = promisify(exec);
 
@@ -46,6 +47,13 @@ export interface TunnelStatus {
   service: TunnelUnitState;
   /** Which tunnel this describes — null when nothing is running. */
   managedBy: "systemd" | "spawned" | null;
+  /**
+   * Which Cloudflare tunnel the unit runs: the box's own `named` tunnel or the
+   * `quick` fallback (scripts/run-tunnel.sh). Null when the unit is not up.
+   */
+  mode: TunnelMode | null;
+  /** `<boxHandle>.clawbox.tech` in named mode, else null. Never the token. */
+  hostname: string | null;
 }
 
 async function ensureDataDir() {
@@ -142,8 +150,12 @@ export async function getTunnelStatus(): Promise<TunnelStatus> {
   const running = serviceRunning || spawnedRunning;
 
   let tunnelUrl: string | null = null;
+  let mode: TunnelMode | null = null;
+  let hostname: string | null = null;
   if (serviceRunning) {
     tunnelUrl = (await readTunnelUrl()) ?? (await readTunnelUrlFromJournal());
+    mode = await readTunnelMode();
+    if (mode === "named") hostname = (await readNamedTunnelCredential())?.hostname ?? null;
   }
   if (!tunnelUrl && spawnedRunning) tunnelUrl = await getTunnelUrl();
 
@@ -157,6 +169,8 @@ export async function getTunnelStatus(): Promise<TunnelStatus> {
     error: null,
     service,
     managedBy: serviceRunning ? "systemd" : spawnedRunning ? "spawned" : null,
+    mode,
+    hostname,
   };
 }
 

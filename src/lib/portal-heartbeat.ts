@@ -1,8 +1,17 @@
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
-import { CLOUDFLARED_DIR } from "./cloudflared";
+import { CLOUDFLARED_DIR, getTunnelServiceState, startTunnelService } from "./cloudflared";
 import { get as getConfigValue } from "./config-store";
+import {
+  type NamedTunnelCredential,
+  clearNamedTunnelCredential,
+  isBoxTunnelHostname,
+  isRefusedToken,
+  isValidTunnelToken,
+  readNamedTunnelCredential,
+  writeNamedTunnelCredential,
+} from "./named-tunnel";
 
 const DEVICE_ID_FILE = path.join(CLOUDFLARED_DIR, "device-id");
 const PORTAL_HEARTBEAT_URL =
@@ -18,6 +27,10 @@ const MACHINE_ID_FILE = "/etc/machine-id";
 // it cleanly.
 let lastPushedUrl: string | null = null;
 let inFlight: Promise<void> | null = null;
+// Set when the portal reported a box hostname other than the one on file and
+// sent no token with it: the next push asks for one. In memory only — a
+// restart re-derives it from the next answer.
+let hostnameMismatch = false;
 
 async function getOrCreateDeviceId(): Promise<string> {
   // Three-tier resolution, picked so the *same physical Pi* always
@@ -102,22 +115,38 @@ async function pushNow(tunnelUrl: string): Promise<void> {
     const deviceId = await getOrCreateDeviceId();
     const name = deriveDeviceName(deviceId);
 
+    const stored = await readNamedTunnelCredential();
+    // Ask for the named tunnel's run token only when there is none on file, or
+    // the portal has since reported a different hostname. The portal fetches
+    // it from Cloudflare per request, so asking on every beat would cost it an
+    // API call every five minutes per box for nothing.
+    const requestBoxTunnelToken = !stored || hostnameMismatch;
+
     const res = await fetch(PORTAL_HEARTBEAT_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ deviceId, tunnelUrl, name }),
+      body: JSON.stringify({
+        deviceId,
+        tunnelUrl,
+        name,
+        ...(requestBoxTunnelToken ? { requestBoxTunnelToken: true } : {}),
+      }),
     });
 
     if (res.ok) {
       lastPushedUrl = tunnelUrl;
+      const answer: unknown = await res.json().catch(() => null);
+      await applyBoxTunnel(answer, stored);
     } else if (res.status === 401 || res.status === 403) {
       // Token revoked or unpaired — stop trying until a config change clears
       // the in-memory state via process restart.
       console.warn(`[portal-heartbeat] auth rejected (${res.status}); will not retry until restart`);
       lastPushedUrl = tunnelUrl;
+      // An unpaired box has no business serving the account's named hostname.
+      if (stored) await revokeNamedTunnel("the portal no longer accepts this box");
     } else {
       const detail = await res.text().catch(() => "");
       console.warn(`[portal-heartbeat] push failed ${res.status}: ${detail.slice(0, 200)}`);
@@ -126,6 +155,83 @@ async function pushNow(tunnelUrl: string): Promise<void> {
     console.warn("[portal-heartbeat] push error:", err instanceof Error ? err.message : err);
   } finally {
     inFlight = null;
+  }
+}
+
+/**
+ * Restart clawbox-tunnel so run-tunnel.sh re-reads the credential — but only
+ * while it is running. A box whose owner switched Remote Access off must not
+ * have it switched back on by a heartbeat.
+ */
+async function restartTunnelIfRunning(reason: string): Promise<void> {
+  try {
+    const state = await getTunnelServiceState();
+    if (state !== "active" && state !== "activating") return;
+    await startTunnelService();
+    console.log(`[portal-heartbeat] restarted the tunnel: ${reason}`);
+  } catch (err) {
+    console.warn("[portal-heartbeat] tunnel restart failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** Forget the named tunnel and drop back to the quick one. */
+async function revokeNamedTunnel(reason: string): Promise<void> {
+  hostnameMismatch = false;
+  if (!(await clearNamedTunnelCredential())) return;
+  console.warn(`[portal-heartbeat] named tunnel credential removed (${reason}); back to the quick tunnel`);
+  await restartTunnelIfRunning("named tunnel revoked");
+}
+
+/**
+ * Act on the `boxTunnel` field of a successful heartbeat answer. Never logs
+ * the token, never throws.
+ *
+ *   absent            → the portal has no named tunnel for this box (never
+ *                       provisioned, the device was removed, or the feature is
+ *                       off server-side). A credential on file is revoked.
+ *   same hostname     → keep; a token that differs is a rotation and replaces it.
+ *   new hostname      → store it when the answer carries a token; otherwise ask
+ *                       for one on the next beat.
+ *
+ * A token cloudflared already refused (run-tunnel.sh records its fingerprint)
+ * is not stored again, so a dead token cannot bounce the tunnel every beat.
+ */
+async function applyBoxTunnel(answer: unknown, stored: NamedTunnelCredential | null): Promise<void> {
+  try {
+    if (!answer || typeof answer !== "object") return;
+    const body = answer as { success?: unknown; boxTunnel?: unknown };
+    // Only an answer that says it succeeded can say "no tunnel for you".
+    if (body.success !== true) return;
+
+    const boxTunnel =
+      body.boxTunnel && typeof body.boxTunnel === "object"
+        ? (body.boxTunnel as { hostname?: unknown; token?: unknown })
+        : null;
+    if (!boxTunnel || !isBoxTunnelHostname(boxTunnel.hostname)) {
+      hostnameMismatch = false;
+      if (stored) await revokeNamedTunnel("the portal no longer reports one for this box");
+      return;
+    }
+
+    const hostname = boxTunnel.hostname;
+    const offered = isValidTunnelToken(boxTunnel.token) ? boxTunnel.token : null;
+    const sameHost = stored?.hostname === hostname;
+
+    if (!offered || (sameHost && offered === stored?.token)) {
+      hostnameMismatch = !sameHost;
+      return;
+    }
+    if (await isRefusedToken(offered)) {
+      hostnameMismatch = !sameHost;
+      return;
+    }
+
+    await writeNamedTunnelCredential({ hostname, token: offered });
+    hostnameMismatch = false;
+    console.log(`[portal-heartbeat] named tunnel credential ${stored ? "updated" : "stored"}`);
+    await restartTunnelIfRunning("named tunnel credential changed");
+  } catch (err) {
+    console.warn("[portal-heartbeat] box tunnel update failed:", err instanceof Error ? err.message : err);
   }
 }
 

@@ -12,12 +12,20 @@ const heartbeatMock = {
   pushHeartbeatIfChanged: vi.fn(),
 };
 
+const namedTunnelMock = {
+  readTunnelMode: vi.fn(async () => null as "named" | "quick" | null),
+  readNamedTunnelCredential: vi.fn(async () => null as { hostname: string; token: string } | null),
+};
+
 vi.mock("@/lib/cloudflared", () => cloudflaredMock);
 vi.mock("@/lib/portal-heartbeat", () => heartbeatMock);
+vi.mock("@/lib/named-tunnel", () => namedTunnelMock);
 
 afterEach(() => {
   for (const fn of Object.values(cloudflaredMock)) fn.mockReset();
   for (const fn of Object.values(heartbeatMock)) fn.mockReset();
+  namedTunnelMock.readTunnelMode.mockReset().mockResolvedValue(null);
+  namedTunnelMock.readNamedTunnelCredential.mockReset().mockResolvedValue(null);
 });
 
 describe("/setup-api/portal/status", () => {
@@ -44,6 +52,8 @@ describe("/setup-api/portal/status", () => {
         { at: "2026-08-22T09:00:00Z", url: "https://abc.trycloudflare.com" },
         { at: "2026-08-21T09:00:00Z", url: "https://old.trycloudflare.com" },
       ],
+      mode: null,
+      hostname: null,
     });
     expect(body.portalAddDeviceUrl).toMatch(/clawbox\.com.*addDevice/);
     expect(body.portalWeb).toMatch(/clawbox\.com/);
@@ -84,6 +94,42 @@ describe("/setup-api/portal/status", () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toMatch(/boom/);
+  });
+});
+
+describe("/setup-api/portal/status — named tunnel", () => {
+  const HOST = "amber-otter-k7m2p9qx4w3n.clawbox.tech";
+  const TOKEN = "eyJzZWNyZXQiOiJkby1ub3Qtc2hvdy1tZSJ9eyJzZWNyZXQiOiJ9";
+
+  it("reports mode and the permanent hostname, and never the token", async () => {
+    cloudflaredMock.isInstalled.mockResolvedValue(true);
+    cloudflaredMock.getTunnelServiceState.mockResolvedValue("active");
+    cloudflaredMock.readTunnelUrl.mockResolvedValue(`https://${HOST}`);
+    cloudflaredMock.readTunnelUrlHistory.mockResolvedValue([]);
+    namedTunnelMock.readTunnelMode.mockResolvedValue("named");
+    namedTunnelMock.readNamedTunnelCredential.mockResolvedValue({ hostname: HOST, token: TOKEN });
+
+    const mod = await import("@/app/setup-api/portal/status/route");
+    const res = await mod.GET();
+    const text = await res.text();
+    expect(text).not.toContain(TOKEN);
+    const body = JSON.parse(text);
+    expect(body.tunnel).toMatchObject({ mode: "named", hostname: HOST, url: `https://${HOST}` });
+    // The stable URL is still what the heartbeat reports as liveness.
+    expect(heartbeatMock.pushHeartbeatIfChanged).toHaveBeenCalledWith(`https://${HOST}`);
+  });
+
+  it("reports quick mode without a hostname", async () => {
+    cloudflaredMock.isInstalled.mockResolvedValue(true);
+    cloudflaredMock.getTunnelServiceState.mockResolvedValue("active");
+    cloudflaredMock.readTunnelUrl.mockResolvedValue("https://abc.trycloudflare.com");
+    cloudflaredMock.readTunnelUrlHistory.mockResolvedValue([]);
+    namedTunnelMock.readTunnelMode.mockResolvedValue("quick");
+    namedTunnelMock.readNamedTunnelCredential.mockResolvedValue({ hostname: HOST, token: TOKEN });
+
+    const mod = await import("@/app/setup-api/portal/status/route");
+    const body = await (await mod.GET()).json();
+    expect(body.tunnel).toMatchObject({ mode: "quick", hostname: null });
   });
 });
 

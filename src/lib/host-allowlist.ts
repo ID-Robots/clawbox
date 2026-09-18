@@ -2,6 +2,7 @@ import { statSync } from "fs";
 import net from "net";
 import os from "os";
 import { loadConfiguredOrigins, resolveOriginsPath } from "@/lib/control-ui-origins";
+import { readNamedTunnelHostnameSync } from "@/lib/named-tunnel";
 
 /**
  * The names the app on port 80 answers to.
@@ -33,12 +34,16 @@ import { loadConfiguredOrigins, resolveOriginsPath } from "@/lib/control-ui-orig
  *   6. The host of an owner-configured control UI origin
  *      (data/control-ui-origins.json, src/lib/control-ui-origins.ts) — the
  *      documented escape hatch for a reverse proxy on another name.
+ *   7. The box's OWN named-tunnel hostname, `<boxHandle>.clawbox.tech`, exactly
+ *      as the portal handed it out (data/cloudflared/named-tunnel, see
+ *      src/lib/named-tunnel.ts) — that one name, never the zone: another box's
+ *      handle is still a foreign name here.
  *
  * Deliberately NOT admitted: `<nodename>.<search domain>` (`clawbox.lan`). The
  * only source of that suffix is DHCP, which is exactly the party this refuses
  * to trust. A box reached that way still has `.local`, its IP and its bare name.
  *
- * The Cloudflare tunnel is not a name at all (its Host is the tunnel's own
+ * The quick tunnel is not a name at all (its Host is the tunnel's own
  * `*.trycloudflare.com` or a custom domain); the caller admits it by its
  * `CF-Connecting-IP`, which scripts/proxy-peer.js deletes from every request
  * whose socket peer is not loopback — see `isTunnelRequest`.
@@ -132,6 +137,7 @@ export function isAllowedHostname(hostname: string): boolean {
   if (hostname.endsWith(".local") && LABEL_RE.test(hostname.slice(0, -".local".length))) return true;
   if (hostname.endsWith(".ts.net") && isLabels(hostname.slice(0, -".ts.net".length), 2)) return true;
   if (hostname === systemHostLabel()) return true;
+  if (hostname === readNamedTunnelHostnameSync()) return true;
   return configuredOriginHosts().has(hostname);
 }
 
