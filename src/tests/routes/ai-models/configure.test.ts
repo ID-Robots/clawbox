@@ -403,6 +403,20 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.error).toContain("Unknown provider");
   });
 
+  // The same 400, for the names a PLAIN OBJECT answers for whether or not the
+  // table declares them. `PROVIDERS["toString"]` resolved to
+  // `Object.prototype.toString`, which is truthy, so the "Unknown provider"
+  // guard below it never fired and the handler carried on with a config that
+  // spreads to `{}` — no defaultModel, no profileKey.
+  it("returns 400 for a provider named after something on Object.prototype", async () => {
+    for (const provider of ["toString", "valueOf", "constructor", "hasOwnProperty"]) {
+      const res = await configurePost(jsonRequest({ provider, apiKey: "test" }));
+      const body = await res.json();
+      expect(res.status, `${provider} must be refused`).toBe(400);
+      expect(body.error).toContain("Unknown provider");
+    }
+  });
+
   it("configures anthropic provider successfully", async () => {
     const res = await configurePost(jsonRequest({
       provider: "anthropic",

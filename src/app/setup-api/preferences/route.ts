@@ -88,6 +88,38 @@ const OWNER_ONLY_WRITE_PREFIX = "installed_";
 // grows past this cap the tool starts getting a 400, so raise this with it.
 const MAX_KEYS_PER_READ = 32;
 
+// Most names one WRITE may carry. The same number as the read, and for the
+// same reason: the work a request costs must not follow the size of its body.
+//
+// The read's cap is the one to match rather than a tighter one of its own —
+// the two doors take the same names, so a body this route accepts should be
+// one a single `keys=` query could ask back. The widest legitimate write is
+// the desktop's appearance bundle — four names (`wp_fit`, `wp_bg_color`,
+// `wp_opacity`, `wp_id`, page.tsx); every other writer on both pages sends one
+// or two, and the MCP `preferences_set` tool sends exactly one. Headroom is
+// deliberate, exactly as on the read: a legitimate caller that grows past this
+// starts getting a 400, so raise this with it.
+const MAX_KEYS_PER_WRITE = 32;
+
+// Most `pref:*` names the store may hold, whatever order they were written in.
+//
+// The per-request cap bounds one body; this bounds the FILE. Without it a
+// caller with a bearer could spend 200 legal requests to reach the same place
+// one illegal request of 5000 keys would have — and `config.get()` re-reads
+// and re-parses config.json synchronously on every call, so a file grown that
+// way takes the desktop, Settings and the setup wizard down with it until
+// someone SSHes in. The middleware admits the MCP bearer to this route, and
+// the bearer is a file anything running as the box's user can read, including
+// a prompt-injected agent turn — see OWNER_ONLY_WRITE_PREFIX above for the
+// same threat model.
+//
+// 500 is the KV route's MAX_ENTRIES (src/app/setup-api/kv/route.ts), which
+// bounds data/kv.json for exactly this reason. A box in the field holds a few
+// dozen: the desktop's own state plus one `app_<id>_settings` per installed
+// app. The cap is on NEW names — a store already at it can still be written
+// to, or the wallpaper would stop changing on the box that hit it.
+const MAX_STORED_PREFERENCES = 500;
+
 // GET /setup-api/preferences?keys=wp_opacity,wp_bg_color
 // GET /setup-api/preferences?all=1  (returns all pref:* keys)
 //
@@ -183,16 +215,31 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
-    const entries: Record<string, unknown> = {};
+    // Counted before the loop and on what the body NAMES rather than on what
+    // survives the prefix filter, the same way the read counts what the query
+    // names: the bound is on the work one request may ask for.
+    if (Object.keys(body).length > MAX_KEYS_PER_WRITE) {
+      return NextResponse.json(
+        { error: `at most ${MAX_KEYS_PER_WRITE} keys per request` },
+        { status: 400 },
+      );
+    }
+    // Null-prototype accumulator, like every other one that takes a name from
+    // outside: the key written below is `pref:` + a rebuilt name, so it cannot
+    // be `__proto__` today, but a later change that drops the prefix or adds a
+    // second assignment here must not be the one that discovers this.
+    const entries: Record<string, unknown> = Object.create(null);
     for (const [key, value] of Object.entries(body)) {
       // A name with the wrong prefix is not this door's to write and is
       // skipped, as it always has been. A name WITH the prefix but spelled
       // impossibly is this door's and is refused, like an impossible value:
       // the caller meant a preference, so it should learn that the write did
-      // not land rather than read `ok: true` over it — the desktop's own
-      // writer branches on nothing but the response (page.tsx's
-      // usePreferenceWriter, InstalledAppSettings), which is exactly how a
-      // dropped write would have been rendered as "Saved".
+      // not land rather than read `ok: true` over it — InstalledAppSettings
+      // branches on this response (`preferencesRes.ok`), which is exactly how
+      // a dropped write would have been rendered as "Saved". The desktop's
+      // other writer, `usePreferenceWriter` in page.tsx, still discards the
+      // response entirely (`.catch(() => {})`), so for THAT caller this 400 is
+      // only a truthful answer, not yet a visible one.
       if (!isAllowed(key)) continue;
       const safeKey = safePreferenceKey(key);
       if (!safeKey) {
@@ -216,6 +263,23 @@ export async function POST(req: Request) {
       entries[`${PREFERENCE_KEY_PREFIX}${safeKey}`] = value;
     }
     if (Object.keys(entries).length > 0) {
+      // One read of the store before the write, and only for a body that
+      // actually stores something: `setMany` is about to read the same file
+      // anyway (read-modify-rewrite), so this costs one extra parse on the
+      // debounced write path and nothing at all on a body this door owns no
+      // name in.
+      const stored = await config.getAll();
+      const held = new Set(
+        Object.keys(stored).filter((key) => key.startsWith(PREFERENCE_KEY_PREFIX)),
+      );
+      const adding = Object.keys(entries).filter((key) => !held.has(key)).length;
+      if (held.size + adding > MAX_STORED_PREFERENCES) {
+        console.error("[preferences] Rejected write: the store already holds the most preferences it may");
+        return NextResponse.json(
+          { error: `this box stores at most ${MAX_STORED_PREFERENCES} preferences` },
+          { status: 400 },
+        );
+      }
       await config.setMany(entries);
     }
     // When language changes, update the persona files of the harness that is

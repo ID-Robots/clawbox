@@ -368,4 +368,85 @@ describe("/setup-api/preferences", () => {
     });
   });
 
+  /**
+   * The COUNT half of the rules. The name is bounded in shape and the value in
+   * size, but until this existed one POST could name as many of them as it
+   * liked: the middleware admits the MCP bearer here, and the bearer is a file
+   * anything running as the box's user can read, so a prompt-injected turn
+   * could park thousands of legal names in config.json — a file `config.get()`
+   * re-reads and re-parses synchronously on every call, which is the desktop,
+   * Settings and the setup wizard all at once. Two caps, both the shape the
+   * read side and the KV route already use.
+   */
+  describe("write size", () => {
+    const bodyOf = (count: number, prefix = "ui_k") =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`${prefix}${i}`, "x"]));
+    const storeOf = (count: number) =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`pref:ui_stored${i}`, "x"]));
+
+    it("refuses a body naming more keys than one write may carry", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(bodyOf(33)),
+      }));
+      expect(res.status).toBe(400);
+      // Refused BEFORE the loop, so nothing was validated or accumulated.
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("stores a body at exactly that cap", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(bodyOf(32)),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts what the body NAMES, not what survives the prefix filter", async () => {
+      // 33 names, only one of which this door owns. The bound is on the work
+      // the request asks for, like MAX_KEYS_PER_READ.
+      const body = { ...bodyOf(32, "not_a_pref_"), wp_opacity: 80 };
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses a write that would grow the store past the names it may hold", async () => {
+      mockGetAll.mockResolvedValue({ ...storeOf(500), other_config_key: 1 });
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ ui_brand_new: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("still stores a name the store ALREADY holds when it is at that cap", async () => {
+      // The cap is on new names, not on writes: a box that reached it must
+      // still be able to change its wallpaper.
+      mockGetAll.mockResolvedValue({ ...storeOf(499), "pref:wp_opacity": 10 });
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80 }),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("does not read the store for a body that stores nothing", async () => {
+      // A body this door owns no name in never pays for the count.
+      mockGetAll.mockClear();
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ "not-a-preference": 1 }),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockGetAll).not.toHaveBeenCalled();
+    });
+  });
+
 });

@@ -2237,7 +2237,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       );
     }
 
-    const baseConfig = PROVIDERS[provider];
+    // `Object.hasOwn` rather than a bare index: `provider` is the caller's
+    // string, and a plain object answers for every name on Object.prototype
+    // too — `PROVIDERS["toString"]` is a truthy function, so the guard below
+    // never fired and the handler carried on with a config that spreads to
+    // `{}`. Same rule as the KV route's RESERVED_KEYS and the apps/settings
+    // writer table.
+    const baseConfig = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
     if (!baseConfig) {
       return NextResponse.json(
         { error: `Unknown provider: ${provider}` },
