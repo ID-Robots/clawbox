@@ -22,6 +22,17 @@ const CURATED = [
   { slug: "nukey", displayName: "Nukey", kind: "object", submittedBy: "railly", curated: true, installed: true },
 ];
 
+/** The pack ClawBox ships, exactly as `/setup-api/pets?gallery=1` reports it. */
+const BUILTIN = {
+  slug: "vibrant-clawd",
+  displayName: "ClawBox crab",
+  kind: "creature",
+  submittedBy: "ID-Robots",
+  curated: true,
+  builtin: true,
+  installed: true,
+};
+
 function galleryPayload(over: Record<string, unknown> = {}) {
   return {
     supported: true,
@@ -32,6 +43,22 @@ function galleryPayload(over: Record<string, unknown> = {}) {
     pets: CURATED,
     ...over,
   };
+}
+
+/**
+ * What a crab box (openclaw, dual) really answers on a box with nothing picked:
+ * `enabled: false`, and `activeSlug` already naming the brand body, because the
+ * route resolves the crab THROUGH the bundled pet.
+ */
+function crabPayload(over: Record<string, unknown> = {}) {
+  return galleryPayload({
+    edition: "openclaw",
+    placeholder: "crab",
+    enabled: false,
+    activeSlug: "vibrant-clawd",
+    pets: [BUILTIN, ...CURATED],
+    ...over,
+  });
 }
 
 let selectCalls: unknown[] = [];
@@ -72,7 +99,7 @@ describe("PetPicker", () => {
     expect(container.textContent).toBe("");
   });
 
-  it("on OpenClaw shows the crab as the first tile — what 'no pet' wears there", async () => {
+  it("on OpenClaw with no bundled pack falls back to the still crab tile", async () => {
     stubFetch(galleryPayload({ edition: "openclaw", placeholder: "crab", enabled: false, activeSlug: "" }));
     const { container, getByTestId } = render(<PetPicker />);
     await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
@@ -173,5 +200,78 @@ describe("PetPicker", () => {
     fireEvent.error(img);
     expect(img.style.visibility).toBe("hidden");
     expect(container.textContent).toContain("Boba");
+  });
+
+  // ── The crab tile IS the bundled pet (owner, 2026-09-18) ──
+  //
+  // There used to be two tiles for one body: a still-PNG "ClawBox crab" and a
+  // "Vibrant Clawd" beside it. They are the same crab, so there is one tile.
+
+  it("draws the first tile on a crab box from the bundled pet's own sheet", async () => {
+    stubFetch(crabPayload());
+    const { container } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    const first = container.querySelectorAll("button")[0];
+    expect(first.querySelector("img")?.getAttribute("src")).toBe(
+      "/setup-api/pets/thumb?slug=vibrant-clawd",
+    );
+    expect(first.textContent).toContain("settings.mascot.petCrab");
+  });
+
+  it("never offers the brand pet a second time on a crab box", async () => {
+    stubFetch(crabPayload());
+    const { container } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    expect(container.querySelectorAll('img[src*="vibrant-clawd"]').length).toBe(1);
+    // The gallery row's own name never reaches the screen: the tile wears the
+    // localised crab name instead.
+    expect(container.textContent).not.toContain("ClawBox crab");
+  });
+
+  it("selects the crab tile when nothing is picked", async () => {
+    stubFetch(crabPayload());
+    const { container } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    const selected = container.querySelectorAll(".ring-orange-400");
+    expect(selected.length).toBe(1);
+    expect(selected[0]).toBe(container.querySelectorAll("button")[0]);
+  });
+
+  it("selects the same crab tile when the brand slug is the explicit pick", async () => {
+    stubFetch(crabPayload({ enabled: true, activeSlug: "vibrant-clawd" }));
+    const { container } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    const selected = container.querySelectorAll(".ring-orange-400");
+    expect(selected.length).toBe(1);
+    expect(selected[0]).toBe(container.querySelectorAll("button")[0]);
+  });
+
+  it("picking the crab tile is still 'no pet'", async () => {
+    stubFetch(crabPayload());
+    const { container } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    fireEvent.click(container.querySelectorAll("button")[0]);
+    await waitFor(() => expect(selectCalls).toEqual([{ slug: null }]));
+  });
+
+  it("falls back to the still crab, and STILL one tile, when the pack is missing", async () => {
+    stubFetch(crabPayload({ pets: [{ ...BUILTIN, installed: false }, ...CURATED] }));
+    const { container } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    const first = container.querySelectorAll("button")[0];
+    expect(first.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy();
+    expect(container.querySelectorAll('img[src*="vibrant-clawd"]').length).toBe(0);
+  });
+
+  it("leaves a Hermes box alone: the egg first, the bundled pet an ordinary tile", async () => {
+    stubFetch(galleryPayload({ placeholder: "egg", pets: [BUILTIN, ...CURATED] }));
+    const { container, getByTestId } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(4));
+    const none = getByTestId("pet-tile-none");
+    expect(none).toBe(container.querySelectorAll("button")[0]);
+    expect(none.querySelector("img")).toBeNull();
+    expect(none.textContent).toContain("settings.mascot.petNone");
+    expect(container.textContent).toContain("ClawBox crab");
+    expect(container.textContent).toContain("settings.mascot.petBuiltin");
   });
 });

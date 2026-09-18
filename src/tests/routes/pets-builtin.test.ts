@@ -71,7 +71,7 @@ describe("GET /setup-api/pets?gallery=1", () => {
     expect(clawd).toBeDefined();
     expect(clawd?.installed).toBe(true);
     expect(clawd?.builtin).toBe(true);
-    expect(clawd?.displayName).toBe("Vibrant Clawd");
+    expect(clawd?.displayName).toBe("ClawBox crab");
     expect(clawd?.submittedBy).toBe("ID-Robots");
     // It leads the list: it is the default and the one tile that needs no
     // internet, so it is not buried under thirteen downloads.
