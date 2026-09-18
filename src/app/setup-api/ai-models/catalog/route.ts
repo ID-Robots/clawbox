@@ -1045,8 +1045,9 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
  * `chatgpt.com/backend-api/codex/models` — and it publishes it under the
  * `openai` provider id, the SAME id as the platform catalogue, choosing between
  * them by the credential its catalog hook resolves first. On a box that also
- * holds an API key (an inline `models.providers.openai.apiKey` counts, and
- * ClawBox writes one there for the image model) the published catalogue is the
+ * holds an API key (an inline `models.providers.openai.apiKey` counts — ClawBox
+ * used to write one there for the image model and no longer does) the
+ * published catalogue is the
  * PLATFORM one: 30 rows including `gpt-5.6`, `o3` and the image models, with the
  * subscription-only `gpt-5.3-codex-spark` marked `available: false`. Nothing in
  * a row says which catalogue it came from — the JSON keys are `available,

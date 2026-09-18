@@ -1,5 +1,6 @@
 import { uuid } from "@/lib/chat-history-cache";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
+import { commandsFromOpenClawList, type SlashCommand } from "@/lib/chat-slash-commands";
 import {
   isInternalRoutingMessage,
   isFailedImageGenerationNotice,
@@ -425,6 +426,36 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     }
     const msgs = (result.messages as unknown[]) || [];
     return projectGatewayHistory(msgs, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
+  }
+
+  /**
+   * The gateway's own command catalogue — `commands.list`, the RPC the core
+   * has published since 2026.7 and the one its Control UI palette reads.
+   * Nothing here is a list of commands written in this repo, so a box running
+   * a core with a command we have never heard of still offers it, and one that
+   * dropped a command stops offering it the moment it does.
+   *
+   * `scope: 'text'` because a ClawBox turn goes out as TEXT through
+   * `chat.send`, and the core's scopes distinguish that from the platform-native
+   * commands a channel like Discord registers — which, typed into this
+   * composer, would do nothing. `includeArgs` is what makes a row able to say
+   * `/model <model>` instead of `/model`.
+   *
+   * Deliberately NOT bound to a session key: the catalogue asked for without
+   * one is the agent's, which is what a composer wants, and passing this
+   * surface's key would make the answer depend on a session that may not exist
+   * yet on a box whose first turn has not been sent.
+   */
+  async listCommands(): Promise<readonly SlashCommand[]> {
+    try {
+      const result = await this.link.request("commands.list", {
+        scope: "text",
+        includeArgs: true,
+      });
+      return commandsFromOpenClawList(result);
+    } catch (err) {
+      throw gatewayError(err);
+    }
   }
 
   async patchSessionDefaults(patch: { thinkingLevel?: string | null; model?: string | null }): Promise<void> {

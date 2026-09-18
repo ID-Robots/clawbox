@@ -350,7 +350,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     // Two independent config keys with no aliasing. imageGenerationModel says
     // where pictures come from; imageModel says what looks at one.
     expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null"))
-      .toEqual({ primary: "openai/gpt-image-1-mini" });
+      .toEqual({ primary: "litellm/gpt-image-1-mini" });
     expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null"))
       .toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
   });

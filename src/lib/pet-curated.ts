@@ -1,7 +1,11 @@
 // ── The curated Petdex shortlist ClawBox offers ──
 //
-// NAMES ONLY. No sprite bytes live in this repository and none ever will —
-// see the licensing note below.
+// NAMES ONLY. Not one byte of PETDEX art lives in this repository and none ever
+// will — see the licensing note below. The two sheets that DO ship are ours to
+// ship: `public/pet-egg-sheet.png` (upstream's own MIT-licensed egg, notice
+// retained beside it) and `public/pets/vibrant-clawd/` (first-party artwork —
+// src/lib/pet-builtin.ts). The rule is about redistributing other people's
+// sprites, not about the existence of a sprite.
 //
 // LICENSING (read before adding anything here)
 // --------------------------------------------
@@ -43,6 +47,8 @@
 // other people's IP). The `/curated/` namespace is the boundary that actually
 // carries the licensing argument above, so the list shrinks rather than
 // reaching outside it.
+
+import { builtinPet, VIBRANT_CLAWD_SLUG } from "@/lib/pet-builtin";
 
 /** Which file Petdex serves a curated pet's sheet under. Not guessable — see
  *  `petdex-manifest.ts`: seven curated pets use `sprite-v2.webp` and six use
@@ -86,6 +92,17 @@ export function curatedPet(slug: string): CuratedPet | undefined {
 }
 
 /**
+ * Who to credit for a pet, whichever list it comes from.
+ *
+ * Both pet routes asked `curatedPet(slug)?.submittedBy ?? ""` for this, which
+ * credits a pet we ship to nobody. One function so a third list cannot leave a
+ * third answer behind.
+ */
+export function petAuthor(slug: string): string {
+  return builtinPet(slug)?.submittedBy ?? curatedPet(slug)?.submittedBy ?? "";
+}
+
+/**
  * The sheet URL to try when the Petdex manifest is unreachable.
  *
  * A URL is not art: this is the same address `hermes pets install` would hit,
@@ -98,10 +115,11 @@ export function curatedFallbackSheetUrl(slug: string): string | null {
 }
 
 /**
- * The pet a fresh Hermes box lands on once the user opts in.
+ * The pet the picker highlights, and what a box lands on with nothing picked.
  *
- * Nothing is installed automatically — the first install needs ~2.2 MB of
- * internet and a deliberate click — but the picker highlights this one so
- * "just give me a pet" is a single tap.
+ * `vibrant-clawd` since 2026-09-17: it is the ClawBox crab, it ships with the
+ * product (src/lib/pet-builtin.ts), and it is therefore the one default that
+ * needs no internet at all — where every curated Petdex pet still costs ~2.2 MB
+ * and a deliberate click before it can be worn.
  */
-export const DEFAULT_PET_SLUG = "boba";
+export const DEFAULT_PET_SLUG: string = VIBRANT_CLAWD_SLUG;

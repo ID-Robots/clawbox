@@ -80,6 +80,23 @@ export interface HermesBox {
    * apart answers differently per key.
    */
   sessionIdFor: (sessionKey: string) => string;
+  /**
+   * What `/setup-api/hermes/commands` answers — the rows the route builds from
+   * Hermes' own `commands.catalog`. Empty by default, so a test that says
+   * nothing about commands gets no popover and is unaffected.
+   */
+  commandRows: { id: string; usage: string; description: string; acceptsArgs: boolean; source: "harness" }[];
+  /**
+   * What that route says about whether it could ASK the dashboard.
+   *
+   * True by default. `false` is the real shape of a box whose dashboard is down
+   * or restarting: the route answers 200 with an empty list beside the flag, so
+   * the browser console carries no 500 over a chat that works, and the adapter
+   * turns the flag back into the rejection its contract calls for — which is
+   * what the hook retries. Empty rows with `available: true` is the OTHER
+   * answer: this box has no commands.
+   */
+  commandsAvailable: boolean;
   /** Prompts POSTed to the images route, in order. */
   imagePrompts: string[];
   /**
@@ -117,6 +134,8 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
     deletedKeys: [],
     historyReads: [],
     historyDelayMs: {},
+    commandRows: [],
+    commandsAvailable: true,
     chatResponse: null,
     sessionIdFor: () => HERMES_SESSION,
     imagePrompts: [],
@@ -208,6 +227,15 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
         const delay = box.historyDelayMs[key] ?? 0;
         if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
         return { ok: true, json: async () => ({ messages }) };
+      }
+      if (url.includes("/setup-api/hermes/commands")) {
+        return {
+          ok: true,
+          json: async () => ({
+            commands: box.commandsAvailable ? box.commandRows : [],
+            available: box.commandsAvailable,
+          }),
+        };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;

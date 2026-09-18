@@ -250,6 +250,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // ClawBox's own brand and is not offered on a device that does not run
   // ClawBox's own harness.
   //
+  // Since 2026-09-17 that crab ARRIVES AS A PET: the route answers the brand
+  // body (`vibrant-clawd`, bundled — src/lib/pet-builtin.ts) with `brand: true`
+  // where the placeholder is the crab, so this component gets a descriptor
+  // rather than nothing and the nine-state sheet replaces the still PNG. The
+  // `<img src="/clawbox-crab.png">` below is now only the FAIL-OPEN body: an
+  // unreachable route, a server that predates the pack, or a bundled sheet this
+  // build could not read. It stays for exactly that reason.
+  //
   // `null` means "not known yet". We hold the whole mascot back for that one
   // round-trip rather than painting a crab and swapping it: a Hermes box must
   // never flash the crab, and on OpenClaw the delay is a local fetch on a
@@ -273,6 +281,17 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     return () => { cancelled = true; window.removeEventListener(PET_CHANGED_EVENT, load) }
   }, [])
   const pet = petStatus?.supported ? petStatus.active : null
+  /**
+   * The body on screen is ClawBox's own crab, drawn from its sprite sheet.
+   *
+   * Since 2026-09-17 the brand crab is a nine-state pack (`vibrant-clawd`,
+   * shipped in the repo) rather than a still PNG, so the pet path renders it —
+   * every roam, throw, bubble, squash and hit box below is the pet's, tuned for
+   * a sprite standing on the shelf, and none of it needed a second renderer.
+   * Exactly two things still follow the BRAND rather than the sprite: what this
+   * mascot calls itself (`data-mascot`), and its voice. A crab may say "claws".
+   */
+  const brandCrab = !!pet?.brand
 
   // ── Where this body may go ──
   //
@@ -454,10 +473,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     sassLinesRef.current = next.sass
   }, [])
   useEffect(() => {
-    petVoiceRef.current = !!pet
-    neutralRef.current = pet ? PET_NEUTRAL_PACK : NEUTRAL_PACK
+    // `brandCrab` and not `!pet`: the filter exists so someone else's pet does
+    // not claim the crab's anatomy, and the crab is not someone else's pet.
+    petVoiceRef.current = !!pet && !brandCrab
+    neutralRef.current = pet && !brandCrab ? PET_NEUTRAL_PACK : NEUTRAL_PACK
     applyVoice(rawPhrasesRef.current, locale)
-  }, [pet, locale, applyVoice])
+  }, [pet, brandCrab, locale, applyVoice])
 
   // Per-effect token so a slow fetch from a stale locale (e.g. en→bg→en in
   // quick succession) can't overwrite the phrase set with the wrong language.
@@ -1571,7 +1592,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     <>
       <style>{MASCOT_KEYFRAMES}</style>
       <div ref={crabElRef}
-        data-mascot={pet ? 'pet' : 'crab'}
+        // The MASCOT, not the renderer: ClawBox's own crab is still the crab
+        // when it is drawn from a spritesheet, and `[data-mascot="crab"]` is
+        // what the desktop's e2e placement spec looks for. A pet the owner
+        // picked is a pet. `PetSprite`'s own `data-pet="<slug>"` is the finer
+        // signal when a test needs to know which sheet is on screen.
+        data-mascot={pet && !brandCrab ? 'pet' : 'crab'}
         // A control, not decoration: while the mascot is shown the shelf hides
         // its own chat button, so this drawing is the way to the chat — and it
         // was a bare <div> with no role, no tab stop and no name, unreachable
@@ -1869,7 +1895,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 animation: `think-dot 1.2s ${delay}s ease-in-out infinite`,
               }} />
             ))}
-            {!pet && thinkingVerb && (
+            {/* The crab's verb is the crab's whether it is drawn from CSS or
+                from the bundled pack: `brandCrab` is still the crab, as
+                `data-mascot` says, so only someone else's pet goes without. */}
+            {(!pet || brandCrab) && thinkingVerb && (
               <div data-testid="mascot-thinking-verb" style={{
                 marginLeft: 4, padding: '2px 8px', borderRadius: 999,
                 background: 'rgba(13,17,23,0.85)', border: '1px solid rgba(99,179,237,0.35)',

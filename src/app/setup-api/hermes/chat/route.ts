@@ -38,6 +38,8 @@ import {
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
+import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
+import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
@@ -1230,6 +1232,73 @@ export async function POST(request: Request) {
     timestamp: Date.now(),
     ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
   }, sessionKey);
+
+  // ── A slash command ─────────────────────────────────────────────────────
+  //
+  // `/status` is not a prompt. Down the ordinary paths — `prompt.submit`, or
+  // `hermes chat -q "/status"` — the text reaches the MODEL, which answers with
+  // its opinion of the word rather than the session's status: the composer's
+  // popover would offer the harness's own commands and then none of them would
+  // do anything. Hermes runs a command through `slash.exec`, which is what
+  // `runHermesSlashCommand` opens, and which is the same door this route's
+  // sibling already uses for the internal `/model … --session` switch.
+  //
+  // Placed AFTER the question is recorded and BEFORE both transports, because
+  // it replaces them rather than layering on one: a command has no streaming to
+  // do (the output arrives whole) and nothing for `--image` to carry.
+  //
+  // Null means the dashboard could not be reached, and the turn falls through
+  // to the CLI below exactly as any other turn on such a box does. That is a
+  // deliberate fall-through and not a silent failure: what the owner then gets
+  // is the model's answer, which is what they got before this branch existed.
+  // The popover, for its part, is fed by the same dashboard and is already
+  // absent on a box where it is down.
+  //
+  // A turn CARRYING A PICTURE is left to the ordinary transports even when its
+  // text is command-shaped: `runHermesSlashCommand` has nowhere to put an
+  // attachment, the user turn above has already been recorded WITH its media,
+  // and a branch that ran the command and dropped the file would show the owner
+  // their screenshot in the transcript over an answer that never saw it.
+  if (imagePaths.length === 0 && isSlashCommandMessage(message)) {
+    const ran = await runHermesSlashCommand({
+      command: message.trim(),
+      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+      ...(rawModel ? { model: rawModel } : {}),
+      ...(wantsProvider ? { provider: rawProvider } : {}),
+      signal: request.signal,
+    });
+    if (ran) {
+      // A command that changed THIS CONVERSATION's model is a change this
+      // surface cannot keep, and the owner is told so rather than left to find
+      // out: the next ordinary turn re-points a resumed session at the model
+      // the chat carries (`openDashboardTurn`), which is the box's CONFIGURED
+      // one, and Hermes' own contract is that a plain or `--session` `/model`
+      // is session-scoped and never written to config.yaml. Hermes answers
+      // with its own success line either way, so without this the switch
+      // happened, was reported, and was silently undone one message later —
+      // false success over an operation that really did run.
+      //
+      // The note is MEASURED, not predicted: it compares Hermes' own
+      // `session.info` announcement with `rawModel`, which is exactly what the
+      // next turn will assert. A `--global` switch writes config.yaml, the two
+      // agree, and nothing is said — no `/model` flag is parsed here and no
+      // copy of Hermes' persist rule exists in this repo.
+      //
+      // Recorded in the transcript WITH the note, because the transcript is
+      // what the owner re-reads and a bubble that loses the caveat on a refresh
+      // would be the same false success one reload later.
+      const text = withSessionModelNote(ran, rawModel);
+      await appendTranscript(
+        { role: "assistant", text, timestamp: Date.now() },
+        sessionKey,
+      );
+      return NextResponse.json({
+        text,
+        harness: "hermes",
+        sessionId: ran.sessionId,
+      } satisfies TurnPayload);
+    }
+  }
 
   const args = ["chat", "-q", promptWithImages, "-Q"];
   if (firstImage) args.push("--image", firstImage);

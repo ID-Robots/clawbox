@@ -249,6 +249,23 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
     expect(body.warning ?? "").toContain("image model");
   });
 
+  it("drops — and names — a saved primary on the image lane's PROVIDER id", async () => {
+    // H1 of the 2026-09-17 review: the bundled litellm plugin publishes a chat
+    // catalog on the id ClawBox parks its image entry under, so a box can be
+    // pinned to `litellm/claude-opus-4-6` from OpenClaw's own picker. Restoring
+    // that from the snapshot would put the chat back on the image proxy.
+    store.local_only_saved_primary = "litellm/claude-opus-4-6";
+
+    const response = await turnOff();
+    const body = await response.json();
+
+    const wrote = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+      .flatMap(([ops]) => ops)
+      .filter((op) => op[0] === "agents.defaults.model.primary");
+    expect(wrote.some((op) => op[1].includes("litellm/"))).toBe(false);
+    expect(body.warning ?? "").toContain("image provider");
+  });
+
   it("drops the image entry from restored fallbacks too", async () => {
     store.local_only_saved_fallbacks = ["openai/gpt-image-1-mini", "openai/gpt-5.4"];
 

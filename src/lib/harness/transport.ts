@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatToolSummary } from "@/lib/chat-history-cache";
+import type { SlashCommand } from "@/lib/chat-slash-commands";
 
 /**
  * The one contract the chat surface talks to.
@@ -479,6 +480,34 @@ export interface HarnessAdapter {
    * Precondition: `capabilities.canListHistory`.
    */
   loadHistory(options?: HistoryOptions): Promise<HistoryPage>;
+
+  /**
+   * The slash commands THIS harness understands, for the composer's popover.
+   *
+   * Both harnesses publish a catalogue and both adapters read it — the gateway
+   * RPC `commands.list` on OpenClaw, the dashboard RPC `commands.catalog` on
+   * Hermes. Neither adapter may answer from a list written in this repo: a
+   * command we offered that the harness had dropped would be a promise the
+   * harness then refuses, and one it gained that we did not know about would be
+   * invisible.
+   *
+   * REJECTS when the TRANSPORT failed — a socket that is not open, a route that
+   * answered non-200 — rather than dressing that up as an empty catalogue.
+   *
+   * An empty array is therefore an ANSWER: this harness, right now, has no
+   * commands to offer. A Hermes box whose dashboard is down is NOT that case —
+   * its route answers 200 with `available: false` so the browser console does
+   * not carry a 500 over a chat that works, and the adapter turns that flag
+   * back into the rejection this contract calls for.
+   *
+   * What neither may ever be is a list this process remembered. Cheap,
+   * idempotent, and nothing is cached inside the adapter, so the caller decides
+   * when to ask again. On the gateway that is every reconnect; on a harness
+   * with no live connection there is no reconnect to hang it on, so the caller
+   * re-asks on a failure and when its surface comes back into view — see
+   * `useSlashCommands`, which is the only caller and does both.
+   */
+  listCommands(): Promise<readonly SlashCommand[]>;
 
   /**
    * Push a sticky per-session default.

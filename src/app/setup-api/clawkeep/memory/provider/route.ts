@@ -6,6 +6,9 @@ import { noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
+// The PURE half of the cloud-defaults rule (client-safe, one type import
+// behind it): the server half is loaded lazily below with the probe it owns.
+import { resolveClawaiCloudDefaults } from "@/lib/clawai-cloud-defaults-state";
 import {
   LOCAL_EMBEDDING_ENGINE,
   LOCAL_EMBEDDING_MODEL,
@@ -74,10 +77,22 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
   const baseUrl = choice?.baseUrl ?? null;
   // No endpoint at all is the on-device answer, the resolver's own rule.
   const source: EmbeddingSource = cloudSupported && baseUrl && !isLoopbackBaseUrl(baseUrl) ? "cloud" : "local";
+  // The SAME verdict the automatic default acts on, reasons and all, rather
+  // than a second reading of one of its facts: `embeddingsRouteReady` alone
+  // answered false to a box with no credential, an unpaid plan and a proxy that
+  // did not answer alike, and the switch could only say "not available on this
+  // box right now" to all three. The edition that indexes on the box itself is
+  // answered without reading the facts — nothing the resolver could say would
+  // change it, and asking would buy an 8 s probe for a fixed answer.
+  const verdict = cloudSupported
+    ? facts && resolveClawaiCloudDefaults(facts).embeddings
+    : ({ source: "local", reason: "edition" } as const);
   return {
     source,
     cloudSupported,
-    cloudAvailable: cloudSupported && facts?.embeddingsRouteReady === true,
+    cloudAvailable: verdict?.source === "cloud",
+    // Null, never a guess, when the facts could not be read at all.
+    cloudReason: verdict?.reason ?? null,
     localInstalled: provisioning?.installed === true,
   };
 }

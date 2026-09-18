@@ -17,6 +17,7 @@
     { "key": "app.terminal", "locales": ["de", "es", "fr", "nl", "sv"], "reason": "\"Terminal\" is the same word in these languages." },
     { "key": "chat.audioPause", "locales": ["de", "fr"], "reason": "\"Pause\" is the German and French word." },
     { "key": "chat.desktop", "locales": ["de", "it"], "reason": "\"Desktop\" is the loanword in German and Italian." },
+    { "key": "chat.detailsSummary", "locales": ["de", "nl"], "reason": "\"Details\" is the German and Dutch word too." },
     { "key": "chat.effort.minimal", "locales": ["de", "fr", "sv"], "reason": "\"Minimal\" is spelt the same in German, French and Swedish." },
     { "key": "chat.effort.ultra", "locales": ["de", "es", "fr", "it", "nl", "sv"], "reason": "\"Ultra\" is the same prefix-word in all of these." },
     { "key": "chat.email.date", "locales": ["fr"], "reason": "\"Date\" is the French word." },

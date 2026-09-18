@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 
 function isSafeHref(url: string): boolean {
   try {
@@ -145,12 +145,76 @@ export function renderInline(text: string, keyPrefix: string) {
  */
 type MdBlock =
   | { kind: "code"; code: string }
+  | { kind: "details"; summary: string; body: string }
   | { kind: "heading"; level: number; text: string }
   | { kind: "table"; header: string[] | null; rows: string[][] }
   | { kind: "list"; items: { marker: string; text: string }[] }
   | { kind: "para"; lines: string[] };
 
 const FENCE_RE = /^\s*```/;
+/**
+ * `<details>`, the ONE piece of HTML this renderer admits.
+ *
+ * OpenClaw agents fold asides — corrections, long tool output, a second
+ * opinion — into `<details><summary>…</summary>…</details>`, and OpenClaw's own
+ * UI draws them as a disclosure. This renderer printed the tags, so a reply
+ * whose interesting half was inside one arrived as a wall of angle brackets.
+ *
+ * Nothing else is admitted, and nothing is ever handed to `innerHTML`: the tags
+ * are CONSUMED here into a block, and the summary and the body go back through
+ * this same renderer as text. A `<script>` in the body stays exactly as
+ * harmless as it has always been — React prints it.
+ */
+const DETAILS_OPEN_RE = /<details(?:\s[^>]*)?>/i;
+const SUMMARY_RE = /^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary\s*>/i;
+
+/** How many `<details>` open and close on one line. */
+function detailsDelta(line: string): { opens: number; closes: number } {
+  return {
+    opens: (line.match(/<details(?:\s[^>]*)?>/gi) ?? []).length,
+    closes: (line.match(/<\/details\s*>/gi) ?? []).length,
+  };
+}
+
+/**
+ * Where this block's OWN `</details>` sits, or null while it is still streaming.
+ *
+ * Depth-aware, not "the last close in the run": `detailsDelta` can return to
+ * zero inside the first collected line, so the run may hold a complete block
+ * AND later markup — `<details>a</details> tail <details>b</details>` on one
+ * line. Taking the last close there would cut the body at the SECOND block's
+ * end and print the first block's literal `</details>` in the bubble.
+ */
+function matchingDetailsClose(inner: string): { index: number; length: number } | null {
+  const pattern = /<details(?:\s[^>]*)?>|<\/details\s*>/gi;
+  let depth = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(inner)) !== null) {
+    if (match[0][1] === "/") {
+      if (depth === 0) return { index: match.index, length: match[0].length };
+      depth--;
+    } else {
+      depth++;
+    }
+  }
+  return null;
+}
+
+/**
+ * Split `<details>…</details>` innards into its summary and its body.
+ *
+ * A body with no `<summary>` is not a mistake worth dropping the content over —
+ * it is what a half-streamed reply looks like — so it keeps the caller's
+ * fallback word as its toggle.
+ */
+function splitDetails(inner: string, fallbackSummary: string): { summary: string; body: string } {
+  const match = inner.match(SUMMARY_RE);
+  if (!match) return { summary: fallbackSummary, body: inner.trim() };
+  return {
+    summary: match[1].trim() || fallbackSummary,
+    body: inner.slice(match[0].length).trim(),
+  };
+}
 const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.*)$/;
 const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
 // A divider needs at least one dash, so a real row of short cells such as
@@ -206,7 +270,7 @@ function splitTableRow(line: string): string[] {
   return cells;
 }
 
-function parseBlocks(text: string): MdBlock[] {
+function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
   const lines = text.split("\n");
   const blocks: MdBlock[] = [];
   let para: string[] = [];
@@ -233,6 +297,54 @@ function parseBlocks(text: string): MdBlock[] {
       }
       // `i` rests on the closing fence (or past the end); the loop steps over it.
       blocks.push({ kind: "code", code: body.join("\n") });
+      continue;
+    }
+
+    // `<details>` is consumed at BLOCK level, like a fence, and for the same
+    // reason: its body holds blank lines, lists and code, and splitting on
+    // paragraphs first would tear it into pieces with the tags left in them.
+    const detailsStart = line.search(DETAILS_OPEN_RE);
+    if (detailsStart !== -1) {
+      // Prose can share the line with the tag: keep it in the paragraph it
+      // belongs to rather than swallowing it into the disclosure.
+      const before = line.slice(0, detailsStart);
+      if (before.trim()) para.push(before);
+      flushPara();
+      const collected: string[] = [line.slice(detailsStart)];
+      let depth = 0;
+      {
+        const { opens, closes } = detailsDelta(collected[0]);
+        depth = opens - closes;
+      }
+      while (depth > 0 && i + 1 < lines.length) {
+        i++;
+        collected.push(lines[i]);
+        const { opens, closes } = detailsDelta(lines[i]);
+        depth += opens - closes;
+      }
+      const joined = collected.join("\n");
+      const openMatch = joined.match(DETAILS_OPEN_RE);
+      const openEnd = (openMatch?.index ?? 0) + (openMatch?.[0].length ?? 0);
+      let inner = joined.slice(openEnd);
+      // The close that BALANCES the opening tag is this block's own; an inner
+      // `<details>` inside it keeps its tags and folds again on the way back
+      // through this renderer.
+      const close = matchingDetailsClose(inner);
+      // An unterminated block is the normal STREAMING shape — the closing tag
+      // has not arrived yet — and must fold rather than flash its tags.
+      let after = "";
+      if (close) {
+        after = inner.slice(close.index + close.length);
+        inner = inner.slice(0, close.index);
+      }
+      blocks.push({ kind: "details", ...splitDetails(inner, detailsLabel) });
+      // Whatever followed `</details>` on the same line is ordinary text
+      // again — unless it opens another block, in which case it is scanned as
+      // a line of its own so that one folds too instead of printing its tags.
+      if (after.trim()) {
+        if (DETAILS_OPEN_RE.test(after)) lines.splice(i + 1, 0, after);
+        else para.push(after);
+      }
       continue;
     }
 
@@ -301,12 +413,67 @@ function parseBlocks(text: string): MdBlock[] {
 }
 
 /**
+ * One `<details>`, as a disclosure.
+ *
+ * Closed by default and the summary as the toggle, which is what `<details>`
+ * means — the aside is an aside. A button with `aria-expanded` rather than the
+ * native element, because that is the pattern this chat already uses for the
+ * tool record and the reasoning disclosure, and three collapsibles in one
+ * bubble should open the same way.
+ *
+ * `open` lives here, per block, for the reason ReasoningDisclosure keeps its
+ * own: which aside is unfolded belongs to the bubble it is in, and lifting it
+ * would make appending a turn reshuffle what is open.
+ */
+function DetailsBlock(
+  { summary, body, tableLabel, detailsLabel, spaced }: {
+    summary: string;
+    body: string;
+    tableLabel: string;
+    detailsLabel: string;
+    spaced: boolean;
+  },
+) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div data-testid="chat-markdown-details" className={spaced ? "mt-2" : ""}>
+      <button
+        type="button"
+        data-testid="chat-markdown-details-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="inline-flex items-center gap-1 border-0 bg-transparent p-0 text-left font-medium text-white/60 cursor-pointer"
+        style={{ font: "inherit", fontSize: 12.5, fontWeight: 500 }}
+      >
+        <span
+          aria-hidden="true"
+          className="material-symbols-rounded"
+          style={{
+            fontSize: 16,
+            transform: open ? "rotate(90deg)" : "none",
+            transition: "transform 120ms ease",
+          }}
+        >
+          chevron_right
+        </span>
+        <span>{renderInline(summary, "details-summary")}</span>
+      </button>
+      {open && body && (
+        <div data-testid="chat-markdown-details-body" className="mt-1 pl-4 border-l border-white/10">
+          {renderText(body, tableLabel, detailsLabel)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * `tableLabel` names the scroll container a wide table sits in. It arrives from
  * the caller because this module is a pure renderer with no access to `t` —
  * the same way `audioLabel` is handed `t("chat.audioReply")`.
  */
-export function renderText(text: string, tableLabel = "Table") {
-  return parseBlocks(text).map((block, i) => {
+export function renderText(text: string, tableLabel = "Table", detailsLabel = "Details") {
+  return parseBlocks(text, detailsLabel).map((block, i) => {
     // The first block sits flush against the top of the bubble; every later
     // one keeps the spacing its kind had before.
     const spaced = i > 0;
@@ -314,6 +481,17 @@ export function renderText(text: string, tableLabel = "Table") {
       case "code":
         return (
           <pre key={i} className="bg-white/[0.06] rounded-lg px-3 py-2 my-1.5 text-xs overflow-x-auto whitespace-pre-wrap break-words">{block.code}</pre>
+        );
+      case "details":
+        return (
+          <DetailsBlock
+            key={i}
+            summary={block.summary}
+            body={block.body}
+            tableLabel={tableLabel}
+            detailsLabel={detailsLabel}
+            spaced={spaced}
+          />
         );
       case "heading":
         return block.level <= 2 ? (
@@ -408,6 +586,11 @@ export function renderText(text: string, tableLabel = "Table") {
  */
 export function plainTextForLabel(text: string, max = 100): string {
   const flat = text
+    // The one HTML the renderer consumes (see DETAILS_OPEN_RE): the tags are
+    // layout, never words, and read out they are "less than details greater
+    // than". The summary and the body stay — they are the aside's own text.
+    .replace(/<\/?details(?:\s[^>]*)?>/gi, " ")
+    .replace(/<\/?summary(?:\s[^>]*)?>/gi, " ")
     // Fenced blocks first: their content may contain any other marker.
     .replace(/```[\s\S]*?```/g, (seg) => seg.slice(3, -3).replace(/^\w*\n/, ""))
     .replace(/`([^`\n]+)`/g, "$1")

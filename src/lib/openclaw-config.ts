@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { GatewayWsUnavailableError, gatewayWsCall, gatewayWsPatchConfig } from "@/lib/openclaw-gateway-ws";
 import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
 import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
@@ -133,6 +134,7 @@ export async function runOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
+  if (await configSetViaGateway([args], options)) return;
   await runConfigSetVerified([args], options, () =>
     withConfigMutationRetry(
       (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
@@ -140,6 +142,128 @@ export async function runOpenclawConfigSet(
       "runOpenclawConfigSet",
     ),
   );
+}
+
+/**
+ * The same assignments as ONE `config.patch` through the running gateway.
+ *
+ * `openclaw config set` is a validated read-modify-write of openclaw.json by
+ * a process that costs ~3 s to start; the gateway's `config.patch` is the
+ * same validated write by the process that is already running, in ~50 ms,
+ * and it hot-applies what it can on the way. Answers true when the write
+ * landed that way. Answers false — and the caller runs the CLI as before —
+ * when the gateway is not there, when the assignments carry options only the
+ * CLI honours (another user's uid/gid, a cwd, an env), when the argv carries
+ * a `config set` FLAG this path cannot honour, when a path cannot be turned
+ * into a merge, when the gateway's answer does not SHOW the write, or when
+ * the gateway REFUSED it: the CLI's refusal carries the wording callers parse
+ * (`refuseUnresolvableModel` reads "Cannot set model reference"), so a
+ * refusal is re-asked of the CLI rather than re-worded here. That costs a CLI
+ * start only on the failing path.
+ *
+ * THE FLAGS ARE PART OF THE DECISION, not noise to filter away.
+ * `openclaw config set <path> <json-object>` REPLACES the value at the path;
+ * `config.patch` applies an RFC-7396-style MERGE (`applyMergePatch`, with
+ * `mergeObjectArraysById: true` at the gateway's own call site), so an object
+ * value is merged key by key and an id-keyed array is merged by id. The core's
+ * `rejectDestructiveArrayPatchWithoutIntent` refuses only the subset that
+ * REMOVES entries — a non-removing replacement would land silently as a merge,
+ * which is a different config from the one the caller asked for. So anything
+ * beyond the two value-mode flags {@link parseConfigSetArgs} understands sends
+ * the whole batch to the CLI. `--replace` is deliberately NOT translated into
+ * `replacePaths` here: the gateway's replace applies to ARRAY paths, the CLI's
+ * to the value at the path, and mapping one onto the other is a semantic claim
+ * no caller has asked for.
+ */
+const GATEWAY_PATCHABLE_CONFIG_SET_FLAGS = new Set(["--json", "--strict-json"]);
+
+/** How many times the gateway's optimistic-concurrency refusal is re-tried on
+ *  the socket before the batch is handed to the CLI. `gatewayWsPatchConfig`
+ *  does `config.get` then `config.patch`, and the gateway touching
+ *  `meta.lastTouchedAt` on a reload between the two is the documented race
+ *  {@link withConfigMutationRetry} exists for — losing it here means the fast
+ *  path pays a full CLI start on exactly the collision it was built for, plus
+ *  a misleading "refused" journal line. Each retry re-reads the hash and costs
+ *  milliseconds; the CLI start costs ~3 s on a Jetson. */
+const GATEWAY_PATCH_CONFLICT_ATTEMPTS = 3;
+
+async function configSetViaGateway(
+  batch: readonly OpenclawConfigSetArgs[],
+  options: OpenclawConfigSetOptions,
+): Promise<boolean> {
+  if (options.uid !== undefined || options.gid !== undefined || options.cwd || options.env) return false;
+  if (gatewayIsAbsent()) return false;
+  const patch: Record<string, unknown> = {};
+  /** Every asked-for path as the gateway spells a changed leaf: the same
+   *  segments, dot-joined, which is what its own `diffConfigLeafPaths` builds. */
+  const askedPaths: string[] = [];
+  for (const args of batch) {
+    if (args.some((arg) => arg.startsWith("--") && !GATEWAY_PATCHABLE_CONFIG_SET_FLAGS.has(arg))) return false;
+    let entry: { path: string; value: unknown };
+    try {
+      entry = parseConfigSetArgs(args);
+    } catch {
+      return false;
+    }
+    const segments = configPathSegments(entry.path);
+    if (!segments || segments.length === 0) return false;
+    // A container value is a REPLACEMENT for the CLI and a MERGE for
+    // `config.patch`: a key the caller left out survives the merge, which is
+    // a different config from the one asked for (a stale `apiKey` under a
+    // provider entry, say). Only a scalar means the same thing to both
+    // writers, so objects and arrays keep the CLI they always had.
+    if (entry.value !== null && typeof entry.value === "object") return false;
+    askedPaths.push(segments.join("."));
+    let node: Record<string, unknown> = patch;
+    for (const key of segments.slice(0, -1)) {
+      const next = node[key];
+      if (next && typeof next === "object" && !Array.isArray(next)) {
+        node = next as Record<string, unknown>;
+      } else {
+        const fresh: Record<string, unknown> = {};
+        node[key] = fresh;
+        node = fresh;
+      }
+    }
+    node[segments[segments.length - 1]] = entry.value;
+  }
+  for (let attempt = 1; attempt <= GATEWAY_PATCH_CONFLICT_ATTEMPTS; attempt++) {
+    try {
+      const { noop, changedPaths } = await gatewayWsPatchConfig(patch, { timeoutMs: options.timeoutMs });
+      // The read-back this module is built on ({@link configSetLanded}: "only a
+      // write this process can SEE there is reported as success"), applied to
+      // the answer the gateway already sends. `config.patch` reports `noop`
+      // whenever the merged config equals the source — which covers the
+      // assignment that was DROPPED rather than applied (`applyMergePatch`
+      // silently skips a key `isMergePatchObjectKeyAllowed` blocks, and any
+      // merge it cannot express, with no error frame) as well as the value
+      // that was already there. The two are indistinguishable from here, so
+      // neither is claimed: the CLI re-reads the file and settles it. An
+      // already-correct value therefore costs a CLI start it used to skip;
+      // that is the price of never reporting a write that did not happen.
+      if (noop) {
+        console.warn(`[openclaw-config] gateway config.patch changed nothing (${loggedConfigAreas(batch.map(configSetEntryPath))}); asking the CLI`);
+        return false;
+      }
+      const uncovered = askedPaths.filter(
+        (asked) => !changedPaths.some((changed) => changed === asked || changed.startsWith(`${asked}.`)),
+      );
+      if (uncovered.length > 0) {
+        console.warn(`[openclaw-config] gateway config.patch did not report ${loggedConfigAreas(uncovered)} as changed; asking the CLI`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof GatewayWsUnavailableError) return false;
+      // The conflict is the one refusal a repeat settles: `config.get` and
+      // `config.patch` are two calls, and the gateway touching the file
+      // between them is ordinary rather than a rejection of this write.
+      if (isConfigMutationConflict(err) && attempt < GATEWAY_PATCH_CONFLICT_ATTEMPTS) continue;
+      console.warn(`[openclaw-config] gateway config.patch refused (${loggedConfigAreas(batch.map(configSetEntryPath))}); asking the CLI`);
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -363,6 +487,17 @@ export async function callGatewayRpc(
   options: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
   const timeoutMs = options.timeoutMs ?? GATEWAY_RPC_TIMEOUT_MS;
+  // In-process first: the gateway's own WebSocket answers in milliseconds
+  // where `openclaw gateway call` spends ~3 s starting the CLI. A gateway
+  // that is not there to talk to falls through to the CLI, whose words for
+  // that case every caller already knows.
+  if (!gatewayIsAbsent()) {
+    try {
+      return await gatewayWsCall(method, params, { timeoutMs });
+    } catch (err) {
+      if (!(err instanceof GatewayWsUnavailableError)) throw err;
+    }
+  }
   const out = await spawnOpenclaw(
     ["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", String(timeoutMs)],
     {
@@ -733,6 +868,7 @@ export async function runOpenclawConfigSetBatch(
     await runOpenclawConfigSet(batch[0], options);
     return;
   }
+  if (await configSetViaGateway(batch, options)) return;
   const payload = JSON.stringify(batch.map(parseConfigSetArgs));
   await runConfigSetVerified(batch, options, () =>
     withConfigMutationRetry(
@@ -2672,9 +2808,21 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
 // answered from the bundled catalog whatever the plugin state, which is why
 // the order never mattered before). The OFF half stays AFTER the write on
 // purpose: a plugin whose model is the CURRENT primary is never switched off
-// underneath it. It is idempotent and non-fatal, and a plugin enabled by the
-// batch loads on the next gateway start ("Restart the gateway to apply"), so
-// the caller's restart has to follow.
+// underneath it. It is idempotent and non-fatal.
+//
+// NEITHER HALF NEEDS A GATEWAY RESTART. The CLI prints "Restart the gateway to
+// apply" after a `plugins.entries.*` write, and that sentence is what this
+// paragraph used to relay as an instruction to the caller. The core's own
+// reload table disagrees with it (docs/gateway/configuration.md, "What
+// hot-applies vs what needs a restart": `plugins.entries.*` → "No (reloads
+// plugin runtime)"), and a plugin flipped through the gateway's own
+// `config.patch` was measured applying in 400 ms with the process id unchanged
+// (a box, 2026-09-17). So `src/app/setup-api/chat/model/route.ts` restarts
+// nothing. The ONE caller that still does is
+// `src/app/setup-api/ai-models/configure/route.ts`, and not for this write:
+// that route also rewrites provider entries and auth profiles during a
+// first-run save, where one restart is cheaper than reasoning about which of
+// the keys in that batch hot-applies.
 
 /**
  * Does this box hold an Anthropic credential the owner has not switched off —

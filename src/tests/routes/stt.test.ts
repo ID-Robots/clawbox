@@ -50,7 +50,9 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 const PROXY = "https://clawbox.com/api/ai";
-const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", capabilities: ["audio"] };
+// The cloud row names the ClawBox AI auth profile: the transcription credential
+// no longer rides on the openai provider entry (it shadowed the ChatGPT sign-in).
+const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", profile: "deepseek:default", capabilities: ["audio"] };
 const INSTALLED = { installed: true, detail: "faster-whisper, kept warm by whisper-server." };
 const MISSING = { installed: false, detail: "The on-box transcriber is not installed." };
 
@@ -309,7 +311,7 @@ describe("POST /setup-api/stt — the write", () => {
           audio: { baseUrl: PROXY },
           // OpenClaw 2's shared list, beside audio rather than under it.
           models: [
-            { model: "gpt-4o-mini-transcribe", provider: "openai", capabilities: ["audio"] },
+            { model: "gpt-4o-mini-transcribe", provider: "openai", profile: "deepseek:default", capabilities: ["audio"] },
             {
               capabilities: ["audio"],
               timeoutSeconds: 120,

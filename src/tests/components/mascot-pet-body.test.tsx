@@ -58,6 +58,22 @@ const CODEX_PET = {
 /** A fresh Hermes box: pets supported, none picked — the state that wears the egg. */
 const FRESH_HERMES = { supported: true, edition: "hermes", enabled: false, active: null };
 
+/** ClawBox's OWN crab, as the route now answers it on openclaw/dual: the
+ *  bundled `vibrant-clawd` pack, flagged `brand`. */
+const BRAND_CRAB = {
+  slug: "vibrant-clawd",
+  displayName: "Vibrant Clawd",
+  submittedBy: "ID-Robots",
+  revision: "1:1941190",
+  frameW: 192,
+  frameH: 208,
+  cols: 8,
+  rows: 9,
+  framesPerState: 6,
+  loopMs: 1100,
+  brand: true,
+};
+
 /** The shape every installed Petdex sheet really has: `waving` (row 3) draws
  *  four frames, `jumping` (row 4) five, and every row insets its art. */
 const MEASURED_PET = {
@@ -125,6 +141,49 @@ describe("edition gating", () => {
     expect(container.querySelector("[data-pet]")).toBeNull();
   });
 
+  it("draws the brand crab as a SPRITE on OpenClaw with nothing picked", async () => {
+    // The whole point of the default-mascot change: what used to be a still PNG
+    // is the bundled nine-state pack, through the one sprite renderer.
+    stubPetsRoute({
+      supported: true,
+      edition: "openclaw",
+      placeholder: "crab",
+      enabled: false,
+      active: BRAND_CRAB,
+    });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('[data-pet="vibrant-clawd"]')).toBeTruthy());
+    expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeNull();
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+    const sprite = container.querySelector("[data-pet]") as HTMLElement;
+    expect(sprite.style.backgroundImage).toContain("slug=vibrant-clawd");
+  });
+
+  it("still calls itself the crab while wearing it", async () => {
+    // `data-mascot` names the MASCOT, not the renderer — ClawBox's own crab is
+    // the crab whatever it is drawn from, which is what the desktop placement
+    // e2e spec looks for, and what keeps the crab's own voice.
+    stubPetsRoute({
+      supported: true,
+      edition: "openclaw",
+      placeholder: "crab",
+      enabled: false,
+      active: BRAND_CRAB,
+    });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-pet]")).toBeTruthy());
+    expect(container.querySelector('[data-mascot="crab"]')).toBeTruthy();
+    expect(container.querySelector('[data-mascot="pet"]')).toBeNull();
+  });
+
+  it("calls itself a pet again once the owner picks someone else's", async () => {
+    stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: true, active: CODEX_PET });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-pet]")).toBeTruthy());
+    expect(container.querySelector('[data-mascot="pet"]')).toBeTruthy();
+    expect(container.querySelector('[data-mascot="crab"]')).toBeNull();
+  });
+
   it("wears the picked pet on OpenClaw, like Hermes does", async () => {
     stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: true, active: CODEX_PET });
     const { container } = render(<Mascot />);
@@ -154,6 +213,23 @@ describe("edition gating", () => {
     // spritesheet would wobble the sheet instead of selecting a frame.
     expect(styled).not.toContain("mascot-idle");
     expect(styled).not.toContain("mascot-waddle");
+  });
+
+  it("keeps the crab's thinking verb while it wears the bundled pack, and gives someone else's pet none", async () => {
+    // The verb at the thinking dots is the crab's own. Making the crab a pet
+    // must not take it away: `brandCrab` is still the crab, as `data-mascot`
+    // says, while a pet the owner picked keeps the dots alone.
+    stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: false, active: BRAND_CRAB });
+    const crab = render(<Mascot thinking />);
+    await waitFor(() => expect(crab.container.querySelector('[data-pet="vibrant-clawd"]')).toBeTruthy());
+    await waitFor(() => expect(crab.getByTestId("mascot-thinking-verb")).toBeInTheDocument());
+    crab.unmount();
+    invalidatePetStatus();
+
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const pet = render(<Mascot thinking />);
+    await waitFor(() => expect(pet.container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    expect(pet.queryByTestId("mascot-thinking-verb")).toBeNull();
   });
 
   it("wears the pet and never the crab on Hermes", async () => {

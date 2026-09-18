@@ -17,15 +17,12 @@ import {
   type ApprovalCard,
   type ApprovalDecision,
 } from "@/lib/gateway-approvals";
+// The shared card palette — same values, one home; see chat-card-style.ts.
+import { BODY_FG, CARD_BG, CARD_BORDER, MUTED_FG, TITLE_FG } from "@/lib/chat-card-style";
 
-const CARD_BG = "rgba(249,115,22,0.10)";
-const CARD_BORDER = "1px solid rgba(249,115,22,0.28)";
 const CRITICAL_BG = "rgba(239,68,68,0.10)";
 const CRITICAL_BORDER = "1px solid rgba(239,68,68,0.35)";
-const TITLE_FG = "#fed7aa";
 const CRITICAL_FG = "#fca5a5";
-const BODY_FG = "rgba(255,255,255,0.72)";
-const MUTED_FG = "rgba(255,255,255,0.5)";
 
 /** The label for each decision the request offered, in the gateway's order. */
 const DECISION_LABEL: Record<ApprovalDecision, string> = {
