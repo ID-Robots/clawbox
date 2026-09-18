@@ -100,6 +100,16 @@ export async function writeEmbedderPin(source: EmbeddingSource): Promise<void> {
  * cloud" means one thing on both editions. Facts that cannot be read at all are
  * the model on this box: an index that cannot be embedded at all is worse than
  * one embedded slowly, and the next read tries again.
+ *
+ * THE PIN IS WHAT RECORDS A CHOICE HERE, and deliberately not
+ * `memory_embeddings_choice_source`. Every box that finished the wizard before
+ * this change carries `owner` in that key — the wizard's last step POSTed the
+ * model on this box because it was the only thing the route could offer on this
+ * SKU, and the route marks every pick as the owner's. Reading that mark as "the
+ * owner asked for the model on this box" would keep every one of those boxes off
+ * the subscription it pays for, for good, which is the opposite of the ruling
+ * above. What it still governs is the automatic PROMOTION (`readOwnerChoices`),
+ * which writes; this only reads.
  */
 export async function defaultEmbedderSource(): Promise<EmbeddingSource> {
   // Lazily, and only here: the server half pulls the probe, the OpenClaw CLI and
