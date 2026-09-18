@@ -1,0 +1,13 @@
+[?25l│
+◇  
+[?25h[2K
+OpenClaw 2026.8.1 (ea80657)
+One CLI to rule them all, and one more restart because you changed the port.
+
+Registered plugin command: /dreaming (plugin: memory-core)
+Memory Index (main)
+Provider: none (requested: none)
+Model: none
+Sources: memory (MEMORY.md + /tmp/ocprog/ws/memory/*.md), sessions (current transcripts + retained transcript artifacts)
+
+[2KIndexing memory… 0%[2KLoading vector extension… · elapsed 0:00 0%[2KLoading vector extension… · elapsed 0:00 0%[2KIndexing memory files… 0/601 · elapsed 0:00 0%[2KIndexing memory files… 0/601 · elapsed 0:00 0%[2KIndexing memory files… 0/601 · elapsed 0:00 0%[2KIndexing memory files… 65/601 · elapsed 0:00 · eta 0:06 11%[2KIndexing memory files… 65/601 · elapsed 0:00 · eta 0:06 11%[2KIndexing memory files… 65/601 · elapsed 0:00 · eta 0:06 11%[2KIndexing memory files… 66/601 · elapsed 0:00 · eta 0:06 11%[2KIndexing memory files… 66/601 · elapsed 0:00 · eta 0:06 11%[2KIndexing memory files… 66/601 · elapsed 0:00 · eta 0:06 11%[2KIndexing memory files… 601/601 · elapsed 0:05 · eta 0:00 100%[2KIndexing memory files… 601/601 · elapsed 0:05 · eta 0:00 100%[2KIndexing session files… 601/601 · elapsed 0:05 · eta 0:00 100%[2KIndexing session files… 601/601 · elapsed 0:05 · eta 0:00 100%[2KIndexing session files… 601/601 · elapsed 0:05 · eta 0:00 100%[2KMemory index updated (main): 601 files indexed.

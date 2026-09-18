@@ -548,8 +548,9 @@ describe("the Memory Shard app", () => {
   /**
    * The bar. The whole of the customer's ask: a pass that is going must show
    * something moving, and where the box knows the numbers it must show those
-   * rather than a spinner — but where it does NOT know them (the OpenClaw arm,
-   * whose CLI reports progress only to a terminal) the bar must claim no
+   * rather than a spinner — but where it does NOT know them (a pass that
+   * has not counted anything yet, or an OpenClaw box with no terminal to run
+   * its CLI on, whose reporter prints only to one) the bar must claim no
    * percentage at all, or the owner is watching an invented one.
    */
   describe("while a pass is going", () => {
@@ -580,9 +581,43 @@ describe("the Memory Shard app", () => {
       expect(screen.getByTestId("memory-shard-progress-fill").getAttribute("style")).toContain("width: 14%");
     });
 
+    it("draws the same fraction for an OpenClaw box's pass, read off its CLI's reporter", async () => {
+      // The case the bar was missing on: a linked OpenClaw box with cloud
+      // embeddings, a Full reindex of 6 files / 12 chunks. The server now
+      // fills `progress` from `openclaw memory index` run on a terminal, in
+      // the same shape the box's own indexer uses — so the card has no branch
+      // for it, and this is the proof.
+      memory = {
+        ...RUNNING({ filesDone: 3, filesTotal: 6, chunks: 7 }),
+        provider: "openai-compatible",
+        model: "text-embedding-3-large",
+        location: "cloud",
+      };
+      mount();
+      expect(await screen.findByText("3 of 6 files · 7 chunks", {}, { timeout: 8000 })).toBeTruthy();
+      expect(screen.getByTestId("memory-shard-progress").querySelector('[data-determinate="true"]')).toBeTruthy();
+      expect(screen.getByTestId("memory-shard-progress-percent").textContent).toBe("50%");
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+      expect(screen.queryByText(/Working through your files/)).toBeNull();
+    });
+
+    it("says an OpenClaw box's numbers in Bulgarian too", async () => {
+      uiLanguage = "bg";
+      memory = {
+        ...RUNNING({ filesDone: 3, filesTotal: 6, chunks: 7 }),
+        provider: "openai-compatible",
+        model: "text-embedding-3-large",
+        location: "cloud",
+      };
+      mount();
+      expect(await screen.findByText(/3 от 6 файла · 7 части/, {}, { timeout: 8000 })).toBeTruthy();
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+    });
+
     it("claims no percentage on a box whose indexer cannot count", async () => {
-      // The OpenClaw arm sends `progress: null`. A bar reading 0% for twenty
-      // minutes is a worse answer than a bar that says only "working".
+      // An OpenClaw box with no terminal to run its CLI on sends
+      // `progress: null`. A bar reading 0% for twenty minutes is a worse
+      // answer than a bar that says only "working".
       memory = RUNNING(null);
       mount();
       expect(await screen.findByText(/Working through your files/, {}, { timeout: 8000 })).toBeTruthy();

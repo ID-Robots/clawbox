@@ -329,21 +329,48 @@ describe("which arm runs the pass", () => {
 
   it("still drives the OpenClaw CLI, argv for argv, where there IS an OpenClaw", async () => {
     // The regression guard for "additive": the other arm must be untouched.
+    // Pinned WITHOUT a terminal host, which is the argv it has always had.
     absent.value = false;
-    const { startMemoryIndex } = await lib();
-    const started = await startMemoryIndex("full", "manual");
-    expect(started.accepted).toBe(true);
-    expect(spawned).toHaveLength(1);
-    expect(spawned[0].cmd).toBe("flock");
-    expect(spawned[0].args).toEqual([
-      "--no-fork", "-n", "-E", "75",
-      // The migration lock `scripts/ensure-local-embeddings.sh` also takes; its
-      // path is derived from the box's layout, so only its shape is pinned.
-      expect.stringMatching(/\.lock$/),
-      "/home/clawbox/.npm-global/bin/openclaw",
-      "memory", "index", "--agent", "main", "--force",
-    ]);
-    await settledMemoryRun(clawkeepDir);
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(clawkeepDir, "no-such-script");
+    try {
+      const { startMemoryIndex } = await lib();
+      const started = await startMemoryIndex("full", "manual");
+      expect(started.accepted).toBe(true);
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].cmd).toBe("flock");
+      expect(spawned[0].args).toEqual([
+        "--no-fork", "-n", "-E", "75",
+        // The migration lock `scripts/ensure-local-embeddings.sh` also takes; its
+        // path is derived from the box's layout, so only its shape is pinned.
+        expect.stringMatching(/\.lock$/),
+        "/home/clawbox/.npm-global/bin/openclaw",
+        "memory", "index", "--agent", "main", "--force",
+      ]);
+      await settledMemoryRun(clawkeepDir);
+    } finally {
+      delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+    }
+  });
+
+  it("runs the same command on a terminal, with the one flag that makes its reporter print", async () => {
+    // `script` is the terminal. Everything after `exec` is the argv above,
+    // quoted for sh, plus `--verbose` — the reporter's `line` face.
+    absent.value = false;
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = "/bin/sh";
+    try {
+      const { startMemoryIndex } = await lib();
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].cmd).toBe("/bin/sh");
+      const [q, e, c, command, typescript] = spawned[0].args;
+      expect([q, e, c, typescript]).toEqual(["-q", "-e", "-c", "/dev/null"]);
+      expect(command).toMatch(
+        /^exec 'flock' '--no-fork' '-n' '-E' '75' '[^']+\.lock' '\/home\/clawbox\/\.npm-global\/bin\/openclaw' 'memory' 'index' '--agent' 'main' '--force' '--verbose'$/,
+      );
+      await settledMemoryRun(clawkeepDir);
+    } finally {
+      delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+    }
   });
 });
 
@@ -356,11 +383,11 @@ describe("which arm runs the pass", () => {
  * `src/lib/process-store.ts`). So what is pinned here is what lands on disk
  * and what comes back out of `readMemoryRunState`, not an in-memory channel.
  *
- * And the honest half: on the arm that drives `openclaw memory index` there is
- * nothing to report — that CLI writes its progress through a terminal reporter
- * which answers a no-op for the non-TTY pipe this module spawns it down — so
- * the field stays null there and the card draws a bar with no percentage
- * rather than one it made up.
+ * And the other arm: `openclaw memory index` writes its progress through a
+ * terminal reporter, so it has numbers only when it runs on a pseudo-terminal
+ * (clawkeep-memory.test.ts drives that end to end). At dispatch it has counted
+ * nothing, and without a terminal it never does — the field stays null and the
+ * card draws a bar with no percentage rather than one it made up.
  */
 describe("how far the pass has got", () => {
   const statePath = () => path.join(clawkeepDir, "memory-index-state.json");
@@ -415,7 +442,7 @@ describe("how far the pass has got", () => {
     expect((await readMemoryRunState()).progress).toBeNull();
   });
 
-  it("answers null on the arm that cannot count, rather than a bar it invented", async () => {
+  it("answers null on the OpenClaw arm at dispatch, before its CLI has counted anything", async () => {
     absent.value = false;
     const { startMemoryIndex } = await lib();
     const started = await startMemoryIndex("full", "manual");
