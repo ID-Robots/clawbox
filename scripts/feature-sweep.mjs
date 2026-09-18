@@ -139,6 +139,44 @@ export function uiLanguageReadsBack(res) {
   return true;
 }
 
+/**
+ * The voice route's engines — which a box may legitimately have none of.
+ *
+ * A box with no speech engine configured (no Kokoro installed, no ClawBox AI
+ * link) answers `/setup-api/tts` with `activeEngine: null` beside an `engines`
+ * list in which nothing is `configured` — the route working, not the route
+ * broken. Checked with the plain `ok("engines", "activeEngine")` that was
+ * `missing field \`activeEngine\`` on every such box, and the release-gate
+ * sweep exited 1 over a device with nothing wrong with it.
+ *
+ * So: an active engine is a PASS, no active engine with nothing configured is
+ * `unproven`, and the failures that matter are still failures — a route that
+ * does not answer 200 or JSON, no `engines` array, an `activeEngine` that is
+ * not a name, and no active engine while one IS configured, which is drift
+ * rather than an empty box.
+ */
+export function speechEnginesReport(res) {
+  if (res.status !== 200) return `expected 200, got ${res.status} ${truncate(res.text)}`;
+  if (res.json === null || typeof res.json !== "object" || Array.isArray(res.json)) {
+    return `expected a JSON object, got ${truncate(res.text)}`;
+  }
+  const { engines, activeEngine } = res.json;
+  if (!Array.isArray(engines)) return `missing \`engines\` array in ${truncate(res.text)}`;
+  const wellFormed = (e) => e !== null && typeof e === "object" && !Array.isArray(e) && typeof e.configured === "boolean";
+  if (!engines.every(wellFormed)) return `invalid \`engines\` entry in ${truncate(res.text)}`;
+  if (activeEngine === undefined || activeEngine === null) {
+    const configured = engines.filter((e) => e.configured);
+    if (configured.length === 0) {
+      return { unproven: "nothing can speak on this box yet: no speech engine is configured, so there is no active one to report" };
+    }
+    return `activeEngine is ${activeEngine === null ? "null" : "missing"} while ${configured.map((e) => e.id ?? "?").join(", ")} is configured in ${truncate(res.text)}`;
+  }
+  if (typeof activeEngine !== "string" || activeEngine === "") {
+    return `activeEngine came back as ${truncate(JSON.stringify(activeEngine) ?? String(activeEngine), 60)}`;
+  }
+  return true;
+}
+
 /** A specific refusal: the status, and the stable code the route promises. */
 function refuses(status, code) {
   return (res) => {
@@ -376,7 +414,7 @@ const AREAS = [
     { name: "the agent gateway is healthy", path: "/setup-api/gateway/health", expect: all(ok("available"), (res) => (res.json.available === true ? true : "the gateway is not answering")) },
   ]],
   ["voice", [
-    { name: "speech output reports its engines", path: "/setup-api/tts", expect: ok("engines", "activeEngine") },
+    { name: "speech output reports its engines", path: "/setup-api/tts", expect: speechEnginesReport },
     { name: "speech input reports its chain", path: "/setup-api/stt", expect: ok("primary", "chain") },
   ]],
   ["channels", [
