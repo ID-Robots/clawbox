@@ -52,6 +52,8 @@ const STOP_TIMEOUT_MS = 15_000;
 const DASHBOARD_RESPAWN_WAIT_MS = 45_000;
 /** Gap between systemd queries while waiting for the replacement process. */
 const RESPAWN_POLL_MS = 500;
+/** How long to wait before re-asking systemd for the baseline main pid. */
+const BASELINE_RETRY_DELAY_MS = 250;
 
 /**
  * Read per call so a box that needs longer — or a test that cannot spend 45 s
@@ -206,7 +208,7 @@ export function classifyUnitState(unit: {
 }
 
 /**
- * The PID systemd currently considers the unit's main process, or null.
+ * The PID systemd currently considers the unit's main process.
  *
  * THE IDENTITY OF THE PROCESS, which a socket cannot give. `Type=simple` means
  * :9119 says only "something is listening", and between our stop and
@@ -215,17 +217,54 @@ export function classifyUnitState(unit: {
  * killed answers, wait for the port to close first and a fast respawn beats the
  * first probe. `MainPID` changes exactly once, when systemd starts the
  * replacement. Read through the same by-name `systemctl show` as every other
- * property here, and 0 (no running main process) reads as null.
+ * property here.
+ *
+ * TWO NULLS, AND THEY ARE NOT THE SAME ANSWER. `MainPID=0` is systemd saying
+ * "no running main process" — a fact, and the state a stopped unit is in. A
+ * MISSING property is systemd not having been asked successfully at all: no
+ * systemctl, a timeout, a `show` that produced nothing. Folded together, the
+ * second read as a valid baseline of "nothing was running", and the very next
+ * pid — the process this bounce was supposed to stop — then satisfied
+ * `waitForReplacement` and the bounce reported `restarted` over a dashboard it
+ * had not replaced. So `read` is carried beside the value and the caller acts
+ * on the difference.
  */
-async function mainPid(): Promise<number | null> {
-  const value = Number((await showUnit(["MainPID"])).MainPID);
-  return Number.isInteger(value) && value > 0 ? value : null;
+export interface MainPidRead {
+  /** systemd answered the question at all. */
+  read: boolean;
+  /** The main pid, or null for a valid `MainPID=0`. */
+  pid: number | null;
+}
+
+async function mainPid(): Promise<MainPidRead> {
+  const raw = (await showUnit(["MainPID"])).MainPID;
+  if (raw === undefined) return { read: false, pid: null };
+  const value = Number(raw);
+  // A property that is present but not a whole non-negative number is not an
+  // answer either — the same "could not be asked" as an absent one.
+  if (!Number.isInteger(value) || value < 0) return { read: false, pid: null };
+  return { read: true, pid: value > 0 ? value : null };
+}
+
+/**
+ * Read the baseline pid, with one retry: this single read decides what the
+ * whole bounce is measured against, and a transient `systemctl show` failure
+ * must not become a baseline. A second attempt costs one local read on a path
+ * that is about to spend up to 45 s.
+ */
+async function readBaselinePid(): Promise<MainPidRead> {
+  const first = await mainPid();
+  if (first.read) return first;
+  await new Promise((resolve) => setTimeout(resolve, BASELINE_RETRY_DELAY_MS));
+  return await mainPid();
 }
 
 async function waitForReplacement(previousPid: number | null, deadline: number): Promise<boolean> {
   for (;;) {
-    const pid = await mainPid();
-    if (pid !== null && pid !== previousPid) return true;
+    const current = await mainPid();
+    // A read that FAILED establishes nothing: it is neither the replacement nor
+    // proof there is none, so the wait simply continues.
+    if (current.read && current.pid !== null && current.pid !== previousPid) return true;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(RESPAWN_POLL_MS, remaining)));
@@ -248,6 +287,35 @@ async function waitForReplacement(previousPid: number | null, deadline: number):
 export type HermesBounceOutcome = "restarted" | "pending" | "failed";
 
 /**
+ * Is the dashboard SERVING right now? One probe, no stop, no waiting.
+ *
+ * The question a caller has after a bounce came back `pending`: the stop took
+ * and systemd owns the unit, so the thing to do is find out whether it has
+ * finished coming up — never to stop it again, which would turn one outage into
+ * two. `Type=simple` means the unit reads `active` the instant ExecStart forks,
+ * so the SOCKET is the fact and the unit state is only good for telling "still
+ * on its way" from "nothing is coming" (`hermesDashboardUnitState`).
+ */
+export async function hermesDashboardServing(): Promise<boolean> {
+  // A non-positive budget is "one probe, then give up" — see `waitForPortOpen`.
+  return await waitForPortOpen(DASHBOARD_PORT, DASHBOARD_HOST, { timeoutMs: 0 });
+}
+
+/**
+ * WHICH PROCESS is serving the dashboard right now, for a caller that has to
+ * tell a replacement from the process a bounce tried to stop.
+ *
+ * The same two nulls {@link MainPidRead} keeps apart, and for the same reason:
+ * `pid: null` with `read: true` is systemd saying "no running main process",
+ * while `read: false` is systemd not having been asked successfully at all.
+ * A caller that folded them would read a failed `systemctl show` as proof the
+ * old process had gone.
+ */
+export async function hermesDashboardMainPid(): Promise<MainPidRead> {
+  return await mainPid();
+}
+
+/**
  * Stop the dashboard, wait for systemd to bring it back, and say which of the
  * three things happened.
  *
@@ -265,15 +333,41 @@ export type HermesBounceOutcome = "restarted" | "pending" | "failed";
 export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
   if (!(await restartsItself())) return "failed";
   // Read BEFORE the stop: this is the process the answer is measured against.
-  const outgoing = await mainPid();
-  const result = await runHermesCli(["dashboard", "--stop"], { timeoutMs: STOP_TIMEOUT_MS }).catch(
-    () => null,
-  );
-  if (result?.code !== 0) return "failed";
+  // NOTHING IS STOPPED UNTIL IT IS READ. Without a baseline this function
+  // cannot tell the replacement from the process it killed, so it would stop
+  // the owner's chat backend and then report `restarted` on the first pid it
+  // saw — which is the outgoing one. Refusing before the stop leaves a working
+  // dashboard working, and "failed" is the honest answer: nothing was done.
+  const baseline = await readBaselinePid();
+  if (!baseline.read) {
+    console.error(
+      `[hermes] ${HERMES_DASHBOARD_UNIT} was not stopped — systemd could not be asked which process is serving it`,
+    );
+    return "failed";
+  }
+  const outgoing = baseline.pid;
+  await runHermesCli(["dashboard", "--stop"], { timeoutMs: STOP_TIMEOUT_MS }).catch(() => null);
 
-  // Past this line the restart HAS been taken: the stop exited 0 over a unit
-  // that restarts itself. The clock running out below is therefore "pending" —
-  // with one exception, asked of systemd rather than assumed, immediately after.
+  // THE STOP'S EXIT CODE IS NOT THE OUTCOME, and reading it as one was a false
+  // failure on every bounce this box performs.
+  //
+  // MEASURED on the owner's Hermes device (2026-09-18): `hermes dashboard
+  // --stop` exits **143** — SIGTERM, 128+15 — after 764 ms, printing
+  // "Terminated", while stopping the dashboard perfectly well; the unit's
+  // MainPID went 17768 → 17877 across that call. The CLI signals the process
+  // group it is itself in, so it kills its own process on the way out. The old
+  // `if (result?.code !== 0) return "failed"` therefore reported a failure over
+  // a restart that had just happened, on EVERY caller of this helper: a ClawKeep
+  // restore told the owner its restored state.db was not being served, the image
+  // refresh told them the box could not draw, and the plugin watcher sent no
+  // "open a new chat" notice for a chat window it had just dropped — then armed
+  // a retry to do it again.
+  //
+  // So the stop is VERIFIED rather than believed, which this function already
+  // knew how to do: the answer is systemd's NEW MainPID and a socket that
+  // answers, and neither of those can be faked by an exit code. That is also why
+  // no branch is lost — a stop that genuinely did not take is still caught, by
+  // the `outgoing` comparison below rather than by the CLI's word for it.
   //
   // ONE deadline across both halves — the doc block above budgets them together
   // because they are the same restart, and spending it twice would put the
@@ -295,6 +389,19 @@ export async function bounceHermesDashboard(): Promise<HermesBounceOutcome> {
     // already spent the whole budget: the ceiling moves 45 s → 50 s, still far
     // inside the 100 s edge cut the budget above is sized against.
     const state = await hermesDashboardUnitState();
+    // THE STOP NEVER TOOK — the branch the exit-code check used to cover, now
+    // asked of the thing that knows. The very same process is still the unit's
+    // main one and systemd calls the unit running, so nothing was stopped and
+    // nothing is on its way back. `pending` here would be the worst of the three
+    // answers: it means "leave it alone", over a dashboard that will stay stale
+    // until somebody acts.
+    const current = await mainPid();
+    if (current.read && current.pid !== null && current.pid === outgoing && state === "running") {
+      console.error(
+        `[hermes] ${HERMES_DASHBOARD_UNIT} was not stopped — the same process is still serving`,
+      );
+      return "failed";
+    }
     console.error(
       `[hermes] ${HERMES_DASHBOARD_UNIT} did not come back after its stop (unit is ${state})`,
     );

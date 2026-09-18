@@ -1,4 +1,4 @@
-import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
+import { bounceHermesDashboardShared } from "@/lib/hermes-bounce-claim";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
@@ -182,7 +182,14 @@ export async function refreshHermesImageTools(before: boolean, after: boolean): 
   // its way back and this call cannot prove it, which is the same as a failure
   // HERE: the next family pays for its own `reload.mcp`, a redundant respawn
   // rather than anything the owner sees.
-  if ((await bounceHermesDashboard()) === "restarted") {
+  // Through the SHARED CLAIM rather than the bouncer directly: while this
+  // restart is in flight the plugin watcher must open no window over it, and the
+  // declaration signature this replacement reads has to become the watcher's
+  // baseline — otherwise it bounces the owner's chat a second time for a plugin
+  // set the new process has already loaded. "in_flight" is not "restarted": a
+  // bounce somebody else owns may have started before the backend was
+  // installed, and this function may not claim a picture it cannot prove.
+  if ((await bounceHermesDashboardShared("the image backend needs the agent to re-scan")) === "restarted") {
     console.log("[hermes/image-refresh] bounced the Hermes dashboard so it picks up the image backend");
     // The bounce takes the MCP children down with the dashboard and brings them
     // back, so every family's tool list is rebuilt — the same effect a reload
