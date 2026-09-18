@@ -311,7 +311,12 @@ export async function POST(req: Request) {
       // the collection back out with it.
       await setPreferences(updates);
       // The window's saved form values. A delete, not a preference write, so
-      // it goes straight to the store: setPreferences drops an undefined.
+      // it goes straight to the store — `setMany` is where `undefined` means
+      // "remove this key" (src/lib/config-store.ts). `setPreferences` would in
+      // fact pass it through (`sanitizePreferenceWrites` has no undefined skip
+      // and `validatePreference` accepts one), but nothing says so at that
+      // door, and a delete routed through the preference RULES is a delete one
+      // future rule can silently turn into a no-op.
       const settingsKey = `pref:app_${appId}_settings`;
       if (settingsKey in all) await configSetMany({ [settingsKey]: undefined });
     } catch (err) {

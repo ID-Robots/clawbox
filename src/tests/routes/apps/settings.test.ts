@@ -184,4 +184,57 @@ describe("/setup-api/apps/settings", () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
   });
+
+  /**
+   * Every OTHER name that is already a property of every object literal.
+   * `toString` passes the charset rule, and before this it resolved through
+   * the writer table's prototype to `Object.prototype.toString` — called with
+   * no `this`, it returns "[object Undefined]" without throwing, so the route
+   * answered `{ ok: true, configWritten: true }` over a file it never wrote
+   * and InstalledAppSettings rendered that as "Connected". Its siblings
+   * (`valueOf`, `hasOwnProperty`, …) threw instead and leaked the raw message
+   * with a 500. Both are the same missing rule.
+   */
+  it("refuses an appId that names a property of Object.prototype", async () => {
+    const fsMod = await import("fs/promises");
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    for (const appId of ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "toLocaleString", "propertyIsEnumerable"]) {
+      const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+        method: "POST",
+        body: JSON.stringify({ appId, settings: { ha_url: "http://ha.local:8123" } }),
+      }));
+      expect(res.status, `${appId} must be refused`).toBe(400);
+      expect(await res.json()).toEqual({ error: "Invalid appId" });
+    }
+    expect(fsMod.default.writeFile).not.toHaveBeenCalled();
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The length every producer already applies — APP_ID_RE is 1-64 — so an id
+   * this door accepts is one the rest of the surface can still name. The
+   * `_setEnabled` branch writes `skills.entries.<id>.enabled` into the
+   * harness's own openclaw.json, and the ad-hoc regex here had no length bound
+   * at all: a caller could park a megabyte-long key in that file.
+   */
+  it("refuses an appId longer than the producers can mint", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "a".repeat(65), settings: { _setEnabled: true } }),
+    }));
+    expect(res.status).toBe(400);
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
+  it("still takes an appId of exactly the length the producers can mint", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    const appId = "a".repeat(64);
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId, settings: { _setEnabled: true } }),
+    }));
+    expect(res.status).toBe(200);
+    expect(setSkillEnabled).toHaveBeenCalledWith(appId, true);
+  });
 });
