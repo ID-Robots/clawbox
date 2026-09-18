@@ -211,6 +211,8 @@ for (const locale of ["bg", "de"]) {
         const pills = composer.locator(".header-dropdown-trigger");
         await expect(pills).toHaveCount(3);
         await expect(page.getByTestId("voice-record")).toBeEnabled();
+        // The greeting turn is over, so the slot beside the field is at rest.
+        await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
         await expect(pills.nth(1)).toContainText(modelLabel);
 
         // A phone held upright (TASK-894) gets the microphone on a row of its
@@ -387,6 +389,7 @@ for (const { locale, viewport } of [
       await page.goto("/");
       await chatOpen(page);
       await expect(page.getByTestId("voice-record")).toBeEnabled();
+      await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
       const primary = page.getByTestId("chat-composer-primary");
       const field = primary.locator("textarea");
@@ -397,15 +400,17 @@ for (const { locale, viewport } of [
       const stop = primary.getByTestId("chat-stop");
       await expect(stop).toBeVisible();
       await expect(page.getByTestId("chat-send")).toHaveCount(0);
-      // The same slot Send had: the thumb does not move.
+      // The same slot Send had: the thumb does not move sideways, and it sits
+      // on the field's row, bottom-aligned with it (the row itself may move
+      // up or down as the cleared field shrinks back to one line).
       const stopBox = (await stop.boundingBox())!;
       expect(Math.abs(stopBox.x - sendBox.x)).toBeLessThan(1);
-      expect(Math.abs(stopBox.y - sendBox.y)).toBeLessThan(1);
-      // Immediately right of the field, on the field's row.
+      expect(Math.abs(stopBox.width - sendBox.width)).toBeLessThan(1);
       const fieldBox = (await field.boundingBox())!;
+      expect(Math.abs((stopBox.y + stopBox.height) - (fieldBox.y + fieldBox.height))).toBeLessThan(1);
+      // Immediately right of the field.
       expect(stopBox.x).toBeGreaterThanOrEqual(fieldBox.x + fieldBox.width);
       expect(stopBox.x - (fieldBox.x + fieldBox.width)).toBeLessThanOrEqual(12);
-      expect(stopBox.y + stopBox.height).toBeLessThanOrEqual(fieldBox.y + fieldBox.height + 1);
       await expect(stop).toHaveCSS("color", "rgb(239, 68, 68)");
 
       const voiceRow = page.getByTestId("chat-composer-voice-row");
