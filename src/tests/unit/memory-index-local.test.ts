@@ -30,8 +30,13 @@ const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
     dataDir: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "memory-index-data-")),
     /** Every text that reached the embedder, in order, across the run. */
     embedCalls: { texts: [] as string[], types: [] as string[] },
-    /** When set, the next embeddings request answers this HTTP status. */
-    embedFail: { status: 0 },
+    /**
+     * When `status` is set, an embeddings request answers it instead of a
+     * vector. `after` lets that many requests through first, which is how a
+     * test reaches the embedder dying PART WAY through a rebuild — the one
+     * state where the store really has been emptied.
+     */
+    embedFail: { status: 0, after: 0 },
     /** What openclaw.json holds, for the one-time carry-over after a swap. */
     openclawConfig: { value: {} as unknown },
   };
@@ -86,9 +91,12 @@ function stubVector(text: string): number[] {
 function installFetchStub(): void {
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
     if (embedFail.status) {
-      const status = embedFail.status;
-      embedFail.status = 0;
-      return new Response("nope", { status });
+      if (embedFail.after > 0) embedFail.after -= 1;
+      else {
+        const status = embedFail.status;
+        embedFail.status = 0;
+        return new Response("nope", { status });
+      }
     }
     const body = JSON.parse(init.body) as { input: string[]; input_type: string };
     embedCalls.texts.push(...body.input);
@@ -116,6 +124,7 @@ beforeEach(async () => {
   embedCalls.texts = [];
   embedCalls.types = [];
   embedFail.status = 0;
+  embedFail.after = 0;
   openclawConfig.value = {};
   installFetchStub();
   _resetLocalMemoryCacheForTests();
@@ -251,6 +260,97 @@ describe("indexing the owner's folders", () => {
       expect(result.files, "the index must survive a folder it could not open").toBe(1);
       expect(result.chunks).toBeGreaterThan(0);
     }
+  });
+
+  it("still forgets a deleted note in a folder whose only PDF was too large to read", async () => {
+    // The derived folder is NAMED as soon as a source holds one extractable
+    // document and WRITTEN only when a conversion is about to be put in it. A
+    // folder whose every extractable document was passed over first — one over
+    // MAX_DOCUMENT_BYTES here — therefore names a folder that is not there, and
+    // failing to walk it used to be charged to the OWNER'S folder: a failure
+    // they cannot act on, and — because `unreadableSources` protects a whole
+    // source from the delete pass — a document they deleted that stayed in the
+    // index and went on being found, on every later pass, for ever.
+    const { MAX_DOCUMENT_BYTES } = await import("@/lib/memory-extract");
+    write("keep.md", "A bicycle is stored in the basement.");
+    const gone = write("gone.md", "The deposit is two months' rent.");
+    // Sparse, so this costs no disk: the extractor stats it and steps over it.
+    fs.truncateSync(write("scan.pdf", ""), MAX_DOCUMENT_BYTES + 1);
+
+    const built = await runLocalIndexPass("full");
+    expect(built.files).toBe(2);
+    // One failure, and only one: the PDF the extractor could not read. The
+    // owner's folder was read perfectly.
+    expect(built.failures, "the owner's folder must not be counted as unreadable").toBe(1);
+
+    fs.rmSync(gone);
+    const after = await runLocalIndexPass("incremental");
+    expect(after.files, "the deleted note must leave the index").toBe(1);
+    expect(after.failures).toBe(1);
+
+    _resetLocalMemoryCacheForTests();
+    const hits = await searchLocalMemory("deposit", 5);
+    expect(hits.map((h) => h.path).join(" ")).not.toContain("gone.md");
+  });
+
+  it("still protects a source whose derived folder IS there and cannot be read", async () => {
+    // The other half of the rule above: a derived folder that exists and will
+    // not open is a real shortfall — its rows may only LOOK stale — so the
+    // source keeps every row it has.
+    const { derivedFolderFor } = await import("@/lib/memory-extract");
+    write("keep.md", "A bicycle is stored in the basement.");
+    // A .txt is extractable, so the folder is really written and really walked.
+    write("lease.txt", "The deposit is two months' rent.");
+    const built = await runLocalIndexPass("full");
+    expect(built.files).toBe(2);
+
+    fs.chmodSync(derivedFolderFor(source), 0o000);
+    let after: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      after = await runLocalIndexPass("incremental");
+    } finally {
+      fs.chmodSync(derivedFolderFor(source), 0o755);
+    }
+    // Running as root in some CI images makes the chmod moot; only assert the
+    // contract when the folder really did become unreadable.
+    if (after.failures > 0) {
+      expect(after.files, "a derived folder that will not open keeps its rows").toBe(2);
+    }
+  });
+
+  it("walks a derived folder it could not stat rather than calling it absent", async () => {
+    // Only ENOENT means "no derived folder". A stat that fails for any other
+    // reason — a permission refused, an I/O error — is "could not look", and
+    // folded into "absent" it skipped the walk, left the source unflagged, and
+    // let the stale sweep delete every derived document it had not seen: the
+    // owner's converted files gone from the index over a folder ClawBox could
+    // not open for a moment. Refused at the stat only, so the walk itself —
+    // the thing that decides what is kept — still sees the folder.
+    const { derivedFolderFor } = await import("@/lib/memory-extract");
+    write("keep.md", "A bicycle is stored in the basement.");
+    write("lease.txt", "The deposit is two months' rent.");
+    expect((await runLocalIndexPass("full")).files).toBe(2);
+
+    const derived = derivedFolderFor(source);
+    const fsp = (await import("node:fs/promises")).default;
+    const realStat = fsp.stat.bind(fsp);
+    const spy = vi.spyOn(fsp, "stat").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+      if (String(target) === derived) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return (realStat as (...args: unknown[]) => Promise<fs.Stats>)(target, ...rest);
+    }) as typeof fsp.stat);
+    let after: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      after = await runLocalIndexPass("incremental");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(after.files, "a derived folder that could not be stat'd keeps its rows").toBe(2);
+
+    _resetLocalMemoryCacheForTests();
+    const hits = await searchLocalMemory("deposit", 5);
+    expect(hits.map((h) => h.path).join(" ")).toContain("lease.txt");
   });
 
   it("can still shrink and still take new work after it has hit its ceiling", async () => {
@@ -474,14 +574,46 @@ describe("the index knows what it was built for", () => {
     expect(localEmbeddingIdentity()).toHaveLength(16);
   });
 
+  it("keeps the index it was going to replace when the embedder will not answer", async () => {
+    // A full reindex is the remedy the amber banner names, and it used to
+    // DESTROY what it was asked to repair: the tables were emptied on the first
+    // statement, and the commonest refusal on this box is the embedder
+    // declining to wake — the 502 `ensureLocalAiReady` answers below its
+    // MemAvailable floor, a busy Orin saying "not now". The owner pressed the
+    // one button the card offered and lost every vector until some later pass
+    // happened to succeed. The rebuild asks for one embedding before it deletes
+    // anything, so a refusal now costs nothing at all.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    const before = await localMemoryStatusJson() as { status: { chunks: number } };
+    expect(before.status.chunks).toBeGreaterThan(0);
+
+    embedFail.status = 502;
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/embedding model/i);
+
+    const status = await localMemoryStatusJson() as {
+      status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(status.status.files).toBe(1);
+    expect(status.status.chunks).toBe(before.status.chunks);
+    expect(status.status.custom.indexIdentity.status).toBe("valid");
+
+    _resetLocalMemoryCacheForTests();
+    expect(await searchLocalMemory("deposit", 5)).not.toHaveLength(0);
+  });
+
   it("does not report a rebuild whose embedder died as a healthy empty index", async () => {
-    // The exact sequence: an owner with a mismatched index presses Index now,
-    // the tables are emptied, and the first embed gets the 502 the MemAvailable
-    // guard answers a wake with. Before, the identity had already been stamped
-    // over the empty tables and the panel went green.
+    // The other half, which the readiness check above cannot cover: the model
+    // answered, the tables were emptied, and it stopped answering part way
+    // through. The identity is stamped at the END of a pass precisely so this
+    // leaves an index that reads as needing a rebuild rather than as a green
+    // panel over a search that finds nothing.
     write("notes.md", "The deposit is two months' rent.");
     await runLocalIndexPass("full");
     embedFail.status = 502;
+    // The readiness check is the request that gets through; the first document
+    // is the one that is refused.
+    embedFail.after = 1;
     await expect(runLocalIndexPass("full")).rejects.toThrow(/embedding model/i);
 
     const status = await localMemoryStatusJson() as {
@@ -511,19 +643,93 @@ describe("the index knows what it was built for", () => {
     expect(row.status.custom.indexIdentity.status).toBe("valid");
   });
 
-  it("keeps MISSING when the pass DID scan files and the index came out empty", async () => {
-    // The other empty, and the one the zero-chunk rule exists for: there were
-    // documents to index and none of them made it in. The reindex the panel
-    // offers is the right advice there, so it has to stay.
+  it("calls an index VALID when the pass read every file and they held nothing", async () => {
+    // Zero chunks over FILES is two states as well, and this is the finished
+    // one: both documents were read and both were blank, so there is nothing
+    // owed and nothing a reindex could do. Called `missing`, the card carried
+    // "the index fingerprint is missing. Run a full reindex" for ever — the
+    // reindex reads the same two files, writes the same nothing, and the banner
+    // comes straight back. A scanned PDF with no text layer lands here too.
     write("blank.md", "   \n\n  ");
     write("also-blank.md", "\t\n");
     const result = await runLocalIndexPass("full");
     expect(result.chunks).toBe(0);
     const row = await localMemoryStatusJson() as {
       scan: { totalFiles: number };
-      status: { custom: { indexIdentity: { status: string } } };
+      status: { files: number; custom: { indexIdentity: { status: string } } };
     };
     expect(row.scan.totalFiles).toBe(2);
+    // Both have a row: the pass FINISHED with them. That is the whole
+    // difference from a pass that could not do the work, and it is the same
+    // subtraction the card prints as `pendingFiles`.
+    expect(row.status.files).toBe(2);
+    expect(row.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  it("keeps MISSING when the pass could not FINISH the files it scanned", async () => {
+    // The other empty, and the one the zero-chunk rule exists for: there were
+    // documents to index and the pass left work owed on them. The reindex the
+    // panel offers is the right advice there, so it has to stay. A file it
+    // could not read leaves no row, which is exactly what says so.
+    write("blank.md", "   \n\n  ");
+    const unreadable = write("locked.md", "The deposit is two months' rent.");
+    fs.chmodSync(unreadable, 0o000);
+    let result: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      result = await runLocalIndexPass("full");
+    } finally {
+      fs.chmodSync(unreadable, 0o644);
+    }
+    // Running as root in some CI images makes the chmod moot; only assert the
+    // contract when the file really did become unreadable.
+    if (result.failures > 0) {
+      const row = await localMemoryStatusJson() as {
+        scan: { totalFiles: number };
+        status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+      };
+      expect(row.status.chunks).toBe(0);
+      expect(row.scan.totalFiles).toBeGreaterThan(row.status.files);
+      expect(row.status.custom.indexIdentity.status).toBe("missing");
+    }
+  });
+
+  it("keeps MISSING when a file it indexed before cannot be read now", async () => {
+    // A row is not proof the pass finished with a file. One indexed on an
+    // earlier pass keeps its old row when this pass cannot read it — it is
+    // still in the scan, so the stale sweep rightly leaves it — and "rows ==
+    // files scanned" then balanced over work that did not happen: an empty
+    // index calling itself valid, which the shared parser draws as healthy.
+    // Refused at `open` for that one file, so the test does not depend on
+    // whether the suite runs as root.
+    const blank = write("blank.md", "   \n\n  ");
+    await runLocalIndexPass("full");
+    const first = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(first.status.custom.indexIdentity.status).toBe("valid");
+
+    touchLater(blank);
+    const fsp = (await import("node:fs/promises")).default;
+    const realOpen = fsp.open.bind(fsp);
+    const spy = vi.spyOn(fsp, "open").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+      if (String(target) === blank) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return (realOpen as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+    }) as typeof fsp.open);
+    let result: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      result = await runLocalIndexPass("incremental");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.failures).toBe(1);
+
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    // The trap: the counts balance, because the old row is still there.
+    expect(row.status.files).toBe(row.scan.totalFiles);
+    expect(row.status.chunks).toBe(0);
     expect(row.status.custom.indexIdentity.status).toBe("missing");
   });
 
