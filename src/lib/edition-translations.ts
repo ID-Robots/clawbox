@@ -10,6 +10,7 @@ import { improvementEn } from "./edition-translations/en-improvement";
 import { paidGateEn } from "./edition-translations/en-paid-gate";
 import { clawaiUsageEn } from "./edition-translations/en-clawai-usage";
 import { clawaiPitchEn } from "./edition-translations/en-clawai-pitch";
+import { anthropicAccountsEn } from "./edition-translations/en-anthropic-accounts";
 import { bg } from "./edition-translations/bg";
 import { de } from "./edition-translations/de";
 import { es } from "./edition-translations/es";
@@ -63,6 +64,7 @@ export const editionEn: Record<string, string> = {
   ...paidGateEn,
   ...clawaiUsageEn,
   ...clawaiPitchEn,
+  ...anthropicAccountsEn,
 };
 
 const overrides: Record<Exclude<Locale, "en">, Record<string, string>> = {

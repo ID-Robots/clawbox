@@ -549,6 +549,7 @@ const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
   weekly: "codingAgent.pausedAllowanceWeekly",
   burst: "codingAgent.pausedAllowanceBurst",
   embeddings: "codingAgent.pausedAllowanceEmbeddings",
+  anthropic: "codingAgent.pausedAllowanceAnthropic",
 };
 
 export default function CodingAgentApp() {
@@ -2493,6 +2494,14 @@ export default function CodingAgentApp() {
                         // ages out, possibly days from now: said in the owner's
                         // clock with the day in front. The per-day meters keep
                         // the UTC hour they are counted in.
+                        // Every Anthropic account at its limit: nobody has to
+                        // press Resume — the box carries on by itself at the
+                        // first reset, and says so rather than inviting a click
+                        // that would only buy the same refusal.
+                        if (run.pauseReason.meter === "anthropic") {
+                          const at = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
+                          return at ? t("codingAgent.pausedAnthropicResumesAt", { time: at }) : t("codingAgent.pausedAnthropicResumes");
+                        }
                         if (isRollingPauseMeter(run.pauseReason.meter)) {
                           const freesUp = formatFreesUpAt(run.pauseReason.resetsAt, { locale });
                           return freesUp ? t("codingAgent.pausedAllowanceFreesUp", { time: freesUp }) : t("codingAgent.pausedAllowanceResetsUnknown");

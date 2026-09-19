@@ -30,9 +30,12 @@
 # at the proxy with the box's portal token and refuses to let an inherited
 # Anthropic credential outrank it. `anthropic` does the exact inverse: every
 # proxy variable is unset, the portal token is never read, the model is a real
-# Claude model, and the credential is either the API key the owner saved on the
-# box (read here, from the same 0600 config, never through argv or the parent's
-# environment) or the login `claude` already holds in this account's home.
+# Claude model, and the credential is the Anthropic ACCOUNT the runner chose
+# from the box's pool (src/lib/anthropic-accounts.ts): an API key, a Claude
+# account's OAuth token, or the login `claude` already holds in this account's
+# home. The runner leaves that one credential in a 0600 file named by
+# CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE, which this script reads and deletes
+# before anything else — never through argv or the parent's environment.
 # Neither branch can see the other's credential.
 #
 # Usage:  claude-ds [any claude argument]     e.g.  claude-ds -p "explain this repo"
@@ -47,8 +50,10 @@
 #                           runs only; an Anthropic run uses Claude Code's own
 #                           default state, which is where the owner's login is)
 #   CLAUDE_DS_PROVIDER      which account pays: clawbox-ai (default) or
-#                           anthropic (the owner's own Claude Code login, or
-#                           the API key they saved on the box)
+#                           anthropic (one of the owner's Anthropic accounts)
+#   CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE
+#                           anthropic only: the one-shot 0600 file holding the
+#                           account the runner chose (read, then deleted)
 #   CLAWBOX_AI_PROXY_URL    ClawBox AI base URL (same var the device uses)
 #   CLAUDE_DS_API_BASE_URL  override for Claude Code's non-inference API base
 #                           (account/entitlement calls); defaults to the proxy
@@ -168,14 +173,49 @@ def has_claude_login():
 
 
 if provider == "anthropic":
+    # THE ACCOUNT THE RUNNER CHOSE. With more than one Anthropic account on the
+    # box (src/lib/anthropic-accounts.ts) the web server decides which one a
+    # spawn uses and leaves that one credential in a 0600 file for us. It is
+    # read here and DELETED here, before anything else happens, so it is on
+    # disk for the second between the spawn and this line and nowhere after.
+    # Its lines: the kind (api_key | oauth | login), then the secret.
+    cred_file = os.environ.get("CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE", "")
+    if cred_file:
+        try:
+            with open(cred_file) as fh:
+                lines = fh.read().split("\n")
+        except Exception as exc:
+            answer("ERR", f"could not read the Anthropic account this run was given: {exc}", "", "", "")
+        finally:
+            try:
+                os.unlink(cred_file)
+            except OSError:
+                pass
+        kind = lines[0].strip() if lines else ""
+        secret = lines[1].strip() if len(lines) > 1 else ""
+        if kind == "api_key" and secret:
+            answer("OK", "key:" + secret, "", effort, "")
+        if kind == "oauth" and secret:
+            answer("OK", "oauth:" + secret, "", effort, "")
+        if kind == "login":
+            if not has_claude_login():
+                answer("ERR",
+                       "The Claude Code sign-in this run was given is gone. Sign in "
+                       "again with `claude` in the Terminal app.", "", "", "")
+            answer("OK", "", "", effort, "1")
+        answer("ERR", "the Anthropic account this run was given is not one this wrapper can use", "", "", "")
+
+    # No file: a box whose pool could not be read, or a caller that is not the
+    # runner. The one credential the box used to keep in the config (a pool
+    # migrates it out on its first read), else the sign-in.
     key = str(cfg.get("anthropic_api_key") or "").strip()
     login = "1" if has_claude_login() else ""
     if not key and not login:
         answer("ERR",
-               "Anthropic is not connected on this ClawBox. Open the Coding Agent "
-               "app -> Settings and save an Anthropic API key, or run `claude` in "
+               "Anthropic is not connected on this ClawBox. Open Settings -> AI "
+               "providers and connect an Anthropic account, or run `claude` in "
                "the Terminal app and sign in.", "", "", "")
-    answer("OK", key, "", effort, login)
+    answer("OK", ("key:" + key) if key else "", "", effort, login)
 
 token = str(cfg.get("clawai_token") or "").strip()
 if not token:
@@ -220,7 +260,10 @@ esac
 # like a proxy bug), and on the Anthropic branch a stray ANTHROPIC_AUTH_TOKEN
 # — which is exactly what a nested claude-ds would have left — sends a run the
 # owner is paying Anthropic for straight back through the proxy.
-unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN
+unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+# The handoff's PATH is not a secret, and the file is already gone — but
+# nothing past this line needs it, so it does not travel into the session.
+unset CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE
 
 if [ "$PROVIDER" = "anthropic" ]; then
   # THE INVERSE OF EVERYTHING BELOW.
@@ -238,12 +281,14 @@ if [ "$PROVIDER" = "anthropic" ]; then
 
   MODEL="${CLAUDE_DS_MODEL:-claude-opus-5}"
   export ANTHROPIC_MODEL="$MODEL"
-  # The key when the owner saved one, otherwise nothing at all — and nothing
-  # is the right answer: Claude Code then uses the login it already holds.
-  # Exported only here, so a ClawBox AI run's environment never carries it.
-  if [ -n "$SECRET" ]; then
-    export ANTHROPIC_API_KEY="$SECRET"
-  fi
+  # The account's credential: an API key, a Claude account's OAuth token, or
+  # nothing at all — and nothing is the right answer for the `claude` sign-in:
+  # Claude Code then uses the login it already holds. Exported only here, so a
+  # ClawBox AI run's environment never carries either.
+  case "$SECRET" in
+    key:?*) export ANTHROPIC_API_KEY="${SECRET#key:}" ;;
+    oauth:?*) export CLAUDE_CODE_OAUTH_TOKEN="${SECRET#oauth:}" ;;
+  esac
 
   HARNESS_CONFIG_FILE="$HOME/.claude.json"
   HARNESS_STATE_DIR="$HOME/.claude"

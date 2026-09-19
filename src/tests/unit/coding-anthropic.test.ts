@@ -31,12 +31,23 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
   set: configSet,
 }));
 
+// The key now lives in the ACCOUNT POOL (src/lib/anthropic-accounts.ts, pinned
+// on its own in anthropic-accounts.test.ts); here only the delegation is.
+const pool = vi.hoisted(() => ({
+  readAccounts: vi.fn(),
+  addApiKeyAccount: vi.fn(),
+  replaceCredential: vi.fn(),
+  removeAccount: vi.fn(),
+  poolHasCredential: vi.fn(),
+}));
+vi.mock("@/lib/anthropic-accounts", () => pool);
+
 import {
   MAX_ANTHROPIC_KEY_CHARS,
   _resetAnthropicLoginCache,
   clearAnthropicKey,
   getAnthropicConnection,
-  getAnthropicKey,
+  hasAnthropicKey,
   hasAnthropicLogin,
   looksLikeAnthropicKey,
   setAnthropicKey,
@@ -53,6 +64,11 @@ beforeEach(() => {
   process.env.CLAWBOX_TEST_HOME = home;
   configGet.mockReset().mockResolvedValue(undefined);
   configSet.mockReset().mockResolvedValue(undefined);
+  pool.readAccounts.mockReset().mockResolvedValue([]);
+  pool.addApiKeyAccount.mockReset().mockResolvedValue({ id: "aaaaaaaa" });
+  pool.replaceCredential.mockReset().mockResolvedValue({ id: "aaaaaaaa" });
+  pool.removeAccount.mockReset().mockResolvedValue(undefined);
+  pool.poolHasCredential.mockReset().mockResolvedValue({ any: false, hasKey: false, hasLogin: false, hasOAuth: false, first: null });
   // Each case gets its own home; the cache must not answer for the last one's.
   _resetAnthropicLoginCache();
 });
@@ -148,46 +164,68 @@ describe("the stored key", () => {
     // The route rejects an oversized body before `setAnthropicKey` is reached,
     // so its boundary test would still pass if this bound were lost. Checked
     // here, where the helper is the only thing standing between the value and
-    // `configSet`.
+    // the store.
     const atCap = `sk-ant-${"x".repeat(MAX_ANTHROPIC_KEY_CHARS - "sk-ant-".length)}`;
     expect(atCap.length).toBe(MAX_ANTHROPIC_KEY_CHARS);
     expect(looksLikeAnthropicKey(atCap)).toBe(true);
     expect(looksLikeAnthropicKey(`${atCap}x`)).toBe(false);
     await expect(setAnthropicKey(`${atCap}x`)).rejects.toThrow();
-    expect(configSet).not.toHaveBeenCalled();
+    expect(pool.addApiKeyAccount).not.toHaveBeenCalled();
+    expect(pool.replaceCredential).not.toHaveBeenCalled();
   });
 
-  it("stores a trimmed key and refuses one that is not a key", async () => {
+  it("stores a trimmed key as the FIRST account, and never in data/config.json", async () => {
     await setAnthropicKey(`  ${KEY}  `);
-    expect(configSet).toHaveBeenCalledWith("anthropic_api_key", KEY);
-    configSet.mockClear();
-    await expect(setAnthropicKey("hunter2")).rejects.toThrow(/sk-ant-/);
+    // First in the order: the key this form saved has always been the one runs used.
+    expect(pool.addApiKeyAccount).toHaveBeenCalledWith({ key: KEY, first: true });
     expect(configSet).not.toHaveBeenCalled();
+    pool.addApiKeyAccount.mockClear();
+    await expect(setAnthropicKey("hunter2")).rejects.toThrow(/sk-ant-/);
+    expect(pool.addApiKeyAccount).not.toHaveBeenCalled();
   });
 
-  it("reads an absent or blank value as no key at all", async () => {
-    expect(await getAnthropicKey()).toBeNull();
-    configGet.mockResolvedValue("   ");
-    expect(await getAnthropicKey()).toBeNull();
-    configGet.mockResolvedValue(7);
-    expect(await getAnthropicKey()).toBeNull();
+  it("replaces the key of an existing key account rather than adding a second one", async () => {
+    pool.readAccounts.mockResolvedValue([{ id: "11111111", kind: "login" }, { id: "22222222", kind: "api_key" }]);
+    await setAnthropicKey(KEY);
+    expect(pool.replaceCredential).toHaveBeenCalledWith("22222222", { kind: "api_key", key: KEY });
+    expect(pool.addApiKeyAccount).not.toHaveBeenCalled();
   });
 
-  it("clears by deleting the key, not by storing an empty string", async () => {
+  it("knows whether a key account exists", async () => {
+    expect(await hasAnthropicKey()).toBe(false);
+    pool.readAccounts.mockResolvedValue([{ id: "22222222", kind: "api_key" }]);
+    expect(await hasAnthropicKey()).toBe(true);
+  });
+
+  it("clears by removing the key account — and never the owner's own sign-in", async () => {
+    pool.readAccounts.mockResolvedValue([{ id: "11111111", kind: "login" }, { id: "22222222", kind: "api_key" }]);
     await clearAnthropicKey();
-    expect(configSet).toHaveBeenCalledWith("anthropic_api_key", undefined);
+    expect(pool.removeAccount).toHaveBeenCalledWith("22222222");
+    expect(pool.removeAccount).toHaveBeenCalledTimes(1);
+    pool.removeAccount.mockClear();
+    pool.readAccounts.mockResolvedValue([{ id: "11111111", kind: "login" }]);
+    await clearAnthropicKey();
+    expect(pool.removeAccount).not.toHaveBeenCalled();
   });
 });
 
 describe("the connection, as a whole", () => {
-  it("prefers the key over a login, because that is what the wrapper exports", async () => {
-    configGet.mockResolvedValue(KEY);
+  it("names the kind of the account a run would use now", async () => {
+    pool.poolHasCredential.mockResolvedValue({ any: true, hasKey: true, hasLogin: true, hasOAuth: false, first: "api_key" });
     fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "o@e.com" } }));
     expect(await getAnthropicConnection()).toEqual({ connected: true, hasKey: true, hasLogin: true, source: "key" });
+    pool.poolHasCredential.mockResolvedValue({ any: true, hasKey: false, hasLogin: false, hasOAuth: true, first: "oauth" });
+    expect((await getAnthropicConnection()).source).toBe("oauth");
   });
 
   it("is not connected when there is neither", async () => {
     expect(await getAnthropicConnection()).toEqual({ connected: false, hasKey: false, hasLogin: false, source: null });
+  });
+
+  it("still reports a sign-in that is plainly there when the pool cannot be read", async () => {
+    pool.poolHasCredential.mockRejectedValue(new Error("store unreadable"));
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "o@e.com" } }));
+    expect(await getAnthropicConnection()).toEqual({ connected: true, hasKey: false, hasLogin: true, source: "login" });
   });
 });
 

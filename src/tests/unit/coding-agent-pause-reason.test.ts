@@ -210,8 +210,16 @@ describe("reading a pause reason off a record", () => {
     // spent per-run media cap refuses the call while the run carries on —
     // none of them is a pause, so none of them belongs here. The three
     // ClawBox AI windows are written by the run's own settle when the
-    // harness's last word is the proxy refusing it (see below).
-    expect([...PAUSE_METERS]).toEqual(["images", "speech", "weekly", "burst", "embeddings"]);
+    // harness's last word is the proxy refusing it (see below). `anthropic`
+    // is written by the same settle when the CLI's last word is an Anthropic
+    // account's limit line and no other account in the pool can take the run
+    // over (TASK-902).
+    expect([...PAUSE_METERS]).toEqual(["images", "speech", "weekly", "burst", "embeddings", "anthropic"]);
+  });
+
+  it("round-trips a run waiting for every Anthropic account's limit to reset", () => {
+    const reason = { kind: "allowance", meter: "anthropic", resetsAt: "2026-09-18T19:50:00.000Z", message: "You've hit your session limit · resets 10:50pm" };
+    expect(parsePauseReason(reason)).toEqual(reason);
   });
 
   it("round-trips a spent ClawBox AI window", () => {
@@ -222,7 +230,8 @@ describe("reading a pause reason off a record", () => {
   });
 
   it("quotes a rolling window's instant with its date for the agent, and a daily one as the bare UTC clock", () => {
-    expect(ROLLING_PAUSE_METERS).toEqual(["weekly", "burst", "embeddings"]);
+    // An Anthropic reset is an instant in the owner's clock too ("resets 10:50pm").
+    expect(ROLLING_PAUSE_METERS).toEqual(["weekly", "burst", "embeddings", "anthropic"]);
     expect(isRollingPauseMeter("weekly")).toBe(true);
     expect(isRollingPauseMeter("images")).toBe(false);
     expect(pauseResetInstant("2026-09-19T14:05:00.000Z")).toBe("2026-09-19 14:05 UTC");

@@ -168,3 +168,28 @@ export interface SecretView {
 export function isValidSecretScope(scope: string): boolean {
   return scope === BOX_SCOPE || SECRET_SCOPE_RE.test(scope);
 }
+
+/**
+ * Scopes the DEVICE files its own credentials under, in the same encrypted
+ * file and under the same key as the owner's secrets — and nowhere else.
+ *
+ * The first is the Anthropic account pool (src/lib/anthropic-accounts.ts): an
+ * OAuth token or API key per account, which a coding run and the gateway spend
+ * but which is not one of the owner's run secrets. So a row in a device scope is
+ * DELIBERATELY outside every owner surface: `listSecrets` does not list it, a
+ * run's environment never receives it (`resolveSecretsForRun` reads the box and
+ * project scopes only), it does not count against `MAX_SECRETS`, and neither
+ * `isValidSecretScope` nor `requireSecretScope` accepts the name — so no owner
+ * route and no MCP verb can read, overwrite or delete one. `@`-prefixed for the
+ * reason `BOX_SCOPE` is: outside `SECRET_SCOPE_RE`, no project can be called it.
+ */
+export const DEVICE_SECRET_SCOPES = ["@anthropic-accounts"] as const;
+
+export type DeviceSecretScope = (typeof DEVICE_SECRET_SCOPES)[number];
+
+export function isDeviceSecretScope(scope: unknown): scope is DeviceSecretScope {
+  return typeof scope === "string" && (DEVICE_SECRET_SCOPES as readonly string[]).includes(scope);
+}
+
+/** How many rows one device scope may hold — a bound, not a budget. */
+export const MAX_DEVICE_SECRETS = 32;

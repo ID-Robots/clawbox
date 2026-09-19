@@ -91,7 +91,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Vercel status (`coding_vercel_status`) | with the deploy tools: coding agent on AND the Vercel integration on | same |
-| Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`) | yes | yes |
+| Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Improvement Program (`clawbox_incidents_list`, `clawbox_incident_report`) | yes | yes |
@@ -114,6 +114,9 @@ says how to hand work to the coding agent and then steer and check it — and
 - **Memory, on-box engines, allowance**: `memory_shard_status`,
   `local_ai_status`, `clawbox_ai_usage` — each answers "off", "not installed" or
   "not linked" as an answer, so call them rather than guess.
+- **"Why is my run waiting?" / before retrying an Anthropic run**:
+  `anthropic_accounts` — how many of the owner's Anthropic accounts can answer,
+  which one is in use, and when a limited one is back.
 
 | Tool | What it does |
 |---|---|
@@ -1073,6 +1076,24 @@ yet" — the card's own words; the owner sees them on clawbox.com), `unreachable
 point at. There is no tool that changes the plan or buys credits: both are
 billed, for the reason there is no plan switch (see "AI configuration").
 
+### Anthropic accounts (both editions)
+
+`anthropic_accounts`
+
+`GET /setup-api/anthropic/accounts` (TASK-902), the route behind Settings → AI
+providers → Anthropic accounts: every Anthropic account the owner connected for
+coding runs — Claude Pro/Max sign-ins, API keys, this box's own `claude`
+sign-in — in the order the box uses them, each with its label, kind, whether it
+can answer now or is at its usage limit and when it is back, and which one a run
+starting now would use; then `can_answer` ("1 of 2"), `all_limited` and
+`next_reset`. When every account is limited it adds `advice` — wait until the
+reset; runs that were cut off resume by themselves then — because that is the
+moment a queue must stop spending attempts: `coding_agent_run` answers the
+same situation with a CONFLICT naming the reset time. Never a credential and
+never an email. Read-only: accounts are added, ordered and re-authenticated by
+the owner in Settings, and the route's writes refuse this bearer 403
+`owner_only`.
+
 ### What the agent deliberately cannot do
 
 The audit behind TASK-899 found these route families with no tool, and each
@@ -1136,6 +1157,11 @@ You may NOT deploy this project to production: the owner has not allowed it. Off
 { "engines": [ { "id": "kokoro", "name": "Kokoro", "does": "speaks replies aloud", "installed": false, "state": "not-installed" }, … ],
   "voice": { "chosen": "auto", "speaking_with": "the ClawBox cloud voice" },
   "guidance": "Not installed here: Kokoro. The owner installs an engine with Install in Settings → Local AI …" }
+
+// anthropic_accounts {} while account #1 is at its session limit
+{ "can_answer": "1 of 2", "all_limited": false, "next_reset": "2026-09-18T19:50:00.000Z",
+  "accounts": [ { "priority": 1, "label": "Work Max", "kind": "Claude account", "status": "at its usage limit", "back_at": "2026-09-18T19:50:00.000Z" },
+                { "priority": 2, "label": "Personal Max", "kind": "Claude account", "status": "can answer", "in_use": true } ] }
 
 // clawbox_ai_usage {}
 { "plan": "Pro", "weekly_allowance": "40% used, 40 of 100 tokens, frees up at 2026-09-21 00:00 UTC",

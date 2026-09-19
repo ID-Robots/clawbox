@@ -217,7 +217,74 @@ const USAGE_UNAVAILABLE: Record<NonNullable<UsageBody["reason"]>, string> = {
     "clawbox.com answered with usage this ClawBox could not read. Tell the user they can see it in their account on clawbox.com.",
 };
 
+/** GET /setup-api/anthropic/accounts — the pool's state, never a credential (TASK-902). */
+interface AnthropicPoolBody {
+  accounts?: {
+    label?: string;
+    kind?: string;
+    status?: string;
+    limitedUntil?: number | null;
+    limitKind?: string | null;
+    priority?: number;
+    active?: boolean;
+  }[];
+  health?: { total?: number; healthy?: number; limited?: number; needsAttention?: number; allLimited?: boolean; nextResetAt?: number | null };
+}
+
+const ACCOUNT_KIND_NOUN: Record<string, string> = {
+  oauth: "Claude account",
+  api_key: "API key",
+  login: "Claude Code sign-in",
+};
+
+const ACCOUNT_STATUS_NOUN: Record<string, string> = {
+  ok: "can answer",
+  limited: "at its usage limit",
+  expired: "needs its sign-in renewed by the owner",
+  revoked: "refused by Anthropic; the owner must re-authenticate it",
+};
+
+function isoOrNull(at: unknown): string | null {
+  return typeof at === "number" && Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
+
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
+  reg.tool(
+    "anthropic_accounts",
+    "Read this box's Anthropic accounts — the Claude subscriptions and API keys the owner connected for coding runs: each one's label, whether it can answer now or is at its usage limit and until when, the order the box uses them in, and how many can answer. A coding run whose account hits its limit moves to the next account by itself; when every account is limited, runs wait and resume by themselves at the first reset. Read this before starting or retrying an Anthropic coding run, and when one is waiting: if none can answer, wait until the time it gives rather than retrying. It changes nothing: the owner adds and orders accounts in Settings → Providers.",
+    {},
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 3_000 },
+    async () => {
+      const body = await apiGet<AnthropicPoolBody>("/setup-api/anthropic/accounts", { timeoutMs: 15_000 });
+      const health = body.health ?? {};
+      const accounts = (body.accounts ?? []).map((a) => ({
+        priority: a.priority,
+        label: a.label,
+        kind: ACCOUNT_KIND_NOUN[a.kind ?? ""] ?? a.kind,
+        status: ACCOUNT_STATUS_NOUN[a.status ?? ""] ?? a.status,
+        ...(a.status === "limited" && isoOrNull(a.limitedUntil) ? { back_at: isoOrNull(a.limitedUntil) } : {}),
+        ...(a.active ? { in_use: true } : {}),
+      }));
+      const nextReset = isoOrNull(health.nextResetAt);
+      if (accounts.length === 0) {
+        return text("No Anthropic account is connected on this box. The owner can connect one in Settings → Providers; until then coding runs use ClawBox AI.");
+      }
+      return json({
+        can_answer: `${health.healthy ?? 0} of ${health.total ?? accounts.length}`,
+        all_limited: health.allLimited === true,
+        ...(nextReset ? { next_reset: nextReset } : {}),
+        accounts,
+        ...(health.allLimited
+          ? {
+            advice: nextReset
+              ? `Every account is at its usage limit. Wait until ${nextReset}: runs that were cut off resume by themselves then. Do not start or retry Anthropic runs before it.`
+              : "No account can answer and none comes back by itself: the owner has to renew or re-authenticate one in Settings → Providers.",
+          }
+          : {}),
+      });
+    },
+  );
+
   // Both editions: the allowance belongs to the box's ClawBox AI plan, which
   // either harness spends. READ ONLY for the reason there is no plan switch
   // (see the file header) — buying credits or changing the plan is billed.

@@ -63,8 +63,10 @@ import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store
 import { getOrCreateSecret } from "@/lib/auth";
 import {
   BOX_SCOPE,
+  isDeviceSecretScope,
   isReservedSecretName,
   isValidSecretScope,
+  MAX_DEVICE_SECRETS,
   MAX_SECRET_VALUE_CHARS,
   MAX_SECRETS,
   MIN_SECRET_VALUE_CHARS,
@@ -72,6 +74,7 @@ import {
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
   SecretStoreError,
+  type DeviceSecretScope,
   type SecretView,
 } from "@/lib/project-secrets-shape";
 
@@ -82,6 +85,8 @@ import {
 // for `fs`, `crypto` and the session secret.
 export {
   BOX_SCOPE,
+  DEVICE_SECRET_SCOPES,
+  isDeviceSecretScope,
   isReservedSecretName,
   isValidSecretScope,
   MAX_SECRET_VALUE_CHARS,
@@ -92,6 +97,7 @@ export {
   SECRET_SCOPE_RE,
   SECRETS_FILE_NAME,
   SecretStoreError,
+  type DeviceSecretScope,
   type SecretRefusal,
   type SecretView,
 } from "@/lib/project-secrets-shape";
@@ -285,7 +291,9 @@ function isStoredSecret(value: unknown): value is StoredSecret {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return typeof v.name === "string" && SECRET_NAME_RE.test(v.name)
-    && typeof v.scope === "string" && isValidSecretScope(v.scope)
+    // A device scope is one of ours too — dropping its rows here would have the
+    // next owner save write the Anthropic accounts out of the file.
+    && typeof v.scope === "string" && (isValidSecretScope(v.scope) || isDeviceSecretScope(v.scope))
     && typeof v.createdAt === "number" && typeof v.updatedAt === "number"
     && typeof v.inject === "boolean"
     && typeof v.iv === "string" && typeof v.tag === "string"
@@ -387,10 +395,15 @@ function sortViews(views: SecretView[]): SecretView[] {
   return views.sort((a, b) => (a.scope === b.scope ? a.name.localeCompare(b.name) : a.scope.localeCompare(b.scope)));
 }
 
+/** The owner's rows: everything but the device's own scopes (see DEVICE_SECRET_SCOPES). */
+function ownerEntries(entries: StoredSecret[]): StoredSecret[] {
+  return entries.filter((entry) => !isDeviceSecretScope(entry.scope));
+}
+
 /** Every entry, names and scopes only. Never a value — see the header. */
 export async function listSecrets(): Promise<SecretView[]> {
   const [entries, k] = await Promise.all([readStore(), storeKey()]);
-  return sortViews(entries.map((entry) => viewOf(entry, k)));
+  return sortViews(ownerEntries(entries).map((entry) => viewOf(entry, k)));
 }
 
 /** Where an entry sits in the list: one name in one scope, and nowhere twice. */
@@ -416,7 +429,7 @@ export async function setSecret(input: { name: unknown; value: unknown; scope?: 
     const entries = await readStore();
     const at = indexOf(entries, name, scope);
     const now = Date.now();
-    if (at < 0 && entries.length >= MAX_SECRETS) {
+    if (at < 0 && ownerEntries(entries).length >= MAX_SECRETS) {
       // Refused, never evicted: the list is what the owner believes a run can
       // reach, and a save that quietly dropped the oldest entry would take a
       // working deploy token away from a project nobody was looking at.
@@ -493,7 +506,7 @@ export async function deleteSecret(input: { name: unknown; scope?: unknown }): P
     if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
     entries.splice(at, 1);
     await writeStore(entries);
-    return sortViews(entries.map((e) => viewOf(e, k)));
+    return sortViews(ownerEntries(entries).map((e) => viewOf(e, k)));
   });
 }
 
@@ -676,4 +689,89 @@ export async function readSecretForProject(input: { name: string; project?: stri
       && (err.code === "invalid_name" || err.code === "reserved_name");
     return { found: false, reason: bad ? "missing" : "unavailable" };
   }
+}
+
+// ── the device's own rows ───────────────────────────────────────────────────
+//
+// A credential the BOX holds for itself — today the Anthropic account pool —
+// kept in this file, under this key and this discipline, and outside every
+// owner surface (see DEVICE_SECRET_SCOPES). The functions below are the only
+// way in or out, they take a device scope and nothing else, and none of them is
+// reachable from a route: the pool module calls them, and it answers labels and
+// states, never a value.
+
+function requireDeviceScope(scope: unknown): DeviceSecretScope {
+  if (!isDeviceSecretScope(scope)) {
+    throw new SecretStoreError("invalid_scope", "That is not a scope this ClawBox keeps its own credentials under.");
+  }
+  return scope;
+}
+
+/** A device row's name: the variable-name alphabet, reserved prefixes allowed — nothing here reaches an environment. */
+function requireDeviceName(name: unknown): string {
+  if (typeof name !== "string" || !SECRET_NAME_RE.test(name)) {
+    throw new SecretStoreError("invalid_name", "A device credential is named like an environment variable.");
+  }
+  return name;
+}
+
+/** Save (or replace) one device credential. */
+export async function setDeviceSecret(input: { scope: unknown; name: unknown; value: unknown }): Promise<void> {
+  const scope = requireDeviceScope(input.scope);
+  const name = requireDeviceName(input.name);
+  const value = requireSecretValue(input.value);
+  await serialised(async () => {
+    const k = await storeKey();
+    const entries = await readStore();
+    const at = indexOf(entries, name, scope);
+    if (at < 0 && entries.filter((entry) => entry.scope === scope).length >= MAX_DEVICE_SECRETS) {
+      throw new SecretStoreError("full", `This ClawBox keeps at most ${MAX_DEVICE_SECRETS} credentials of this kind.`);
+    }
+    const now = Date.now();
+    const sealed = seal(value, name, scope, k);
+    // Never injected, whatever an older row claimed: the tick is the owner's
+    // consent for a run's environment, and no run gets a device row.
+    const entry: StoredSecret = at < 0
+      ? { name, scope, createdAt: now, updatedAt: now, inject: false, ...sealed }
+      : { ...entries[at], updatedAt: now, inject: false, ...sealed };
+    if (at < 0) entries.push(entry);
+    else entries[at] = entry;
+    await writeStore(entries);
+  });
+}
+
+/** One device credential, with the same three ways of not having it as `readSecretForProject`. */
+export async function readDeviceSecret(input: { scope: unknown; name: unknown }): Promise<SecretLookup> {
+  try {
+    const scope = requireDeviceScope(input.scope);
+    const name = requireDeviceName(input.name);
+    const [entries, k] = await Promise.all([readStore(), storeKey()]);
+    const at = indexOf(entries, name, scope);
+    if (at < 0) return { found: false, reason: "missing" };
+    const value = open(entries[at], k);
+    return value === null ? { found: false, reason: "unreadable" } : { found: true, value };
+  } catch (err) {
+    const bad = err instanceof SecretStoreError && (err.code === "invalid_name" || err.code === "invalid_scope");
+    return { found: false, reason: bad ? "missing" : "unavailable" };
+  }
+}
+
+/** Forget one device credential. Answers whether there was one. */
+export async function deleteDeviceSecret(input: { scope: unknown; name: unknown }): Promise<boolean> {
+  const scope = requireDeviceScope(input.scope);
+  const name = requireDeviceName(input.name);
+  return serialised(async () => {
+    const entries = await readStore();
+    const at = indexOf(entries, name, scope);
+    if (at < 0) return false;
+    entries.splice(at, 1);
+    await writeStore(entries);
+    return true;
+  });
+}
+
+/** The names filed under one device scope — for a sweep of rows nothing refers to any more. */
+export async function listDeviceSecretNames(scope: unknown): Promise<string[]> {
+  const key = requireDeviceScope(scope);
+  return (await readStore()).filter((entry) => entry.scope === key).map((entry) => entry.name);
 }

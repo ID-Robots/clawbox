@@ -35,7 +35,7 @@
  * screen reader still heard in English (UI sweep 2026-09-07, shell-7).
  */
 export const NOTIFY_ACTION_TARGETS = {
-  settings: { email: "settings.email" },
+  settings: { email: "settings.email", ai: "settings.providers" },
 } as const;
 
 type NotifyActionApp = keyof typeof NOTIFY_ACTION_TARGETS;
@@ -53,8 +53,11 @@ export type NotifyAction = {
   [App in NotifyActionApp]: { open: App; section: keyof (typeof NOTIFY_ACTION_TARGETS)[App] };
 }[NotifyActionApp];
 
-/** The email queue's destination — the one producer that has a use for this today. */
+/** The email queue's destination. */
 export const OPEN_EMAIL_SETTINGS: NotifyAction = { open: "settings", section: "email" };
+
+/** Settings → Providers, where the Anthropic accounts are — for the account-limit notices (TASK-902). */
+export const OPEN_AI_PROVIDERS_SETTINGS: NotifyAction = { open: "settings", section: "ai" };
 
 /**
  * The allowlisted pair this value names, or null.
