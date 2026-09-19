@@ -206,13 +206,25 @@ describe("changing the pool", () => {
     expect(handoff.clearHandoffTokens).toHaveBeenCalledTimes(1);
   });
 
-  it("answers a sign-in for a DIFFERENT Claude account with 409, stores nothing, and keeps the handoff", async () => {
+  it("answers a sign-in for a DIFFERENT Claude account with 409, stores nothing, and drops that account's handoff", async () => {
     const { AnthropicAccountError } = await import("@/lib/anthropic-accounts");
-    pool.replaceCredential.mockRejectedValue(new AnthropicAccountError("wrong_account", "That sign-in is max2@example.com, not work@example.com."));
-    const res = await post({ action: "reauth_oauth", id: "aaaaaaaa" });
-    expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe("wrong_account");
+    for (const code of ["wrong_account", "duplicate"] as const) {
+      handoff.clearHandoffTokens.mockClear();
+      pool.replaceCredential.mockRejectedValueOnce(new AnthropicAccountError(code, "That sign-in is max2@example.com, not work@example.com."));
+      const res = await post({ action: "reauth_oauth", id: "aaaaaaaa" });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe(code);
+      // It can never renew this row; left behind it would only hold a live token.
+      expect(handoff.clearHandoffTokens).toHaveBeenCalledTimes(1);
+    }
     expect(pool.addOAuthAccount).not.toHaveBeenCalled();
+  });
+
+  it("keeps the handoff for a retry when a re-authentication could not be stored", async () => {
+    const { AnthropicAccountError } = await import("@/lib/anthropic-accounts");
+    pool.replaceCredential.mockRejectedValueOnce(new AnthropicAccountError("store_unavailable", "The store would not write."));
+    const res = await post({ action: "reauth_oauth", id: "aaaaaaaa" });
+    expect(res.status).toBe(503);
     expect(handoff.clearHandoffTokens).not.toHaveBeenCalled();
   });
 

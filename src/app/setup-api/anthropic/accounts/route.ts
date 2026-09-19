@@ -12,6 +12,7 @@ import {
   renameAccount,
   reorderAccounts,
   replaceCredential,
+  type AnthropicAccount,
   type OAuthTokens,
 } from "@/lib/anthropic-accounts";
 import { pickAccount } from "@/lib/anthropic-limit";
@@ -181,8 +182,18 @@ export async function POST(request: Request) {
         if (taken instanceof NextResponse) return taken;
         // The pool refuses a sign-in that is a DIFFERENT Claude account from the
         // one named here (`wrong_account`, `duplicate`): the id says which row,
-        // only the sign-in says whose tokens these are. Kept for a retry, as above.
-        const account = await replaceCredential(body.id, { kind: "oauth", tokens: taken.tokens, email: taken.email });
+        // only the sign-in says whose tokens these are. That handoff can never
+        // renew this row, and any other use of it starts a new sign-in, which
+        // clears the file. So it is consumed like any handoff that cannot be
+        // used, not left holding the refused account's live token for its TTL.
+        // Other failures keep it for a retry, as above.
+        let account: AnthropicAccount;
+        try {
+          account = await replaceCredential(body.id, { kind: "oauth", tokens: taken.tokens, email: taken.email });
+        } catch (err) {
+          if (err instanceof AnthropicAccountError && (err.code === "wrong_account" || err.code === "duplicate")) await clearHandoffTokens();
+          throw err;
+        }
         await clearHandoffTokens();
         extra.accountId = account.id;
         console.error(`[anthropic-accounts] the owner re-authenticated a Claude account (${account.id})`);
