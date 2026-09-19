@@ -532,6 +532,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.pausedAllowanceFreesUp": "It frees up at {time}.",
   "codingAgent.pausedAllowanceResets": "It resets at {time} UTC.",
   "codingAgent.pausedAllowanceResetsUnknown": "Resume it once the allowance is back.",
+  // Every Anthropic account in the box's pool is at its usage limit (TASK-902).
+  // Unlike the meters above nobody has to press Resume: the box carries the run
+  // on by itself at the first reset, and the second sentence says so.
+  "codingAgent.pausedAllowanceAnthropic": "Waiting: every Anthropic account on this box is at its usage limit.",
+  "codingAgent.pausedAnthropicResumesAt": "It carries on by itself at {time}.",
+  "codingAgent.pausedAnthropicResumes": "It carries on by itself as soon as one account is back.",
   "codingAgent.prOpening": "Opening PR",
   "codingAgent.prWaiting": "Checks {done}/{total}",
   "codingAgent.prMerged": "Merged",
@@ -749,6 +755,13 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "That secret is no longer there.",
   "codingAgent.stepSecretsInjected": "Secrets in the environment: {names}",
   "codingAgent.stepSecretsUnreadable": "Could not read these secrets: {names}",
+  // Which of the owner's Anthropic accounts a run is on, and the moves between
+  // them when one hits its usage limit (TASK-902). {label}, {from} and {to} are
+  // the owner's own account names; {time} is the reset in the box's clock.
+  "codingAgent.stepAnthropicAccount": "On Anthropic account \"{label}\"",
+  "codingAgent.stepAccountSwitched": "Anthropic account \"{from}\" hit its usage limit (back at {time}); carrying on with \"{to}\" in the same session",
+  "codingAgent.stepAccountsWaiting": "Every Anthropic account is at its usage limit; waiting for the reset at {time}",
+  "codingAgent.stepResumedAfterLimit": "The usage limit reset; carrying on where it left off",
   "codingAgent.secretsNameLabel": "Variable name",
   "codingAgent.secretsValueLabel": "Value",
   "codingAgent.secretsRefusedShort": "A value must be at least {n} characters, so this box can keep it out of a run's output.",

@@ -1407,4 +1407,68 @@ export const nl: Record<string, string> = {
   "settings.clawaiPitch.localBody":
     "ClawBox kan in plaats daarvan zijn eigen modellen op het apparaat draaien, zodat er niets vanaf gaat. Ze zijn kleiner en trager dan die in de cloud, en je kiest en installeert ze zelf.",
   "settings.clawaiPitch.localAction": "Lokale AI instellen",
+
+  // === Instellingen → Aanbieders → Anthropic-accounts (TASK-902) ===
+  // Meerdere Anthropic-accounts in de volgorde van de eigenaar; een run gaat
+  // vanzelf over op het volgende wanneer er een zijn gebruikslimiet bereikt.
+  "settings.anthropicAccounts.title": "Anthropic-accounts",
+  "settings.anthropicAccounts.intro":
+    "Programmeerruns gebruiken het eerste account in deze lijst dat kan antwoorden. Bereikt dat zijn gebruikslimiet, dan gaat de run over op het volgende account en gaat verder waar hij was; het eerste account wordt weer gebruikt zodra zijn limiet is gereset.",
+  "settings.anthropicAccounts.summaryReady": "{ready} van {total} klaar",
+  "settings.anthropicAccounts.summaryAllLimited": "Alle beperkt · terug om {time}",
+  "settings.anthropicAccounts.summaryNone": "Niet verbonden",
+  "settings.anthropicAccounts.loading": "Accounts laden…",
+  "settings.anthropicAccounts.loadFailed": "De accounts konden niet worden geladen.",
+  "settings.anthropicAccounts.empty": "Er is nog geen Anthropic-account verbonden. Programmeerruns gebruiken ClawBox AI tot je er een verbindt.",
+  "settings.anthropicAccounts.kindOauth": "Claude-account",
+  "settings.anthropicAccounts.kindApiKey": "API-sleutel",
+  "settings.anthropicAccounts.kindLogin": "Claude Code-aanmelding",
+  "settings.anthropicAccounts.statusInUse": "In gebruik",
+  "settings.anthropicAccounts.statusReady": "Klaar",
+  "settings.anthropicAccounts.statusLimited": "Beperkt tot {time}",
+  "settings.anthropicAccounts.statusExpired": "Aanmelding verlopen",
+  "settings.anthropicAccounts.statusRevoked": "Opnieuw verifiëren nodig",
+  "settings.anthropicAccounts.moveUp": "Omhoog",
+  "settings.anthropicAccounts.moveDown": "Omlaag",
+  "settings.anthropicAccounts.rename": "Naam wijzigen",
+  "settings.anthropicAccounts.renameLabel": "Accountnaam",
+  "settings.anthropicAccounts.renameSave": "Naam opslaan",
+  "settings.anthropicAccounts.reauth": "Opnieuw verifiëren",
+  "settings.anthropicAccounts.remove": "Verwijderen",
+  "settings.anthropicAccounts.removeConfirm": "Tik nogmaals om te verwijderen",
+  "settings.anthropicAccounts.connectFirst": "Een account verbinden",
+  "settings.anthropicAccounts.connectAnother": "Nog een account verbinden",
+  "settings.anthropicAccounts.connectTitle": "Een Claude-account verbinden",
+  "settings.anthropicAccounts.keyTitle": "Een Anthropic API-sleutel toevoegen",
+  "settings.anthropicAccounts.reauthTitle": "{label} opnieuw verifiëren",
+  "settings.anthropicAccounts.labelField": "Naam (optioneel)",
+  "settings.anthropicAccounts.labelPlaceholder": "Geef het een naam, bijv. Werk Max",
+  "settings.anthropicAccounts.stepSignIn": "1. Meld je aan met het Claude-account dat je wilt toevoegen. Anthropic toont je daarna een code.",
+  "settings.anthropicAccounts.openSignIn": "Aanmelden met Claude",
+  "settings.anthropicAccounts.stepPaste": "2. Plak die code hier.",
+  "settings.anthropicAccounts.codePlaceholder": "Plak de code",
+  "settings.anthropicAccounts.connect": "Verbinden",
+  "settings.anthropicAccounts.connecting": "Bezig met verbinden…",
+  "settings.anthropicAccounts.useApiKey": "Liever een API-sleutel gebruiken",
+  "settings.anthropicAccounts.useSignIn": "Liever aanmelden met een Claude-account",
+  "settings.anthropicAccounts.apiKeyLabel": "Anthropic API-sleutel",
+  "settings.anthropicAccounts.apiKeyPlaceholder": "sk-ant-…",
+  "settings.anthropicAccounts.saveKey": "Sleutel opslaan",
+  "settings.anthropicAccounts.savedUnchecked":
+    "Opgeslagen. Anthropic was niet bereikbaar om de sleutel te controleren, dus de eerste run die hem gebruikt doet dat.",
+  "settings.anthropicAccounts.addLogin": "De Claude Code-aanmelding van deze box toevoegen",
+  "settings.anthropicAccounts.loginNote":
+    "Wordt vernieuwd met `claude` in de Terminal-app. Hier verwijderen haalt hem alleen van deze lijst.",
+  "settings.anthropicAccounts.cancel": "Annuleren",
+  "settings.anthropicAccounts.actionFailed": "De accounts konden niet worden gewijzigd.",
+
+  // Een run die wacht omdat elk Anthropic-account beperkt is, en de stappen op
+  // de tijdlijn voor het wisselen van account (TASK-902).
+  "codingAgent.pausedAllowanceAnthropic": "Wacht: elk Anthropic-account op deze box heeft zijn gebruikslimiet bereikt.",
+  "codingAgent.pausedAnthropicResumesAt": "De run gaat om {time} vanzelf verder.",
+  "codingAgent.pausedAnthropicResumes": "De run gaat vanzelf verder zodra er een account terug is.",
+  "codingAgent.stepAnthropicAccount": "Op Anthropic-account “{label}”",
+  "codingAgent.stepAccountSwitched": "Anthropic-account “{from}” heeft zijn gebruikslimiet bereikt (terug om {time}); verder met “{to}” in dezelfde sessie",
+  "codingAgent.stepAccountsWaiting": "Elk Anthropic-account heeft zijn gebruikslimiet bereikt; wacht op de reset om {time}",
+  "codingAgent.stepResumedAfterLimit": "De gebruikslimiet is gereset; de run gaat verder waar hij gebleven was",
 };

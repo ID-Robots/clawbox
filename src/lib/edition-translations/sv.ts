@@ -1403,4 +1403,68 @@ export const sv: Record<string, string> = {
   "settings.clawaiPitch.localBody":
     "ClawBox kan i stället köra egna modeller på enheten, så att ingenting lämnar den. De är mindre och långsammare än de i molnet, och du väljer och installerar dem själv.",
   "settings.clawaiPitch.localAction": "Ställ in lokal AI",
+
+  // === Inställningar → Leverantörer → Anthropic-konton (TASK-902) ===
+  // Flera Anthropic-konton i ägarens ordning; en körning går själv över till
+  // nästa när ett konto når sin användningsgräns.
+  "settings.anthropicAccounts.title": "Anthropic-konton",
+  "settings.anthropicAccounts.intro":
+    "Kodningskörningar använder det första kontot i listan som kan svara. När det når sin användningsgräns går körningen över till nästa konto och fortsätter där den var; det första kontot används igen så snart dess gräns har återställts.",
+  "settings.anthropicAccounts.summaryReady": "{ready} av {total} redo",
+  "settings.anthropicAccounts.summaryAllLimited": "Alla begränsade · tillbaka {time}",
+  "settings.anthropicAccounts.summaryNone": "Inte anslutet",
+  "settings.anthropicAccounts.loading": "Läser in kontona…",
+  "settings.anthropicAccounts.loadFailed": "Kontona kunde inte läsas in.",
+  "settings.anthropicAccounts.empty": "Inget Anthropic-konto är anslutet än. Kodningskörningar använder ClawBox AI tills du ansluter ett.",
+  "settings.anthropicAccounts.kindOauth": "Claude-konto",
+  "settings.anthropicAccounts.kindApiKey": "API-nyckel",
+  "settings.anthropicAccounts.kindLogin": "Claude Code-inloggning",
+  "settings.anthropicAccounts.statusInUse": "Används",
+  "settings.anthropicAccounts.statusReady": "Redo",
+  "settings.anthropicAccounts.statusLimited": "Begränsat till {time}",
+  "settings.anthropicAccounts.statusExpired": "Inloggningen har gått ut",
+  "settings.anthropicAccounts.statusRevoked": "Måste autentiseras igen",
+  "settings.anthropicAccounts.moveUp": "Flytta upp",
+  "settings.anthropicAccounts.moveDown": "Flytta ned",
+  "settings.anthropicAccounts.rename": "Byt namn",
+  "settings.anthropicAccounts.renameLabel": "Kontonamn",
+  "settings.anthropicAccounts.renameSave": "Spara namn",
+  "settings.anthropicAccounts.reauth": "Autentisera igen",
+  "settings.anthropicAccounts.remove": "Ta bort",
+  "settings.anthropicAccounts.removeConfirm": "Tryck igen för att ta bort",
+  "settings.anthropicAccounts.connectFirst": "Anslut ett konto",
+  "settings.anthropicAccounts.connectAnother": "Anslut ett konto till",
+  "settings.anthropicAccounts.connectTitle": "Anslut ett Claude-konto",
+  "settings.anthropicAccounts.keyTitle": "Lägg till en Anthropic API-nyckel",
+  "settings.anthropicAccounts.reauthTitle": "Autentisera {label} igen",
+  "settings.anthropicAccounts.labelField": "Namn (valfritt)",
+  "settings.anthropicAccounts.labelPlaceholder": "Ge det ett namn, t.ex. Jobb Max",
+  "settings.anthropicAccounts.stepSignIn": "1. Logga in med det Claude-konto du vill lägga till. Anthropic visar dig sedan en kod.",
+  "settings.anthropicAccounts.openSignIn": "Logga in med Claude",
+  "settings.anthropicAccounts.stepPaste": "2. Klistra in koden här.",
+  "settings.anthropicAccounts.codePlaceholder": "Klistra in koden",
+  "settings.anthropicAccounts.connect": "Anslut",
+  "settings.anthropicAccounts.connecting": "Ansluter…",
+  "settings.anthropicAccounts.useApiKey": "Använd en API-nyckel i stället",
+  "settings.anthropicAccounts.useSignIn": "Logga in med ett Claude-konto i stället",
+  "settings.anthropicAccounts.apiKeyLabel": "Anthropic API-nyckel",
+  "settings.anthropicAccounts.apiKeyPlaceholder": "sk-ant-…",
+  "settings.anthropicAccounts.saveKey": "Spara nyckel",
+  "settings.anthropicAccounts.savedUnchecked":
+    "Sparad. Anthropic gick inte att nå för att kontrollera nyckeln, så den första körningen som använder den gör det.",
+  "settings.anthropicAccounts.addLogin": "Lägg till den här boxens Claude Code-inloggning",
+  "settings.anthropicAccounts.loginNote":
+    "Förnyas med `claude` i Terminal-appen. Att ta bort den här tar bara bort den från listan.",
+  "settings.anthropicAccounts.cancel": "Avbryt",
+  "settings.anthropicAccounts.actionFailed": "Kontona kunde inte ändras.",
+
+  // En körning som väntar för att alla Anthropic-konton är begränsade, och
+  // tidslinjens steg när kontot byts (TASK-902).
+  "codingAgent.pausedAllowanceAnthropic": "Väntar: alla Anthropic-konton på den här boxen har nått sin användningsgräns.",
+  "codingAgent.pausedAnthropicResumesAt": "Den fortsätter av sig själv {time}.",
+  "codingAgent.pausedAnthropicResumes": "Den fortsätter av sig själv så snart ett konto är tillbaka.",
+  "codingAgent.stepAnthropicAccount": "På Anthropic-kontot ”{label}”",
+  "codingAgent.stepAccountSwitched": "Anthropic-kontot ”{from}” nådde sin användningsgräns (tillbaka kl. {time}); fortsätter med ”{to}” i samma session",
+  "codingAgent.stepAccountsWaiting": "Alla Anthropic-konton har nått sin användningsgräns; väntar på återställningen kl. {time}",
+  "codingAgent.stepResumedAfterLimit": "Användningsgränsen har återställts; fortsätter där den slutade",
 };

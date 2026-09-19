@@ -1393,4 +1393,68 @@ export const bg: Record<string, string> = {
   "settings.clawaiPitch.localBody":
     "Вместо това ClawBox може да пуска собствени модели на устройството, така че нищо не го напуска. Те са по-малки и по-бавни от облачните, а вие сами ги избирате и инсталирате.",
   "settings.clawaiPitch.localAction": "Настройте локален AI",
+
+  // === Настройки → Доставчици → Акаунти в Anthropic (TASK-902) ===
+  // Няколко акаунта в Anthropic в реда на собственика; изпълнението само минава
+  // към следващия, когато някой достигне лимита си за използване.
+  "settings.anthropicAccounts.title": "Акаунти в Anthropic",
+  "settings.anthropicAccounts.intro":
+    "Изпълненията по програмиране използват първия акаунт в този списък, който може да отговаря. Когато той достигне лимита си за използване, изпълнението преминава към следващия акаунт и продължава оттам, докъдето е стигнало; първият акаунт се използва отново веднага щом лимитът му се нулира.",
+  "settings.anthropicAccounts.summaryReady": "{ready} от {total} готови",
+  "settings.anthropicAccounts.summaryAllLimited": "Всички са ограничени · обратно в {time}",
+  "settings.anthropicAccounts.summaryNone": "Не е свързан",
+  "settings.anthropicAccounts.loading": "Акаунтите се зареждат…",
+  "settings.anthropicAccounts.loadFailed": "Акаунтите не можаха да бъдат заредени.",
+  "settings.anthropicAccounts.empty": "Все още няма свързан акаунт в Anthropic. Изпълненията по програмиране използват ClawBox AI, докато не свържете такъв.",
+  "settings.anthropicAccounts.kindOauth": "Акаунт в Claude",
+  "settings.anthropicAccounts.kindApiKey": "API ключ",
+  "settings.anthropicAccounts.kindLogin": "Вход в Claude Code",
+  "settings.anthropicAccounts.statusInUse": "Използва се",
+  "settings.anthropicAccounts.statusReady": "Готов",
+  "settings.anthropicAccounts.statusLimited": "Ограничен до {time}",
+  "settings.anthropicAccounts.statusExpired": "Входът е изтекъл",
+  "settings.anthropicAccounts.statusRevoked": "Нужно е повторно удостоверяване",
+  "settings.anthropicAccounts.moveUp": "Нагоре",
+  "settings.anthropicAccounts.moveDown": "Надолу",
+  "settings.anthropicAccounts.rename": "Преименуване",
+  "settings.anthropicAccounts.renameLabel": "Име на акаунта",
+  "settings.anthropicAccounts.renameSave": "Запазване на името",
+  "settings.anthropicAccounts.reauth": "Повторно удостоверяване",
+  "settings.anthropicAccounts.remove": "Премахване",
+  "settings.anthropicAccounts.removeConfirm": "Докоснете отново, за да премахнете",
+  "settings.anthropicAccounts.connectFirst": "Свържете акаунт",
+  "settings.anthropicAccounts.connectAnother": "Свържете още един акаунт",
+  "settings.anthropicAccounts.connectTitle": "Свързване на акаунт в Claude",
+  "settings.anthropicAccounts.keyTitle": "Добавяне на API ключ за Anthropic",
+  "settings.anthropicAccounts.reauthTitle": "Повторно удостоверяване на {label}",
+  "settings.anthropicAccounts.labelField": "Име (по избор)",
+  "settings.anthropicAccounts.labelPlaceholder": "Дайте му име, напр. Работен Max",
+  "settings.anthropicAccounts.stepSignIn": "1. Влезте с акаунта в Claude, който искате да добавите. След това Anthropic ще Ви покаже код.",
+  "settings.anthropicAccounts.openSignIn": "Вход с Claude",
+  "settings.anthropicAccounts.stepPaste": "2. Поставете този код тук.",
+  "settings.anthropicAccounts.codePlaceholder": "Поставете кода",
+  "settings.anthropicAccounts.connect": "Свързване",
+  "settings.anthropicAccounts.connecting": "Свързва се…",
+  "settings.anthropicAccounts.useApiKey": "Използване на API ключ вместо това",
+  "settings.anthropicAccounts.useSignIn": "Вход с акаунт в Claude вместо това",
+  "settings.anthropicAccounts.apiKeyLabel": "API ключ за Anthropic",
+  "settings.anthropicAccounts.apiKeyPlaceholder": "sk-ant-…",
+  "settings.anthropicAccounts.saveKey": "Запазване на ключа",
+  "settings.anthropicAccounts.savedUnchecked":
+    "Запазен. Не успяхме да се свържем с Anthropic, за да проверим ключа, така че това ще направи първото изпълнение, което го използва.",
+  "settings.anthropicAccounts.addLogin": "Добавяне на входа в Claude Code на тази кутия",
+  "settings.anthropicAccounts.loginNote":
+    "Подновява се с `claude` в Терминала. Премахването тук само го маха от този списък.",
+  "settings.anthropicAccounts.cancel": "Отказ",
+  "settings.anthropicAccounts.actionFailed": "Акаунтите не можаха да бъдат променени.",
+
+  // Изпълнение, което чака, защото всеки акаунт в Anthropic е ограничен, и
+  // стъпките във времевата линия при смяна на акаунта (TASK-902).
+  "codingAgent.pausedAllowanceAnthropic": "В изчакване: всеки акаунт в Anthropic на тази кутия е достигнал лимита си за използване.",
+  "codingAgent.pausedAnthropicResumesAt": "Изпълнението продължава само в {time}.",
+  "codingAgent.pausedAnthropicResumes": "Изпълнението продължава само, щом някой акаунт се върне.",
+  "codingAgent.stepAnthropicAccount": "С акаунт в Anthropic „{label}“",
+  "codingAgent.stepAccountSwitched": "Акаунтът в Anthropic „{from}“ достигна лимита си за използване (обратно в {time}); продължава с „{to}“ в същата сесия",
+  "codingAgent.stepAccountsWaiting": "Всеки акаунт в Anthropic е достигнал лимита си за използване; изчаква нулирането в {time}",
+  "codingAgent.stepResumedAfterLimit": "Лимитът за използване се нулира; продължава оттам, докъдето беше стигнало",
 };

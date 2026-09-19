@@ -1406,4 +1406,68 @@ export const de: Record<string, string> = {
   "settings.clawaiPitch.localBody":
     "ClawBox kann stattdessen eigene Modelle auf dem Gerät ausführen, sodass nichts es verlässt. Sie sind kleiner und langsamer als die in der Cloud, und Sie wählen und installieren sie selbst.",
   "settings.clawaiPitch.localAction": "Lokale KI einrichten",
+
+  // === Einstellungen → Anbieter → Anthropic-Konten (TASK-902) ===
+  // Mehrere Anthropic-Konten in der Reihenfolge des Besitzers; ein Lauf wechselt
+  // von selbst zum nächsten, wenn eines sein Nutzungslimit erreicht.
+  "settings.anthropicAccounts.title": "Anthropic-Konten",
+  "settings.anthropicAccounts.intro":
+    "Läufe des Coding-Agenten verwenden das erste Konto dieser Liste, das antworten kann. Erreicht es sein Nutzungslimit, wechselt der Lauf zum nächsten Konto und macht dort weiter, wo er war; das erste Konto wird wieder verwendet, sobald sein Limit zurückgesetzt ist.",
+  "settings.anthropicAccounts.summaryReady": "{ready} von {total} bereit",
+  "settings.anthropicAccounts.summaryAllLimited": "Alle limitiert · zurück um {time}",
+  "settings.anthropicAccounts.summaryNone": "Nicht verbunden",
+  "settings.anthropicAccounts.loading": "Konten werden geladen…",
+  "settings.anthropicAccounts.loadFailed": "Die Konten konnten nicht geladen werden.",
+  "settings.anthropicAccounts.empty": "Es ist noch kein Anthropic-Konto verbunden. Läufe verwenden ClawBox AI, bis Sie eines verbinden.",
+  "settings.anthropicAccounts.kindOauth": "Claude-Konto",
+  "settings.anthropicAccounts.kindApiKey": "API-Schlüssel",
+  "settings.anthropicAccounts.kindLogin": "Claude-Code-Anmeldung",
+  "settings.anthropicAccounts.statusInUse": "In Verwendung",
+  "settings.anthropicAccounts.statusReady": "Bereit",
+  "settings.anthropicAccounts.statusLimited": "Limitiert bis {time}",
+  "settings.anthropicAccounts.statusExpired": "Anmeldung abgelaufen",
+  "settings.anthropicAccounts.statusRevoked": "Erneute Anmeldung nötig",
+  "settings.anthropicAccounts.moveUp": "Nach oben",
+  "settings.anthropicAccounts.moveDown": "Nach unten",
+  "settings.anthropicAccounts.rename": "Umbenennen",
+  "settings.anthropicAccounts.renameLabel": "Kontoname",
+  "settings.anthropicAccounts.renameSave": "Namen speichern",
+  "settings.anthropicAccounts.reauth": "Erneut anmelden",
+  "settings.anthropicAccounts.remove": "Entfernen",
+  "settings.anthropicAccounts.removeConfirm": "Zum Entfernen erneut tippen",
+  "settings.anthropicAccounts.connectFirst": "Konto verbinden",
+  "settings.anthropicAccounts.connectAnother": "Weiteres Konto verbinden",
+  "settings.anthropicAccounts.connectTitle": "Claude-Konto verbinden",
+  "settings.anthropicAccounts.keyTitle": "Anthropic-API-Schlüssel hinzufügen",
+  "settings.anthropicAccounts.reauthTitle": "{label} erneut anmelden",
+  "settings.anthropicAccounts.labelField": "Bezeichnung (optional)",
+  "settings.anthropicAccounts.labelPlaceholder": "Benennen Sie es, z. B. Arbeit Max",
+  "settings.anthropicAccounts.stepSignIn": "1. Melden Sie sich mit dem Claude-Konto an, das Sie hinzufügen möchten. Anthropic zeigt Ihnen danach einen Code.",
+  "settings.anthropicAccounts.openSignIn": "Mit Claude anmelden",
+  "settings.anthropicAccounts.stepPaste": "2. Fügen Sie diesen Code hier ein.",
+  "settings.anthropicAccounts.codePlaceholder": "Code einfügen",
+  "settings.anthropicAccounts.connect": "Verbinden",
+  "settings.anthropicAccounts.connecting": "Wird verbunden…",
+  "settings.anthropicAccounts.useApiKey": "Stattdessen einen API-Schlüssel verwenden",
+  "settings.anthropicAccounts.useSignIn": "Stattdessen mit einem Claude-Konto anmelden",
+  "settings.anthropicAccounts.apiKeyLabel": "Anthropic-API-Schlüssel",
+  "settings.anthropicAccounts.apiKeyPlaceholder": "sk-ant-…",
+  "settings.anthropicAccounts.saveKey": "Schlüssel speichern",
+  "settings.anthropicAccounts.savedUnchecked":
+    "Gespeichert. Anthropic war nicht erreichbar, um den Schlüssel zu prüfen — das übernimmt der erste Lauf, der ihn verwendet.",
+  "settings.anthropicAccounts.addLogin": "Die Claude-Code-Anmeldung dieser Box hinzufügen",
+  "settings.anthropicAccounts.loginNote":
+    "Wird mit `claude` in der Terminal-App erneuert. Wenn Sie sie hier entfernen, verschwindet sie nur aus dieser Liste.",
+  "settings.anthropicAccounts.cancel": "Abbrechen",
+  "settings.anthropicAccounts.actionFailed": "Die Konten konnten nicht geändert werden.",
+
+  // Ein Lauf, der wartet, weil jedes Anthropic-Konto limitiert ist, und die
+  // Schritte der Zeitleiste für den Kontowechsel (TASK-902).
+  "codingAgent.pausedAllowanceAnthropic": "Wartet: Jedes Anthropic-Konto dieser Box hat sein Nutzungslimit erreicht.",
+  "codingAgent.pausedAnthropicResumesAt": "Der Lauf geht um {time} von selbst weiter.",
+  "codingAgent.pausedAnthropicResumes": "Der Lauf geht von selbst weiter, sobald ein Konto wieder verfügbar ist.",
+  "codingAgent.stepAnthropicAccount": "Auf dem Anthropic-Konto „{label}“",
+  "codingAgent.stepAccountSwitched": "Das Anthropic-Konto „{from}“ hat sein Nutzungslimit erreicht (zurück um {time}); weiter mit „{to}“ in derselben Sitzung",
+  "codingAgent.stepAccountsWaiting": "Jedes Anthropic-Konto hat sein Nutzungslimit erreicht; wartet auf das Zurücksetzen um {time}",
+  "codingAgent.stepResumedAfterLimit": "Das Nutzungslimit ist zurückgesetzt; der Lauf macht weiter, wo er aufgehört hat",
 };
