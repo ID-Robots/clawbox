@@ -18,6 +18,8 @@ import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { gatewayFrameError, isGatewayStartingRefusal } from '@/lib/chat-gateway-starting'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
+import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
+import { ChatProgressCard } from '@/components/ChatProgressCard'
 import { AskUserPrompt } from '@/lib/chat-ask-user'
 import {
   loadPendingQuestions,
@@ -2124,6 +2126,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // would let a Hermes box open a gateway socket after a Settings event.
   const hasLiveConnectionRef = useRef(true)
   useEffect(() => { hasLiveConnectionRef.current = caps.hasLiveConnection }, [caps])
+  // The agent's "Task progress" card for the conversation on screen — the
+  // gateway's `progressCard.get`, re-read on (re)connect, on a tab switch and
+  // on every `progressCard.changed` for this session (TASK-896). Only the
+  // gateway keeps one, so a box with no live connection never asks.
+  const { card: progressCard, onChanged: onProgressCardChanged } = useGatewayProgressCard({
+    request: wsRequest,
+    sessionKey: activeTabKey ?? mainSessionKey,
+    enabled: caps.hasLiveConnection && status === 'connected',
+  })
+  // The socket handler is built once per connection; it reaches the hook through a ref.
+  const progressCardChangedRef = useRef(onProgressCardChanged)
+  useEffect(() => { progressCardChangedRef.current = onProgressCardChanged }, [onProgressCardChanged])
   // WHO makes a reply's audio on this box, through a ref for the same reason:
   // a reply lands in a socket callback, not in a render. See chatOwesAClip.
   const spokenReplyTriggerRef = useRef<typeof caps.spokenReplyTrigger>(null)
@@ -2600,6 +2614,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         if (eventName === 'connect.challenge') {
           sendConnect(data.payload as Record<string, unknown> | undefined)
+          return
+        }
+
+        // The agent rewrote (or cleared) a session's progress card. A hint,
+        // not the card: the hook re-reads it when the session is this one.
+        if (eventName === PROGRESS_CARD_CHANGED_EVENT) {
+          progressCardChangedRef.current(data.payload)
           return
         }
 
@@ -7090,6 +7111,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         <div ref={messagesEndRef} />
       </div>
+
+      {/* The agent's progress card, pinned at the top of the composer stack —
+          in the column, so the transcript above gives up the height and the
+          text box below is never covered. */}
+      {progressCard && <ChatProgressCard card={progressCard} />}
 
       {/* Attachment strip.
 

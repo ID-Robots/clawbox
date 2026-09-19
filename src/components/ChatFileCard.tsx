@@ -37,8 +37,9 @@ export default function ChatFileCard({ src }: { src: string }) {
     return () => controller.abort()
   }, [src, href])
 
-  // What is on disk beats what the payload said; the payload beats nothing.
-  const shownSize = size ?? mediaFileSize(src)
+  // What is on disk beats what the payload said; the payload beats nothing. A
+  // file the probe found gone claims no size at all.
+  const shownSize = missing ? null : size ?? mediaFileSize(src)
   const extension = name.includes('.') ? name.split('.').pop()!.slice(0, 4).toUpperCase() : ''
 
   return (
