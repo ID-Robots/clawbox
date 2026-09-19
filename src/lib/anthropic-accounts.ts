@@ -129,7 +129,6 @@ function newId(taken: readonly AnthropicAccount[]): string {
 function cleanLabel(raw: unknown, fallback: string): string {
   // Control characters out (a label is drawn in the owner's list and said in a
   // chat notice), runs of whitespace folded, then bounded.
-  // eslint-disable-next-line no-control-regex
   const text = typeof raw === "string" ? raw.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim() : "";
   return (text || fallback).slice(0, MAX_ACCOUNT_LABEL_CHARS);
 }
