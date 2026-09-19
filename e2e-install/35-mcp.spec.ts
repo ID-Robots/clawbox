@@ -171,7 +171,7 @@ const MCP_SESSION = `
   await client.connect(transport);
   const { tools } = await client.listTools();
   const calls = {};
-  for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage"]) {
+  for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage", "anthropic_accounts"]) {
     const result = await client.callTool({ name, arguments: {} });
     const first = Array.isArray(result.content) ? result.content[0] : null;
     calls[name] = { isError: result.isError === true, text: first && first.type === "text" ? first.text : "" };
@@ -198,7 +198,7 @@ test.describe("clawbox MCP server over stdio (TASK-899)", () => {
     expect(out).toMatch(/Tool contract OK\./);
   });
 
-  test("the agent can read Memory Shard, Local AI and its ClawBox AI allowance", async () => {
+  test("the agent can read Memory Shard, Local AI, its ClawBox AI allowance and the Anthropic account pool", async () => {
     const raw = await dockerExec(
       ["bash", "-c", `cd ${PROJECT_DIR} && exec ${BUN} -e "$0"`, MCP_SESSION],
       { user: "clawbox", timeoutMs: 180_000 },
@@ -206,7 +206,7 @@ test.describe("clawbox MCP server over stdio (TASK-899)", () => {
     const session = JSON.parse(raw.trim().split("\n").pop() ?? "{}") as McpSession;
 
     // Registered on every box, whatever is switched on.
-    for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage"]) {
+    for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage", "anthropic_accounts"]) {
       expect(session.names, `${name} should be offered`).toContain(name);
       expect(session.calls[name]?.isError, `${name} answered an error: ${session.calls[name]?.text}`).toBe(false);
     }
@@ -230,5 +230,12 @@ test.describe("clawbox MCP server over stdio (TASK-899)", () => {
     // An unlinked test box answers in prose; a linked one answers the plan.
     const usage = session.calls.clawbox_ai_usage.text;
     expect(usage).toMatch(/ClawBox AI|clawbox\.com|"plan"/);
+
+    // The Anthropic account pool (TASK-902): "none connected" in prose on a
+    // box without one, the count that can answer on a box with one — and in
+    // either case never an email and never a credential.
+    const accounts = session.calls.anthropic_accounts.text;
+    expect(accounts).toMatch(/No Anthropic account is connected|"can_answer"/);
+    expect(accounts).not.toMatch(/sk-ant-|@|token/i);
   });
 });

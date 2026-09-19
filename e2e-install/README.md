@@ -13,6 +13,7 @@ specs depend on state set up by earlier ones:
 | ---- | ------ |
 | `10-happy-path.spec.ts`       | `install.sh` → setup wizard end to end → desktop loads |
 | `20-settings.spec.ts`         | System info/stats, preferences, hotspot, password rotate, update-branch |
+| `22-anthropic-accounts.spec.ts` | Anthropic account pool: owner-only writes, two Claude accounts through the sign-in handoff (no token in the clear under data/), a simulated session limit, and the Settings → Providers card (limited chip, reorder, two-tap remove) |
 | `30-files.spec.ts`            | mkdir, upload, list, read, delete — verified both via API and on-disk |
 | `40-terminal.spec.ts`         | `/terminal-ws` PTY round-trip (`uname -a`) |
 | `50-webapps.spec.ts`          | Code-assistant init → file write → build → `/setup-api/webapps` serves |

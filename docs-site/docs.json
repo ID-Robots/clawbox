@@ -62,6 +62,7 @@
             "pages": [
               "guides/chat",
               "guides/clawbox-ai",
+              "guides/anthropic-accounts",
               "guides/memory-shard",
               "guides/local-ai",
               "guides/messaging-channels",
