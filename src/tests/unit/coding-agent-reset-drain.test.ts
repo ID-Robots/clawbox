@@ -20,6 +20,7 @@
  * question directly instead of waiting for the machine to be slow enough.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -55,7 +56,7 @@ vi.mock("@/lib/coding-git", async (importOriginal) => ({
   commitRunWork: vi.fn(async () => ({ committed: false, reason: "no_changes" })),
   newestCommitSince,
 }));
-const openPullRequest = vi.hoisted(() => vi.fn(async () => ({ ok: false, detail: "no remote" })));
+const openPullRequest = vi.hoisted(() => vi.fn<typeof import("@/lib/coding-pr").openPullRequest>(async () => ({ ok: false, detail: "no remote" })));
 vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-pr")>()),
   openPullRequest,
@@ -81,6 +82,7 @@ let base: string;
 let home: string;
 let root: string;
 let binDir: string;
+let projectDir: string;
 let restore: () => void;
 
 const INIT = '{"type":"system","subtype":"init","session_id":"sess-reset-1","model":"deepseek-v4-pro","permissionMode":"acceptEdits"}';
@@ -112,6 +114,48 @@ function installHarness(): void {
   );
 }
 
+/** How long the stand-in `gh` holds the review loop's first poll open. */
+const GH_POLL_HOLD_S = 1.5;
+
+/**
+ * A `gh` ahead of the real one on PATH. Every call answers "not signed in" at
+ * once — which is what CI's runner says, with no token in the test step — except
+ * the review loop's `pr view`, which holds on for a beat and writes under HOME
+ * at the start and at the end of it. The writes are the shape of the failure
+ * this pins: a `gh` that puts one entry in HOME while the teardown is removing
+ * the tree is all `rmSync` needs to fail with ENOTEMPTY.
+ */
+function installSlowGh(): { started: string; finished: string } {
+  const marks = path.join(home, ".config", "gh");
+  const started = path.join(marks, "pr-view-started");
+  const finished = path.join(marks, "pr-view-finished");
+  fs.writeFileSync(
+    path.join(binDir, "gh"),
+    [
+      "#!/usr/bin/env bash",
+      'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
+      `  mkdir -p "${marks}" && : > "${started}"`,
+      `  sleep ${GH_POLL_HOLD_S}`,
+      `  : > "${finished}"`,
+      "fi",
+      "echo 'To get started with GitHub CLI, please run:  gh auth login' >&2",
+      "exit 4",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+  return { started, finished };
+}
+
+/** A real repository, so the run gets a branch and auto-PR has something to open. */
+function initGitRepo(dir: string): void {
+  for (const args of [["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]]) {
+    execFileSync("git", args, { cwd: dir });
+  }
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "first"], { cwd: dir });
+}
+
 function writeConfig(cfg: Record<string, unknown> = {}): void {
   fs.mkdirSync(path.join(root, "data"), { recursive: true });
   fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({
@@ -133,7 +177,7 @@ function makeProject(id: string): string {
 const wait = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 beforeEach(async () => {
-  restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN");
+  restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN", "PATH");
   base = fs.mkdtempSync(path.join(os.tmpdir(), "coding-reset-drain-"));
   home = path.join(base, "home");
   root = path.join(home, "clawbox");
@@ -151,7 +195,7 @@ beforeEach(async () => {
   announceCodingAgent.mockClear();
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
-  makeProject("site");
+  projectDir = makeProject("site");
 });
 
 afterEach(async () => {
@@ -209,5 +253,37 @@ describe("the teardown hook", () => {
     for (const spy of SHARED_SPIES()) spy.mockClear();
     await wait(3_000);
     expectNothingStirred();
+  });
+
+  it("waits for the review loop's first poll, which the opened pull request started", async () => {
+    // The third thing the settle chain starts: the watchers. The review loop
+    // looks at a pull request the moment it is opened — `gh pr view` from the
+    // run's folder with the box's HOME — and that look was started and
+    // forgotten, so the hook answered with `gh` still going in the tree the
+    // teardown was about to remove. CI: `ENOTEMPTY ... rmdir '.../home'` in
+    // coding-agent-durable-completion.test.ts. The stand-in holds the poll open,
+    // so the hook is asked while it is out rather than when CI is slow enough.
+    writeConfig({ coding_agent_review_pass: false, coding_agent_auto_pr: true });
+    installHarness();
+    const gh = installSlowGh();
+    initGitRepo(projectDir);
+    // A commit to open from, and GitHub agreeing to open it.
+    newestCommitSince.mockResolvedValue("abc1234");
+    openPullRequest.mockResolvedValue({ ok: true, number: 7, url: "https://github.com/o/r/pull/7" });
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    await vi.waitFor(() => {
+      expect(fs.existsSync(gh.started)).toBe(true);
+    }, { timeout: 30_000, interval: 25 });
+    // The poll that is out is the review loop's, on the pull request this run
+    // opened — otherwise this case proves nothing.
+    expect(lib.getRun(started.id)?.review?.prNumber).toBe(7);
+
+    await lib._resetCodingAgentStateForTests();
+
+    // The hook answered only once `gh` was done in the tree. Before the fix it
+    // answered with the poll still asleep, and the teardown's `rmSync` ran
+    // against a live `gh`.
+    expect(fs.existsSync(gh.finished)).toBe(true);
   });
 });

@@ -7142,9 +7142,10 @@ async function beginPullRequestWatch(origin: CodingRun, input: {
   // A THIRD watcher, and it runs beside either of those rather than instead of
   // one: GitHub's checks and Vercel's build are different questions about the
   // same push, and a box whose project is linked wants both answered.
-  // Fire-and-forget, and last, because a Vercel fault must never be able to
-  // stop a pull request that has already been opened.
-  void startDeployWatch(origin.id);
+  // Not awaited, and last, because a Vercel fault must never be able to stop a
+  // pull request that has already been opened. Tracked all the same — see
+  // `runWatcherPoll`.
+  trackSettleWork(startDeployWatch(origin.id));
 }
 
 /**
@@ -7248,6 +7249,40 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
   persist(true);
 }
 
+/**
+ * One poll of a pull-request, review or deployment watcher, tracked like the
+ * settle path it continues.
+ *
+ * A poll is a `gh` (or Vercel) call made from the run's own folder with the
+ * box's HOME, and every one of them used to be started and forgotten — the
+ * review loop's first look fires the moment the pull request is opened, which
+ * is while the settle chain a teardown waits for is still finishing. The drain
+ * then answered with `gh` still going inside the tree the suite was removing,
+ * and CI failed with `ENOTEMPTY: directory not empty, rmdir '.../home'` in
+ * `coding-agent-durable-completion.test.ts` (PR #928, touching none of this):
+ * `rmSync` empties a folder once and then only retries the `rmdir`, so one entry
+ * `gh` wrote under HOME in that window was enough. Pinned by
+ * `coding-agent-reset-drain.test.ts`.
+ *
+ * `watchers` is the loop's own set: the test reset clears it, and a poll armed
+ * before that — or re-armed by a poll the drain was waiting for — ends here
+ * instead of spawning `gh` into whatever the next test is doing. On the box
+ * nothing clears the sets but the loops themselves, so this never stops a live
+ * one.
+ */
+function runWatcherPoll(watchers: Set<string>, runId: string, poll: () => Promise<void>): void {
+  if (!watchers.has(runId)) return;
+  trackSettleWork(poll());
+}
+
+/** Arm a watcher's next poll — see `runWatcherPoll`. */
+function scheduleWatcherPoll(watchers: Set<string>, runId: string, poll: () => Promise<void>, delayMs: number): void {
+  if (!watchers.has(runId)) return;
+  const timer = setTimeout(() => { runWatcherPoll(watchers, runId, poll); }, delayMs);
+  // Never hold the process open for a pull request or a build.
+  timer.unref?.();
+}
+
 /** Runs whose checks are being polled right now, so a restart or a second
  *  settle cannot start two watchers for one pull request. */
 const prWatchers = store.prWatchers;
@@ -7313,11 +7348,7 @@ function watchPullRequest(runId: string): void {
     prWatchers.delete(runId);
   };
 
-  const schedule = () => {
-    const timer = setTimeout(() => { void tick(); }, POLL_INTERVAL_MS);
-    // Never hold the process open for a pull request.
-    timer.unref?.();
-  };
+  const schedule = () => { scheduleWatcherPoll(prWatchers, runId, tick, POLL_INTERVAL_MS); };
 
   schedule();
 }
@@ -7542,18 +7573,12 @@ function watchDeployment(runId: string): void {
    * Every fault inside `tick` is already a result rather than a throw; this is
    * for the ones that are not (a disk that will not take `persist`).
    */
-  const poll = () => {
-    void tick().catch((err) => {
-      console.error(`[coding-agent] deployment poll for ${runId}:`, err instanceof Error ? err.message : err);
-      deployWatchers.delete(runId);
-    });
-  };
+  const poll = (): Promise<void> => tick().catch((err) => {
+    console.error(`[coding-agent] deployment poll for ${runId}:`, err instanceof Error ? err.message : err);
+    deployWatchers.delete(runId);
+  });
 
-  const schedule = () => {
-    const timer = setTimeout(poll, VERCEL_POLL_INTERVAL_MS);
-    // Never hold the process open for a build on somebody else's servers.
-    timer.unref?.();
-  };
+  const schedule = () => { scheduleWatcherPoll(deployWatchers, runId, poll, VERCEL_POLL_INTERVAL_MS); };
 
   const tick = async (): Promise<void> => {
     const run = loadRuns().find((r) => r.id === runId);
@@ -7602,16 +7627,16 @@ function watchDeployment(runId: string): void {
     settleDeploy(run, verdict.phase, verdict.detail);
     deployWatchers.delete(runId);
     // The one thing that happens after a settle: a FAILED build is handed back
-    // to the session that wrote it. Fire-and-forget, because nothing here waits
-    // on a run starting.
-    if (verdict.phase === "failed") void handOffFailedDeploy(runId);
+    // to the session that wrote it. Not awaited, because nothing here waits on
+    // a run starting — but tracked, like the poll that reached it.
+    if (verdict.phase === "failed") trackSettleWork(handOffFailedDeploy(runId));
   };
 
   // The first look is taken NOW rather than one interval from now, the way the
   // review loop's is: this is armed both by a push that has just happened and
   // by the boot sweep after a restart, and in the second case a record that has
   // been pending since before the reboot should be re-read at once.
-  poll();
+  runWatcherPoll(deployWatchers, runId, poll);
 }
 
 /** What the poll just learned about the deployment, onto the record. */
@@ -8021,15 +8046,14 @@ function watchReviewLoop(runId: string): void {
   };
 
   const schedule = () => {
-    const timer = setTimeout(() => { void tick(); }, reviewPollIntervalMs(process.env.CLAWBOX_CODING_REVIEW_POLL_MS));
-    // Never hold the process open for a pull request.
-    timer.unref?.();
+    scheduleWatcherPoll(reviewWatchers, runId, tick, reviewPollIntervalMs(process.env.CLAWBOX_CODING_REVIEW_POLL_MS));
   };
 
   // The first poll is immediate: the pull request has just been opened (or a
   // fix run has just pushed), and a three-minute silence before the first word
-  // about it reads as nothing happening.
-  void tick();
+  // about it reads as nothing happening. Immediate is also why it is tracked:
+  // it runs while the settle chain that opened the pull request is finishing.
+  runWatcherPoll(reviewWatchers, runId, tick);
 }
 
 /**
@@ -9662,6 +9686,10 @@ function stderrTail(stderr: string): string {
  * a `git init` from this path still creating .git inside the tree the teardown
  * was removing. Holding the promises costs nothing in production and gives the
  * suites something to wait on.
+ *
+ * The watchers the settle path arms belong here too, poll by poll: they are the
+ * same "still doing after it was reported finished", only on a timer — see
+ * `runWatcherPoll`.
  */
 const settling = store.settling;
 
@@ -12155,6 +12183,9 @@ function endEveryLiveRun(): ChildProcess[] {
   waiters.clear();
   transitions.clear();
   runSecretEnv.clear();
+  // What ends the watchers' loops: a poll already in flight is waited for by
+  // the drain, and neither it nor a timer armed earlier polls again once its
+  // run is gone from these — see `runWatcherPoll`.
   prWatchers.clear();
   deployWatchers.clear();
   reviewWatchers.clear();
