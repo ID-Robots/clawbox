@@ -1444,6 +1444,7 @@ export const fr: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Nom (facultatif)",
   "settings.anthropicAccounts.labelPlaceholder": "Nommez-le, p. ex. Travail Max",
   "settings.anthropicAccounts.stepSignIn": "1. Connectez-vous avec le compte Claude à ajouter. Anthropic vous affiche ensuite un code.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Connectez-vous avec le même compte Claude qu'avant. Un autre compte est refusé. Anthropic vous affiche ensuite un code.",
   "settings.anthropicAccounts.openSignIn": "Se connecter avec Claude",
   "settings.anthropicAccounts.stepPaste": "2. Collez ce code ici.",
   "settings.anthropicAccounts.codePlaceholder": "Collez le code",

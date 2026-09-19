@@ -1444,6 +1444,7 @@ export const ja: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "名前（任意）",
   "settings.anthropicAccounts.labelPlaceholder": "名前を付けてください（例: 仕事用 Max）",
   "settings.anthropicAccounts.stepSignIn": "1. 追加したい Claude アカウントでサインインします。すると Anthropic がコードを表示します。",
+  "settings.anthropicAccounts.stepSignInReauth": "1. 以前と同じ Claude アカウントでサインインします。別のアカウントは拒否されます。すると Anthropic がコードを表示します。",
   "settings.anthropicAccounts.openSignIn": "Claude でサインイン",
   "settings.anthropicAccounts.stepPaste": "2. そのコードをここに貼り付けます。",
   "settings.anthropicAccounts.codePlaceholder": "コードを貼り付け",

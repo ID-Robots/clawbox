@@ -1444,6 +1444,7 @@ export const nl: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Naam (optioneel)",
   "settings.anthropicAccounts.labelPlaceholder": "Geef het een naam, bijv. Werk Max",
   "settings.anthropicAccounts.stepSignIn": "1. Meld je aan met het Claude-account dat je wilt toevoegen. Anthropic toont je daarna een code.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Meld je aan met hetzelfde Claude-account als eerder. Een ander account wordt geweigerd. Anthropic toont je daarna een code.",
   "settings.anthropicAccounts.openSignIn": "Aanmelden met Claude",
   "settings.anthropicAccounts.stepPaste": "2. Plak die code hier.",
   "settings.anthropicAccounts.codePlaceholder": "Plak de code",

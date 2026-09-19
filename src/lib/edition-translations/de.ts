@@ -1443,6 +1443,7 @@ export const de: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Bezeichnung (optional)",
   "settings.anthropicAccounts.labelPlaceholder": "Benennen Sie es, z. B. Arbeit Max",
   "settings.anthropicAccounts.stepSignIn": "1. Melden Sie sich mit dem Claude-Konto an, das Sie hinzufügen möchten. Anthropic zeigt Ihnen danach einen Code.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Melden Sie sich mit demselben Claude-Konto wie zuvor an. Ein anderes Konto wird abgelehnt. Anthropic zeigt Ihnen danach einen Code.",
   "settings.anthropicAccounts.openSignIn": "Mit Claude anmelden",
   "settings.anthropicAccounts.stepPaste": "2. Fügen Sie diesen Code hier ein.",
   "settings.anthropicAccounts.codePlaceholder": "Code einfügen",

@@ -1452,6 +1452,7 @@ export const zh: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "名称（可选）",
   "settings.anthropicAccounts.labelPlaceholder": "起个名字，例如 工作 Max",
   "settings.anthropicAccounts.stepSignIn": "1. 使用要添加的 Claude 账户登录。随后 Anthropic 会显示一个代码。",
+  "settings.anthropicAccounts.stepSignInReauth": "1. 使用与之前相同的 Claude 账户登录。其他账户会被拒绝。随后 Anthropic 会显示一个代码。",
   "settings.anthropicAccounts.openSignIn": "使用 Claude 登录",
   "settings.anthropicAccounts.stepPaste": "2. 将该代码粘贴到这里。",
   "settings.anthropicAccounts.codePlaceholder": "粘贴代码",

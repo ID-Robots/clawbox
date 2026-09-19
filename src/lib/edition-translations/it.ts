@@ -1455,6 +1455,7 @@ export const it: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Nome (facoltativo)",
   "settings.anthropicAccounts.labelPlaceholder": "Dagli un nome, ad es. Lavoro Max",
   "settings.anthropicAccounts.stepSignIn": "1. Accedi con l'account Claude che vuoi aggiungere. Anthropic ti mostra poi un codice.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Accedi con lo stesso account Claude di prima. Un account diverso viene rifiutato. Anthropic ti mostra poi un codice.",
   "settings.anthropicAccounts.openSignIn": "Accedi con Claude",
   "settings.anthropicAccounts.stepPaste": "2. Incolla qui quel codice.",
   "settings.anthropicAccounts.codePlaceholder": "Incolla il codice",

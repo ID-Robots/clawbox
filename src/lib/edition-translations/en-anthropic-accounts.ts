@@ -38,6 +38,7 @@ export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Name (optional)",
   "settings.anthropicAccounts.labelPlaceholder": "Name it, e.g. Work Max",
   "settings.anthropicAccounts.stepSignIn": "1. Sign in with the Claude account you want to add. Anthropic then shows you a code.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Sign in with the same Claude account as before. A different account is refused. Anthropic then shows you a code.",
   "settings.anthropicAccounts.openSignIn": "Sign in with Claude",
   "settings.anthropicAccounts.stepPaste": "2. Paste that code here.",
   "settings.anthropicAccounts.codePlaceholder": "Paste the code",

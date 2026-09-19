@@ -1430,6 +1430,7 @@ export const bg: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Име (по избор)",
   "settings.anthropicAccounts.labelPlaceholder": "Дайте му име, напр. Работен Max",
   "settings.anthropicAccounts.stepSignIn": "1. Влезте с акаунта в Claude, който искате да добавите. След това Anthropic ще Ви покаже код.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Влезте със същия акаунт в Claude като преди. Друг акаунт ще бъде отказан. След това Anthropic ще Ви покаже код.",
   "settings.anthropicAccounts.openSignIn": "Вход с Claude",
   "settings.anthropicAccounts.stepPaste": "2. Поставете този код тук.",
   "settings.anthropicAccounts.codePlaceholder": "Поставете кода",

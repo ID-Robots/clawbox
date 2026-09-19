@@ -1440,6 +1440,7 @@ export const sv: Record<string, string> = {
   "settings.anthropicAccounts.labelField": "Namn (valfritt)",
   "settings.anthropicAccounts.labelPlaceholder": "Ge det ett namn, t.ex. Jobb Max",
   "settings.anthropicAccounts.stepSignIn": "1. Logga in med det Claude-konto du vill lägga till. Anthropic visar dig sedan en kod.",
+  "settings.anthropicAccounts.stepSignInReauth": "1. Logga in med samma Claude-konto som tidigare. Ett annat konto nekas. Anthropic visar dig sedan en kod.",
   "settings.anthropicAccounts.openSignIn": "Logga in med Claude",
   "settings.anthropicAccounts.stepPaste": "2. Klistra in koden här.",
   "settings.anthropicAccounts.codePlaceholder": "Klistra in koden",

@@ -460,7 +460,10 @@ export default function AnthropicAccountsCard() {
           {panel.method === "oauth" ? (
             <>
               <div className="space-y-2">
-                <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">{t("settings.anthropicAccounts.stepSignIn")}</p>
+                {/* Re-authenticating takes the SAME account only (the pool refuses
+                    another one), so "the account you want to add" would send the
+                    owner straight into that refusal. */}
+                <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">{t(panel.mode === "reauth" ? "settings.anthropicAccounts.stepSignInReauth" : "settings.anthropicAccounts.stepSignIn")}</p>
                 <button type="button" onClick={() => void startSignIn()} disabled={busy !== null} className={signInOpened ? secondaryButton : primaryButton} data-testid="anthropic-accounts-signin">
                   {t("settings.anthropicAccounts.openSignIn")}
                 </button>
