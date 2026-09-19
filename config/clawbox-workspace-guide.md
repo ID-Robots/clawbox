@@ -92,17 +92,21 @@ honest request. If a proposal is parked and the chat is not open, `openclaw appr
 
 ## Coding agent (delegate a whole task)
 
-Three more tools are registered when your session starts, and only if the owner had it switched on in the **Coding Agent app** on the desktop AND that app reported the harness ready (Claude Code, `claude-ds` and ClawBox AI all present):
+These tools are registered when your session starts, and only if the owner had the coding agent switched on in the **Coding Agent app** on the desktop AND that app reported the harness ready (Claude Code, `claude-ds` and a connected account):
 
 | Tool | Purpose |
 |---|---|
-| `coding_agent_run` | Hand a task to a separate Claude Code session that works in the background inside one folder (a `code_project_*` project, usually) on the box's ClawBox AI plan. Returns a run id at once. |
-| `coding_agent_status` | Follow a run; `wait_seconds` blocks up to two minutes instead of polling. When finished it carries the summary to relay to the user. |
-| `coding_agent_stop` | End a run early. Its files stay. |
+| `coding_project_status` | The owner's projects: how to name each to a run (`project_id` or `directory`), last commit, whether it is an app, and which runs are working, waiting, unmerged or left running. Call it before starting a run. |
+| `coding_agent_run` | Hand a task to a separate Claude Code session that works in the background inside one folder — in a copy on its own branch when that folder is a git repository of its own, in the folder itself otherwise. Returns a run id at once — say it is running and stop. |
+| `coding_agent_status` | One run in full: the summary to relay, its deliverable, where its work is. `wait_seconds` blocks up to two minutes; use it only when the user wants to wait. |
+| `coding_run_list` | Every run at a glance: status, branch and whether the work is merged home, attempts and the deliverable verdict, why a paused one is paused, `detached` (survives a web-server restart), `left_running`. |
+| `coding_run_message` | Steer a run that is still working — one plain-text correction, instead of stopping it. |
+| `coding_agent_resume` | Carry on a paused or gave-up run you started, when the user asks; `message` tells it what it missed. |
+| `coding_agent_stop` | End a run early, only on the user's word. Its files stay. |
 
-Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself.
+Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself. Merging a run's branch home (a run that worked in place has none to merge), pausing, and the Vercel, production and pipeline switches are the owner's, on the run's or project's page — and so is anything about a run the owner started.
 
-Registration happens once, at startup. A switch turned off mid-session leaves the tools listed, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same app.
+A switch turned off mid-session can leave the tools listed until they are rebuilt, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same app.
 
 ---
 

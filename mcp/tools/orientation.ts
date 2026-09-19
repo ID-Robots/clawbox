@@ -524,7 +524,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
 
   reg.tool(
     "clawbox_context",
-    "Load the ClawBox field guide: what this device is, its mascot, its architecture, the house rules, how to store data in a webapp you build, and whose screen the browser tools drive. Call it once at the start of a session, and always before answering \"what is this\" or \"what can you do\".",
+    "Load the ClawBox field guide: what this device is, its mascot, its architecture, the house rules, how to hand a coding task to the coding agent and then steer and check on it, how to store data in a webapp you build, and whose screen the browser tools drive. Call it once at the start of a session, and always before answering \"what is this\" or \"what can you do\".",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 24_000 },
     async () => {

@@ -144,3 +144,91 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
     });
   });
 });
+
+/**
+ * The MCP server itself, spoken to over stdio the way a harness speaks to it —
+ * on an INSTALLED box, where the edition lock, the bearer file and the device
+ * API are the real ones rather than the postures the unit suites build.
+ *
+ * The client runs from the checkout so the SDK resolves out of its
+ * node_modules; the script travels as bash's `$0`, so no quoting of it is
+ * needed. Only read-only tools are called.
+ */
+const PROJECT_DIR = "/home/clawbox/clawbox";
+const BUN = "/home/clawbox/.bun/bin/bun";
+
+const MCP_SESSION = `
+(async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["run", "mcp/clawbox-mcp.ts"],
+    cwd: ${JSON.stringify(PROJECT_DIR)},
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "e2e-install", version: "1.0.0" });
+  await client.connect(transport);
+  const { tools } = await client.listTools();
+  const calls = {};
+  for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage"]) {
+    const result = await client.callTool({ name, arguments: {} });
+    const first = Array.isArray(result.content) ? result.content[0] : null;
+    calls[name] = { isError: result.isError === true, text: first && first.type === "text" ? first.text : "" };
+  }
+  console.log(JSON.stringify({ names: tools.map((t) => t.name), calls }));
+  await client.close();
+  process.exit(0);
+})().catch((err) => { console.error(err); process.exit(1); });
+`;
+
+interface McpSession {
+  names: string[];
+  calls: Record<string, { isError: boolean; text: string }>;
+}
+
+test.describe("clawbox MCP server over stdio (TASK-899)", () => {
+  test("the tool-surface check passes on the installed box", async () => {
+    // Throws — and fails the test — on a non-zero exit, which is how the
+    // checker reports a contract or gate problem.
+    const out = await dockerExec(
+      ["bash", "-c", `cd ${PROJECT_DIR} && exec ${BUN} run mcp/check-tools.ts`],
+      { user: "clawbox", timeoutMs: 180_000 },
+    );
+    expect(out).toMatch(/Tool contract OK\./);
+  });
+
+  test("the agent can read Memory Shard, Local AI and its ClawBox AI allowance", async () => {
+    const raw = await dockerExec(
+      ["bash", "-c", `cd ${PROJECT_DIR} && exec ${BUN} -e "$0"`, MCP_SESSION],
+      { user: "clawbox", timeoutMs: 180_000 },
+    );
+    const session = JSON.parse(raw.trim().split("\n").pop() ?? "{}") as McpSession;
+
+    // Registered on every box, whatever is switched on.
+    for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage"]) {
+      expect(session.names, `${name} should be offered`).toContain(name);
+      expect(session.calls[name]?.isError, `${name} answered an error: ${session.calls[name]?.text}`).toBe(false);
+    }
+
+    // The coding-agent family moves as ONE gate: the owner's switch and a
+    // ready harness. Whichever way this box is set, the new tools follow it.
+    const codingOn = session.names.includes("coding_agent_run");
+    for (const name of ["coding_run_list", "coding_agent_resume", "coding_project_status"]) {
+      expect(session.names.includes(name), `${name} should follow coding_agent_run`).toBe(codingOn);
+    }
+
+    const memory = JSON.parse(session.calls.memory_shard_status.text) as Record<string, unknown>;
+    expect(memory).toHaveProperty("switched_on");
+    expect(memory).toHaveProperty("indexing");
+    expect(String(memory.guidance)).toMatch(/Memory Shard|indexing/);
+
+    const local = JSON.parse(session.calls.local_ai_status.text) as { engines?: { id: string }[] };
+    expect(Array.isArray(local.engines)).toBe(true);
+    expect(local.engines?.map((e) => e.id)).toContain("llamacpp");
+
+    // An unlinked test box answers in prose; a linked one answers the plan.
+    const usage = session.calls.clawbox_ai_usage.text;
+    expect(usage).toMatch(/ClawBox AI|clawbox\.com|"plan"/);
+  });
+});
