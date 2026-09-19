@@ -20,6 +20,13 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { isPrPending, runBranchName } from "@/lib/coding-pr-state";
 import type { ReviewSnapshot } from "@/lib/coding-review-state";
+import {
+  MAX_FEEDBACK_CHECKS,
+  MAX_FEEDBACK_LOG_CHARS,
+  MAX_FEEDBACK_THREADS,
+  MAX_THREAD_BODY_CHARS,
+  buildReviewFeedback,
+} from "@/lib/coding-review-state";
 import { readFirstTurn } from "@/tests/helpers/fake-harness";
 
 // The same ceiling the other coding-agent suites carry: the awaited reset in
@@ -727,5 +734,221 @@ describe("a round whose run can no longer be resumed", () => {
     expect(origin?.review?.fixMode).toBe("fresh");
     expect(origin?.review?.fixDetail).toMatch(/never opened a session/i);
     expect(lib.listRuns().some((r) => r.reviewLoopOf === RUN_ID)).toBe(true);
+  });
+});
+
+/**
+ * A round longer than anything an owner may type (TASK-901).
+ *
+ * The owner's 4 000-character limit was applied to every start, including the
+ * rounds the box writes itself — and a round quotes GitHub. PR #926's four
+ * CodeRabbit threads came to 17 385 characters; the round was refused with "The
+ * task is too long: at most 4000 characters." and the pull request was handed
+ * back unreviewed. Here the primary task is 6 000 characters, past the typed
+ * limit as well, and the findings are the size GitHub actually sends.
+ */
+describe("a round longer than the owner's task limit", () => {
+  let lib: Lib;
+  let base: string;
+  let home: string;
+  let root: string;
+  let restore: () => void;
+
+  const PRIMARY_TASK = "Finish the pull request for TASK-899 and name every file it touches. ".repeat(100).slice(0, 6_000);
+
+  const INIT = '{"type":"system","subtype":"init","session_id":"sess-long-1","model":"deepseek-v4-flash","permissionMode":"acceptEdits"}';
+  const RESULT = JSON.stringify({
+    type: "result", subtype: "success", is_error: false, num_turns: 2, total_cost_usd: 0.01,
+    result: "Answered every review comment.", session_id: "sess-long-1",
+  });
+
+  /** Four review comments at the length the thread parser keeps of each. */
+  const THREADS = [1, 2, 3, 4].map((n) => ({
+    path: `src/lib/area-${n}.ts`,
+    line: n * 10,
+    author: "coderabbitai",
+    body: `Finding ${n}:`.padEnd(MAX_THREAD_BODY_CHARS, " The guard here does not hold on an empty list."),
+    url: null,
+  }));
+
+  /** A run that COMPLETED with a 6 000-character task, its pull request open and watched. */
+  function writeLongRecord(): void {
+    const now = Date.now();
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify([{
+      id: RUN_ID,
+      task: PRIMARY_TASK,
+      directory: home,
+      projectId: null,
+      source: "agent",
+      status: "completed",
+      effort: "low",
+      startedAt: now - 1_800_000,
+      completedAt: now - 1_500_000,
+      sessionId: "sess-long",
+      summary: null,
+      error: null,
+      numTurns: 3,
+      filesTouched: ["index.html"],
+      commandsRun: 0,
+      permissionDenials: 0,
+      progress: [],
+      exitCode: 0,
+      pr: {
+        phase: "review",
+        number: PR_NUMBER,
+        url: `https://github.com/o/r/pull/${PR_NUMBER}`,
+        branch: runBranchName(RUN_ID),
+        base: "beta",
+        checks: { total: 0, passed: 0, failed: 0, pending: 0 },
+        detail: null,
+        startedAt: now - 1_500_000,
+        endedAt: null,
+        reviewOk: true,
+        foundBy: "opened",
+      },
+      review: {
+        prNumber: PR_NUMBER,
+        url: `https://github.com/o/r/pull/${PR_NUMBER}`,
+        base: "beta",
+        round: 0,
+        maxRounds: 3,
+        state: "polling",
+        checks: [],
+        unresolvedThreads: 0,
+        reviewDecision: null,
+        lastPolledAt: null,
+        roundStartedAt: now - 60_000,
+        detail: null,
+        fixRunId: null,
+        fixMode: null,
+        fixDetail: null,
+      },
+    }]));
+  }
+
+  beforeEach(async () => {
+    restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN");
+    base = fs.mkdtempSync(path.join(os.tmpdir(), "coding-review-long-"));
+    home = path.join(base, "home");
+    root = path.join(home, "clawbox");
+    const binDir = path.join(home, ".local", "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(path.join(root, "data"), { recursive: true });
+    process.env.HOME = home;
+    process.env.CLAWBOX_ROOT = root;
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(binDir, "claude-ds"),
+      [
+        "#!/usr/bin/env bash",
+        readFirstTurn(path.join(base, "last-task.txt")),
+        `echo '${INIT}'`, `echo '${RESULT}'`, "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(root, "data", "config.json"),
+      JSON.stringify({
+        clawai_token: "claw_test_token",
+        clawai_tier: "flash",
+        coding_agent_enabled: true,
+        coding_agent_generate_images: false,
+        coding_agent_auto_pr: true,
+        coding_agent_review_rounds: 3,
+      }),
+    );
+    review.pushBranch.mockResolvedValue({ ok: true });
+    review.readFailedCheckLogs.mockResolvedValue([
+      {
+        check: { name: "build", state: "fail", url: null },
+        log: "error TS2322: Type 'string' is not assignable".padEnd(MAX_FEEDBACK_LOG_CHARS, "\n  at build (src/lib/area-1.ts:10:3)"),
+      },
+    ]);
+    review.readReviewSnapshot
+      .mockResolvedValueOnce(snap({
+        checks: [{ name: "build", state: "fail", url: null }],
+        reviewDecision: "CHANGES_REQUESTED",
+        threads: THREADS,
+      }))
+      .mockResolvedValue(snap());
+    github.mergePullRequest.mockResolvedValue({ ok: false, detail: "not in this test" });
+    writeLongRecord();
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+  });
+
+  afterEach(async () => {
+    await lib._resetCodingAgentStateForTests();
+    restore();
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it("starts the round for a 6 000-character primary task, with every finding in it", async () => {
+    expect(PRIMARY_TASK.length).toBe(6_000);
+    expect(PRIMARY_TASK.length).toBeGreaterThan(lib.MAX_TASK_CHARS);
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); }, { timeout: 20_000 });
+
+    // The round was spent on a run that actually went out — not refused and
+    // settled `needs_owner` with "The task is too long".
+    const origin = lib.getRun(RUN_ID);
+    expect(origin?.review?.round).toBe(1);
+    expect(origin?.review?.fixMode).toBe("resumed");
+    expect(origin?.review?.detail ?? "").not.toMatch(/too long/i);
+    const fix = lib.listRuns().find((r) => r.reviewLoopOf === RUN_ID);
+    expect(fix).toBeTruthy();
+    expect(origin?.review?.fixRunId).toBe(fix?.id);
+    expect(fix?.status).toBe("completed");
+    expect(fix?.reviewRound).toBe(1);
+
+    // Longer than the owner may type — the very thing that used to refuse it —
+    // and whole: nothing the reviewer said was clipped away to make it fit.
+    expect(fix?.task.length).toBeGreaterThan(lib.MAX_TASK_CHARS);
+    const task = fs.readFileSync(path.join(base, "last-task.txt"), "utf-8");
+    for (const thread of THREADS) expect(task).toContain(`### ${thread.path}:${thread.line} — @coderabbitai`);
+    expect(task).toContain("### build");
+    expect(task).toContain("error TS2322");
+    expect(task).not.toContain("…(truncated)");
+    // The round points at the pull request and resumes the session that holds
+    // the primary task; it never carries that task again.
+    expect(task).toContain(`#${PR_NUMBER}`);
+    expect(task).not.toContain(PRIMARY_TASK.slice(0, 200));
+  });
+
+  it("keeps the longest round and review pass the box can write under its own ceiling", () => {
+    // Every cap buildReviewFeedback has, overrun: more failing checks and
+    // threads than it quotes, each at full length, on a conflicting branch.
+    const worst = buildReviewFeedback({
+      prNumber: 99_999,
+      url: "https://github.com/o/r/pull/99999",
+      branch: runBranchName(RUN_ID),
+      base: "beta",
+      round: 6,
+      maxRounds: 6,
+      failedChecks: Array.from({ length: MAX_FEEDBACK_CHECKS + 3 }, (_, i) => ({
+        check: { name: `check-${i}`, state: "fail" as const, url: `https://github.com/o/r/actions/runs/${i}` },
+        log: "e".repeat(MAX_FEEDBACK_LOG_CHARS * 2),
+      })),
+      threads: Array.from({ length: MAX_FEEDBACK_THREADS + 5 }, (_, i) => ({
+        path: `src/${"deep/".repeat(40)}file-${i}.ts`,
+        line: i + 1,
+        author: "coderabbitai",
+        body: "b".repeat(MAX_THREAD_BODY_CHARS),
+        url: `https://github.com/o/r/pull/99999#discussion_r${i}`,
+      })),
+      conflicting: true,
+      changesRequested: true,
+      fresh: true,
+    });
+    expect(worst.length).toBeGreaterThan(lib.MAX_TASK_CHARS);
+    expect(worst.length).toBeLessThanOrEqual(lib.MAX_BOX_TASK_CHARS);
+
+    // The review pass names its interface files, so a long file list is the
+    // way it grows.
+    const pass = lib.reviewPassTask({
+      filesTouched: Array.from({ length: 200 }, (_, i) => `src/components/${"nested/".repeat(20)}Screen${i}.tsx`),
+    });
+    expect(pass.length).toBeLessThanOrEqual(lib.MAX_BOX_TASK_CHARS);
   });
 });

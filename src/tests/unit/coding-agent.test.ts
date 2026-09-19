@@ -647,6 +647,28 @@ describe("a run", () => {
     expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
   });
 
+  it("holds only a TYPED task to the owner's limit — a follow-up the box wrote is clipped, never refused", async () => {
+    // TASK-901: a review round quotes GitHub, and the typed limit refused it.
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+
+    // A continuation someone TYPED is still refused past the limit.
+    await expect(lib.startRun({ task: "x".repeat(lib.MAX_TASK_CHARS + 1), resumeRunId: first.id, source: "agent" }))
+      .rejects.toMatchObject({ kind: "invalid" });
+
+    // The box's own round starts even past ITS ceiling, clipped with a marker.
+    const round = await lib.startRun({
+      task: "y".repeat(lib.MAX_BOX_TASK_CHARS + 500),
+      resumeRunId: first.id,
+      source: "agent",
+      reviewLoopOf: first.id,
+      reviewRound: 1,
+    });
+    expect(round.task).toHaveLength(lib.MAX_BOX_TASK_CHARS);
+    expect(round.task.endsWith("\n…(truncated)")).toBe(true);
+    expect((await finished(round.id)).status).toBe("completed");
+  });
+
   it("does not report a run finished on a result event alone — the process must exit", async () => {
     // A resumed session on a real box (run-qqj1io65) emitted a result-shaped
     // event and then kept working for three minutes; the record said
