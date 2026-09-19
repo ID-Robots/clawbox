@@ -418,6 +418,37 @@ describe("the Anthropic account-limit notices", () => {
     expect(payload.runId).toBeUndefined();
   });
 
+  it("reaches the owner's Telegram chat on OpenClaw, as the same plain text", async () => {
+    const notice = { kind: "switched", fromLabel: "Work Max", toLabel: "Personal Max", resetAt: AT_2250, runId: "run-k3x9q2ab" } as const;
+    configGet.mockImplementation(async (key: string) => (key === "telegram_bot_token" ? "123:abc" : undefined));
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceAnthropicLimit(notice);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.telegram.org/bot123:abc/sendMessage");
+    const body = JSON.parse(String(init.body));
+    expect(body.chat_id).toBe("1001");
+    expect(body.text).toBe(buildAnthropicLimitNotice(notice));
+    expect(body.parse_mode).toBeUndefined();
+  });
+
+  it("reaches each approved user through the hermes send path on Hermes", async () => {
+    const notice = { kind: "all_limited", resetAt: AT_2250, runId: null } as const;
+    getActiveHarness.mockResolvedValue("hermes");
+    readHermesApprovedUsers.mockResolvedValue([{ id: "42", name: "Maya" }]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceAnthropicLimit(notice);
+
+    expect(notifyHermesTelegramUser).toHaveBeenCalledWith("42", buildAnthropicLimitNotice(notice));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("goes to the owner's Telegram too, and never lets a failure escape", async () => {
     configGet.mockImplementation(async (key: string) => (key === "telegram_bot_token" ? "123:abc" : undefined));
     readTelegramAllowFrom.mockRejectedValue(new Error("no file"));

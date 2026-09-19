@@ -418,8 +418,10 @@ export default function AnthropicAccountsCard() {
                       } else armRemove(account.id);
                     }}
                     onBlur={() => { if (confirmRemove === account.id) setConfirmRemove(null); }}
-                    aria-label={t("settings.anthropicAccounts.remove")}
-                    title={t("settings.anthropicAccounts.remove")}
+                    // The armed button's name is the word it shows, so a screen
+                    // reader hears that the next press removes the account.
+                    aria-label={confirmRemove === account.id ? t("settings.anthropicAccounts.removeConfirm") : t("settings.anthropicAccounts.remove")}
+                    title={confirmRemove === account.id ? t("settings.anthropicAccounts.removeConfirm") : t("settings.anthropicAccounts.remove")}
                     data-testid={`anthropic-account-remove-${account.id}`}
                     className={confirmRemove === account.id
                       ? "text-[11px] px-2.5 h-7 rounded-lg border border-red-400/40 text-red-300 hover:bg-red-400/10"

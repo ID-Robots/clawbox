@@ -10864,9 +10864,12 @@ function spawnRun(
   // itself never is, and never in argv. No entry means the wrapper's own
   // fallback: the legacy key, else the `claude` sign-in.
   const account = run.provider === "anthropic" ? runAnthropicCredential.get(run.id) : undefined;
-  if (account) runEnv.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE = writeCredentialHandoff(run.id, account.credential);
   let child: ChildProcess;
   try {
+    // Inside the `try`: the handoff can throw (a full disk, a folder it cannot
+    // make), and the `finally` must still close the two logs opened above. The
+    // settle path takes any file it did write (removeCredentialHandoffs).
+    if (account) runEnv.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE = writeCredentialHandoff(run.id, account.credential);
     child = spawn(bin, argv, {
       cwd: run.directory,
       // Deliberately NOT process.env: see the header. The cast is only because
@@ -10886,8 +10889,9 @@ function spawnRun(
       stdio: ["pipe", logs.out, logs.err],
     });
   } finally {
-    // Node has dup'd them into the child; this process has no use for them and
-    // a leaked descriptor would keep a deleted log alive for the server's life.
+    // Node has dup'd them into the child (or there is no child); this process
+    // has no use for them and a leaked descriptor would keep a deleted log
+    // alive for the server's life.
     fs.closeSync(logs.out);
     fs.closeSync(logs.err);
   }
