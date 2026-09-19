@@ -1470,6 +1470,8 @@ export const zh: Record<string, string> = {
     "在终端应用中运行 `claude` 即可续期。在这里移除只会把它从此列表中拿掉。",
   "settings.anthropicAccounts.cancel": "取消",
   "settings.anthropicAccounts.actionFailed": "无法更改账户。",
+  "settings.anthropicAccounts.refusedWrongAccount": "此次登录的是 {signedIn}，而不是 {expected}。请以 {expected} 登录以续期 {label}，或将 {signedIn} 作为单独的账户连接。",
+  "settings.anthropicAccounts.refusedDuplicate": "此次登录的是 {signedIn}，它已作为 {label} 在列表中。",
 
   // 因所有 Anthropic 账户都受限而等待的运行，以及切换账户时时间线上的步骤
   // （TASK-902）。

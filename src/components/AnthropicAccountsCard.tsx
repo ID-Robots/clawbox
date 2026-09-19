@@ -114,9 +114,31 @@ export default function AnthropicAccountsCard() {
 
   useEffect(() => () => { if (confirmTimer.current) clearTimeout(confirmTimer.current); }, []);
 
+  /**
+   * The two refusals a re-authentication with the WRONG Claude account earns,
+   * in the owner's language, built from the facts the route sends beside its
+   * English sentence. Null for any other answer, which keeps that sentence.
+   */
+  const localRefusal = (code: unknown, details: unknown): string | null => {
+    if (!details || typeof details !== "object") return null;
+    const d = details as Record<string, unknown>;
+    const text = (v: unknown) => (typeof v === "string" && v ? v : null);
+    const signedIn = text(d.signedIn);
+    const expected = text(d.expected);
+    const label = text(d.label);
+    if (code === "wrong_account" && signedIn && expected && label) {
+      return t("settings.anthropicAccounts.refusedWrongAccount", { signedIn, expected, label });
+    }
+    if (code === "duplicate" && signedIn && label) return t("settings.anthropicAccounts.refusedDuplicate", { signedIn, label });
+    return null;
+  };
+
   const readError = async (res: Response): Promise<string> => {
     try {
-      const body = await res.json() as { error?: unknown };
+      const body = await res.json() as { error?: unknown; code?: unknown; details?: unknown };
+      const local = localRefusal(body.code, body.details);
+      // `t` answers the bare key until the locale pack has loaded.
+      if (local && !local.startsWith("settings.")) return local;
       return typeof body.error === "string" && body.error.trim() ? body.error : t("settings.anthropicAccounts.actionFailed");
     } catch {
       return t("settings.anthropicAccounts.actionFailed");

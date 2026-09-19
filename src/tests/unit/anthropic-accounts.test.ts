@@ -302,7 +302,7 @@ describe("OAuth accounts", () => {
 
     // The browser was signed in as someone else entirely.
     await expect(pool.replaceCredential(work.id, { kind: "oauth", tokens: tokens("stranger-access", 8 * 60 * 60_000), email: "stranger@example.com" }))
-      .rejects.toMatchObject({ code: "wrong_account" });
+      .rejects.toMatchObject({ code: "wrong_account", details: { signedIn: "stranger@example.com", expected: "work@example.com", label: "Work" } });
     // …or as the OTHER account on this list.
     await expect(pool.replaceCredential(work.id, { kind: "oauth", tokens: tokens("personal-again", 8 * 60 * 60_000), email: "me@example.com" }))
       .rejects.toMatchObject({ code: "wrong_account" });
@@ -317,7 +317,7 @@ describe("OAuth accounts", () => {
     const unnamed = await pool.addOAuthAccount({ label: "Old", tokens: tokens("old-access", 8 * 60 * 60_000) });
     await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access", 8 * 60 * 60_000) });
     await expect(pool.replaceCredential(unnamed.id, { kind: "oauth", tokens: tokens("personal-again", 8 * 60 * 60_000), email: "me@example.com" }))
-      .rejects.toMatchObject({ code: "duplicate" });
+      .rejects.toMatchObject({ code: "duplicate", details: { signedIn: "me@example.com", label: "Personal" } });
     // A new address for it is learned, as before.
     const learned = await pool.replaceCredential(unnamed.id, { kind: "oauth", tokens: tokens("old-again", 8 * 60 * 60_000), email: "old@example.com" });
     expect(learned.email).toBe("old@example.com");

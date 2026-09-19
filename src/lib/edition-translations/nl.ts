@@ -1462,6 +1462,8 @@ export const nl: Record<string, string> = {
     "Wordt vernieuwd met `claude` in de Terminal-app. Hier verwijderen haalt hem alleen van deze lijst.",
   "settings.anthropicAccounts.cancel": "Annuleren",
   "settings.anthropicAccounts.actionFailed": "De accounts konden niet worden gewijzigd.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Deze aanmelding is van {signedIn}, niet van {expected}. Meld je aan als {expected} om {label} te vernieuwen, of verbind {signedIn} als een eigen account.",
+  "settings.anthropicAccounts.refusedDuplicate": "Deze aanmelding is van {signedIn}, dat al in de lijst staat als {label}.",
 
   // Een run die wacht omdat elk Anthropic-account beperkt is, en de stappen op
   // de tijdlijn voor het wisselen van account (TASK-902).

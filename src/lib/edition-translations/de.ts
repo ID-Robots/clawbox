@@ -1461,6 +1461,8 @@ export const de: Record<string, string> = {
     "Wird mit `claude` in der Terminal-App erneuert. Wenn Sie sie hier entfernen, verschwindet sie nur aus dieser Liste.",
   "settings.anthropicAccounts.cancel": "Abbrechen",
   "settings.anthropicAccounts.actionFailed": "Die Konten konnten nicht geändert werden.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Diese Anmeldung gehört zu {signedIn}, nicht zu {expected}. Melden Sie sich als {expected} an, um {label} zu erneuern, oder verbinden Sie {signedIn} als eigenes Konto.",
+  "settings.anthropicAccounts.refusedDuplicate": "Diese Anmeldung gehört zu {signedIn}, das bereits als {label} in der Liste steht.",
 
   // Ein Lauf, der wartet, weil jedes Anthropic-Konto limitiert ist, und die
   // Schritte der Zeitleiste für den Kontowechsel (TASK-902).

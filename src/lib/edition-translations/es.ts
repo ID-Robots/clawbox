@@ -1457,6 +1457,8 @@ export const es: Record<string, string> = {
     "Se renueva con `claude` en la app Terminal. Quitarla aquí solo la saca de esta lista.",
   "settings.anthropicAccounts.cancel": "Cancelar",
   "settings.anthropicAccounts.actionFailed": "No se pudieron cambiar las cuentas.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Ese inicio de sesión es de {signedIn}, no de {expected}. Inicia sesión como {expected} para renovar {label}, o conecta {signedIn} como una cuenta propia.",
+  "settings.anthropicAccounts.refusedDuplicate": "Ese inicio de sesión es de {signedIn}, que ya está en la lista como {label}.",
 
   // Una ejecución que espera porque todas las cuentas de Anthropic están
   // limitadas, y los pasos de la línea de tiempo del cambio de cuenta (TASK-902).

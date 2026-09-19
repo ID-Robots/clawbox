@@ -1448,6 +1448,8 @@ export const bg: Record<string, string> = {
     "Подновява се с `claude` в Терминала. Премахването тук само го маха от този списък.",
   "settings.anthropicAccounts.cancel": "Отказ",
   "settings.anthropicAccounts.actionFailed": "Акаунтите не можаха да бъдат променени.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Това влизане е с {signedIn}, а не с {expected}. Влезте като {expected}, за да подновите {label}, или свържете {signedIn} като отделен акаунт.",
+  "settings.anthropicAccounts.refusedDuplicate": "Това влизане е с {signedIn}, който вече е в списъка като {label}.",
 
   // Изпълнение, което чака, защото всеки акаунт в Anthropic е ограничен, и
   // стъпките във времевата линия при смяна на акаунта (TASK-902).

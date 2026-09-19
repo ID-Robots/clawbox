@@ -56,4 +56,6 @@ export const anthropicAccountsEn: Record<string, string> = {
     "Renewed with `claude` in the Terminal app. Removing it here only takes it off this list.",
   "settings.anthropicAccounts.cancel": "Cancel",
   "settings.anthropicAccounts.actionFailed": "The accounts could not be changed.",
+  "settings.anthropicAccounts.refusedWrongAccount": "That sign-in is {signedIn}, not {expected}. Sign in as {expected} to renew {label}, or connect {signedIn} as an account of its own.",
+  "settings.anthropicAccounts.refusedDuplicate": "That sign-in is {signedIn}, which is already on the list as {label}.",
 };

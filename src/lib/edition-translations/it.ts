@@ -1473,6 +1473,8 @@ export const it: Record<string, string> = {
     "Si rinnova con `claude` nell'app Terminale. Rimuoverlo qui lo toglie solo da questo elenco.",
   "settings.anthropicAccounts.cancel": "Annulla",
   "settings.anthropicAccounts.actionFailed": "Non è stato possibile modificare gli account.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Questo accesso è di {signedIn}, non di {expected}. Accedi come {expected} per rinnovare {label}, oppure collega {signedIn} come account a sé.",
+  "settings.anthropicAccounts.refusedDuplicate": "Questo accesso è di {signedIn}, che è già nell'elenco come {label}.",
 
   // Un'esecuzione in attesa perché tutti gli account Anthropic sono limitati, e
   // i passaggi della cronologia per il cambio di account (TASK-902).

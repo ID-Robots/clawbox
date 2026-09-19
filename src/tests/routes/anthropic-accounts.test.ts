@@ -210,10 +210,15 @@ describe("changing the pool", () => {
     const { AnthropicAccountError } = await import("@/lib/anthropic-accounts");
     for (const code of ["wrong_account", "duplicate"] as const) {
       handoff.clearHandoffTokens.mockClear();
-      pool.replaceCredential.mockRejectedValueOnce(new AnthropicAccountError(code, "That sign-in is max2@example.com, not work@example.com."));
+      const details = { signedIn: "max2@example.com", expected: "work@example.com", label: "Work" };
+      pool.replaceCredential.mockRejectedValueOnce(new AnthropicAccountError(code, "That sign-in is max2@example.com, not work@example.com.", details));
       const res = await post({ action: "reauth_oauth", id: "aaaaaaaa" });
       expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe(code);
+      const body = await res.json();
+      expect(body.code).toBe(code);
+      // The facts go with it, so the owner's card can say it in their language.
+      expect(body.details).toEqual(details);
+      expect(JSON.stringify(body)).not.toContain(ACCESS);
       // It can never renew this row; left behind it would only hold a live token.
       expect(handoff.clearHandoffTokens).toHaveBeenCalledTimes(1);
     }

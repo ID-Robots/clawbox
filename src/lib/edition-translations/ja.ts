@@ -1462,6 +1462,8 @@ export const ja: Record<string, string> = {
     "ターミナルアプリで `claude` を実行すると更新されます。ここで削除しても、この一覧から外れるだけです。",
   "settings.anthropicAccounts.cancel": "キャンセル",
   "settings.anthropicAccounts.actionFailed": "アカウントを変更できませんでした。",
+  "settings.anthropicAccounts.refusedWrongAccount": "このサインインは {signedIn} のもので、{expected} ではありません。{label} を更新するには {expected} でサインインするか、{signedIn} を別のアカウントとして接続してください。",
+  "settings.anthropicAccounts.refusedDuplicate": "このサインインは {signedIn} のもので、すでに {label} として一覧にあります。",
 
   // すべての Anthropic アカウントが上限に達して待機している実行と、アカウント
   // 切り替えのタイムライン上のステップ（TASK-902）。

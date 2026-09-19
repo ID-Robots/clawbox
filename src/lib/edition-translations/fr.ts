@@ -1462,6 +1462,8 @@ export const fr: Record<string, string> = {
     "Se renouvelle avec `claude` dans l'app Terminal. La retirer ici ne fait que l'enlever de cette liste.",
   "settings.anthropicAccounts.cancel": "Annuler",
   "settings.anthropicAccounts.actionFailed": "Les comptes n'ont pas pu être modifiés.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Cette connexion est celle de {signedIn}, pas de {expected}. Connectez-vous en tant que {expected} pour renouveler {label}, ou connectez {signedIn} comme un compte à part.",
+  "settings.anthropicAccounts.refusedDuplicate": "Cette connexion est celle de {signedIn}, qui figure déjà dans la liste sous le nom {label}.",
 
   // Une exécution qui attend parce que tous les comptes Anthropic sont limités,
   // et les étapes de la chronologie pour le changement de compte (TASK-902).

@@ -201,7 +201,12 @@ export type AnthropicAccountRefusal =
   | "store_unavailable";
 
 export class AnthropicAccountError extends Error {
-  constructor(readonly code: AnthropicAccountRefusal, message: string) {
+  /**
+   * `details`: the facts a refusal's message is built from (emails, a label),
+   * so the owner's card can say it in the owner's language rather than show
+   * the English `message`. Labels and emails only — never a credential.
+   */
+  constructor(readonly code: AnthropicAccountRefusal, message: string, readonly details?: Readonly<Record<string, string>>) {
     super(message);
     this.name = "AnthropicAccountError";
   }
@@ -484,11 +489,19 @@ export async function replaceCredential(id: unknown, credential: { kind: "oauth"
     if (credential.kind === "oauth") {
       const email = cleanEmail(credential.email);
       if (email && account.email && !sameEmail(email, account.email)) {
-        throw new AnthropicAccountError("wrong_account", `That sign-in is ${email}, not ${account.email}. Sign in as ${account.email} to renew "${account.label}", or connect ${email} as an account of its own.`);
+        throw new AnthropicAccountError(
+          "wrong_account",
+          `That sign-in is ${email}, not ${account.email}. Sign in as ${account.email} to renew "${account.label}", or connect ${email} as an account of its own.`,
+          { signedIn: email, expected: account.email, label: account.label },
+        );
       }
       const twin = email ? file.accounts.find((a) => a.id !== account.id && a.kind === "oauth" && sameEmail(a.email, email)) : undefined;
-      if (twin) {
-        throw new AnthropicAccountError("duplicate", `That sign-in is ${email}, which is already on the list as "${twin.label}".`);
+      if (email && twin) {
+        throw new AnthropicAccountError(
+          "duplicate",
+          `That sign-in is ${email}, which is already on the list as "${twin.label}".`,
+          { signedIn: email, label: twin.label },
+        );
       }
       await storeCredential(account.id, oauthSecret(credential.tokens));
       account.expiresAt = credential.tokens.expires;

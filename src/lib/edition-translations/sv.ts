@@ -1458,6 +1458,8 @@ export const sv: Record<string, string> = {
     "Förnyas med `claude` i Terminal-appen. Att ta bort den här tar bara bort den från listan.",
   "settings.anthropicAccounts.cancel": "Avbryt",
   "settings.anthropicAccounts.actionFailed": "Kontona kunde inte ändras.",
+  "settings.anthropicAccounts.refusedWrongAccount": "Den här inloggningen gäller {signedIn}, inte {expected}. Logga in som {expected} för att förnya {label}, eller anslut {signedIn} som ett eget konto.",
+  "settings.anthropicAccounts.refusedDuplicate": "Den här inloggningen gäller {signedIn}, som redan finns i listan som {label}.",
 
   // En körning som väntar för att alla Anthropic-konton är begränsade, och
   // tidslinjens steg när kontot byts (TASK-902).

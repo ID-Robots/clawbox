@@ -81,8 +81,9 @@ function crossOrigin() {
   );
 }
 
-function refusal(error: string, code: string, status: number) {
-  return NextResponse.json({ error, code }, { status });
+/** `details`: a pool refusal's facts (emails, a label), for the card to say in the owner's language. */
+function refusal(error: string, code: string, status: number, details?: Readonly<Record<string, string>>) {
+  return NextResponse.json(details ? { error, code, details } : { error, code }, { status });
 }
 
 const REFUSAL_STATUS: Record<AnthropicAccountError["code"], number> = {
@@ -261,7 +262,7 @@ export async function POST(request: Request) {
         return refusal("Unknown action.", "invalid", 400);
     }
   } catch (err) {
-    if (err instanceof AnthropicAccountError) return refusal(err.message, err.code, REFUSAL_STATUS[err.code]);
+    if (err instanceof AnthropicAccountError) return refusal(err.message, err.code, REFUSAL_STATUS[err.code], err.details);
     return refusal(`The Anthropic accounts could not be changed: ${err instanceof Error ? err.message : String(err)}`, "store_unavailable", 503);
   }
   return NextResponse.json({ ...(await describePool()), ...extra });
