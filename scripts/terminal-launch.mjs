@@ -113,7 +113,6 @@ export function resolveShell(requested, listed, fallback = DEFAULT_SHELL) {
 export function resolveCwd(requested, home) {
   const value = (requested ?? "").trim();
   if (!value || value === "~" || value === "~/") return { cwd: home, refused: null };
-  // eslint-disable-next-line no-control-regex
   if (value.length > 1024 || /[\u0000-\u001f\u007f]/.test(value)) return { cwd: home, refused: value };
   const target = value.startsWith("~/")
     ? path.join(home, value.slice(2))

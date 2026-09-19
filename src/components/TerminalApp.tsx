@@ -799,6 +799,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   useEffect(() => {
     mountedRef.current = true;
     connect().catch(releaseAfterFailedConnect);
+    // The one list, filled in place by wireTerminal and never replaced.
+    const terminalCleanup = terminalCleanupRef.current;
 
     return () => {
       mountedRef.current = false;
@@ -806,7 +808,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       if (fitFrameRef.current !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(fitFrameRef.current);
       inputDisposableRef.current?.dispose();
-      for (const undo of terminalCleanupRef.current.splice(0)) {
+      for (const undo of terminalCleanup.splice(0)) {
         try { undo(); } catch { /* best effort */ }
       }
       if (wsRef.current) {

@@ -2891,7 +2891,7 @@ export const zh: Record<string, string> = {
   "terminal.settings.bell": "响铃",
   "terminal.settings.bellOff": "关闭",
   "terminal.settings.bellVisual": "视觉",
-  "terminal.settings.shellSection": "Shell",
+  "terminal.settings.shellSection": "Shell 与起始文件夹",
   "terminal.settings.newTabsOnly": "适用于此后打开的标签页",
   "terminal.settings.shell": "默认 Shell",
   "terminal.settings.shellDefault": "设备默认（{shell}）",

@@ -53,7 +53,7 @@ vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
 vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: class {} }));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
-const writeText = vi.fn(async (_text: string) => {});
+const writeText = vi.fn<(text: string) => Promise<void>>(async () => {});
 
 beforeEach(() => {
   sent.length = 0;

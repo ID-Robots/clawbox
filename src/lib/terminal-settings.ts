@@ -88,7 +88,6 @@ function clamp(value: unknown, min: number, max: number, fallback: number): numb
 
 // No control characters in either path: they reach a query string and a
 // spawn() on the other side, and a preference value refuses them anyway.
-// eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const SHELL_PATH = /^\/[A-Za-z0-9._+/-]{1,254}$/;
 
