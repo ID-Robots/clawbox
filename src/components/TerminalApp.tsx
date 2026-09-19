@@ -122,6 +122,35 @@ function refitForFont(term: XTerm, fitAddon: XFitAddon, family: string): void {
   fitAddon.fit();
 }
 
+/**
+ * The letter spacing that makes a WebGL cell as wide as the face, in whole
+ * device pixels. The WebGL renderer sizes a cell to the face's advance
+ * rounded DOWN to a device pixel and adds `letterSpacing` to that — so the
+ * default 13 px JetBrains Mono (a 7.8 px advance) was drawn into 7 px cells on
+ * a ratio-1 screen and every glyph crowded the next. One pixel more whenever
+ * the floor threw away half a pixel or more turns the floor into a rounding.
+ * The DOM renderer keeps the exact advance and needs none.
+ */
+export function cellSnapSpacing(advanceCssPx: number, devicePixelRatio: number): number {
+  if (!Number.isFinite(advanceCssPx) || advanceCssPx <= 0) return 0;
+  const device = advanceCssPx * (devicePixelRatio > 0 ? devicePixelRatio : 1);
+  return device - Math.floor(device) >= 0.5 ? 1 : 0;
+}
+
+/** The face's advance in CSS pixels, measured the way xterm measures it (one "W"). */
+function measureAdvance(family: string, size: number): number | null {
+  if (typeof document === "undefined") return null;
+  try {
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (!ctx) return null;
+    ctx.font = `${size}px ${family}`;
+    const width = ctx.measureText("W").width;
+    return Number.isFinite(width) && width > 0 ? width : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The ClawBox palette on a given ground — kept for callers that draw a terminal on a ground of their own. */
 export function terminalTheme(ground: string): TerminalColors {
   const { colors } = TERMINAL_THEMES["clawbox-dark"];
@@ -409,13 +438,30 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   }, []);
 
   // ── Renderer ──────────────────────────────────────────────────────────
+  // Keep the WebGL cell as wide as the face (cellSnapSpacing); back to none
+  // on the DOM renderer. Asked again whenever the face, its size, the pixel
+  // ratio or the renderer changes.
+  const snapCells = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    let spacing = 0;
+    if (webglRef.current) {
+      const advance = measureAdvance(String(term.options.fontFamily ?? ""), Number(term.options.fontSize ?? 0));
+      spacing = advance === null ? 0 : cellSnapSpacing(advance, window.devicePixelRatio || 1);
+    }
+    if ((term.options.letterSpacing ?? 0) === spacing) return;
+    try { term.options.letterSpacing = spacing; } catch { return; }
+    scheduleFit();
+  }, [scheduleFit]);
+
   const releaseWebgl = useCallback(() => {
     const addon = webglRef.current;
     webglRef.current = null;
     if (!addon) return;
     try { addon.dispose(); } catch { /* already gone with its context */ }
+    snapCells();
     scheduleFit();
-  }, [scheduleFit]);
+  }, [scheduleFit, snapCells]);
 
   const ensureWebgl = useCallback(async () => {
     const term = termRef.current;
@@ -432,9 +478,11 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       addon.onContextLoss(() => {
         if (webglRef.current === addon) webglRef.current = null;
         try { addon.dispose(); } catch { /* already gone */ }
+        snapCells();
       });
       term.loadAddon(addon);
       webglRef.current = addon;
+      snapCells();
       scheduleFit();
     } catch {
       // No WebGL2 here, or the addon would not start: the DOM renderer stays.
@@ -442,7 +490,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     } finally {
       webglLoadingRef.current = false;
     }
-  }, [scheduleFit]);
+  }, [scheduleFit, snapCells]);
 
   // `connect()` raises the lock on entry and only `onopen`/`onclose` lower it
   // again, so ANY throw before the socket handlers are installed strands it:
@@ -484,7 +532,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     // the cell's size in CSS pixels without changing the element's.
     if (typeof window.matchMedia === "function") {
       let query: MediaQueryList | null = null;
-      const onRatio = () => { scheduleFit(); listen(); };
+      const onRatio = () => { snapCells(); scheduleFit(); listen(); };
       const listen = () => {
         query?.removeEventListener?.("change", onRatio);
         query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
@@ -499,7 +547,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
         setMenu({ x: clampMenuX(x), y: clampMenuY(y), hasSelection: true });
       }));
     }
-  }, [scheduleFit, copyAndTell]);
+  }, [scheduleFit, snapCells, copyAndTell]);
 
   const connect = useCallback(async () => {
     if (!mountedRef.current || !containerRef.current) return;
@@ -610,7 +658,9 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       // for this terminal only, and only while it is still on screen.
       if (fontLate.late && fontLate.loading) {
         void fontLate.loading.then((loaded) => {
-          if (loaded && mountedRef.current && termRef.current === term) refitForFont(term, fitAddon, face.family);
+          if (!loaded || !mountedRef.current || termRef.current !== term) return;
+          refitForFont(term, fitAddon, face.family);
+          snapCells();
         });
       }
 
@@ -744,7 +794,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
         }
       }
     };
-  }, [wsUrl, updateStatus, releaseAfterFailedConnect, wireTerminal, ensureWebgl, copyAndTell]);
+  }, [wsUrl, updateStatus, releaseAfterFailedConnect, wireTerminal, ensureWebgl, snapCells, copyAndTell]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -791,6 +841,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     } catch {
       return;
     }
+    snapCells();
     scheduleFit();
     if (previous.font !== settings.font || previous.fontSize !== settings.fontSize) {
       // A shipped face is fetched before it is measured, like the first one was.
@@ -798,6 +849,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       const apply = () => {
         if (termRef.current !== term || !mountedRef.current) return;
         term.options.fontFamily = face.family;
+        snapCells();
         scheduleFit();
       };
       if (face.face && typeof document !== "undefined" && "fonts" in document) {
@@ -806,7 +858,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
         apply();
       }
     }
-  }, [settings, scheduleFit]);
+  }, [settings, scheduleFit, snapCells]);
 
   // Focus terminal on any interaction with the container
   const handleContainerClick = useCallback(() => {

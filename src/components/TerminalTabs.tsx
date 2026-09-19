@@ -381,7 +381,11 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
                 className={`group relative flex items-center h-[30px] rounded-t-lg transition-colors ${selected ? "" : hoverFill}`}
                 style={{
                   flex: "0 1 13rem",
-                  minWidth: "7.5rem",
+                  // Narrow enough to squeeze, wide enough that "Terminal 12"
+                  // still reads whole beside its icon and close button — at
+                  // 7.5rem every tab of a full strip read "Termina…". The
+                  // strip scrolls for the rest.
+                  minWidth: "8.75rem",
                   background: selected ? theme.colors.background : undefined,
                   boxShadow: selected ? `inset 0 1px 0 ${palette.hairline}, inset 1px 0 0 ${palette.hairline}, inset -1px 0 0 ${palette.hairline}` : undefined,
                 }}
