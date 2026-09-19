@@ -21,7 +21,7 @@ const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
 // is safe to return for the client to relay in the (tokenless) configure body.
 async function persistTokensAndAck(
   provider: string,
-  tokens: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number },
+  tokens: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number; account_email?: string },
   extra?: { projectId?: string },
 ): Promise<NextResponse> {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -205,12 +205,20 @@ export async function POST(request: Request) {
       }
     }
 
+    // Anthropic names the account the tokens belong to beside them. Kept as a
+    // LABEL for the Anthropic account list (src/lib/anthropic-accounts.ts),
+    // which is how an owner tells two Claude accounts apart; nothing decides
+    // anything on it, and the configure route ignores it.
+    const accountEmail = provider === "anthropic" && typeof tokenData.account?.email_address === "string"
+      ? tokenData.account.email_address.slice(0, 254)
+      : undefined;
     return persistTokensAndAck(
       provider,
       {
         access_token: tokenData.access_token,
         refresh_token: tokenData.refresh_token,
         expires_in: tokenData.expires_in,
+        ...(accountEmail ? { account_email: accountEmail } : {}),
       },
       { projectId },
     );

@@ -229,6 +229,9 @@ const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
 const UNGATED_COMMON = [
   "clawbox_incidents_list", "clawbox_incident_report",
   "memory_shard_status", "local_ai_status", "clawbox_ai_usage",
+  // The Anthropic account pool's state (TASK-902): "no account connected" is
+  // an answer, and a queue needs it most on the box where every one is limited.
+  "anthropic_accounts",
 ];
 
 /** The gate that points the OTHER way: it exists where the box cannot draw. */

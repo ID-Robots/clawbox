@@ -661,7 +661,18 @@ function describeRun(run: RunPayload, tail: number, vercel: boolean): string {
     // one of them. Resuming a run that is out of allowance buys the same
     // refusal, which is why the reset time is the operative fact here.
     const reason = run.pauseReason;
-    if (reason && reason.kind === "allowance") {
+    if (reason && reason.kind === "allowance" && reason.meter === "anthropic") {
+      // Every Anthropic account in the box's pool is at its usage limit
+      // (TASK-902). Unlike the other meters nobody has to press anything: the
+      // box resumes the run itself at the first reset — so the one thing a
+      // caller must not do is burn an attempt on a resume or a fresh run.
+      const when = pauseResetInstant(reason.resetsAt);
+      parts.push(
+        `Waiting for limit reset${when ? ` at ${when}` : ""}: every Anthropic account on this box is at its usage limit.`
+        + " Its work is kept and its session is intact, and the box resumes it by itself as soon as the first account is back."
+        + " Do not resume it or start a fresh run for the same task before then; anthropic_accounts shows each account and when it returns.",
+      );
+    } else if (reason && reason.kind === "allowance") {
       // A rolling window can free up days from now, so it is quoted with its
       // date; the per-day meters keep the bare UTC clock they reset at.
       const clock = pauseResetClock(reason.resetsAt);
@@ -829,6 +840,10 @@ function deliverableRow(run: RunPayload): Record<string, unknown> | null {
 function pauseSentence(reason: CodingPauseReason | null | undefined): string | null {
   if (!reason) return null;
   if (reason.kind === "owner") return "paused on purpose";
+  if (reason.meter === "anthropic") {
+    const at = pauseResetInstant(reason.resetsAt);
+    return `waiting for limit reset${at ? ` at ${at}` : ""}: every Anthropic account is at its usage limit, and the box resumes it by itself`;
+  }
   const clock = pauseResetClock(reason.resetsAt);
   const when = isRollingPauseMeter(reason.meter) ? pauseResetInstant(reason.resetsAt) : clock && `${clock} UTC`;
   return `the ${PAUSE_METER_NOUN[reason.meter]} is used up${when ? `; it comes back at ${when}` : ""}`;

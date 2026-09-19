@@ -114,6 +114,32 @@ describe("Escape inside the chat", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  // The CI flake behind the case above. "+" opens the card after a status
+  // fetch, outside any event, and on a loaded box React's scheduler runs out of
+  // its 5 ms slice at the commit, so a PASSIVE effect from that render runs a
+  // task later. An Escape pressed at the card already on screen then found no
+  // card listener, and only the chat's own. Making every task overrun its slice
+  // reproduces that every time; the card's listeners go on in its commit now.
+  it("closes the Create app card on an Escape pressed the moment it appears, on a busy box", async () => {
+    const onClose = vi.fn();
+    render(<ChatPopup isOpen onClose={onClose} />);
+    const toggle = await screen.findByTestId("chat-new-app-toggle");
+    const realNow = performance.now.bind(performance);
+    let overrun = 0;
+    const busy = vi.spyOn(performance, "now").mockImplementation(() => realNow() + (overrun += 50));
+    try {
+      fireEvent.click(toggle);
+      await screen.findByTestId("chat-new-app");
+    } finally {
+      busy.mockRestore();
+    }
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByTestId("chat-new-app")).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("still closes the chat when nothing is open on top of it", async () => {
     const onClose = vi.fn();
     render(<ChatPopup isOpen onClose={onClose} />);

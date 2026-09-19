@@ -105,6 +105,10 @@ export type ProgressLabelKey =
   // secrets this run was handed, and which one the box could not open.
   | "secretsInjected"
   | "secretsUnreadable"
+  | "anthropicAccount"
+  | "accountSwitched"
+  | "accountsWaiting"
+  | "resumedAfterLimit"
   // The Vercel deployment of the run's push (src/lib/vercel.ts), on a project
   // the owner has linked: what the box watched, how the build went, and the
   // production promotion — which is only ever the owner's own doing.
@@ -362,6 +366,19 @@ export const RUNNER_STEP = {
    * way that looks like anything else.
    */
   secretsUnreadable: (names: readonly string[]) => `Could not read these secrets: ${names.join(", ")}`,
+  /**
+   * Which of the owner's Anthropic accounts this spawn is on (TASK-902). Said
+   * only when it CHANGES, so a run that stays on one account says it once.
+   * The owner's own label, never an email and never a credential.
+   */
+  anthropicAccount: (label: string) => `On Anthropic account "${label}"`,
+  /** The account hit its usage limit and the run was moved to the next one, in place. */
+  accountSwitched: (from: string, to: string, clock: string) =>
+    `Anthropic account "${from}" hit its usage limit (back at ${clock}); carrying on with "${to}" in the same session`,
+  /** Every account is limited: the run waits, paused, instead of failing. */
+  accountsWaiting: (clock: string) => `Every Anthropic account is at its usage limit; waiting for the reset at ${clock}`,
+  /** The box resumed a run that was waiting for a reset — nobody pressed anything. */
+  resumedAfterLimit: "The usage limit reset; carrying on where it left off",
 } as const;
 
 /** One recognisable runner sentence: what it looks like, and what it means. */
@@ -462,6 +479,15 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
   { re: /^Secrets in this run's environment: (.+)$/, labelKey: "secretsInjected", icon: "key", params: (m) => ({ names: m[1] }) },
   { re: /^Could not read these secrets: (.+)$/, labelKey: "secretsUnreadable", icon: "key_off", params: (m) => ({ names: m[1] }) },
+  { re: /^On Anthropic account "(.*)"$/, labelKey: "anthropicAccount", icon: "account_circle", params: (m) => ({ label: m[1] }) },
+  {
+    re: /^Anthropic account "(.*)" hit its usage limit \(back at (\d{1,2}:\d{2})\); carrying on with "(.*)" in the same session$/,
+    labelKey: "accountSwitched",
+    icon: "swap_horiz",
+    params: (m) => ({ from: m[1], time: m[2], to: m[3] }),
+  },
+  { re: /^Every Anthropic account is at its usage limit; waiting for the reset at (\d{1,2}:\d{2})$/, labelKey: "accountsWaiting", icon: "hourglass_top", params: (m) => ({ time: m[1] }) },
+  { re: /^The usage limit reset; carrying on where it left off$/, labelKey: "resumedAfterLimit", icon: "play_circle" },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {

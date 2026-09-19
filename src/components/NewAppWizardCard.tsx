@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useT } from "@/lib/i18n";
 import { taskTitle } from "@/lib/task-title";
 import {
@@ -212,7 +212,15 @@ export default function NewAppWizardCard({
   // here: the click decides where focus goes.
   const [opener] = useState<Element | null>(() => (typeof document === "undefined" ? null : document.activeElement));
 
-  useEffect(() => {
+  // A LAYOUT effect: the listeners are in place in the same commit that puts
+  // the card on screen. The chat's "+" opens the card after a status fetch,
+  // outside any event, and a passive effect from that render runs in a LATER
+  // scheduler task — on a busy box, after an Escape pressed at the card that
+  // is already showing. That Escape then reached only the chat's own listener
+  // and closed the whole conversation with the card still up (the CI flake of
+  // `chat-popup-dismiss-and-geometry`, reproduced by making the scheduler yield
+  // after every task).
+  useLayoutEffect(() => {
     if (!closeOnOutsideClick || !onClose) return;
     const onPointerDown = (event: PointerEvent) => {
       const card = cardRef.current;

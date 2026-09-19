@@ -17,6 +17,7 @@ import { useTr } from "@/lib/i18n-floor";
 import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import ClawboxAiUsageCard from "./ClawboxAiUsageCard";
+import AnthropicAccountsCard from "./AnthropicAccountsCard";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
 import LocalAiPanel from "./LocalAiPanel";
@@ -4086,6 +4087,13 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 panel above's to fix, and a usage card under it would only
                 repeat that nothing can be read. */}
             {aiProvider?.clawaiConfigured && !aiProvider.clawaiTokenRejected && <ClawboxAiUsageCard />}
+
+            {/* The Anthropic accounts coding runs spend, in the owner's order,
+                with the one a usage limit set aside and when it is back
+                (TASK-902). On every edition and whatever the chat provider
+                above is: it is the coding agent's pool, not the chat's, and
+                the limit notices open this section to show it. */}
+            <AnthropicAccountsCard />
           </div>
         )}
 

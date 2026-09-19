@@ -32,7 +32,7 @@ const readTelegramAllowFrom = vi.hoisted(() => vi.fn());
 const readConfigStrict = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom, readConfigStrict }));
 
-import { announceCodingAgent, buildAnnouncement } from "@/lib/coding-agent-notify";
+import { announceAnthropicLimit, announceCodingAgent, buildAnnouncement, buildAnthropicLimitNotice } from "@/lib/coding-agent-notify";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
@@ -50,6 +50,8 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     sessionId: "sess-1",
     provider: "clawbox-ai",
     requestedModel: null,
+    anthropicAccount: null,
+    accountSwitches: [],
     model: "deepseek-v4-flash",
     summary: SECRET_SUMMARY,
     error: null,
@@ -384,5 +386,73 @@ describe("the Telegram leg", () => {
     await expect(announceCodingAgent(run())).resolves.toBeUndefined();
     getActiveHarness.mockRejectedValue(new Error("no edition"));
     await expect(announceCodingAgent(run())).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The Anthropic account-limit notices (TASK-902): one when an account becomes
+ * limited and the box moves on, one when that leaves no account — and never
+ * the run card's type, which is deduped by run id and would take the place of
+ * the same run's finish notice.
+ */
+describe("the Anthropic account-limit notices", () => {
+  const SOFIA = "Europe/Sofia";
+  const AT_2250 = Date.UTC(2026, 8, 18, 19, 50);
+
+  it("says which account stopped, when it is back, and where the run carried on", () => {
+    expect(buildAnthropicLimitNotice({ kind: "switched", fromLabel: "Work Max", toLabel: "Personal Max", resetAt: AT_2250, runId: "run-k3x9q2ab" }, SOFIA))
+      .toBe('Anthropic account "Work Max" hit its usage limit (back at 22:50). ClawBox switched to "Personal Max" and run-k3x9q2ab carried on.');
+  });
+
+  it("says that runs WAIT when every account is limited, and until when", () => {
+    expect(buildAnthropicLimitNotice({ kind: "all_limited", resetAt: AT_2250, runId: null }, SOFIA))
+      .toBe("Every Anthropic account on this ClawBox is at its usage limit. Coding runs are waiting instead of failing, and pick up again at 22:50.");
+    expect(buildAnthropicLimitNotice({ kind: "all_limited", resetAt: null, runId: null }, SOFIA)).toMatch(/as soon as one is back/);
+  });
+
+  it("goes to the desktop as a plain notice that opens Settings → AI providers, not as a run card", async () => {
+    await announceAnthropicLimit({ kind: "switched", fromLabel: "A", toLabel: "B", resetAt: AT_2250, runId: "run-k3x9q2ab" });
+    const payload = ringEntry();
+    expect(payload.type).toBe("notify");
+    expect(payload.action).toEqual({ open: "settings", section: "ai" });
+    expect(payload.runId).toBeUndefined();
+  });
+
+  it("reaches the owner's Telegram chat on OpenClaw, as the same plain text", async () => {
+    const notice = { kind: "switched", fromLabel: "Work Max", toLabel: "Personal Max", resetAt: AT_2250, runId: "run-k3x9q2ab" } as const;
+    configGet.mockImplementation(async (key: string) => (key === "telegram_bot_token" ? "123:abc" : undefined));
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceAnthropicLimit(notice);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.telegram.org/bot123:abc/sendMessage");
+    const body = JSON.parse(String(init.body));
+    expect(body.chat_id).toBe("1001");
+    expect(body.text).toBe(buildAnthropicLimitNotice(notice));
+    expect(body.parse_mode).toBeUndefined();
+  });
+
+  it("reaches each approved user through the hermes send path on Hermes", async () => {
+    const notice = { kind: "all_limited", resetAt: AT_2250, runId: null } as const;
+    getActiveHarness.mockResolvedValue("hermes");
+    readHermesApprovedUsers.mockResolvedValue([{ id: "42", name: "Maya" }]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceAnthropicLimit(notice);
+
+    expect(notifyHermesTelegramUser).toHaveBeenCalledWith("42", buildAnthropicLimitNotice(notice));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("goes to the owner's Telegram too, and never lets a failure escape", async () => {
+    configGet.mockImplementation(async (key: string) => (key === "telegram_bot_token" ? "123:abc" : undefined));
+    readTelegramAllowFrom.mockRejectedValue(new Error("no file"));
+    kvSet.mockImplementation(() => { throw new Error("disk full"); });
+    await expect(announceAnthropicLimit({ kind: "all_limited", resetAt: null, runId: null })).resolves.toBeUndefined();
   });
 });

@@ -722,3 +722,90 @@ describe("the provider split", () => {
     expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBeUndefined();
   });
 });
+
+/**
+ * The account pool's handoff (TASK-902): the runner picks ONE of the box's
+ * Anthropic accounts per spawn and leaves its credential in a 0600 file named
+ * by CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE. The wrapper must read it, delete it
+ * before Claude Code starts, export the right variable for its kind — and let
+ * it outrank the legacy key, because it is the account the runner CHOSE.
+ */
+describe("the account the runner chose", () => {
+  function handoff(kind: string, secret: string): string {
+    const file = path.join(path.dirname(home), `handoff-${kind}.cred`);
+    writeFileSync(file, `${kind}\n${secret}\n`, { mode: 0o600 });
+    return file;
+  }
+
+  it("exports an OAuth account's token as CLAUDE_CODE_OAUTH_TOKEN, and deletes the file before Claude Code starts", () => {
+    const file = handoff("oauth", "sk-ant-oat01-second-account-token");
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file });
+    expect(res.status).toBe(0);
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-second-account-token");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    // Gone from disk, and its path does not travel into the session either.
+    expect(existsSync(file)).toBe(false);
+    expect(env.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE).toBeUndefined();
+  });
+
+  it("exports an API-key account as ANTHROPIC_API_KEY, over a legacy key still in the config", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", anthropic_api_key: "sk-ant-legacy-key-0123456789" });
+    const file = handoff("api_key", "sk-ant-api03-pool-account-key");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file }).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-api03-pool-account-key");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("exports nothing for the `claude` sign-in, so Claude Code uses its own login", () => {
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    writeFileSync(path.join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }));
+    writeDeviceConfig({ clawai_token: "claw_test_token", anthropic_api_key: "sk-ant-legacy-key-0123456789" });
+    const file = handoff("login", "");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file }).status).toBe(0);
+    const env = capturedEnv();
+    // Not even the legacy key: the runner chose the sign-in.
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it("drops an inherited CLAUDE_CODE_OAUTH_TOKEN, which would outrank the account the runner chose", () => {
+    const file = handoff("api_key", "sk-ant-api03-pool-account-key");
+    expect(runWrapper({
+      CLAUDE_DS_PROVIDER: "anthropic",
+      CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file,
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-somebody-elses",
+    }).status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    // And on the ClawBox AI branch too.
+    expect(runWrapper({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-somebody-elses" }).status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it("refuses a sign-in handoff when the sign-in is gone, and starts nothing", () => {
+    const file = handoff("login", "");
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/sign-in this run was given is gone/);
+    expect(existsSync(envDump)).toBe(false);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("refuses a handoff it cannot use, never printing what was in it", () => {
+    const file = handoff("mystery", "sk-ant-should-not-print");
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file });
+    expect(res.status).toBe(1);
+    expect(res.stderr).not.toContain("sk-ant-should-not-print");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("is never read on a ClawBox AI run", () => {
+    const file = handoff("api_key", "sk-ant-api03-pool-account-key");
+    expect(runWrapper({ CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file }).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(Object.values(env).some((v) => v.includes("pool-account-key"))).toBe(false);
+  });
+});

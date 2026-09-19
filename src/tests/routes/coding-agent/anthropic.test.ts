@@ -29,9 +29,16 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 // ~/.claude of their own — its own filesystem rules are pinned separately, in
 // src/tests/unit/coding-anthropic.test.ts.
 const getAnthropicConnection = vi.hoisted(() => vi.fn());
+// Where the key goes is the account pool's business (anthropic-accounts.test.ts
+// pins that it lands in the secret store and never in data/config.json); here
+// only that the route hands it over, and when it must not.
+const setAnthropicKey = vi.hoisted(() => vi.fn());
+const clearAnthropicKey = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-anthropic", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-anthropic")>()),
   getAnthropicConnection,
+  setAnthropicKey,
+  clearAnthropicKey,
 }));
 
 const NOTHING = { connected: false, hasKey: false, hasLogin: false, source: null };
@@ -75,6 +82,8 @@ beforeEach(async () => {
   configGet.mockResolvedValue(undefined);
   configSet.mockResolvedValue(undefined);
   getAnthropicConnection.mockResolvedValue(NOTHING);
+  setAnthropicKey.mockResolvedValue(undefined);
+  clearAnthropicKey.mockResolvedValue(undefined);
   // Anthropic says the key is good unless a case says otherwise.
   fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
@@ -99,7 +108,8 @@ describe("the owner gate", () => {
         expect((await res.json()).kind).toBe("owner_only");
       }
     }
-    expect(configSet).not.toHaveBeenCalled();
+    expect(setAnthropicKey).not.toHaveBeenCalled();
+    expect(clearAnthropicKey).not.toHaveBeenCalled();
   });
 
   it("refuses a write fired from another site, even with the owner's cookie", async () => {
@@ -108,7 +118,8 @@ describe("the owner gate", () => {
     expect((await post.json()).kind).toBe("cross_origin");
     const del = await DELETE(req("DELETE", { origin: "https://evil.example" }));
     expect(del.status).toBe(403);
-    expect(configSet).not.toHaveBeenCalled();
+    expect(setAnthropicKey).not.toHaveBeenCalled();
+    expect(clearAnthropicKey).not.toHaveBeenCalled();
   });
 
   it("still answers the GET for the owner's own page", async () => {
@@ -150,7 +161,8 @@ describe("saving a key", () => {
     configGet.mockResolvedValue(undefined);
     const res = await POST(req("POST"));
     expect(res.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("anthropic_api_key", KEY);
+    expect(setAnthropicKey).toHaveBeenCalledWith(KEY);
+    expect(configSet).not.toHaveBeenCalledWith("anthropic_api_key", KEY);
     expect((await res.json()).verified).toBe(true);
   });
 
@@ -161,7 +173,8 @@ describe("saving a key", () => {
     const res = await POST(req("POST", { body: { apiKey: "hunter2" } }));
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(configSet).not.toHaveBeenCalled();
+    expect(setAnthropicKey).not.toHaveBeenCalled();
+    expect(clearAnthropicKey).not.toHaveBeenCalled();
   });
 
   it("refuses a key Anthropic itself rejects", async () => {
@@ -171,7 +184,8 @@ describe("saving a key", () => {
     const res = await POST(req("POST"));
     expect(res.status).toBe(400);
     expect((await res.json()).kind).toBe("rejected");
-    expect(configSet).not.toHaveBeenCalled();
+    expect(setAnthropicKey).not.toHaveBeenCalled();
+    expect(clearAnthropicKey).not.toHaveBeenCalled();
   });
 
   it("STORES a key it could not check, and says the check did not happen", async () => {
@@ -181,7 +195,8 @@ describe("saving a key", () => {
     fetchMock.mockRejectedValue(new Error("ENOTFOUND"));
     const res = await POST(req("POST"));
     expect(res.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("anthropic_api_key", KEY);
+    expect(setAnthropicKey).toHaveBeenCalledWith(KEY);
+    expect(configSet).not.toHaveBeenCalledWith("anthropic_api_key", KEY);
     expect((await res.json()).verified).toBe(false);
   });
 
@@ -190,7 +205,8 @@ describe("saving a key", () => {
     expect(res.status).toBe(400);
     // Not even a network call: the cap is checked before the live probe.
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(configSet).not.toHaveBeenCalled();
+    expect(setAnthropicKey).not.toHaveBeenCalled();
+    expect(clearAnthropicKey).not.toHaveBeenCalled();
   });
 
   it("answers 400 rather than 500 on a body it cannot read", async () => {
@@ -198,7 +214,8 @@ describe("saving a key", () => {
       expect((await POST(req("POST", { body }))).status).toBe(400);
     }
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(configSet).not.toHaveBeenCalled();
+    expect(setAnthropicKey).not.toHaveBeenCalled();
+    expect(clearAnthropicKey).not.toHaveBeenCalled();
   });
 
   it("does not put the key on the wire anywhere but Anthropic's own host", async () => {
@@ -217,7 +234,7 @@ describe("removing the key", () => {
     configGet.mockResolvedValue(KEY);
     const res = await DELETE(req("DELETE"));
     expect(res.status).toBe(200);
-    expect(configSet).toHaveBeenCalledWith("anthropic_api_key", undefined);
+    expect(clearAnthropicKey).toHaveBeenCalledTimes(1);
   });
 
   it("leaves a `claude` login the owner made themselves alone", async () => {
@@ -229,7 +246,7 @@ describe("removing the key", () => {
     getAnthropicConnection.mockResolvedValue(VIA_LOGIN);
     const body = await (await DELETE(req("DELETE"))).json();
     expect(body).toMatchObject({ hasKey: false, hasLogin: true, connected: true });
-    // Exactly one write, and it is the key's.
-    expect(configSet).toHaveBeenCalledTimes(1);
+    // Exactly one removal, and it is the key's.
+    expect(clearAnthropicKey).toHaveBeenCalledTimes(1);
   });
 });

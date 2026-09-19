@@ -37,6 +37,8 @@ import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
+import { formatResetClock } from "@/lib/anthropic-limit";
+import { OPEN_AI_PROVIDERS_SETTINGS } from "@/lib/notify-action";
 
 const MAX_TOAST_CHARS = 280;
 /** Telegram's own limit is 4096; the template never gets near it. */
@@ -198,5 +200,48 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
     await notifyTelegram(message);
   } catch (err) {
     console.error("[coding-agent] telegram notice failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * An Anthropic account hit its usage limit (TASK-902).
+ *
+ * TWO notices, and deliberately only two: one when an account becomes limited
+ * and the box moves to the next one, and one when that leaves NO account able
+ * to answer. None when the box goes back to the preferred account after its
+ * reset — that is the box working as intended, and a message about it every
+ * five hours would teach the owner to ignore the other two.
+ *
+ * The words carry the owner's own LABELS and a clock, never an email or a
+ * credential. They go where the finish notice goes — the desktop and the
+ * owner's Telegram chat — but on the desktop as a plain notice that opens
+ * Settings → Providers, not as a run card: the run card is deduped by run
+ * id, and this would have taken the place of the run's own finish notice.
+ */
+export type AnthropicLimitNotice =
+  | { kind: "switched"; fromLabel: string; toLabel: string; resetAt: number; runId: string | null }
+  | { kind: "all_limited"; resetAt: number | null; runId: string | null };
+
+export function buildAnthropicLimitNotice(notice: AnthropicLimitNotice, timeZone?: string): string {
+  if (notice.kind === "switched") {
+    return `Anthropic account "${notice.fromLabel}" hit its usage limit (back at ${formatResetClock(notice.resetAt, timeZone)}).`
+      + ` ClawBox switched to "${notice.toLabel}"${notice.runId ? ` and ${notice.runId} carried on` : ""}.`;
+  }
+  const when = notice.resetAt !== null ? `at ${formatResetClock(notice.resetAt, timeZone)}` : "as soon as one is back";
+  return `Every Anthropic account on this ClawBox is at its usage limit.`
+    + ` Coding runs are waiting instead of failing, and pick up again ${when}.`;
+}
+
+export async function announceAnthropicLimit(notice: AnthropicLimitNotice): Promise<void> {
+  const message = buildAnthropicLimitNotice(notice);
+  try {
+    await pushPendingAction({ type: "notify", message: message.slice(0, MAX_TOAST_CHARS), action: OPEN_AI_PROVIDERS_SETTINGS });
+  } catch (err) {
+    console.error("[anthropic-accounts] desktop notice failed:", err instanceof Error ? err.message : err);
+  }
+  try {
+    await notifyTelegram(message);
+  } catch (err) {
+    console.error("[anthropic-accounts] telegram notice failed:", err instanceof Error ? err.message : err);
   }
 }

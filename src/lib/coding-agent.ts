@@ -158,7 +158,30 @@ import {
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
-import { announceCodingAgent } from "@/lib/coding-agent-notify";
+import {
+  anotherAccountLikely,
+  accountsSnapshot,
+  markLimited,
+  onLimitReset,
+  prepareAccount,
+  readAccounts,
+  removeCredentialHandoffs,
+  startAnthropicAccounts,
+  writeCredentialHandoff,
+  type AnthropicCredential,
+  type LimitRecorded,
+  type PreparedAccount,
+} from "@/lib/anthropic-accounts";
+import {
+  detectAnthropicLimit,
+  formatResetClock,
+  limitUntil,
+  pickAccount,
+  poolHealth,
+  type AnthropicLimit,
+  type AnthropicLimitKind,
+} from "@/lib/anthropic-limit";
+import { announceAnthropicLimit, announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
   collectVisualEvidence,
   renderEvidenceSection,
@@ -1206,6 +1229,46 @@ const DENIED_HOME_SUBTREES: readonly string[] = [...HARD_HOME_SUBTREES, ...HARNE
 export type { CodingRunStatus };
 export type CodingRunSource = "agent" | "owner";
 
+/**
+ * One move of a run from an Anthropic account at its limit to the next one in
+ * the owner's order. Labels as they read at the time, so the run's page can say
+ * what happened without the pool — and without ever holding a credential.
+ */
+export interface AccountSwitch {
+  at: number;
+  fromId: string | null;
+  fromLabel: string | null;
+  toId: string;
+  toLabel: string;
+  /** When the account it left is expected back; null when the box had to assume. */
+  limitedUntil: number | null;
+  kind: AnthropicLimitKind;
+}
+
+/** How many switches a record keeps — a night of them, not a history. */
+export const MAX_ACCOUNT_SWITCHES = 20;
+
+function normalizeAccountSwitches(raw: unknown): AccountSwitch[] {
+  if (!Array.isArray(raw)) return [];
+  const str = (v: unknown, max: number): string | null => (typeof v === "string" && v ? v.slice(0, max) : null);
+  return raw.flatMap((entry): AccountSwitch[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const e = entry as Record<string, unknown>;
+    const toId = str(e.toId, 16);
+    const toLabel = str(e.toLabel, 80);
+    if (typeof e.at !== "number" || !toId || !toLabel) return [];
+    return [{
+      at: e.at,
+      fromId: str(e.fromId, 16),
+      fromLabel: str(e.fromLabel, 80),
+      toId,
+      toLabel,
+      limitedUntil: typeof e.limitedUntil === "number" ? e.limitedUntil : null,
+      kind: e.kind === "weekly" || e.kind === "rate" || e.kind === "credit" ? e.kind : "session",
+    }];
+  }).slice(-MAX_ACCOUNT_SWITCHES);
+}
+
 export interface CodingRun {
   /** Short id, e.g. "run-k3x9q2ab". Short on purpose: MCP error text redacts
    *  every 32+ hex run, and a uuid would come out as [REDACTED]. */
@@ -1234,6 +1297,17 @@ export interface CodingRun {
    * and on ClawBox AI the plan chooses it). Null where the provider decides.
    */
   requestedModel: string | null;
+  /**
+   * The Anthropic ACCOUNT — an id in the box's pool (src/lib/anthropic-accounts.ts)
+   * — the run's current process is on. Null for a ClawBox AI run and for a
+   * record from before the pool. Deliberately NOT frozen the way `provider` is:
+   * when an account hits its usage limit the box moves the run to the next one
+   * and resumes it in place (TASK-902), and a resume goes to whichever account
+   * is first in line at that moment.
+   */
+  anthropicAccount: string | null;
+  /** Every such move, oldest first — what the run's page shows. Bounded. */
+  accountSwitches: AccountSwitch[];
   /** The run's final message: what changed, how to verify, what is left. */
   summary: string | null;
   /** Full final result for machine consumers; never parse the clipped display summary. */
@@ -2043,7 +2117,13 @@ export interface RunTeam {
   taskId: string | null;
 }
 
-export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found";
+/**
+ * `limited` (TASK-902): every Anthropic account in the box's pool is at its
+ * usage limit. A refusal like `busy` — 409, CONFLICT to the MCP layer — with
+ * the first reset time in its sentence, so a queue waits instead of spending
+ * an attempt on a run that would only be refused upstream.
+ */
+export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found" | "limited";
 
 /** Thrown by startRun/stopRun; the routes map `kind` to a status code. */
 export class CodingAgentError extends Error {
@@ -3628,6 +3708,8 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // is what the default answers — there was nothing else to run on.
     provider: codingProviderFrom(raw.provider),
     requestedModel: normalizeRequestedModel(raw.provider, raw.requestedModel),
+    anthropicAccount: typeof raw.anthropicAccount === "string" && /^[0-9a-f]{8}$/.test(raw.anthropicAccount) ? raw.anthropicAccount : null,
+    accountSwitches: normalizeAccountSwitches((raw as { accountSwitches?: unknown }).accountSwitches),
     summary: typeof raw.summary === "string" ? raw.summary : null,
     resultText: typeof raw.resultText === "string" ? raw.resultText : null,
     error: typeof raw.error === "string" ? raw.error : null,
@@ -4148,6 +4230,23 @@ interface LiveRun {
    * finishRun applies this rather than the stream handler.
    */
   outcome: { status: "completed" | "failed"; error: string | null; resumable: boolean } | null;
+  /**
+   * The HARNESS's own report that the Anthropic account ran into its cap — the
+   * synthetic assistant message the CLI writes instead of an answer (TASK-902).
+   * The settle path reads this before the run's closing words, because those
+   * are the run's and a run can be writing ABOUT limits.
+   */
+  limitSignal: string | null;
+  /**
+   * The owner's test hook (`simulateAnthropicLimit`): the words of a limit to
+   * settle this run with, set just before the hook ends the process.
+   */
+  simulatedLimit: string | null;
+  /**
+   * A pause the account switch decided on after the process had gone — no
+   * other account could take the run over — applied when finishRun runs again.
+   */
+  forcedAccountPause: { resetsAt: string | null; message: string } | null;
 }
 
 /**
@@ -4192,6 +4291,8 @@ interface RunStore {
   exitHookInstalled: boolean;
   /** A run's injected secrets, kept off the record — see runSecretEnv. */
   runSecretEnv: Map<string, Record<string, string>>;
+  /** The Anthropic account a run's next spawn uses, credential included — see runAnthropicCredential. */
+  runAnthropicCredential: Map<string, RunAnthropicCredential>;
   /** The runs whose pull request, deployment or review is already being watched. */
   prWatchers: Set<string>;
   deployWatchers: Set<string>;
@@ -4220,6 +4321,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   dirty: false,
   exitHookInstalled: false,
   runSecretEnv: new Map<string, Record<string, string>>(),
+  runAnthropicCredential: new Map<string, RunAnthropicCredential>(),
   prWatchers: new Set<string>(),
   deployWatchers: new Set<string>(),
   reviewWatchers: new Set<string>(),
@@ -4390,6 +4492,9 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     endRequested: null,
     allowanceRefusal: null,
     pauseReason: null,
+    limitSignal: null,
+    simulatedLimit: null,
+    forcedAccountPause: null,
     timedOut: false,
     // The harness's segment carries on across the restart, and the result it
     // eventually prints reports that whole segment's totals — which is exactly
@@ -5496,7 +5601,11 @@ const runSecretEnv = store.runSecretEnv;
 async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
   const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
   runSecretEnv.set(run.id, resolved.env);
-  registerRunSecrets(run.id, Object.entries(resolved.env).map(([name, value]) => ({ name, value })));
+  // The Anthropic account rides the same path: every async spawn comes through
+  // here just before it, which is exactly where "which account is first in
+  // line right now" should be asked (TASK-902).
+  await prepareRunAccount(run);
+  registerRunRedaction(run.id);
   run.secretNames = resolved.names;
   if (resolved.names.length > 0) pushProgress(run, RUNNER_STEP.secretsInjected(resolved.names));
   // Said in the run's own feed rather than only in the log: an entry the owner
@@ -5507,12 +5616,66 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
 }
 
 /**
+ * The Anthropic account a run's next spawn is on, WITH its credential — in
+ * memory only, beside the owner's secrets and dropped with them, never on the
+ * record (which carries the account's id and nothing else).
+ */
+interface RunAnthropicCredential {
+  accountId: string;
+  label: string;
+  credential: AnthropicCredential;
+}
+
+const runAnthropicCredential: Map<string, RunAnthropicCredential> =
+  store.runAnthropicCredential ?? (store.runAnthropicCredential = new Map<string, RunAnthropicCredential>());
+
+/**
+ * Choose the account for an `anthropic` run's next spawn: the first usable one
+ * in the owner's order (src/lib/anthropic-accounts.ts).
+ *
+ * Never throws: this runs after a record may already have been flipped to
+ * "running". When the pool cannot be read, or holds nothing that answers, the
+ * spawn goes without a handoff and the wrapper falls back to what it always
+ * read (the legacy key, else the `claude` sign-in) — and when every account is
+ * limited the preferred one is handed over anyway (`fallback`), because its
+ * refusal is what pauses the run until the reset.
+ */
+async function prepareRunAccount(run: CodingRun): Promise<void> {
+  runAnthropicCredential.delete(run.id);
+  if (run.provider !== "anthropic") return;
+  let prepared: PreparedAccount | null = null;
+  try {
+    ({ prepared } = await prepareAccount({ fallback: true }));
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
+  }
+  if (!prepared) return;
+  runAnthropicCredential.set(run.id, { accountId: prepared.account.id, label: prepared.account.label, credential: prepared.credential });
+  if (run.anthropicAccount !== prepared.account.id) pushProgress(run, RUNNER_STEP.anthropicAccount(prepared.account.label));
+  run.anthropicAccount = prepared.account.id;
+}
+
+/**
+ * Arm the redaction table with everything this run was handed: the owner's
+ * injected secrets, and the Anthropic account's own token or key — which is in
+ * the harness's environment too, so a run that echoes it must not get it onto
+ * the record.
+ */
+function registerRunRedaction(runId: string): void {
+  const list = Object.entries(runSecretEnv.get(runId) ?? {}).map(([name, value]) => ({ name, value }));
+  const account = runAnthropicCredential.get(runId);
+  if (account?.credential.secret) list.push({ name: "ANTHROPIC_ACCOUNT", value: account.credential.secret });
+  registerRunSecrets(runId, list);
+}
+
+/**
  * Put a run's secrets back, from a copy taken before its settle dropped them.
  *
- * For ONE caller: the automatic transient retry in `finishRun`. That branch
- * respawns the same record synchronously, from the child's own `close`
- * handler, so it cannot re-resolve — the resolve is a disk read — and the
- * cleanup above it has already emptied both tables. A retried child spawned
+ * For the two continuations that respawn the same record from its own settle:
+ * the automatic transient retry in `finishRun`, which runs synchronously from
+ * the child's `close` handler and cannot re-resolve (the resolve is a disk
+ * read), and the account switch, which re-resolves only the ACCOUNT. The
+ * cleanup above both has already emptied every table. A retried child spawned
  * with no redaction table armed is a child whose echoed token would reach the
  * run record; one spawned with no environment is a retry that fails for the
  * want of a credential the first attempt had.
@@ -5522,15 +5685,17 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
  * the deliverable gate. Those are the paths where re-reading is the right
  * answer, because time has passed and the owner may have changed their mind.
  */
-function restoreRunSecrets(runId: string, env: Record<string, string>): void {
+function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential): void {
   runSecretEnv.set(runId, env);
-  registerRunSecrets(runId, Object.entries(env).map(([name, value]) => ({ name, value })));
+  if (account) runAnthropicCredential.set(runId, account);
+  registerRunRedaction(runId);
 }
 
-/** Both tables, emptied for one run. The settle path's own step, and the undo
+/** Every table, emptied for one run. The settle path's own step, and the undo
  *  for a `restoreRunSecrets` whose child never started. */
 function dropRunSecrets(runId: string): void {
   runSecretEnv.delete(runId);
+  runAnthropicCredential.delete(runId);
   forgetRunSecrets(runId);
 }
 
@@ -5759,6 +5924,9 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // log kept past the settle is disk the owner never asked to spend. A retry
   // (finishRun) opens a fresh pair.
   removeStreamLogs(run.id);
+  // A credential handoff the wrapper never got to read (it died first, or
+  // never started) goes with the process it was written for.
+  removeCredentialHandoffs(run.id);
   // The run's own tab, never the owner's: browser sessions are tagged with the
   // run that opened them and a run always gets a new page (browser-sessions.ts).
   void closeSessionsForRun(run.id).catch(() => {});
@@ -6102,7 +6270,9 @@ interface StreamEvent {
   model?: string;
   /** `id` is the API message: the CLI emits one assistant event PER CONTENT
    *  BLOCK of it (thinking, then text or tool_use), each with the same usage. */
-  message?: { id?: unknown; content?: unknown; usage?: unknown };
+  message?: { id?: unknown; content?: unknown; usage?: unknown; model?: unknown };
+  /** assistant: the CLI's own tag on a message it wrote instead of an API answer (`rate_limit`, `billing_error`, …). */
+  error?: unknown;
   /** system/task_started: what the helper was asked, in the CLI's words. */
   description?: unknown;
   result?: unknown;
@@ -6404,6 +6574,29 @@ export function runInputsNote(run: Pick<CodingRun, "id" | "inputs">): string {
 }
 
 /** One line of `--output-format stream-json`. */
+/** The first text block of an assistant event, bounded. */
+function firstEventText(event: StreamEvent): string | null {
+  const raw = event.message?.content;
+  if (!Array.isArray(raw)) return null;
+  for (const block of raw as Record<string, unknown>[]) {
+    if (block.type === "text" && typeof block.text === "string" && block.text.trim()) return block.text.trim().slice(0, 400);
+  }
+  return null;
+}
+
+/** See the call site in handleEvent. */
+function noteAnthropicLimitSignal(state: LiveRun, event: StreamEvent): void {
+  const tagged = event.error === "rate_limit" || event.error === "billing_error";
+  const synthetic = event.message?.model === "<synthetic>";
+  if (!tagged && !synthetic) return;
+  const text = firstEventText(event);
+  if (!text) return;
+  // A synthetic message is not always a limit (an interrupted request is one
+  // too), so an untagged one must read as a limit in its own words; a tagged
+  // one IS the CLI saying so, whatever its wording.
+  if (tagged || detectAnthropicLimit(text, Date.now())) state.limitSignal = text;
+}
+
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
 
@@ -6506,6 +6699,13 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // run's command, and a tester's `npm test` must not mark the run as one
     // with side effects. The card already names the helper that is out.
     if (typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id) return;
+    // An Anthropic account at its cap. The CLI does not answer that with an
+    // API message: it writes a SYNTHETIC one (model "<synthetic>", tagged
+    // `error: "rate_limit"` on the builds that tag it) carrying its own line —
+    // "You've hit your session limit · resets 10:50pm". Remembered as the
+    // HARNESS's words, so the settle path never has to take the run's own
+    // closing sentence for a limit (TASK-902).
+    if (run.provider === "anthropic") noteAnthropicLimitSignal(state, event);
     // numTurns stays the CLI's own number from the final result event.
     // A live per-event count was tried and measured 291 events against the
     // CLI's 38 turns on run-5vt51ppv — no event arithmetic reproduces the
@@ -9811,12 +10011,251 @@ async function settleWork(killed: ChildProcess[], timeoutMs: number): Promise<vo
 /** The shape of the ClawBox AI proxy's allowance refusal as a harness relays it. */
 const PROXY_REFUSAL_RE = /\b429\b|\busage_limit\b/;
 
+// ─── An Anthropic account at its usage limit (TASK-902) ─────────────────────
+
+/** A limit found on a settling run: what it is, when it lifts, and the words it came in. */
+interface FoundAccountLimit {
+  limit: AnthropicLimit;
+  /** When the account is taken to be back: the parsed reset, else the default window. */
+  until: number;
+  text: string;
+}
+
+/**
+ * Did this run end on its Anthropic account's usage cap?
+ *
+ * The harness's OWN words first — the synthetic message the CLI writes in
+ * place of an answer (LiveRun.limitSignal) — and only then the head of the
+ * failure the record carries, which for a run that died on a limit is that same
+ * line. Never the run's transcript: a run working on this very feature fails
+ * with sentences about limits in it, and those are the run's, not Anthropic's.
+ */
+function anthropicLimitOf(run: CodingRun, state: LiveRun): FoundAccountLimit | null {
+  const now = Date.now();
+  for (const text of [state.limitSignal, run.error]) {
+    if (!text) continue;
+    const limit = detectAnthropicLimit(text, now);
+    if (limit) return { limit, until: limitUntil(limit, now), text: text.trim().slice(0, 400) };
+  }
+  // A synthetic message the CLI TAGGED as a rate limit is one, whatever its
+  // wording: the tag is the harness saying so.
+  if (state.limitSignal) {
+    const limit: AnthropicLimit = { kind: "rate", resetsAt: null };
+    return { limit, until: limitUntil(limit, now), text: state.limitSignal };
+  }
+  return null;
+}
+
+/**
+ * When the FIRST account is expected back, counting the one that has just
+ * refused as back at `until` — what a run waiting for "all limited" to end is
+ * told. Off the snapshot, because the settle path that asks is synchronous.
+ */
+function earliestAccountReset(refusedId: string | null, until: number): number {
+  const now = Date.now();
+  let earliest = until;
+  for (const account of accountsSnapshot() ?? []) {
+    if (account.id === refusedId || account.status !== "limited" || account.limitedUntil === null) continue;
+    if (account.limitedUntil > now && account.limitedUntil < earliest) earliest = account.limitedUntil;
+  }
+  return earliest;
+}
+
+/**
+ * Record the limit on the account the run was on, and say so when it left the
+ * box with NO account able to answer. Never throws: the run has settled either
+ * way, and the pool is the owner's list, not the run's outcome.
+ */
+async function recordAccountLimit(run: CodingRun, found: FoundAccountLimit): Promise<LimitRecorded | null> {
+  if (!run.anthropicAccount) return null;
+  try {
+    const recorded = await markLimited(run.anthropicAccount, found.until, found.limit.kind);
+    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${found.limit.kind} limit until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    if (recorded.becameAllLimited) {
+      void announceAnthropicLimit({ kind: "all_limited", resetAt: recorded.health.nextResetAt, runId: run.id }).catch(() => {});
+    }
+    return recorded;
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: could not record the Anthropic account's limit:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/** What a session resumed on another account is told. It already holds the task. */
+function accountSwitchContinuation(run: CodingRun): string {
+  return "Your previous turn was cut off because the Anthropic account this run was using reached its usage limit."
+    + " ClawBox has moved the run to another Anthropic account; the session, the folder, the branch and everything you have done are unchanged."
+    + ` Continue the task exactly where the transcript leaves off — do not start over and do not repeat work that is already done. Your evidence folder is ${artifactsDir(run.id)}.`;
+}
+
+/**
+ * Move a run whose account hit its limit to the next account and resume it in
+ * place — or, when no account can take it, settle it as waiting.
+ *
+ * Tracked settle work, run straight after `finishRun` returned with the record
+ * back on "running". It re-checks that before it spawns: the owner may have
+ * stopped or paused the run in between, and their gesture — which found a
+ * record with no process and settled it — wins.
+ */
+async function continueOnAnotherAccount(
+  run: CodingRun,
+  state: LiveRun,
+  exitCode: number | null,
+  found: FoundAccountLimit,
+  carriedSecrets: Record<string, string> | undefined,
+  carriedAccount: RunAnthropicCredential | undefined,
+): Promise<void> {
+  const fromId = run.anthropicAccount;
+  const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
+  const recorded = await recordAccountLimit(run, found);
+  let prepared: PreparedAccount | null = null;
+  let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
+  try {
+    const answer = await prepareAccount({ exclude: new Set(fromId ? [fromId] : []) });
+    prepared = answer.prepared;
+    nextResetAt = answer.health.nextResetAt ?? nextResetAt;
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
+  }
+  if (run.status !== "running" || live.has(run.id)) return;
+
+  if (!prepared) {
+    // Nobody else can answer after all (another run got there first, or the
+    // next account's credential turned out dead). Wait for the first reset,
+    // settled through finishRun's ordinary tail as the pause it is.
+    const resetsAt = nextResetAt ?? found.until;
+    pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
+    state.forcedAccountPause = { resetsAt: new Date(resetsAt).toISOString(), message: found.text.slice(0, MAX_PAUSE_MESSAGE_CHARS) };
+    finishRun(run, state, exitCode);
+    return;
+  }
+
+  const now = Date.now();
+  const switched: AccountSwitch = {
+    at: now,
+    fromId,
+    fromLabel,
+    toId: prepared.account.id,
+    toLabel: prepared.account.label,
+    limitedUntil: found.until,
+    kind: found.limit.kind,
+  };
+  run.accountSwitches = [...run.accountSwitches, switched].slice(-MAX_ACCOUNT_SWITCHES);
+  run.anthropicAccount = prepared.account.id;
+  restoreRunSecrets(run.id, carriedSecrets ?? {}, {
+    accountId: prepared.account.id,
+    label: prepared.account.label,
+    credential: prepared.credential,
+  });
+  pushProgress(run, RUNNER_STEP.accountSwitched(fromLabel ?? "the previous account", prepared.account.label, formatResetClock(found.until)));
+  persist(true);
+  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} hit its ${found.limit.kind} limit`);
+  // One notice per account becoming limited — a second run reporting the same
+  // limit is not news. `recorded` is null only when there was nothing to
+  // record against, and then the switch itself is the news.
+  if (recorded === null || recorded.newlyLimited) {
+    void announceAnthropicLimit({
+      kind: "switched",
+      fromLabel: fromLabel ?? "Anthropic account",
+      toLabel: prepared.account.label,
+      resetAt: found.until,
+      runId: run.id,
+    }).catch(() => {});
+  }
+  try {
+    // The SAME record and session: `continuingRecord`, so the counters add up,
+    // and the session's own transcript is where the work is — the task is not
+    // replayed into it. A run that never got a session starts it from the task.
+    spawnOrSettle(run, run.sessionId, state.tools, state.settings, run.sessionId ? accountSwitchContinuation(run) : undefined, true);
+  } catch {
+    // spawnOrSettle settled the record and said why.
+  }
+}
+
+/**
+ * THE TEST HOOK the acceptance run uses (TASK-902): make every live run on
+ * `accountId` end as if Anthropic had refused it with a session limit, so the
+ * real switch path runs — nothing about the switch itself is simulated. The
+ * owner-only route is the one caller. Answers the runs it interrupted.
+ */
+export function simulateAnthropicLimit(accountId: string, resetsAt: number): string[] {
+  const message = `You've hit your session limit · resets ${formatCliClock(resetsAt)}`;
+  const interrupted: string[] = [];
+  for (const run of loadRuns()) {
+    if (run.status !== "running" || run.provider !== "anthropic" || run.anthropicAccount !== accountId) continue;
+    const state = live.get(run.id);
+    if (!state || state.endRequested !== null) continue;
+    state.simulatedLimit = message;
+    endProcess(state);
+    interrupted.push(run.id);
+  }
+  return interrupted;
+}
+
+/** "10:50pm" in the box's zone — the way the CLI words a reset, so the test hook's line is parsed like a real one. */
+function formatCliClock(at: number): string {
+  const [h, m] = formatResetClock(at).split(":").map(Number);
+  const hour12 = h % 12 === 0 ? 12 : h % 12;
+  return `${hour12}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
+}
+
+/**
+ * Resume every run that is waiting for an Anthropic limit to reset — the wake
+ * the pool fires at the first reset (onLimitReset), and the boot hook.
+ *
+ * Oldest wait first, one at a time, through the ordinary resume gates: a run
+ * the one-run-at-a-time rule turns away stays waiting, and the next wake (or a
+ * finishing run's own settle) tries again. A run that nobody could resume
+ * because the pool is still limited stays exactly as it was.
+ */
+export async function resumeRunsWaitingForAnthropic(): Promise<string[]> {
+  const waiting = loadRuns()
+    .filter((r) => r.status === "paused" && r.pauseReason?.kind === "allowance" && r.pauseReason.meter === "anthropic")
+    .sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
+  const resumed: string[] = [];
+  for (const run of waiting) {
+    try {
+      await resumeRun(run.id, { automatic: true });
+      resumed.push(run.id);
+    } catch (err) {
+      const kind = err instanceof CodingAgentError ? err.kind : null;
+      console.error(`[coding-agent] ${run.id} could not be resumed after the limit reset:`, err instanceof Error ? err.message : err);
+      // Every account limited again, or no slot free: the rest would meet the same answer.
+      if (kind === "limited" || kind === "busy") break;
+    }
+  }
+  return resumed;
+}
+
+let anthropicWakeInstalled = false;
+
+/**
+ * At boot, after the runs are reconciled: read the pool (which migrates the
+ * legacy key and arms the reset wake), listen for the wake, and resume anything
+ * that was left waiting for a reset that has passed while the box was down.
+ */
+export async function armAnthropicAccounts(): Promise<void> {
+  if (!anthropicWakeInstalled) {
+    anthropicWakeInstalled = true;
+    onLimitReset(() => {
+      void resumeRunsWaitingForAnthropic().catch(() => {});
+    });
+  }
+  await startAnthropicAccounts();
+  const accounts = accountsSnapshot() ?? [];
+  if (pickAccount(accounts, Date.now())) await resumeRunsWaitingForAnthropic();
+}
+
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
   state.openSubagents.clear();
   run.subagentsActive = 0;
   run.activeSubagents = [];
+  // An Anthropic account at its usage limit, and what to do about it — decided
+  // below, acted on after the cleanup (TASK-902).
+  let accountLimit: FoundAccountLimit | null = null;
+  let accountDecision: "switch" | "wait" | null = null;
   if (run.status === "running") {
     // The device's own stop — the token limit — has already written why on
     // the record. A result event that slipped out before the kill landed
@@ -9824,7 +10263,21 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // limit" error beside it: both at once, and the resume the error offers
     // hidden behind a status that says the work is done.
     const deviceStopped = state.endRequested === "stop" && run.error !== null;
-    if (state.outcome && !deviceStopped) {
+    if (state.forcedAccountPause) {
+      // The account switch found no account to move the run to, AFTER the
+      // process had gone (continueOnAnotherAccount). It settles as the wait it
+      // is — paused, session intact — through the ordinary tail below.
+      run.status = "paused";
+      run.resumable = true;
+      run.error = null;
+      run.pauseReason = { kind: "allowance", meter: "anthropic", resetsAt: state.forcedAccountPause.resetsAt, message: state.forcedAccountPause.message };
+    } else if (state.simulatedLimit) {
+      // The owner's test hook ended this process to stand in for a real limit:
+      // settle it exactly as the harness's own limit line would.
+      run.status = "failed";
+      run.error = state.simulatedLimit;
+      state.limitSignal = state.simulatedLimit;
+    } else if (state.outcome && !deviceStopped) {
       // The result event's verdict, now that the process is actually gone.
       // Ahead of the stop branch so a stop that raced the final message
       // keeps "completed", as it always has — the OWNER's stop records no
@@ -9915,6 +10368,44 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.error = null;
       }
     }
+    // AN ANTHROPIC ACCOUNT AT ITS USAGE LIMIT (TASK-902). The overnight queue
+    // died on exactly this on 2026-09-18 — "You've hit your session limit ·
+    // resets 10:50pm" — while a second account could have carried on. So the
+    // run is not failed: it goes on, in place, on the next account in the
+    // owner's order (same record, same session, same worktree and branch, same
+    // attempt count), and only when NO account can answer does it wait —
+    // paused, with the reset time on the record — for the box to resume it at
+    // the first reset. Only a run nobody asked to end, and only on the
+    // harness's own limit line (see anthropicLimitOf).
+    if (run.status === "failed" && run.provider === "anthropic" && state.endRequested === null && !state.timedOut) {
+      accountLimit = anthropicLimitOf(run, state);
+      if (accountLimit) {
+        // Decided NOW, synchronously, off what this process knows of the pool:
+        // a pause has to be on the record before the cleanup and the settle
+        // below read the status. `null` — the pool has not been read since
+        // boot — goes the slow way, which settles the pause itself if it must.
+        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount) : false;
+        if (another === false) {
+          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until);
+          run.status = "paused";
+          run.resumable = true;
+          run.error = null;
+          run.pauseReason = {
+            kind: "allowance",
+            meter: "anthropic",
+            resetsAt: new Date(resetsAt).toISOString(),
+            message: accountLimit.text.slice(0, MAX_PAUSE_MESSAGE_CHARS),
+          };
+          // The closing words were the limit line, not a report.
+          run.summary = null;
+          run.resultText = null;
+          pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
+          accountDecision = "wait";
+        } else {
+          accountDecision = "switch";
+        }
+      }
+    }
   }
   // Only a paused run has a pause to explain. A pause that raced the final
   // message and settled as "completed" instead must not keep a reason for a
@@ -9926,12 +10417,38 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // The owner's secrets, taken before the cleanup below drops them — for the
   // retry branch alone, which cannot re-resolve them. See restoreRunSecrets.
   const carriedSecrets = runSecretEnv.get(run.id);
+  // …and the Anthropic account it was on, for the same branch and for the
+  // account switch below.
+  const carriedAccount = runAnthropicCredential.get(run.id);
   // Timers, the run's browser tab, and the verdict on what it left running.
   // Before the retry branch below, which respawns into a fresh state and a
   // fresh process group: a retry that inherited the first attempt's timers
   // would be judged idle on the first attempt's clock.
   cleanupRunResources(run, state);
   live.delete(run.id);
+
+  // THE ACCOUNT SWITCH (TASK-902) — see where `accountDecision` is set. The
+  // record goes straight back to "running": nothing downstream (the waiters,
+  // the review pass, the queue that started the run) is told it finished,
+  // because it has not. The move itself is asynchronous (the pool is read and
+  // an OAuth token may be renewed), and is tracked like any settle work.
+  if (accountDecision === "switch" && accountLimit) {
+    run.status = "running";
+    run.completedAt = null;
+    run.exitCode = null;
+    run.error = null;
+    // The limit line arrived as the result event's text; a continuation that
+    // dies without a result must not file it as the run's report.
+    run.summary = null;
+    run.resultText = null;
+    run.lastActivityAt = Date.now();
+    persist(true);
+    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, accountLimit, carriedSecrets, carriedAccount));
+    return;
+  }
+  if (accountDecision === "wait" && accountLimit) {
+    void recordAccountLimit(run, accountLimit);
+  }
 
   // One automatic restart when the upstream blinked and the run got nowhere.
   //
@@ -9984,7 +10501,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // The same credentials and the same redaction table as the attempt that
       // got nowhere: this is one run making a second try at the same work, not
       // a new decision by the owner.
-      if (carriedSecrets) restoreRunSecrets(run.id, carriedSecrets);
+      if (carriedSecrets || carriedAccount) restoreRunSecrets(run.id, carriedSecrets ?? {}, carriedAccount);
       try {
         spawnRun(run, null, state.tools, state.settings);
         return;
@@ -10341,8 +10858,18 @@ function spawnRun(
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
   const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, secrets: runSecretEnv.get(run.id) });
+  // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
+  // credential goes into a one-shot 0600 file the wrapper reads and deletes
+  // before exec; only the file's PATH is in the environment — the credential
+  // itself never is, and never in argv. No entry means the wrapper's own
+  // fallback: the legacy key, else the `claude` sign-in.
+  const account = run.provider === "anthropic" ? runAnthropicCredential.get(run.id) : undefined;
   let child: ChildProcess;
   try {
+    // Inside the `try`: the handoff can throw (a full disk, a folder it cannot
+    // make), and the `finally` must still close the two logs opened above. The
+    // settle path takes any file it did write (removeCredentialHandoffs).
+    if (account) runEnv.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE = writeCredentialHandoff(run.id, account.credential);
     child = spawn(bin, argv, {
       cwd: run.directory,
       // Deliberately NOT process.env: see the header. The cast is only because
@@ -10362,8 +10889,9 @@ function spawnRun(
       stdio: ["pipe", logs.out, logs.err],
     });
   } finally {
-    // Node has dup'd them into the child; this process has no use for them and
-    // a leaked descriptor would keep a deleted log alive for the server's life.
+    // Node has dup'd them into the child (or there is no child); this process
+    // has no use for them and a leaked descriptor would keep a deleted log
+    // alive for the server's life.
     fs.closeSync(logs.out);
     fs.closeSync(logs.err);
   }
@@ -10409,6 +10937,9 @@ function spawnRun(
     endRequested: null,
     allowanceRefusal: null,
     pauseReason: null,
+    limitSignal: null,
+    simulatedLimit: null,
+    forcedAccountPause: null,
     timedOut: false,
     sawResult: continuingRecord,
     sawInit: false,
@@ -11416,6 +11947,9 @@ function newRunRecord(fields: {
     model: null,
     provider: fields.settings.provider,
     requestedModel: fields.settings.model,
+    // Chosen at each spawn from the pool (prepareRunSecrets), not here.
+    anthropicAccount: null,
+    accountSwitches: [],
     summary: null,
     error: null,
     numTurns: 0,
@@ -11706,11 +12240,18 @@ function singleFlight(id: string, transition: () => Promise<CodingRun>): Promise
  * where the transcript left off. Runs through the same gates a start does —
  * the owner's switch, readiness, the capability drop, one run at a time.
  */
-export function resumeRun(id: string): Promise<CodingRun> {
-  return singleFlight(id, () => resumeRunOnce(id));
+export function resumeRun(id: string, opts: { automatic?: boolean } = {}): Promise<CodingRun> {
+  return singleFlight(id, () => resumeRunOnce(id, opts.automatic === true));
 }
 
-async function resumeRunOnce(id: string): Promise<CodingRun> {
+/**
+ * `automatic` is the BOX resuming a run that was waiting for an Anthropic
+ * limit to reset (TASK-902) — not the owner pressing Resume. So it is not an
+ * attempt of theirs (the attempt count stays what it was), the permission rules
+ * the run was started with stay frozen, and the run is told the limit reset
+ * rather than that somebody resumed it.
+ */
+async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
@@ -11762,7 +12303,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
     // the run back the refusal the owner just answered, and the button would be a
     // lie. Narrowing works the same way: a rule removed before the resume is gone
     // from the resumed run too.
-    run.allowRules = await getAllowRules(allowRuleContext());
+    if (!automatic) run.allowRules = await getAllowRules(allowRuleContext());
     // Read BEFORE the flip below, which is what makes this a resume: the
     // continuation text and the pull-request step both depend on which of the two
     // resumable endings this run is coming back from.
@@ -11786,14 +12327,14 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
     // A run that gave up with no pull request ever opened gets the step back, so
     // the owner's Resume can actually reach the deliverable it is resumed for.
     if (gaveUp) reopenPullRequestStep(run);
-    openAttempt(run);
-    pushProgress(run, RUNNER_STEP.resumedByOwner);
+    if (!automatic) openAttempt(run);
+    pushProgress(run, automatic ? RUNNER_STEP.resumedAfterLimit : RUNNER_STEP.resumedByOwner);
     // RE-RESOLVED, like the permission rules just above and for the same reason:
     // a resume is the owner's own deliberate act, so an entry they have un-ticked
     // since the pause is not handed back, and one they have ticked is.
     await prepareRunSecrets(run);
     persist(true);
-    console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : "pause"}`);
+    console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : automatic ? "waiting for an Anthropic limit to reset" : "pause"}`);
     startProjectIcon(run);
     // The session already holds the task; replaying it verbatim would read as
     // "start over". Say what actually happened instead — and for a run that gave
@@ -11807,7 +12348,9 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
       ? undefined
       : missing && deliverable
         ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
-        : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
+        : automatic
+          ? `You were paused because every Anthropic account on this ClawBox had reached its usage limit. The limit has reset and you are resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
+          : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
     spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
     return cloneRun(run);
   } finally {
@@ -11995,6 +12538,22 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   } else if (!readiness.ready) {
     refusal = readiness.problems.join(" ");
   }
+  // Every Anthropic account at its usage limit (TASK-902): refused before
+  // anything spawns, with the time the first one is back — a queue that reads
+  // this waits for that time instead of spending an attempt on a run
+  // Anthropic would only refuse. Only for a run that is actually going to
+  // Anthropic, and never over a pool this box cannot read (the spawn's own
+  // choice copes with that).
+  if (!refusal && provider === "anthropic") {
+    const waitUntil = await anthropicPoolWait();
+    if (waitUntil !== undefined) {
+      throw new CodingAgentError(
+        "limited",
+        `Every Anthropic account on this ClawBox is at its usage limit${waitUntil !== null ? `; the first one is back at ${formatResetClock(waitUntil)} (${new Date(waitUntil).toISOString()})` : ""}.`
+        + " Wait for the limit reset rather than retrying, or connect another account in Settings → Providers.",
+      );
+    }
+  }
   if (refusal) {
     // A harness fault recorded where it actually BIT — at the moment work was
     // attempted — rather than on the status poll, which asks the same question
@@ -12036,6 +12595,21 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     );
   }
   return holdSpawnSlot();
+}
+
+/**
+ * `undefined` when an Anthropic account can answer (or the pool cannot be read
+ * — never a refusal over a read that failed); otherwise when the first limited
+ * account is back, or null when none will be back by itself (every account
+ * needs the owner).
+ */
+async function anthropicPoolWait(): Promise<number | null | undefined> {
+  try {
+    const health = poolHealth(await readAccounts(), Date.now());
+    return health.allLimited && health.limited > 0 ? health.nextResetAt : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -12,43 +12,32 @@
  *    login is the owner's, made outside this app, and deleting somebody's
  *    session because they pressed a button labelled "disconnect the key"
  *    would be the wrong reading of the button.
- *  - an API KEY, saved here. It lives beside `clawai_token` in the same 0600
- *    data/config.json — the box's existing pattern for a credential held on
- *    the owner's behalf — and leaves that file in exactly one direction: the
- *    `claude-ds` wrapper reads it itself, as root-less clawbox, immediately
- *    before exec. It is never in a response body, never in a log line, never
- *    in argv and never in the environment the web server hands the child.
+ *  - an API KEY, saved here — and, since TASK-902, any number of Claude
+ *    accounts beside it. They are accounts in the ANTHROPIC ACCOUNT POOL
+ *    (src/lib/anthropic-accounts.ts), with each credential in the owner secret
+ *    store, never in data/config.json. A run is handed its account's credential
+ *    through a one-shot 0600 file that `claude-ds` reads and deletes right
+ *    before exec; it is never in a response body, never in a log line, never in
+ *    argv and never in the environment the web server hands the child.
  *
  * A run is DENIED the key it must not have: the deny rules a run is spawned
  * with already put data/ off limits (src/lib/coding-agent.ts), so neither
  * provider's run can read the other's credential out of the config.
  */
 
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { get as configGet, set as configSet } from "@/lib/config-store";
-import { ANTHROPIC_API_KEY_CONFIG_KEY } from "@/lib/coding-provider";
+import {
+  addApiKeyAccount,
+  poolHasCredential,
+  readAccounts,
+  removeAccount,
+  replaceCredential,
+} from "@/lib/anthropic-accounts";
+import { hasAnthropicLogin } from "@/lib/claude-login";
 
-/**
- * Claude Code's own state, at its defaults. An `anthropic` run deliberately
- * does NOT set CLAUDE_CONFIG_DIR (the ClawBox AI runs keep their own
- * ~/.claude-ds), so the native login the owner made in a terminal is the one
- * the run uses — which means these are the files to ask.
- */
-function claudeHome(): string {
-  return path.join(os.homedir(), ".claude");
-}
-
-/** Where `claude` writes an OAuth credential on Linux. */
-function credentialsPath(): string {
-  return path.join(claudeHome(), ".credentials.json");
-}
-
-/** Claude Code's top-level config, which records the signed-in account. */
-function claudeConfigPath(): string {
-  return path.join(os.homedir(), ".claude.json");
-}
+// The `claude` sign-in checks moved to their own module (the account pool needs
+// them too, and importing this file from there would be a cycle); re-exported so
+// every caller keeps its import.
+export { _resetAnthropicLoginCache, hasAnthropicLogin } from "@/lib/claude-login";
 
 /** An API key's shape, before it is ever stored. */
 const KEY_PREFIX = "sk-ant-";
@@ -62,18 +51,22 @@ const VERIFY_TIMEOUT_MS = 10_000;
 const VERIFY_URL = "https://api.anthropic.com/v1/models?limit=1";
 const ANTHROPIC_VERSION = "2023-06-01";
 
-export type AnthropicSource = "key" | "login";
+/**
+ * Which kind of access a run would use. `oauth` joined `key` and `login` with
+ * the account pool: a Claude account connected through the box's own sign-in.
+ */
+export type AnthropicSource = "key" | "login" | "oauth";
 
 export interface AnthropicConnection {
   /** Would an `anthropic` run have something to authenticate with? */
   connected: boolean;
-  /** The key the owner saved here. */
+  /** An API key is among the box's accounts. */
   hasKey: boolean;
   /** A `claude` login the owner made themselves, which this app does not own. */
   hasLogin: boolean;
   /**
-   * Which one a run would use. The key wins, because it is the one the owner
-   * chose HERE and the wrapper exports ANTHROPIC_API_KEY when it is present.
+   * What the account a run would use NOW is — the first usable one in the
+   * owner's order (src/lib/anthropic-accounts.ts).
    */
   source: AnthropicSource | null;
 }
@@ -88,21 +81,25 @@ export function looksLikeAnthropicKey(value: string): boolean {
   );
 }
 
-/** The stored key, or null. The ONE reader; nothing else may call configGet for it. */
-export async function getAnthropicKey(): Promise<string | null> {
-  const raw = await configGet(ANTHROPIC_API_KEY_CONFIG_KEY);
-  const key = typeof raw === "string" ? raw.trim() : "";
-  return key === "" ? null : key;
+/** The first API-key account, or null. */
+async function firstKeyAccount(): Promise<{ id: string } | null> {
+  return (await readAccounts()).find((a) => a.kind === "api_key") ?? null;
 }
 
-/** Whether one is stored, without reading it into the caller's scope. */
+/** Whether an API key is among the box's accounts, without reading it into the caller's scope. */
 export async function hasAnthropicKey(): Promise<boolean> {
-  return (await getAnthropicKey()) !== null;
+  return (await firstKeyAccount()) !== null;
 }
 
 /**
- * Save the owner's key. Shape-checked here rather than at the route, so every
- * caller gets the same refusal.
+ * Save the owner's key — the Coding Agent app's one-field form. Shape-checked
+ * here rather than at the route, so every caller gets the same refusal.
+ *
+ * Into the ACCOUNT POOL, and so into the owner secret store — never
+ * data/config.json, where it used to sit beside the portal token. A box that
+ * already has a key account gets its key replaced (a rotated key is the same
+ * account); one without gets a new account FIRST in the order, which is the
+ * precedence this form always had: the key it saved was the one runs used.
  *
  * @throws Error with an owner-facing sentence when the value is not a key
  */
@@ -111,106 +108,33 @@ export async function setAnthropicKey(value: string): Promise<void> {
   if (!looksLikeAnthropicKey(key)) {
     throw new Error(`That does not look like an Anthropic API key — they start with "${KEY_PREFIX}".`);
   }
-  await configSet(ANTHROPIC_API_KEY_CONFIG_KEY, key);
+  const existing = await firstKeyAccount();
+  if (existing) await replaceCredential(existing.id, { kind: "api_key", key });
+  else await addApiKeyAccount({ key, first: true });
 }
 
-/** Forget the stored key. The owner's own `claude` login is left alone. */
+/** Forget the stored key — the first API-key account. The owner's own `claude` login is left alone. */
 export async function clearAnthropicKey(): Promise<void> {
-  await configSet(ANTHROPIC_API_KEY_CONFIG_KEY, undefined);
-}
-
-function readableNonEmptyFile(file: string): boolean {
-  try {
-    const stat = fs.statSync(file);
-    return stat.isFile() && stat.size > 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The last verdict about `~/.claude.json`, keyed on what would change it.
- *
- * The Coding Agent app polls the status route every five seconds while a run
- * or a pull request is in flight, and each poll reached the branch below: a
- * SYNCHRONOUS whole-file read plus a `JSON.parse`, on the web server's event
- * loop. That file is Claude Code's own and grows a `projects` entry for every
- * folder the owner has ever opened, so on a box in daily use it is not small.
- *
- * Keyed on size and mtime rather than a timer alone: the answer changes only
- * when the file does, and a sign-in the owner has just made must show up at
- * the next poll rather than after a TTL. The TTL is the other half — it
- * bounds a clock that went backwards and an mtime granularity coarser than
- * the poll — so the worst case is one stale answer, and the stale answer is
- * never used to REFUSE anything: a run's own gate re-reads (assertCanSpawn),
- * and the wrapper reads the file itself immediately before exec.
- */
-let configLoginCache: { key: string; at: number; answer: boolean } | null = null;
-
-/** How long a cached verdict may stand even if nothing about the file changed. */
-const LOGIN_CACHE_TTL_MS = 5_000;
-
-/** The whole-file read, cached. Returns false for anything it cannot read. */
-function configHasAccount(): boolean {
-  let key: string;
-  try {
-    const stat = fs.statSync(claudeConfigPath());
-    key = `${stat.size}:${stat.mtimeMs}`;
-  } catch {
-    // No config at all is a stable, cheap answer — and not one worth caching,
-    // since a stat is all it cost.
-    return false;
-  }
-  const now = Date.now();
-  if (configLoginCache && configLoginCache.key === key && now - configLoginCache.at < LOGIN_CACHE_TTL_MS) {
-    return configLoginCache.answer;
-  }
-  let answer = false;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(claudeConfigPath(), "utf8")) as unknown;
-    if (typeof parsed === "object" && parsed !== null) {
-      const account = (parsed as { oauthAccount?: unknown }).oauthAccount;
-      answer = typeof account === "object" && account !== null;
-    }
-  } catch {
-    answer = false;
-  }
-  configLoginCache = { key, at: now, answer };
-  return answer;
-}
-
-/** Test seam: forget what was read, so a case can rewrite the file under it. */
-export function _resetAnthropicLoginCache(): void {
-  configLoginCache = null;
-}
-
-/**
- * Has the owner signed `claude` in on this box?
- *
- * Asked of the files rather than by running `claude`: the CLI has no
- * non-interactive "who am I" that answers in under a second, and this is read
- * on every status poll. Two places count, because which one holds the answer
- * depends on the CLI's version — the credential file it writes on Linux, and
- * the account block in its top-level config.
- *
- * The credential file is checked FIRST and is a `stat`, so the common case —
- * a box where the owner has signed in — never opens the larger config at all.
- */
-export function hasAnthropicLogin(): boolean {
-  if (readableNonEmptyFile(credentialsPath())) return true;
-  return configHasAccount();
+  const existing = await firstKeyAccount();
+  if (existing) await removeAccount(existing.id);
 }
 
 /** The whole connection state, for the status payload and for readiness. */
 export async function getAnthropicConnection(): Promise<AnthropicConnection> {
-  const hasKey = await hasAnthropicKey();
-  const hasLogin = hasAnthropicLogin();
-  return {
-    connected: hasKey || hasLogin,
-    hasKey,
-    hasLogin,
-    source: hasKey ? "key" : hasLogin ? "login" : null,
-  };
+  try {
+    const pool = await poolHasCredential();
+    return {
+      connected: pool.any,
+      hasKey: pool.hasKey,
+      hasLogin: hasAnthropicLogin(),
+      source: pool.first === "api_key" ? "key" : pool.first,
+    };
+  } catch {
+    // A pool that cannot be read at all must not read as "not connected" to a
+    // box whose sign-in is plainly there — the run's own spawn re-reads.
+    const hasLogin = hasAnthropicLogin();
+    return { connected: hasLogin, hasKey: false, hasLogin, source: hasLogin ? "login" : null };
+  }
 }
 
 export type KeyVerdict = "ok" | "rejected" | "unreachable";

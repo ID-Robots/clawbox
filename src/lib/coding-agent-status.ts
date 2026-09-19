@@ -44,7 +44,11 @@ export function isCodingRunStatus(value: unknown): value is CodingRunStatus {
  * `cap`) while the run carries on. A meter listed here with nothing able to
  * produce it would be a sentence in ten languages that no box can ever show.
  */
-export const PAUSE_METERS = ["images", "speech", "weekly", "burst", "embeddings"] as const;
+// `anthropic` (TASK-902): every Anthropic account in the box's pool is at its
+// usage limit, written by the run's own settle when the harness's last word is
+// the CLI's limit line and no other account can take the run over. The run
+// waits, paused, and the box resumes it itself at the first reset.
+export const PAUSE_METERS = ["images", "speech", "weekly", "burst", "embeddings", "anthropic"] as const;
 
 export type CodingPauseMeter = (typeof PAUSE_METERS)[number];
 
@@ -139,6 +143,7 @@ export const PAUSE_METER_NOUN: Record<CodingPauseMeter, string> = {
   weekly: "weekly ClawBox AI chat allowance",
   burst: "ClawBox AI 5-hour burst allowance",
   embeddings: "weekly ClawBox AI memory indexing allowance",
+  anthropic: "Anthropic accounts' usage limits",
 };
 
 /**
@@ -147,7 +152,9 @@ export const PAUSE_METER_NOUN: Record<CodingPauseMeter, string> = {
  * now, so their instant is shown with its day and in the reader's own clock —
  * never as the bare "HH:MM UTC" the per-day meters use.
  */
-export const ROLLING_PAUSE_METERS: readonly CodingPauseMeter[] = ["weekly", "burst", "embeddings"];
+// `anthropic` too: an account's reset is an instant in the owner's own clock
+// ("resets 10:50pm"), not a UTC day boundary.
+export const ROLLING_PAUSE_METERS: readonly CodingPauseMeter[] = ["weekly", "burst", "embeddings", "anthropic"];
 
 export function isRollingPauseMeter(meter: CodingPauseMeter): boolean {
   return ROLLING_PAUSE_METERS.includes(meter);

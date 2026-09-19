@@ -66,6 +66,7 @@
     { "key": "progress.update", "locales": ["de", "nl"], "reason": "\"Update\" is the loanword in German and Dutch." },
     { "key": "progress.wifi", "locales": "*", "reason": "WiFi is a trademark." },
     { "key": "remoteControl.onlineTitle", "locales": ["de", "it", "nl", "sv"], "reason": "\"Tunnel\" and \"online\" are both the same words in these languages." },
+    { "key": "settings.anthropicAccounts.apiKeyPlaceholder", "locales": "*", "reason": "The shape of an Anthropic API key." },
     { "key": "settings.botTokenPlaceholder", "locales": "*", "reason": "The shape of a Telegram bot token." },
     { "key": "settings.discord", "locales": "*", "reason": "Discord is a brand name." },
     { "key": "settings.documentation", "locales": ["fr"], "reason": "\"Documentation\" is the French word." },

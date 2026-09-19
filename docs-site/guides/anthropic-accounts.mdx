@@ -1,0 +1,144 @@
+---
+title: "Multiple Anthropic Accounts"
+icon: "users"
+summary: "Connect more than one Claude subscription or Anthropic API key for coding runs, put them in the order you want, and let the box move a run to the next account when one hits its usage limit."
+---
+
+The Coding Agent runs Claude Code on your box. A Claude Pro or Max subscription has a
+five-hour session window and a weekly cap. Once one of them is used up, a box with a
+single account stops coding until the limit resets. That includes a queue left running
+overnight.
+
+Connect more than one Anthropic account and the box carries on. When the account a run
+is using hits its limit, the run moves to the next account and continues in the same
+session. The first account is used again as soon as its limit resets.
+
+<Note>
+These accounts are for **coding runs** only. They do not change which AI answers in the
+chat: that is the provider at the top of **Settings → Providers** (see
+[Choose Your AI Provider](/setup/choose-ai-provider)).
+</Note>
+
+## How the fallback works
+
+- **Your order decides.** Every coding run uses the first account in the list that can
+  answer. It never takes turns (round-robin): account #2 only works while account #1 is
+  out.
+- **A limit moves the run; it doesn't end it.** Claude Code reports a limit in its own
+  words, like *"You've hit your session limit · resets 10:50pm"*. When that happens, the
+  box notes when the account is back, switches the run to the next account and resumes
+  it in the same session. The work so far and the conversation are kept.
+- **The first account comes back by itself.** Once its reset time passes, the box uses
+  it again for the next run, with nothing for you to do.
+- **When every account is limited, runs wait.** A run that cannot continue on any
+  account is paused, not failed, and shows *Waiting*. The box resumes it at the first
+  reset without you pressing anything. Until then, a new coding run is refused with the
+  reset time rather than started and cut off.
+- **Only a usage cap counts.** This covers the session (five-hour) window, the weekly
+  cap, an API key's rate limit and a prepaid key with no credit left. Any other failure
+  is a real failure and is not passed from account to account.
+
+If a limit message gives no reset time, the account is set aside for five hours, the
+length of a session window.
+
+## Connect your accounts
+
+<Steps>
+  <Step title="Open the list">
+    Go to **Settings → Providers** and scroll to the **Anthropic accounts** card, at the
+    bottom of the page.
+  </Step>
+  <Step title="Connect a Claude account">
+    Press **Connect an account**. Once you have one, the button reads **Connect another
+    account**. Give it a name if you like, such as *Work Max*. The name is how the box
+    refers to the account in notices and in the run timeline.
+  </Step>
+  <Step title="Sign in with Claude">
+    **Sign in with Claude** opens Anthropic's sign-in page in a new tab. Sign in with the
+    account you want to add and approve access. Anthropic then shows a code: paste it into
+    the card and press **Connect**.
+  </Step>
+  <Step title="Add the next one">
+    Repeat the steps with a **different** Claude account. Sign out of the first one on
+    claude.ai first, or use a private window, or Anthropic will sign you in as the same
+    account again.
+  </Step>
+</Steps>
+
+Signing in again with an account that is already on the list does not add a second row.
+It renews that account's sign-in and keeps its place.
+
+If **Connect** fails or says there is no pending sign-in, press **Sign in with Claude**
+again for a fresh code.
+
+### API keys and the Terminal sign-in
+
+- **An Anthropic API key.** In the connect panel, choose **Use an API key instead** and
+  paste the key (it starts with `sk-ant-`). The box checks it with Anthropic and refuses
+  it only if Anthropic says no. If Anthropic cannot be reached, the key is saved and the
+  first run that uses it checks it.
+- **The box's own Claude Code sign-in.** If you signed in by running `claude` in the
+  Terminal app, the box adds that sign-in to the list by itself. It is renewed in the
+  Terminal, not here. Removing it only takes it off the list, and **Add this box's
+  Claude Code sign-in** puts it back.
+- **A key you saved before.** An Anthropic API key already saved in the Coding Agent app
+  became account #1 automatically when your box updated. You don't have to re-enter it.
+
+A box keeps up to **8** accounts.
+
+## Order and manage them
+
+Each row shows the account's place in the order, its name, the Anthropic account it
+belongs to and its state. The badge at the top of the card sums it up: **2 of 3 ready**,
+or **All limited · back at 22:50**.
+
+| State | What it means |
+|---|---|
+| **In use** | The account a run starting now would use. |
+| **Ready** | Can answer; waiting its turn. |
+| **Limited until 22:50** | At its usage limit. The time is in your clock, with the weekday when it is not today. |
+| **Sign-in expired** | The box could not renew the sign-in. Re-authenticate it, or for the Claude Code sign-in, run `claude` in the Terminal app again. |
+| **Needs re-authentication** | Anthropic refused the credential, for example after a revoked key or a password change. |
+
+| Control | What it does |
+|---|---|
+| ↑ / ↓ | Move the account up or down in the order. |
+| Rename | Change the name. It is only a label for you. |
+| Re-authenticate | Sign in again or paste a new key. The account keeps its place, and a limit it is under stays until its reset. Sign in as the same Claude account: a sign-in for a different one, including another account on the list, is refused and nothing changes. To add that account, use **Connect another account** instead. |
+| Remove | Tap once to arm it and again to remove the account. Its credential is deleted from the box. |
+
+## What you see when a limit hits
+
+- **In the run's timeline:** *Anthropic account "Work Max" hit its usage limit (back at
+  22:50); carrying on with "Personal Max" in the same session.*
+- **A notice** on the desktop, and in your Telegram chat if you connected a bot. There
+  are two kinds: one when
+  an account is set aside and the box switches, and one when no account is left. Pressing
+  the desktop notice opens **Settings → Providers**. You get no notice when the box goes
+  back to your first account: that is the list working as intended.
+- **On a waiting run's card:** *Waiting: every Anthropic account on this box is at its
+  usage limit. It carries on by itself at 22:50.* You don't need to press **Resume**.
+
+## The assistant knows too
+
+The assistant reads the same list with the `anthropic_accounts` tool: how many accounts
+can answer, which one is in use and when a limited one is back. It uses this before
+starting or retrying a coding run. When every account is limited, it waits for the reset
+instead of spending attempts. The tool can only read: adding, removing and ordering
+accounts needs your signed-in browser session. See
+[Agent Interface](/technical/agent-interface).
+
+## Privacy and security
+
+- Keys and sign-in tokens are stored encrypted in the box's secret store. They are never
+  written to its configuration file, to logs, to run records or to pull requests, and
+  the card never shows one again after you save it.
+- The card shows each account's name, the email address Anthropic reported for it and
+  its state. The assistant gets the names and states only: no email and no credential.
+- Only you can change the list, from the box's own pages while signed in. The assistant,
+  and any page on another site, is refused.
+
+<Note>
+Each account is used under its own Anthropic plan and terms. Connect accounts you are
+entitled to use.
+</Note>

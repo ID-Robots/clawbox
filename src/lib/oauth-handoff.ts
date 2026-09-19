@@ -50,3 +50,59 @@ export async function sweepStaleHandoffTokens(): Promise<void> {
     // No handoff file — nothing to sweep.
   }
 }
+
+/** What a completed sign-in left in the handoff file, checked. */
+export interface HandoffTokens {
+  provider: string | null;
+  accessToken: string;
+  refreshToken: string | null;
+  /** Seconds, as the token endpoint answered it. */
+  expiresIn: number | null;
+  /** Anthropic only: the account the tokens belong to — a label. */
+  accountEmail: string | null;
+  createdAt: number;
+}
+
+/**
+ * Read the handoff the way the configure route does — same TTL, same shape
+ * rules — for a consumer that is not that route: the Anthropic account pool,
+ * which takes a SECOND (third, …) Claude account from the very same sign-in
+ * flow. Material that cannot be used is removed rather than left for every
+ * retry to trip over; usable material is left for the caller to consume with
+ * `clearHandoffTokens` once it has stored it.
+ */
+export async function readHandoffTokens(): Promise<{ ok: true; tokens: HandoffTokens } | { ok: false; error: string }> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(HANDOFF_TOKENS_PATH, "utf-8");
+  } catch {
+    return { ok: false, error: "No pending sign-in. Start it again." };
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("not an object");
+    parsed = value as Record<string, unknown>;
+  } catch {
+    await clearHandoffTokens();
+    return { ok: false, error: "No pending sign-in. Start it again." };
+  }
+  const createdAt = typeof parsed.createdAt === "number" && Number.isFinite(parsed.createdAt) ? parsed.createdAt : null;
+  const age = createdAt === null ? null : Date.now() - createdAt;
+  const access = typeof parsed.access_token === "string" ? parsed.access_token.trim() : "";
+  if (!access || age === null || age < 0 || age > HANDOFF_TTL_MS || (parsed.provider !== undefined && typeof parsed.provider !== "string")) {
+    await clearHandoffTokens();
+    return { ok: false, error: "The sign-in is missing or has expired. Start it again." };
+  }
+  return {
+    ok: true,
+    tokens: {
+      provider: typeof parsed.provider === "string" ? parsed.provider : null,
+      accessToken: access,
+      refreshToken: typeof parsed.refresh_token === "string" && parsed.refresh_token.trim() ? parsed.refresh_token.trim() : null,
+      expiresIn: typeof parsed.expires_in === "number" && parsed.expires_in > 0 ? parsed.expires_in : null,
+      accountEmail: typeof parsed.account_email === "string" ? parsed.account_email : null,
+      createdAt: createdAt as number,
+    },
+  };
+}

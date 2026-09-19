@@ -359,6 +359,14 @@ export async function register() {
         } catch (err) {
           console.error('[instrumentation] Could not resume the delivery pipelines:', err instanceof Error ? err.message : err)
         }
+        // The Anthropic account pool (TASK-902): its first read migrates a
+        // legacy key into the secret store and arms the limit-reset wake, and
+        // a run left waiting for a reset that passed while the box was down is
+        // resumed now. AFTER the reconciliation, which settles the records it
+        // reads. Its own catch, like its siblings.
+        codingAgent.armAnthropicAccounts().catch((err: unknown) => {
+          console.error('[instrumentation] Could not arm the Anthropic account pool:', err instanceof Error ? err.message : err)
+        })
       })
   } catch (err) {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)

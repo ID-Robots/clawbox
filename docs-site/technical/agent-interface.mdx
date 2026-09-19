@@ -43,7 +43,8 @@ to hand work to the coding agent and then steer and check it — and calls `devi
 answering anything about the device. After that it picks by question: `coding_project_status`
 before starting a coding run, `coding_run_list` for "what are my runs doing", and
 `memory_shard_status`, `local_ai_status` or `clawbox_ai_usage` for memory, on-box engines and
-your allowance.
+your allowance, and `anthropic_accounts` before starting or retrying a coding run that uses
+your Anthropic accounts.
 
 | Tool | Purpose |
 |---|---|
@@ -221,6 +222,17 @@ the 5-hour limit (and when each frees up), the weekly meters for pictures, spoke
 transcribed audio and memory indexing, and your prepaid credits. Where clawbox.com does not share
 the figures with the box yet, the agent says so and points you at your account there. No tool
 changes your plan or buys credits.
+
+### Anthropic accounts — both editions
+`anthropic_accounts` reads the Anthropic accounts your coding runs use, from **Settings →
+Providers → Anthropic accounts**. For each account it gives the name, the kind and the state:
+it can answer, or it is at its usage limit and back at a given time. It also gives the order
+the box uses them in, the one a run starting now would use, and how many can answer. When
+every account is limited, it tells the agent to wait for the first reset: runs that were cut
+off resume by themselves then, and `coding_agent_run` refuses a new Anthropic run until that
+time. The answer never carries an email or a credential. Adding, ordering and removing
+accounts is yours to do, in Settings. See
+[Multiple Anthropic Accounts](/guides/anthropic-accounts).
 
 ### Reporting a problem — both editions
 `clawbox_incidents_list` lists errors ClawBox's own software hit on this device — a failed
