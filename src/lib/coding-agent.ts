@@ -707,7 +707,23 @@ export const CODING_AGENT_RESET_KEYS = [
 export const MAX_IMAGES_PER_RUN = 20;
 export const MAX_AUDIO_PER_RUN = 40;
 export const MIN_TOKEN_LIMIT = 10_000;
+/** The longest task a person — the owner, or the assistant on their behalf — may type. */
 export const MAX_TASK_CHARS = 4_000;
+/**
+ * The ceiling on a task the BOX wrote: the automatic review pass, a review-loop
+ * round, a deployment-fix turn (see isBoxWrittenTask). MAX_TASK_CHARS is not
+ * applied to these.
+ *
+ * A review round quotes GitHub's failing-check logs and review comments, up to
+ * MAX_FEEDBACK_CHARS, and a deployment fix quotes the build log's tail. Held to
+ * the typed limit, PR #926's round — four CodeRabbit threads — was refused with
+ * "The task is too long" and the pull request handed back unreviewed (TASK-901).
+ *
+ * Above what any of those builders produces, and CLIPPED to rather than
+ * refused at: a box-written task's length is the box's own doing, so it is
+ * never the reason a follow-up does not start.
+ */
+export const MAX_BOX_TASK_CHARS = 32_000;
 export const MAX_DIRECTORY_CHARS = 512;
 
 /**
@@ -4665,10 +4681,28 @@ function newRunId(): string {
 // re-exported here under the name the routes have always imported.
 export const RUN_ID_RE = ARTIFACT_RUN_ID_RE;
 
-function normalizeTask(task: unknown): string {
+/**
+ * Did the BOX write this task, rather than a person typing it?
+ *
+ * True for the follow-ups the runner starts itself — the review pass, a
+ * review-loop round, a deployment-fix turn. Those fields are internal: no route
+ * passes them through from a request body, so a typed task cannot claim this.
+ */
+function isBoxWrittenTask(input: Pick<StartRunInput, "reviewOf" | "reviewLoopOf" | "vercelFixOf">): boolean {
+  return typeof input.reviewOf === "string" || typeof input.reviewLoopOf === "string" || typeof input.vercelFixOf === "string";
+}
+
+const BOX_TASK_CLIPPED = "\n…(truncated)";
+
+function normalizeTask(task: unknown, boxWritten = false): string {
   if (typeof task !== "string") throw new CodingAgentError("invalid", "A task is required.");
   const cleaned = task.replace(/\u0000/g, "").trim();
   if (!cleaned) throw new CodingAgentError("invalid", "A task is required.");
+  if (boxWritten) {
+    return cleaned.length > MAX_BOX_TASK_CHARS
+      ? `${cleaned.slice(0, MAX_BOX_TASK_CHARS - BOX_TASK_CLIPPED.length)}${BOX_TASK_CLIPPED}`
+      : cleaned;
+  }
   if (cleaned.length > MAX_TASK_CHARS) {
     throw new CodingAgentError("invalid", `The task is too long: at most ${MAX_TASK_CHARS} characters.`);
   }
@@ -10861,7 +10895,7 @@ export async function sweepCodingWorktrees(options: { force?: boolean } = {}): P
 // ─── Public operations ───────────────────────────────────────────────────────
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
-  const task = normalizeTask(input.task);
+  const task = normalizeTask(input.task, isBoxWrittenTask(input));
 
   let resumeSessionId: string | null = null;
   let directory: string;
