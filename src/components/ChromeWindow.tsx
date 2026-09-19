@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, useLayoutEffect, ReactNode } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { WINDOW_CHROME, WindowChromeContext, type WindowChrome, type WindowTone } from "@/lib/window-chrome";
 import { createPortal } from "react-dom";
 import * as kv from "@/lib/client-kv";
 import SnapPreviewOverlay from "@/components/SnapPreviewOverlay";
@@ -108,6 +109,12 @@ export default function ChromeWindow({
   const [minimizing, setMinimizing] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  // The title bar's slot for the app's own controls, and the face of the
+  // chrome the app asked for (see window-chrome.ts).
+  const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
+  const [tone, setTone] = useState<WindowTone>("dark");
+  const chrome = useMemo<WindowChrome>(() => ({ actions: actionsEl, active: isActive, tone, setTone }), [actionsEl, isActive, tone]);
+  const palette = WINDOW_CHROME[tone];
   const windowRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({ isDragging: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
   const resizeRef = useRef<{
@@ -173,6 +180,8 @@ export default function ChromeWindow({
   }, [minimized]);
 
   const handleDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    // The app's own controls in the bar are buttons, not a grip.
+    if ((e.target as HTMLElement | null)?.closest?.("[data-window-titlebar-actions]")) return;
     if (maximized) {
       // No drag from a maximized bar — but a mousedown's other default, moving
       // focus, is still refused, as the drag path below refuses it: that is
@@ -494,9 +503,7 @@ export default function ChromeWindow({
         ...windowStyle,
         zIndex,
         borderRadius: snapped ? 0 : 8,
-        boxShadow: isActive
-          ? "0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)"
-          : "0 4px 20px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04)",
+        boxShadow: isActive ? palette.shadow : palette.shadowInactive,
         opacity: 1,
         transition: snapped && !isDragging
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
@@ -508,41 +515,45 @@ export default function ChromeWindow({
       <div
         className="flex items-center h-9 px-2 cursor-default select-none shrink-0"
         style={{
-          background: isActive
-            ? "linear-gradient(180deg, #292d36 0%, #242830 100%)"
-            : "#1f2228",
-          borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
+          background: isActive ? palette.titleBar : palette.titleBarInactive,
+          borderBottom: `1px solid ${palette.hairline}`,
           borderRadius: snapped ? 0 : "8px 8px 0 0",
         }}
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}
-        onDoubleClick={handleMaximize}
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement | null)?.closest?.("[data-window-titlebar-actions]")) return;
+          handleMaximize();
+        }}
       >
         {/* Left: title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className={`text-xs font-medium truncate ${isActive ? "text-white/80" : "text-white/50"}`}>{title}</span>
+          <span className={`text-xs font-medium truncate ${isActive ? palette.titleClass : palette.titleInactiveClass}`}>{title}</span>
         </div>
+
+        {/* The app's own controls (window-chrome.ts), left of the window's. */}
+        <div ref={setActionsEl} data-window-titlebar-actions="true" className="flex items-center gap-1 ml-2 empty:hidden" />
 
         {/* Right: window controls — ChromeOS circular buttons */}
         <div className="flex items-center gap-1.5 ml-2">
           {/* Minimize */}
           <button
             onClick={handleMinimize}
-            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
+            className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
             title={t("window.minimize")}
             aria-label={t("window.minimize")}
           >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
+            <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>minimize</span>
           </button>
 
           {/* Maximize */}
           <button
             onClick={handleMaximize}
-            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
+            className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
             title={maximized ? t("window.restore") : t("window.maximize")}
             aria-label={maximized ? t("window.restore") : t("window.maximize")}
           >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
+            <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
           </button>
 
           {/* Close */}
@@ -552,13 +563,15 @@ export default function ChromeWindow({
             title={t("window.close")}
             aria-label={t("window.close")}
           >
-            <span className="material-symbols-rounded text-white/60 group-hover:text-white" style={{ fontSize: 16 }}>close</span>
+            <span className={`material-symbols-rounded ${palette.controlClass} group-hover:text-white`} style={{ fontSize: 16 }}>close</span>
           </button>
         </div>
       </div>
 
       {/* Content */}
-      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
+      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden" style={{ background: palette.ground }}>
+        <WindowChromeContext.Provider value={chrome}>{children}</WindowChromeContext.Provider>
+      </div>
 
       {/* Resize handles — hidden when maximized/snapped */}
       {!maximized && !snapped && (

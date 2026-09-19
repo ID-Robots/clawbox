@@ -9,6 +9,19 @@
  * owner to remember a command. It is TYPED, not injected: the shell echoes it,
  * so what ran is on screen and the window is still an ordinary terminal
  * afterwards.
+ *
+ * How it looks and behaves comes from the owner's Terminal settings
+ * (src/lib/terminal-settings.ts): theme, face, size, line height, cursor,
+ * scrollback, copy-on-select, bell, and the shell and folder a new tab starts
+ * in. A change applies to every open terminal at once.
+ *
+ * Rendering: WebGL where the device has it — crisp at any devicePixelRatio,
+ * box drawing and block elements drawn cell-exact by the renderer rather than
+ * by the font, emoji and Nerd Font icons scaled back into their cells — and
+ * xterm's DOM renderer where it does not or the context is lost. Only the tab
+ * on screen holds a WebGL context; a browser allows a page about sixteen.
+ * Character widths follow Unicode 11, so an emoji takes the two cells the
+ * shell counted for it.
  */
 
 import React, {
@@ -19,10 +32,28 @@ import React, {
 } from "react";
 import dynamic from "next/dynamic";
 import { createPortal } from "react-dom";
-import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { DESKTOP_LAYERS, shelfHeight } from "@/lib/window-snap";
+import { WINDOW_CHROME } from "@/lib/window-chrome";
+import {
+  TERMINAL_FONTS,
+  TERMINAL_THEMES,
+  getTerminalSettings,
+  loadTerminalSettings,
+  terminalFontFor,
+  terminalThemeFor,
+  useTerminalSettings,
+  type TerminalColors,
+  type TerminalFontDef,
+  type TerminalSettings,
+} from "@/lib/terminal-settings";
+import { canReadClipboard as clipboardReadable, copyToClipboard, readClipboard } from "@/lib/terminal-clipboard";
+import { isMacPlatform, shortcutLabel, terminalShortcut } from "@/lib/terminal-keys";
 import "@xterm/xterm/css/xterm.css";
+
+type XTerm = import("@xterm/xterm").Terminal;
+type XFitAddon = import("@xterm/addon-fit").FitAddon;
+type XWebglAddon = import("@xterm/addon-webgl").WebglAddon;
 
 /** What a keyboard shortcut in the terminal asks the tab strip around it to do. */
 export type TerminalTabAction = "newTab" | "closeTab" | "nextTab" | "prevTab";
@@ -37,122 +68,247 @@ export interface TerminalAppProps {
    */
   active?: boolean;
   /**
-   * Tab shortcuts — Alt+Shift+T, Alt+Shift+W, Alt+Shift+PageDown/PageUp —
-   * handed to whoever owns the tabs. Without a handler the keys reach the
-   * shell as they always did.
+   * Tab shortcuts — Ctrl+Shift+T/W, Ctrl+Tab/Ctrl+Shift+Tab and their Alt+Shift
+   * twins (src/lib/terminal-keys.ts) — handed to whoever owns the tabs.
+   * Without a handler the keys reach the shell as they always did.
    */
   onTabAction?: (action: TerminalTabAction) => void;
+  /** Opens the Terminal's settings; the right-click menu offers it when given. */
+  onOpenSettings?: () => void;
+  /** The shell rang the bell (with the visual bell on) — the strip marks a tab behind the front one. */
+  onBell?: () => void;
+}
+
+/** The default face's stack, as the rest of the desktop has always read it. */
+export const TERMINAL_FONT_FAMILY = TERMINAL_FONTS["jetbrains-mono"].family;
+
+/** How long the first cell waits for the settings and the web font before it is drawn with what is there. */
+const FONT_WAIT_MS = 1500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), ms); }),
+  ]).finally(() => { if (timer !== null) clearTimeout(timer); });
 }
 
 /**
- * Copy to the clipboard, over plain HTTP too: `navigator.clipboard` exists
- * only on a secure origin, and every LAN ClawBox is http://, so the
- * `execCommand` fallback is the path most boxes take.
+ * A shipped face, loaded before the grid is measured — bounded, so a slow disk
+ * never holds the shell. Answers whether the wait ran out and the load itself,
+ * so a terminal drawn on the fallback face can be refitted the moment the real
+ * one lands. The device's own monospace needs no wait.
  */
-/**
- * The terminal's face. JetBrains Mono (shipped, public/fonts) for the text;
- * the Nerd Fonts symbols set (shipped) for the glyphs a TUI draws with —
- * powerline, devicons, the private-use icons; the platform's own colour
- * font for emoji, which no monospace face carries; then the faces the box
- * image has (DejaVu, Liberation) so a phone and the box's own Chromium fall
- * through the same way. Box drawing comes from JetBrains Mono itself — the
- * whole of Claude Code's UI is `╭─╮ │ ╰─╯`.
- */
-export const TERMINAL_FONT_FAMILY = '"JetBrains Mono", "Symbols Nerd Font Mono", "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono", Menlo, Consolas, monospace';
-
-/** How long the first cell waits for the web font before it is drawn with the fallback face. */
-const FONT_WAIT_MS = 1500;
-
-/**
- * The web font, loaded before the grid is measured — bounded, so a slow disk
- * never holds the shell. Answers whether the wait ran out and the load
- * itself, so a terminal drawn on the fallback face can be refitted the
- * moment the real one lands.
- */
-async function loadTerminalFont(): Promise<{ late: boolean; loading: Promise<boolean> | null }> {
-  if (typeof document === "undefined" || !("fonts" in document)) return { late: false, loading: null };
+async function loadTerminalFont(font: TerminalFontDef, size: number): Promise<{ late: boolean; loading: Promise<boolean> | null }> {
+  if (!font.face || typeof document === "undefined" || !("fonts" in document)) return { late: false, loading: null };
   let loading: Promise<boolean>;
   try {
-    loading = document.fonts.load('13px "JetBrains Mono"').then((faces) => faces.length > 0, () => false);
+    loading = document.fonts.load(`${size}px "${font.face}"`).then((faces) => faces.length > 0, () => false);
   } catch {
     return { late: false, loading: null };
   }
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const late = await Promise.race([
-    loading.then(() => false),
-    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), FONT_WAIT_MS); }),
-  ]);
-  if (timer !== null) clearTimeout(timer);
-  return { late, loading };
-}
-
-/** Re-measure the grid on the face that has just arrived: xterm measures on a font CHANGE, so the family is set away and back. */
-const FALLBACK_FONT_FAMILY = '"DejaVu Sans Mono", "Liberation Mono", monospace';
-function refitForFont(term: import("@xterm/xterm").Terminal, fitAddon: import("@xterm/addon-fit").FitAddon): void {
-  term.options.fontFamily = FALLBACK_FONT_FAMILY;
-  term.options.fontFamily = TERMINAL_FONT_FAMILY;
-  fitAddon.fit();
-}
-
-/** The Coding Agent's ground (`--win-ground`), as the terminal's canvas needs it: a literal. */
-const TERMINAL_GROUND_FALLBACK = "#0d1117";
-function terminalGround(): string {
-  if (typeof window === "undefined") return TERMINAL_GROUND_FALLBACK;
-  const v = getComputedStyle(document.documentElement).getPropertyValue("--win-ground").trim();
-  return v || TERMINAL_GROUND_FALLBACK;
+  const late = await withTimeout(loading.then(() => false), FONT_WAIT_MS);
+  return { late: late === undefined, loading };
 }
 
 /**
- * The palette: GitHub's dark scheme, the same one the code editor colours
- * with (`.tok-*` in globals.css), on the Coding Agent's ground — so a run's
- * transcript in a Terminal window reads like the run's own page.
+ * Re-measure the grid on the face that has just arrived: xterm measures on a
+ * font CHANGE, so the family is set away and back.
  */
-export function terminalTheme(ground: string) {
+const FALLBACK_FONT_FAMILY = '"DejaVu Sans Mono", "Liberation Mono", monospace';
+function refitForFont(term: XTerm, fitAddon: XFitAddon, family: string): void {
+  term.options.fontFamily = FALLBACK_FONT_FAMILY;
+  term.options.fontFamily = family;
+  fitAddon.fit();
+}
+
+/**
+ * The letter spacing that makes a WebGL cell as wide as the face, in whole
+ * device pixels. The WebGL renderer sizes a cell to the face's advance
+ * rounded DOWN to a device pixel and adds `letterSpacing` to that — so the
+ * default 13 px JetBrains Mono (a 7.8 px advance) was drawn into 7 px cells on
+ * a ratio-1 screen and every glyph crowded the next. One pixel more whenever
+ * the floor threw away half a pixel or more turns the floor into a rounding.
+ * The DOM renderer keeps the exact advance and needs none.
+ */
+export function cellSnapSpacing(advanceCssPx: number, devicePixelRatio: number): number {
+  if (!Number.isFinite(advanceCssPx) || advanceCssPx <= 0) return 0;
+  const device = advanceCssPx * (devicePixelRatio > 0 ? devicePixelRatio : 1);
+  return device - Math.floor(device) >= 0.5 ? 1 : 0;
+}
+
+/** The face's advance in CSS pixels, measured the way xterm measures it (one "W"). */
+function measureAdvance(family: string, size: number): number | null {
+  if (typeof document === "undefined") return null;
+  try {
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (!ctx) return null;
+    ctx.font = `${size}px ${family}`;
+    const width = ctx.measureText("W").width;
+    return Number.isFinite(width) && width > 0 ? width : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The ClawBox palette on a given ground — kept for callers that draw a terminal on a ground of their own. */
+export function terminalTheme(ground: string): TerminalColors {
+  const { colors } = TERMINAL_THEMES["clawbox-dark"];
+  return { ...colors, background: ground, cursorAccent: ground };
+}
+
+/** The xterm options a settings value decides — every one of them can change on a live terminal. */
+function liveOptions(settings: TerminalSettings) {
+  const theme = terminalThemeFor(settings.theme);
   return {
-    background: ground,
-    foreground: "#e6edf3",
-    cursor: "#f97316",
-    cursorAccent: ground,
-    selectionBackground: "rgba(255, 255, 255, 0.18)",
-    black: "#484f58",
-    red: "#ff7b72",
-    green: "#3fb950",
-    yellow: "#d29922",
-    blue: "#58a6ff",
-    magenta: "#bc8cff",
-    cyan: "#39c5cf",
-    white: "#b1bac4",
-    brightBlack: "#6e7681",
-    brightRed: "#ffa198",
-    brightGreen: "#56d364",
-    brightYellow: "#e3b341",
-    brightBlue: "#79c0ff",
-    brightMagenta: "#d2a8ff",
-    brightCyan: "#56d4dd",
-    brightWhite: "#f0f6fc",
+    theme: theme.colors,
+    fontFamily: terminalFontFor(settings.font).family,
+    fontSize: settings.fontSize,
+    lineHeight: settings.lineHeight,
+    cursorStyle: settings.cursorStyle,
+    cursorBlink: settings.cursorBlink,
+    scrollback: settings.scrollback,
+    // A light ground needs the colours an app chose for a dark one nudged
+    // until they read; on a dark ground every colour is drawn exactly as sent,
+    // truecolor included.
+    minimumContrastRatio: theme.tone === "light" ? 3 : 1,
   };
 }
 
-function copyText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
+/**
+ * The buffer's whole text — scrollback and screen — with every wrapped row
+ * joined back onto the line it continues, so "Copy all" pastes the lines the
+ * program printed rather than the width the window happened to be.
+ */
+export function terminalBufferText(term: Pick<XTerm, "buffer">): string {
+  const buffer = term.buffer.active;
+  const lines: string[] = [];
+  for (let y = 0; y < buffer.length; y++) {
+    const line = buffer.getLine(y);
+    if (!line) continue;
+    // A row that continues on the next keeps its trailing spaces: they are
+    // text the program wrote, not the padding after it.
+    const continues = buffer.getLine(y + 1)?.isWrapped === true;
+    const text = line.translateToString(!continues);
+    if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
+    else lines.push(text);
   }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
 }
-function fallbackCopy(text: string) {
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  try {
-    ta.focus();
-    ta.setSelectionRange(0, ta.value.length);
-    document.execCommand("copy");
-  } finally {
-    document.body.removeChild(ta);
-  }
+
+// ── Touch selection ───────────────────────────────────────────────────
+//
+// xterm selects with a mouse and has nothing for a finger. A long press
+// selects the word under it (a path, a URL — what a phone copies), dragging
+// then moves the selection's end, and letting go opens the same menu a right
+// click does. A swipe that starts before the press is recognised stays xterm's
+// scroll.
+
+const LONG_PRESS_MS = 450;
+const TOUCH_SLOP_PX = 10;
+
+function cellAt(term: XTerm, clientX: number, clientY: number): { col: number; row: number } | null {
+  const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen || !term.cols || !term.rows) return null;
+  const rect = screen.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const col = Math.floor(((clientX - rect.left) / rect.width) * term.cols);
+  const row = Math.floor(((clientY - rect.top) / rect.height) * term.rows);
+  return {
+    col: Math.min(term.cols - 1, Math.max(0, col)),
+    row: term.buffer.active.viewportY + Math.min(term.rows - 1, Math.max(0, row)),
+  };
+}
+
+/** The run of non-blank cells around `col` — the second half of a wide glyph belongs to its word. */
+function wordAt(term: XTerm, col: number, row: number): { start: number; end: number } {
+  const line = term.buffer.active.getLine(row);
+  if (!line) return { start: col, end: col };
+  const blank = (x: number) => {
+    const cell = line.getCell(x);
+    if (!cell) return true;
+    if (cell.getWidth() === 0) return false;
+    const chars = cell.getChars();
+    return chars === "" || /\s/.test(chars);
+  };
+  if (blank(col)) return { start: col, end: col };
+  let start = col;
+  while (start > 0 && !blank(start - 1)) start--;
+  let end = col;
+  while (end < term.cols - 1 && !blank(end + 1)) end++;
+  return { start, end };
+}
+
+function installTouchSelection(el: HTMLElement, term: XTerm, onSelected: (x: number, y: number) => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let origin: { x: number; y: number } | null = null;
+  // The long-pressed word, as linear cell positions (row * cols + col).
+  let anchor: { start: number; end: number } | null = null;
+  const cancelTimer = () => { if (timer) clearTimeout(timer); timer = null; };
+
+  const onStart = (ev: TouchEvent) => {
+    cancelTimer();
+    anchor = null;
+    if (ev.touches.length !== 1) { origin = null; return; }
+    origin = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+    timer = setTimeout(() => {
+      timer = null;
+      if (!origin) return;
+      const cell = cellAt(term, origin.x, origin.y);
+      if (!cell) return;
+      const word = wordAt(term, cell.col, cell.row);
+      anchor = { start: cell.row * term.cols + word.start, end: cell.row * term.cols + word.end };
+      term.select(word.start, cell.row, word.end - word.start + 1);
+      try { navigator.vibrate?.(10); } catch { /* no haptics here */ }
+    }, LONG_PRESS_MS);
+  };
+  const onMove = (ev: TouchEvent) => {
+    const touch = ev.touches[0];
+    if (!touch) return;
+    if (!anchor) {
+      if (origin && Math.hypot(touch.clientX - origin.x, touch.clientY - origin.y) > TOUCH_SLOP_PX) {
+        cancelTimer();
+        origin = null;
+      }
+      return;
+    }
+    // Selecting: the finger drags the selection's end, not the scrollback.
+    ev.preventDefault();
+    ev.stopPropagation();
+    const cell = cellAt(term, touch.clientX, touch.clientY);
+    if (!cell) return;
+    const cols = term.cols;
+    const at = cell.row * cols + cell.col;
+    const start = Math.min(anchor.start, at);
+    const end = Math.max(anchor.end, at);
+    term.select(start % cols, Math.floor(start / cols), end - start + 1);
+  };
+  const onEnd = (ev: TouchEvent) => {
+    cancelTimer();
+    if (anchor) {
+      // No synthetic mousedown after it: xterm would take that for a click
+      // and clear the selection the finger just made.
+      if (ev.cancelable) ev.preventDefault();
+      anchor = null;
+      const touch = ev.changedTouches[0];
+      if (term.hasSelection()) onSelected(touch?.clientX ?? origin?.x ?? 0, touch?.clientY ?? origin?.y ?? 0);
+    }
+    origin = null;
+  };
+  const onCancel = () => { cancelTimer(); anchor = null; origin = null; };
+
+  el.addEventListener("touchstart", onStart, { passive: true });
+  el.addEventListener("touchmove", onMove, { passive: false, capture: true });
+  el.addEventListener("touchend", onEnd, { passive: false });
+  el.addEventListener("touchcancel", onCancel);
+  return () => {
+    cancelTimer();
+    el.removeEventListener("touchstart", onStart);
+    el.removeEventListener("touchmove", onMove, { capture: true });
+    el.removeEventListener("touchend", onEnd);
+    el.removeEventListener("touchcancel", onCancel);
+  };
 }
 
 interface ContextMenuState {
@@ -162,31 +318,47 @@ interface ContextMenuState {
 }
 
 /** The menu's width and height, for keeping it inside the viewport. */
-const MENU_W = 200;
-const MENU_H = 160;
+const MENU_W = 240;
+const MENU_H = 270;
 
-function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalAppProps) {
-  const { t } = useT();
+const IS_MAC = isMacPlatform();
+
+function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSettings, onBell }: TerminalAppProps) {
   const tr = useTr();
   // Read through a ref for the same reason `initialCommand` is: `connect` must
   // not change identity — and with it the live socket's handlers — because the
   // translation catalogue finished loading.
   const trRef = useRef(tr);
   useEffect(() => { trRef.current = tr; }, [tr]);
+  const { settings } = useTerminalSettings();
+  const settingsRef = useRef(settings);
+  // What the xterm instance was last given, so a render that changed nothing
+  // re-applies nothing.
+  const appliedSettingsRef = useRef<TerminalSettings | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // The right-click menu: where it is and whether Copy has anything to copy.
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   // Whether the clipboard can be READ from script — a secure origin only.
   // Paste is offered when it can, and named as a key combination when not.
-  const [canReadClipboard] = useState(() => typeof navigator !== "undefined" && typeof navigator.clipboard?.readText === "function");
+  const [canReadClipboard] = useState(() => clipboardReadable());
   const onTabActionRef = useRef(onTabAction);
   useEffect(() => { onTabActionRef.current = onTabAction; }, [onTabAction]);
+  const onBellRef = useRef(onBell);
+  useEffect(() => { onBellRef.current = onBell; }, [onBell]);
+  const activeRef = useRef(active);
   // Read by the key handler xterm calls before it forwards a key to the
   // shell, so an Escape meant for the menu never reaches the PTY.
   const menuOpenRef = useRef(false);
   useEffect(() => { menuOpenRef.current = menu !== null; }, [menu]);
-  const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
-  const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
+  // A short line over the terminal — "Copied to clipboard" — and the visual bell.
+  const [notice, setNotice] = useState<{ text: string; error: boolean; id: number } | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [bellFlash, setBellFlash] = useState(0);
+  const termRef = useRef<XTerm | null>(null);
+  const fitAddonRef = useRef<XFitAddon | null>(null);
+  const webglRef = useRef<XWebglAddon | null>(null);
+  const webglLoadingRef = useRef(false);
+  const fitFrameRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   // `exited`: the SHELL ended — `exit`, Ctrl+D — as opposed to the connection
   // to it going away. The first is the owner's doing and gets no retry; the
@@ -200,7 +372,9 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
   const inputDisposableRef = useRef<{ dispose: () => void } | null>(null);
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  // What lives as long as the xterm instance: its event subscriptions, the
+  // resize observer, the touch handlers.
+  const terminalCleanupRef = useRef<Array<() => void>>([]);
   const connectLockRef = useRef(false);
   // Held from connect until the shell's FIRST byte of output. Sending on
   // `onopen` instead would type into a PTY whose shell has not been exec'd
@@ -228,6 +402,96 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     setStatus(s);
   }, []);
 
+  const showNotice = useCallback((text: string, error = false) => {
+    if (!mountedRef.current) return;
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    setNotice((prev) => ({ text, error, id: (prev?.id ?? 0) + 1 }));
+    noticeTimerRef.current = setTimeout(() => {
+      noticeTimerRef.current = null;
+      if (mountedRef.current) setNotice(null);
+    }, error ? 3200 : 1600);
+  }, []);
+
+  /** Copy text; say so unless `quiet` (copy-on-select), and always say when it failed. */
+  const copyAndTell = useCallback((text: string, quiet = false) => {
+    if (!text) return;
+    void copyToClipboard(text).then((ok) => {
+      if (ok && quiet) return;
+      showNotice(
+        ok ? trRef.current("terminal.copied", "Copied to clipboard")
+          : trRef.current("terminal.copyFailed", "The browser refused the clipboard — select the text and press {keys}", { keys: shortcutLabel("copy", IS_MAC) }),
+        !ok,
+      );
+    });
+  }, [showNotice]);
+
+  // One fit per frame, however many things asked for it. A panel that is not
+  // on screen has no size to fit to and is fitted when it comes back.
+  const scheduleFit = useCallback(() => {
+    if (fitFrameRef.current !== null || typeof requestAnimationFrame !== "function") return;
+    fitFrameRef.current = requestAnimationFrame(() => {
+      fitFrameRef.current = null;
+      const el = containerRef.current;
+      if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
+      try { fitAddonRef.current?.fit(); } catch { /* not open yet */ }
+    });
+  }, []);
+
+  // ── Renderer ──────────────────────────────────────────────────────────
+  // Keep the WebGL cell as wide as the face (cellSnapSpacing); back to none
+  // on the DOM renderer. Asked again whenever the face, its size, the pixel
+  // ratio or the renderer changes.
+  const snapCells = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    let spacing = 0;
+    if (webglRef.current) {
+      const advance = measureAdvance(String(term.options.fontFamily ?? ""), Number(term.options.fontSize ?? 0));
+      spacing = advance === null ? 0 : cellSnapSpacing(advance, window.devicePixelRatio || 1);
+    }
+    if ((term.options.letterSpacing ?? 0) === spacing) return;
+    try { term.options.letterSpacing = spacing; } catch { return; }
+    scheduleFit();
+  }, [scheduleFit]);
+
+  const releaseWebgl = useCallback(() => {
+    const addon = webglRef.current;
+    webglRef.current = null;
+    if (!addon) return;
+    try { addon.dispose(); } catch { /* already gone with its context */ }
+    snapCells();
+    scheduleFit();
+  }, [scheduleFit, snapCells]);
+
+  const ensureWebgl = useCallback(async () => {
+    const term = termRef.current;
+    if (!term || !activeRef.current || webglRef.current || webglLoadingRef.current) return;
+    if (typeof window === "undefined" || typeof window.WebGL2RenderingContext === "undefined") return;
+    webglLoadingRef.current = true;
+    try {
+      const { WebglAddon } = await import("@xterm/addon-webgl");
+      if (termRef.current !== term || !activeRef.current || !mountedRef.current) return;
+      const addon = new WebglAddon();
+      // A lost context (the GPU reset, too many contexts on the page) hands
+      // the terminal back to the DOM renderer; the next time this tab comes
+      // to the front it asks for WebGL again.
+      addon.onContextLoss(() => {
+        if (webglRef.current === addon) webglRef.current = null;
+        try { addon.dispose(); } catch { /* already gone */ }
+        snapCells();
+      });
+      term.loadAddon(addon);
+      webglRef.current = addon;
+      snapCells();
+      scheduleFit();
+    } catch {
+      // No WebGL2 here, or the addon would not start: the DOM renderer stays.
+      webglRef.current = null;
+    } finally {
+      webglLoadingRef.current = false;
+    }
+  }, [scheduleFit, snapCells]);
+
   // `connect()` raises the lock on entry and only `onopen`/`onclose` lower it
   // again, so ANY throw before the socket handlers are installed strands it:
   // a ChunkLoadError from the three dynamic imports below when an in-app update
@@ -244,6 +508,47 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     termRef.current?.writeln(`\r\n\x1b[31mError: could not start the terminal — ${reason}\x1b[0m`);
   }, [updateStatus]);
 
+  /** Everything that lives as long as the xterm instance, wired once after it opens. */
+  const wireTerminal = useCallback((term: XTerm, el: HTMLElement) => {
+    const cleanup = terminalCleanupRef.current;
+    // xterm's own resize (a fit that changed the grid) is what the PTY hears.
+    const resizeSub = term.onResize?.(({ cols, rows }) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+    });
+    if (resizeSub) cleanup.push(() => resizeSub.dispose());
+    const bellSub = term.onBell?.(() => {
+      if (settingsRef.current.bell !== "visual") return;
+      setBellFlash((n) => n + 1);
+      onBellRef.current?.();
+    });
+    if (bellSub) cleanup.push(() => bellSub.dispose());
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => scheduleFit());
+      ro.observe(el);
+      cleanup.push(() => ro.disconnect());
+    }
+    // A move to a screen with another pixel ratio (or a browser zoom) changes
+    // the cell's size in CSS pixels without changing the element's.
+    if (typeof window.matchMedia === "function") {
+      let query: MediaQueryList | null = null;
+      const onRatio = () => { snapCells(); scheduleFit(); listen(); };
+      const listen = () => {
+        query?.removeEventListener?.("change", onRatio);
+        query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+        query?.addEventListener?.("change", onRatio);
+      };
+      listen();
+      cleanup.push(() => query?.removeEventListener?.("change", onRatio));
+    }
+    if (typeof term.hasSelection === "function") {
+      cleanup.push(installTouchSelection(el, term, (x, y) => {
+        if (settingsRef.current.copyOnSelect) copyAndTell(term.getSelection(), true);
+        setMenu({ x: clampMenuX(x), y: clampMenuY(y), hasSelection: true });
+      }));
+    }
+  }, [scheduleFit, snapCells, copyAndTell]);
+
   const connect = useCallback(async () => {
     if (!mountedRef.current || !containerRef.current) return;
     if (connectLockRef.current) return;
@@ -257,55 +562,57 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
 
     // Create terminal instance once
-    let fontLate: { late: boolean; loading: Promise<boolean> | null } | null = null;
     if (!termRef.current) {
-      // The face is a web font: waited for before the first cell is drawn,
-      // or xterm would size its grid on the fallback and every glyph would
-      // land off its cell once the real one arrived.
-      fontLate = await loadTerminalFont();
+      // The owner's settings, then their face — each waited for, boundedly,
+      // before the first cell is drawn, or xterm would size its grid on the
+      // fallback face and every glyph would land off its cell once the real
+      // one arrived.
+      await withTimeout(loadTerminalSettings(), FONT_WAIT_MS);
+      const initial = getTerminalSettings();
+      const face = terminalFontFor(initial.font);
+      const fontLate = await loadTerminalFont(face, initial.fontSize);
       if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
       const term = new Terminal({
-        theme: terminalTheme(terminalGround()),
-        // Box-drawing first. Claude Code's whole UI is drawn with `╭─╮ │ ╰─╯`,
-        // and NONE of the four fonts the old stack named (Cascadia, JetBrains
-        // Mono, Fira Code, Consolas — nor its Courier New fallback) exists on
-        // this image: `fc-list` has none of them, so every session fell through
-        // to the generic `monospace` alias and the glyphs were whatever the
-        // viewing device's fontconfig happened to resolve. DejaVu and Liberation
-        // DO ship here, so naming them makes the result the same on the box's
-        // own Chromium and on a phone that has neither.
-        fontFamily: TERMINAL_FONT_FAMILY,
-        fontSize: 13,
-        // 1.0, not 1.4. Line height is leading BETWEEN rows, and a full-screen
-        // TUI draws its vertical borders as one glyph per row — at 1.4 every
-        // `│` was separated from the one below it by 40% of a line, so every box
-        // in Claude Code rendered as a dotted column. Prose scrollback can
-        // afford leading; a TUI cannot.
-        lineHeight: 1.0,
-        cursorBlink: true,
-        cursorStyle: "block",
-        scrollback: 5000,
+        ...liveOptions(initial),
+        letterSpacing: 0,
+        cursorInactiveStyle: "outline",
         // The background is opaque, so transparency bought nothing and cost the
         // renderer its fast path — on a redraw-heavy TUI that showed as tearing.
         allowTransparency: false,
         // Claude Code marks emphasis with bold. Remapping bold onto the BRIGHT
         // palette (xterm's default) recoloured its text instead of weighting it.
         drawBoldTextInBrightColors: false,
+        fontWeight: "normal",
+        fontWeightBold: "bold",
         macOptionIsMeta: true,
         // A right click on a word selects it, so "right click, Copy" works
         // on a word without dragging first.
         rightClickSelectsWord: true,
+        // Unicode 11 widths are "proposed" API in xterm 6.
+        allowProposedApi: true,
+        // WebGL draws box drawing and block elements itself, so `╭─╮ │ ╰─╯`
+        // joins at every line height, and scales a glyph that would spill
+        // into the next cell (an emoji, a Nerd Font icon) back into its own.
+        customGlyphs: true,
+        rescaleOverlappingGlyphs: true,
       });
+      appliedSettingsRef.current = initial;
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon());
+      // Widths are decided as text is written, so before anything is.
+      try {
+        const { Unicode11Addon } = await import("@xterm/addon-unicode11");
+        term.loadAddon(new Unicode11Addon());
+        term.unicode.activeVersion = "11";
+      } catch {
+        // xterm's own Unicode 6 tables: emoji may count as one cell.
+      }
+      if (!mountedRef.current || !containerRef.current) { term.dispose(); connectLockRef.current = false; return; }
 
-      // Clipboard key handler at xterm level.
-      // - Ctrl+Shift+C: copy selection
-      // - Ctrl+Shift+V and Ctrl+V: let the event pass through to the browser
-      //   so it fires a native "paste" event on xterm's hidden textarea (the
-      //   only way to read the clipboard over plain HTTP).
+      // The keys the terminal answers itself (src/lib/terminal-keys.ts); every
+      // other key is the shell's.
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
         // An Escape while the right-click menu is open is for the menu. xterm
         // sees the key before the document does, so without this the menu
@@ -321,34 +628,27 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
           if (ev.type === "keydown") reconnectRef.current();
           return false;
         }
-        if (ev.ctrlKey && ev.shiftKey && ev.key === "C" && ev.type === "keydown") {
-          const sel = term.getSelection();
-          if (sel) copyText(sel);
-          return false;
-        }
-        // Tab shortcuts, only when somebody owns the tabs. Alt+Shift, not
-        // Ctrl+Shift: Ctrl+Shift+T/W and Ctrl+PageUp/PageDown are the
-        // browser's own accelerators (reopen tab, CLOSE THE WINDOW, switch
-        // tab), handled before the page ever sees the key — preventDefault
-        // cannot claim them. Alt+Shift+letter is bound by no browser.
-        const tabs = onTabActionRef.current;
-        if (tabs && ev.type === "keydown" && ev.altKey && ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
-          let action: TerminalTabAction | null = null;
-          if (ev.key === "T" || ev.key === "t") action = "newTab";
-          else if (ev.key === "W" || ev.key === "w") action = "closeTab";
-          else if (ev.key === "PageDown") action = "nextTab";
-          else if (ev.key === "PageUp") action = "prevTab";
-          if (action) {
+        const action = terminalShortcut(ev, IS_MAC);
+        if (!action) return true;
+        // Paste is the browser's own: its paste event on xterm's hidden input
+        // is the one clipboard read plain HTTP allows, and xterm turns it
+        // into a bracketed paste. So the key is only kept from the shell.
+        if (action === "paste") return false;
+        if (action === "copy") {
+          if (ev.type === "keydown") {
             ev.preventDefault();
-            tabs(action);
-            return false;
+            const sel = term.getSelection();
+            if (sel) copyAndTell(sel);
           }
-        }
-        // Let Ctrl+Shift+V AND Ctrl+V bubble to the browser natively
-        if (ev.ctrlKey && (ev.key === "v" || ev.key === "V") && ev.type === "keydown") {
           return false;
         }
-        return true;
+        const tabs = onTabActionRef.current;
+        if (!tabs) return true;
+        if (ev.type === "keydown") {
+          ev.preventDefault();
+          tabs(action);
+        }
+        return false;
       });
 
       termRef.current = term;
@@ -356,26 +656,27 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       // The wait ran out before the face was in: the grid was measured on
       // the fallback, so it is measured again when the real one lands —
       // for this terminal only, and only while it is still on screen.
-      if (fontLate?.late && fontLate.loading) {
+      if (fontLate.late && fontLate.loading) {
         void fontLate.loading.then((loaded) => {
-          if (loaded && mountedRef.current && termRef.current === term) refitForFont(term, fitAddon);
+          if (!loaded || !mountedRef.current || termRef.current !== term) return;
+          refitForFont(term, fitAddon, face.family);
+          snapCells();
         });
       }
 
       term.open(containerRef.current!);
+      wireTerminal(term, containerRef.current!);
       fitAddon.fit();
+      void ensureWebgl();
     }
 
     const term = termRef.current!;
-    const fitAddon = fitAddonRef.current!;
 
     term.writeln(`\x1b[2m\x1b[36m${trRef.current("terminal.connectingToServer", "Connecting to terminal server…")}\x1b[0m`);
 
     // Clean up previous connection
     inputDisposableRef.current?.dispose();
     inputDisposableRef.current = null;
-    resizeObserverRef.current?.disconnect();
-    resizeObserverRef.current = null;
     if (wsRef.current) {
       wsRef.current.onclose = null;
       wsRef.current.onmessage = null;
@@ -384,9 +685,19 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       wsRef.current = null;
     }
 
+    // The shell and folder a new shell starts in, when the owner chose them.
+    // The server checks both (/etc/shells, an existing directory) and says
+    // what it started instead of a refused one.
+    const { shell, cwd } = settingsRef.current;
+    const query = new URLSearchParams();
+    if (shell) query.set("shell", shell);
+    if (cwd) query.set("cwd", cwd);
+    const queryString = query.toString();
+    const connectUrl = queryString ? `${wsUrl}?${queryString}` : wsUrl;
+
     let ws: WebSocket;
     try {
-      ws = new WebSocket(wsUrl);
+      ws = new WebSocket(connectUrl);
     } catch (err) {
       // The lock is released by `onopen` and `onclose`, and a constructor that
       // throws reaches neither. Left raised it made the Reconnect button a
@@ -414,9 +725,9 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       if (!mountedRef.current) { ws.close(); return; }
       updateStatus("connected");
       term.clear();
-      term.focus();
+      if (activeRef.current) term.focus();
 
-      // Send initial size
+      // Send initial size; later changes go out from xterm's onResize.
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
 
       // Forward terminal input → server
@@ -425,18 +736,6 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
           ws.send(JSON.stringify({ type: "input", data }));
         }
       });
-
-      // Handle resize
-      const ro = new ResizeObserver(() => {
-        try {
-          fitAddon.fit();
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-          }
-        } catch {}
-      });
-      if (containerRef.current) ro.observe(containerRef.current);
-      resizeObserverRef.current = ro;
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -448,6 +747,15 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
           if (pending && ws.readyState === WebSocket.OPEN) {
             pendingCommandRef.current = null;
             ws.send(JSON.stringify({ type: "input", data: `${pending}\r` }));
+          }
+        } else if (msg.type === "started") {
+          // The server could not honour a chosen shell or folder and started
+          // the box's default instead: said once, dimmed, above the prompt.
+          if (typeof msg.shellRefused === "string" && typeof msg.shell === "string") {
+            term.writeln(`\x1b[2m${trRef.current("terminal.shellFallback", "{shell} is not a shell on this box — started {fallback} instead", { shell: msg.shellRefused, fallback: msg.shell })}\x1b[0m`);
+          }
+          if (typeof msg.cwdRefused === "string" && typeof msg.cwd === "string") {
+            term.writeln(`\x1b[2m${trRef.current("terminal.cwdFallback", "{cwd} is not a folder on this box — started in {fallback}", { cwd: msg.cwdRefused, fallback: msg.cwd })}\x1b[0m`);
           }
         } else if (msg.type === "exit") {
           term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
@@ -466,11 +774,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
     ws.onclose = (ev) => {
       connectLockRef.current = false;
-      // Clean up input/resize handlers
       inputDisposableRef.current?.dispose();
       inputDisposableRef.current = null;
-      resizeObserverRef.current?.disconnect();
-      resizeObserverRef.current = null;
 
       if (!mountedRef.current) return;
       // The server closes the socket right after `exit`: that close is the
@@ -489,21 +794,28 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         }
       }
     };
-  }, [wsUrl, updateStatus, releaseAfterFailedConnect]);
+  }, [wsUrl, updateStatus, releaseAfterFailedConnect, wireTerminal, ensureWebgl, snapCells, copyAndTell]);
 
   useEffect(() => {
     mountedRef.current = true;
     connect().catch(releaseAfterFailedConnect);
+    // The one list, filled in place by wireTerminal and never replaced.
+    const terminalCleanup = terminalCleanupRef.current;
 
     return () => {
       mountedRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+      if (fitFrameRef.current !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(fitFrameRef.current);
       inputDisposableRef.current?.dispose();
-      resizeObserverRef.current?.disconnect();
+      for (const undo of terminalCleanup.splice(0)) {
+        try { undo(); } catch { /* best effort */ }
+      }
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close(1000, "component unmounted");
       }
+      webglRef.current = null;
       if (termRef.current) {
         termRef.current.dispose();
         termRef.current = null;
@@ -512,20 +824,63 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Settings, live ────────────────────────────────────────────────────
+  useEffect(() => {
+    settingsRef.current = settings;
+    const term = termRef.current;
+    const previous = appliedSettingsRef.current;
+    if (!term || !previous || previous === settings) return;
+    appliedSettingsRef.current = settings;
+    const next = liveOptions(settings);
+    try {
+      term.options.theme = next.theme;
+      term.options.fontSize = next.fontSize;
+      term.options.lineHeight = next.lineHeight;
+      term.options.cursorStyle = next.cursorStyle;
+      term.options.cursorBlink = next.cursorBlink;
+      term.options.scrollback = next.scrollback;
+      term.options.minimumContrastRatio = next.minimumContrastRatio;
+    } catch {
+      return;
+    }
+    snapCells();
+    scheduleFit();
+    if (previous.font !== settings.font || previous.fontSize !== settings.fontSize) {
+      // A shipped face is fetched before it is measured, like the first one was.
+      const face = terminalFontFor(settings.font);
+      const apply = () => {
+        if (termRef.current !== term || !mountedRef.current) return;
+        term.options.fontFamily = face.family;
+        snapCells();
+        scheduleFit();
+      };
+      if (face.face && typeof document !== "undefined" && "fonts" in document) {
+        document.fonts.load(`${settings.fontSize}px "${face.face}"`).then(apply, apply);
+      } else {
+        apply();
+      }
+    }
+  }, [settings, scheduleFit, snapCells]);
+
   // Focus terminal on any interaction with the container
   const handleContainerClick = useCallback(() => {
     termRef.current?.focus();
   }, []);
 
-  // The tab that just came on screen takes the keyboard. Its container was
-  // display:none a moment ago, so the fit is redone too — the ResizeObserver
-  // sees the size change as well, but a focus into a stale-sized terminal
-  // would put the cursor in the wrong place for a frame.
+  // The tab that just came on screen takes the keyboard and the GPU; the one
+  // that went behind gives its WebGL context back. Its container was
+  // display:none a moment ago, so the fit is redone too — a focus into a
+  // stale-sized terminal would put the cursor in the wrong place for a frame.
   useEffect(() => {
-    if (!active) return;
+    activeRef.current = active;
+    if (!active) {
+      releaseWebgl();
+      return;
+    }
     try { fitAddonRef.current?.fit(); } catch {}
     termRef.current?.focus();
-  }, [active]);
+    void ensureWebgl();
+  }, [active, ensureWebgl, releaseWebgl]);
 
   // Re-focus terminal when the window becomes visible/active
   useEffect(() => {
@@ -545,20 +900,26 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     };
   }, [active]);
 
+  // Copy on select, for a mouse: the selection is final when the button comes up.
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0 || !settingsRef.current.copyOnSelect) return;
+    const term = termRef.current;
+    // xterm settles a double- or triple-click selection on this same event.
+    setTimeout(() => {
+      const sel = term?.getSelection();
+      if (sel) copyAndTell(sel, true);
+    }, 0);
+  }, [copyAndTell]);
+
   // ── Right-click menu ──────────────────────────────────────────────────
   //
   // The browser's own menu has nothing useful for a terminal — no Copy over
   // plain HTTP, no Paste that reaches the shell — so it is replaced with the
-  // four things a terminal is actually asked for.
+  // things a terminal is actually asked for.
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const term = termRef.current;
-    const x = Math.min(e.clientX, Math.max(0, window.innerWidth - MENU_W));
-    // Above the shelf, not merely inside the viewport: a menu opened in the
-    // lower rows of a window that reaches the shelf put Clear behind it, and
-    // the shelf took the click (sweep FT-2).
-    const y = Math.min(e.clientY, Math.max(0, window.innerHeight - shelfHeight() - MENU_H));
-    setMenu({ x, y, hasSelection: Boolean(term?.getSelection()) });
+    setMenu({ x: clampMenuX(e.clientX), y: clampMenuY(e.clientY), hasSelection: Boolean(term?.getSelection()) });
   }, []);
   const menuRef = useRef<HTMLDivElement>(null);
   const closeMenu = useCallback(() => {
@@ -600,21 +961,27 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   }, [menu, closeMenu]);
   const menuCopy = useCallback(() => {
     const sel = termRef.current?.getSelection();
-    if (sel) copyText(sel);
+    if (sel) copyAndTell(sel);
     closeMenu();
-    termRef.current?.focus();
-  }, [closeMenu]);
+  }, [closeMenu, copyAndTell]);
+  const menuCopyAll = useCallback(() => {
+    const term = termRef.current;
+    let text = "";
+    try { text = term ? terminalBufferText(term) : ""; } catch { text = ""; }
+    if (text) copyAndTell(text);
+    closeMenu();
+  }, [closeMenu, copyAndTell]);
   const menuPaste = useCallback(() => {
     closeMenu();
     const term = termRef.current;
-    if (!term || !navigator.clipboard?.readText) return;
-    navigator.clipboard.readText().then((text) => {
+    if (!term) return;
+    void readClipboard().then((text) => {
       // Through xterm's own paste so bracketed-paste mode is honoured: a
       // multi-line paste into a shell that asked for it arrives as one
       // paste, not as lines run one by one.
       if (text) term.paste(text);
       term.focus();
-    }).catch(() => { term.focus(); });
+    });
   }, [closeMenu]);
   const menuSelectAll = useCallback(() => {
     termRef.current?.selectAll();
@@ -623,8 +990,11 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   const menuClear = useCallback(() => {
     termRef.current?.clear();
     closeMenu();
-    termRef.current?.focus();
   }, [closeMenu]);
+  const menuSettings = useCallback(() => {
+    setMenu(null);
+    onOpenSettings?.();
+  }, [onOpenSettings]);
 
   // Fallback keyboard handler — copy/paste is handled at the xterm level
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -649,6 +1019,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         if (e.key === "Enter") { e.preventDefault(); reconnectRef.current(); }
         return;
       }
+      // A terminal shortcut is never the shell's, focused or not.
+      if (terminalShortcut(e, IS_MAC)) return;
       // Map key to terminal data and send directly
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -670,8 +1042,13 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     }
   }, []);
 
+  const theme = terminalThemeFor(settings.theme);
+  const colors = theme.colors;
+  const chrome = WINDOW_CHROME[theme.tone];
+  const light = theme.tone === "light";
+
   const statusDot = {
-    connecting: "bg-yellow-400 animate-pulse",
+    connecting: "bg-yellow-400 motion-safe:animate-pulse",
     connected: "bg-green-400",
     disconnected: "bg-gray-500",
     error: "bg-red-400",
@@ -699,10 +1076,13 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   }, [connect, releaseAfterFailedConnect]);
   useEffect(() => { reconnectRef.current = handleReconnect; }, [handleReconnect]);
 
+  const pasteKeys = shortcutLabel("paste", IS_MAC);
+
   return (
     <div
       className="flex flex-col h-full"
-      style={{ background: "var(--win-ground)" }}
+      style={{ background: colors.background, color: colors.foreground }}
+      data-terminal-theme={theme.id}
       onKeyDown={handleKeyDown}
     >
       {/* Status bar — only shown when disconnected/error */}
@@ -710,84 +1090,136 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         <div
           className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
           style={{
-            background: "rgba(255,255,255,0.04)",
-            borderColor: "rgba(255,255,255,0.06)",
+            background: light ? "rgba(0,0,0,0.035)" : "rgba(255,255,255,0.035)",
+            borderColor: chrome.hairline,
           }}
         >
           <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot}`} />
-          <span className="shrink-0 text-xs font-mono" style={{ color: "#9ca3af" }}>
+          <span className="shrink-0 text-xs font-mono" style={{ opacity: 0.72 }}>
             {statusLabel}
           </span>
           {/* The socket's address is a diagnostic for a connection that
               failed; a shell the owner ended has nothing to diagnose. */}
           {status !== "exited" && (
-            <span className="text-xs font-mono ml-1 min-w-0 truncate" style={{ color: "#6b7280" }}>
+            <span className="text-xs font-mono ml-1 min-w-0 truncate" style={{ opacity: 0.45 }}>
               — {wsUrl}
             </span>
           )}
           <div className="flex-1" />
           <button
+            type="button"
             onClick={handleReconnect}
-            className="shrink-0 whitespace-nowrap text-xs px-2 py-0.5 rounded transition-colors font-mono"
-            style={{
-              background: "rgba(34,197,94,0.15)",
-              color: "var(--coral-bright)",
-              border: "1px solid rgba(34,197,94,0.3)",
-            }}
+            className="shrink-0 whitespace-nowrap text-xs px-2.5 py-0.5 rounded-md transition-colors font-medium cursor-pointer bg-[rgba(249,115,22,0.14)] hover:bg-[rgba(249,115,22,0.24)] border border-[rgba(249,115,22,0.35)]"
+            style={{ color: light ? "#c2410c" : "var(--coral-bright)" }}
           >
             {tr("terminal.reconnect", "Reconnect")}
           </button>
         </div>
       )}
 
-      {/* Terminal container */}
+      {/* The terminal. The padding is on this frame, not on the element
+          xterm measures: FitAddon reads its parent's border-box height, so
+          padding there made the grid one row taller than the space it had
+          and the bottom row was cut through. */}
       <div
-        ref={containerRef}
-        tabIndex={0}
-        className="flex-1 overflow-hidden outline-none"
-        style={{
-          padding: "6px 4px",
-          background: "var(--win-ground)",
-        }}
-        onClick={handleContainerClick}
-        onFocus={handleContainerClick}
+        className="relative flex-1 min-h-0"
+        style={{ padding: "6px 2px 4px 8px", background: colors.background }}
         onContextMenu={handleContextMenu}
-      />
+        onMouseUp={handleMouseUp}
+      >
+        <div
+          ref={containerRef}
+          tabIndex={0}
+          data-testid="terminal-surface"
+          className="h-full w-full overflow-hidden outline-none"
+          onClick={handleContainerClick}
+          onFocus={handleContainerClick}
+        />
+        {bellFlash > 0 && (
+          <div
+            key={bellFlash}
+            aria-hidden="true"
+            data-testid="terminal-bell-flash"
+            className="terminal-bell-flash pointer-events-none absolute inset-0"
+            style={{ background: colors.foreground }}
+          />
+        )}
+        <div aria-live="polite" className="pointer-events-none absolute right-3 bottom-3 flex justify-end">
+          {notice && (
+            <span
+              key={notice.id}
+              data-testid="terminal-notice"
+              className="terminal-notice rounded-lg px-2.5 py-1 text-xs font-medium shadow-lg border"
+              style={{
+                background: "var(--bg-elevated)",
+                borderColor: "var(--border-subtle)",
+                color: notice.error ? "#fca5a5" : "var(--text-primary)",
+              }}
+            >
+              {notice.text}
+            </span>
+          )}
+        </div>
+      </div>
 
       {/* On the body, not in the window: a window is its own stacking
           context, so no z-index INSIDE it can reach above the shelf or the
           docked chat — the menu's 99999 was measured against the window's
           siblings and painted under the shelf's 10000 (sweep FT-2). Keys
-          still bubble here through React's tree, so the guards above hold. */}
+          still bubble here through React's tree, so the guards above hold.
+          Drawn as the desktop's other context menus are (Files, the desktop
+          icons): the elevated surface, the subtle border, a blur. */}
       {menu && createPortal(
         <div
           ref={menuRef}
           role="menu"
+          aria-label={tr("terminal.menuLabel", "Terminal")}
           data-terminal-menu
           data-testid="terminal-context-menu"
-          className="fixed min-w-[200px] py-1 bg-[#1c1c30] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
-          style={{ left: menu.x, top: menu.y, zIndex: DESKTOP_LAYERS.menu }}
+          className="fixed min-w-[220px] py-1.5 rounded-xl shadow-2xl border border-[var(--border-subtle)] text-sm text-[var(--text-primary)]"
+          style={{ left: menu.x, top: menu.y, zIndex: DESKTOP_LAYERS.menu, background: "var(--bg-elevated)", backdropFilter: "blur(16px)" }}
           onKeyDown={onMenuKeyDown}
         >
           <button type="button" role="menuitem" data-testid="terminal-menu-copy" disabled={!menu.hasSelection} onClick={menuCopy} className={MENU_ITEM}>
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">content_copy</span>
-            {t("terminal.copy")}
-            <span className="ml-auto text-[11px] text-white/40 font-mono">Ctrl+Shift+C</span>
+            <span className="material-symbols-rounded" style={{ fontSize: 17 }} aria-hidden="true">content_copy</span>
+            {tr("terminal.copy", "Copy")}
+            <span className={MENU_KEYS}>{shortcutLabel("copy", IS_MAC)}</span>
           </button>
-          <button type="button" role="menuitem" data-testid="terminal-menu-paste" disabled={!canReadClipboard} onClick={menuPaste} className={MENU_ITEM} title={canReadClipboard ? undefined : t("terminal.pasteHint")}>
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">content_paste</span>
-            {t("terminal.paste")}
-            <span className="ml-auto text-[11px] text-white/40 font-mono">Ctrl+Shift+V</span>
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="terminal-menu-paste"
+            disabled={!canReadClipboard}
+            onClick={menuPaste}
+            className={MENU_ITEM}
+            title={canReadClipboard ? undefined : tr("terminal.pasteWith", "Paste with {keys}", { keys: pasteKeys })}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 17 }} aria-hidden="true">content_paste</span>
+            {tr("terminal.paste", "Paste")}
+            <span className={MENU_KEYS}>{pasteKeys}</span>
           </button>
-          <div role="separator" className="my-1 border-t border-white/10" />
+          <button type="button" role="menuitem" data-testid="terminal-menu-copy-all" onClick={menuCopyAll} className={MENU_ITEM}>
+            <span className="material-symbols-rounded" style={{ fontSize: 17 }} aria-hidden="true">file_copy</span>
+            {tr("terminal.copyAll", "Copy all")}
+          </button>
           <button type="button" role="menuitem" data-testid="terminal-menu-select-all" onClick={menuSelectAll} className={MENU_ITEM}>
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">select_all</span>
-            {t("terminal.selectAll")}
+            <span className="material-symbols-rounded" style={{ fontSize: 17 }} aria-hidden="true">select_all</span>
+            {tr("terminal.selectAll", "Select all")}
           </button>
+          <div role="separator" className="my-1 border-t border-[var(--border-subtle)]" />
           <button type="button" role="menuitem" data-testid="terminal-menu-clear" onClick={menuClear} className={MENU_ITEM}>
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">cleaning_services</span>
-            {t("terminal.clear")}
+            <span className="material-symbols-rounded" style={{ fontSize: 17 }} aria-hidden="true">cleaning_services</span>
+            {tr("terminal.clear", "Clear")}
           </button>
+          {onOpenSettings && (
+            <>
+              <div role="separator" className="my-1 border-t border-[var(--border-subtle)]" />
+              <button type="button" role="menuitem" data-testid="terminal-menu-settings" onClick={menuSettings} className={MENU_ITEM}>
+                <span className="material-symbols-rounded" style={{ fontSize: 17 }} aria-hidden="true">settings</span>
+                {tr("terminal.settingsMenu", "Terminal settings…")}
+              </button>
+            </>
+          )}
         </div>,
         document.body,
       )}
@@ -795,21 +1227,33 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   );
 }
 
-const MENU_ITEM = "w-full px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2 bg-transparent border-none cursor-pointer disabled:cursor-default text-inherit";
+/** Keep the menu inside the viewport — and above the shelf, not merely inside the screen. */
+function clampMenuX(x: number): number {
+  return Math.min(x, Math.max(0, window.innerWidth - MENU_W));
+}
+function clampMenuY(y: number): number {
+  // A menu opened in the lower rows of a window that reaches the shelf put
+  // Clear behind it, and the shelf took the click (sweep FT-2).
+  return Math.min(y, Math.max(0, window.innerHeight - shelfHeight() - MENU_H));
+}
+
+const MENU_ITEM = "w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left transition-colors cursor-pointer bg-transparent border-none text-inherit hover:bg-white/[0.06] focus-visible:bg-white/[0.08] focus-visible:outline-none disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default";
+const MENU_KEYS = "ml-auto pl-4 text-[11px] text-[var(--text-muted)] font-mono";
 
 /** next/dynamic renders this inside the page's provider, so it can be translated. */
 function TerminalLoading() {
   const tr = useTr();
+  const colors = terminalThemeFor(getTerminalSettings().theme).colors;
   return (
     <div
       className="h-full flex flex-col items-center justify-center gap-3"
-      style={{ background: "var(--win-ground)" }}
+      style={{ background: colors.background }}
     >
       <div
         className="w-8 h-8 rounded-full border-2 border-t-transparent motion-safe:animate-spin"
         style={{ borderColor: "var(--coral-bright)", borderTopColor: "transparent" }}
       />
-      <span className="text-sm font-mono" style={{ color: "#4b5563" }}>
+      <span className="text-sm font-mono" style={{ color: colors.foreground, opacity: 0.5 }}>
         {tr("terminal.loading", "Loading terminal…")}
       </span>
     </div>
