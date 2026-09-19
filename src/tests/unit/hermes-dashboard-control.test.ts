@@ -125,14 +125,112 @@ describe("bounceHermesDashboard", () => {
     expect(cliMock).not.toHaveBeenCalled();
   });
 
-  it("reports a failure when the stop itself did not take", async () => {
-    cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "unkillable" });
+  it("refuses — WITHOUT stopping anything — when the outgoing PID cannot be read", async () => {
+    // The baseline this whole bounce is measured against. `MainPID=0` is a
+    // FACT ("no running main process"); a `systemctl show` that produced
+    // nothing is not an answer at all, and folding the two together made the
+    // second read as a valid "nothing was running" — so the very next pid seen,
+    // which is the process this bounce was supposed to stop, satisfied the
+    // replacement wait and the bounce reported `restarted` over a dashboard it
+    // had not replaced.
+    //
+    // Refusing before the stop leaves a working dashboard working, and "failed"
+    // is the honest answer: nothing was done.
+    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
+      const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
+      const property = (args as string[]).find((a) => a.startsWith("--property=")) ?? "";
+      // The restart policy reads fine; only the pid query is unanswerable.
+      if (property === "--property=MainPID") {
+        done(null, { stdout: "", stderr: "" });
+        return;
+      }
+      done(null, { stdout: "Restart=always\n", stderr: "" });
+    });
+
     await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    expect(cliMock).not.toHaveBeenCalled();
+  });
+
+  it("retries the baseline read once, because one hiccup must not cost a restart", async () => {
+    let asked = 0;
+    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: unknown) => {
+      const done = cb as (e: Error | null, out: { stdout: string; stderr: string }) => void;
+      const property = (args as string[]).find((a) => a.startsWith("--property=")) ?? "";
+      if (property === "--property=MainPID") {
+        asked += 1;
+        // The first read fails; from the second on it answers, and the
+        // replacement is a different process.
+        done(null, { stdout: asked === 1 ? "" : `MainPID=${asked === 2 ? 4242 : 5353}\n`, stderr: "" });
+        return;
+      }
+      done(null, { stdout: "Restart=always\n", stderr: "" });
+    });
+
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
+    expect(cliMock).toHaveBeenCalledWith(["dashboard", "--stop"], expect.anything());
+  });
+
+  it("still treats a valid MainPID=0 as a baseline, because that is an answer", async () => {
+    // A unit that is genuinely stopped. Systemd answering `0` is a fact, and
+    // the replacement's pid is different from "none" — which is what the
+    // existing "counts a respawn even when the unit had no running process"
+    // case is about. The refusal above must not have swallowed it.
+    systemd({ pids: ["0", "5353"] });
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
+  });
+
+  it("counts a stop that exited NON-ZERO but did stop the dashboard as a restart", async () => {
+    // MEASURED on the owner's Hermes box (2026-09-18): `hermes dashboard --stop`
+    // exits 143 — SIGTERM, 128+15 — after 764 ms, printing "Terminated", while
+    // stopping the dashboard perfectly well; MainPID went 17768 → 17877 across
+    // that call. The CLI signals the process group it is itself in, so it kills
+    // its own process on the way out.
+    //
+    // Reading that code as the outcome was a false failure on EVERY bounce this
+    // device performs: a ClawKeep restore told the owner its restored state.db
+    // was not being served, the image refresh told them the box could not draw,
+    // and the plugin watcher sent no "open a new chat" notice for a chat window
+    // it had just dropped. The outcome is systemd's new MainPID and a socket
+    // that answers — neither of which an exit code can fake.
+    cliMock.mockResolvedValue({ code: 143, stdout: "Terminated", stderr: "" });
+    await expect(bounceHermesDashboard()).resolves.toBe("restarted");
+  });
+
+  it("reports a failure when the stop itself did not take", async () => {
+    // The branch the exit-code check used to cover, asked of the thing that
+    // knows instead: the SAME process is still the unit's main one and systemd
+    // calls the unit running, so nothing was stopped and nothing is coming.
+    // `pending` here would be the worst of the three answers — it means "leave
+    // it alone" over a dashboard that will stay stale until somebody acts.
+    cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "unkillable" });
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "active", SubState: "running" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
   });
 
   it("does not throw when the CLI is missing entirely", async () => {
     cliMock.mockRejectedValue(new Error("ENOENT"));
-    await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    systemd({
+      pids: ["4242", "4242"],
+      unit: { LoadState: "loaded", ActiveState: "active", SubState: "running" },
+    });
+    process.env.HERMES_DASHBOARD_WAIT_MS = "40";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bounceHermesDashboard()).resolves.toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+      delete process.env.HERMES_DASHBOARD_WAIT_MS;
+    }
   });
 
   /**

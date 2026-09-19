@@ -102,19 +102,27 @@ const MAX_ENDPOINT_CHARS = 2048;
  * prompt-injected coding run, a hand-edited `data/config.json` and a restored
  * backup all reach the store and none of them reaches here.
  *
- * WHAT IT MAY BE. Plain `http:` is accepted, for the one case it exists for: a
- * staging proxy on a trusted LAN. That is a STAGING CONTRACT and not a
- * loopback restriction — pinning it to loopback would delete the staging setup
- * it was added for. Outside a trusted LAN the endpoint must be `https:`,
- * because the request carries the box's `claw_` bearer and the text being
- * embedded in cleartext otherwise (CWE-319). Nothing here can tell a trusted
- * LAN from the open internet, so that half is the operator's to honour.
+ * WHAT IT MAY BE. `https:`, or a plain `http:` endpoint on THIS DEVICE. Every
+ * request to it carries the box's `claw_` bearer and the owner's document text
+ * as the body, so cleartext off the device is CWE-319 and is refused by
+ * default — the earlier "a staging proxy on a trusted LAN is the operator's to
+ * honour" left the one failure that cannot be undone to a promise nothing here
+ * could check. A loopback `http:` leaves no interface, which is why the local
+ * embedder's own proxy is reached that way and is not a hole in this.
  *
- * WHAT IS ENFORCED. The scheme must be `http:` or `https:` and the whole URL
- * must parse and stay under {@link MAX_ENDPOINT_CHARS}. Anything else — a
- * `file:`, a `data:`, an unparseable string, a length nothing legitimate needs
- * — is refused and this box falls back to the built-in proxy route, which is
- * its own account's endpoint and never a third party's.
+ * THE STAGING LANE IS STILL THERE AND IS NOW EXPLICIT. An image built with
+ * `CLAWBOX_AI_EMBEDDINGS_INSECURE=1` accepts a plain-`http:` endpoint anywhere,
+ * for the LAN proxy the staging contract was written for. It is the same trust
+ * boundary as the address itself — root's environment, never the device store —
+ * so the operator who needs it can still have it, and a box that was never told
+ * to accept cleartext cannot be talked into it by a file.
+ *
+ * WHAT IS ENFORCED. The whole URL must parse, stay under
+ * {@link MAX_ENDPOINT_CHARS}, and be `https:`, loopback `http:`, or `http:`
+ * under the opt-in above. Anything else — a `file:`, a `data:`, an unparseable
+ * string, a cleartext host on the network, a length nothing legitimate needs —
+ * is refused and this box falls back to the built-in proxy route, which is its
+ * own account's endpoint and never a third party's.
  */
 function usableEndpoint(raw: string | undefined): string | null {
   const candidate = raw?.trim();
@@ -125,7 +133,56 @@ function usableEndpoint(raw: string | undefined): string | null {
   } catch {
     return null;
   }
-  return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+  if (parsed.protocol === "https:") return parsed.toString();
+  if (parsed.protocol !== "http:") return null;
+  return isLoopbackHost(parsed.hostname) || insecureEmbeddingsAllowed() ? parsed.toString() : null;
+}
+
+/** A host that cannot leave this device. IPv6 arrives from `URL` in brackets. */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "::1" || /^127\./.test(host);
+}
+
+/**
+ * The staging opt-in, read where the address is read: the image's environment.
+ *
+ * Read per call rather than frozen at module load, for the same reason
+ * `respawnWaitMs` is: a test — and a staging operator — must be able to set it
+ * without a rebuild, and this is not a hot path.
+ */
+function insecureEmbeddingsAllowed(): boolean {
+  const raw = process.env.CLAWBOX_AI_EMBEDDINGS_INSECURE?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+/**
+ * Could ANYTHING embed through `raw`, as an address?
+ *
+ * Deliberately WEAKER than {@link usableEndpoint}, and the difference is whose
+ * client is being judged. That one is ClawBox's own fence: these are the
+ * addresses THIS process may send the owner's documents to, and plain `http:`
+ * off the device is refused because ClawBox would be the one putting them on
+ * the wire. This one is asked by `readEmbeddingPlacement` about OpenClaw's
+ * `memory.search.remote.baseUrl` — where the CORE is the embedding client and
+ * ClawBox has no jurisdiction at all. An owner who pointed OpenClaw's memory
+ * search at a llama.cpp on another machine (`http://192.168.1.50:8080/v1`) has a
+ * recorded placement, and reading it as unset had the boot promotion replace
+ * their endpoint with the ClawBox AI one and start a full reindex — a
+ * configuration change nobody asked for.
+ *
+ * What it still refuses is what a truncated URL, a `file:`/`data:` scheme or a
+ * half-finished migration leaves behind: not an address, so not a placement.
+ */
+export function embeddingEndpointParseable(raw: string | undefined): boolean {
+  const candidate = raw?.trim();
+  if (!candidate || candidate.length > MAX_ENDPOINT_CHARS) return false;
+  try {
+    const parsed = new URL(candidate);
+    return (parsed.protocol === "https:" || parsed.protocol === "http:") && parsed.hostname !== "";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -140,7 +197,16 @@ function usableEndpoint(raw: string | undefined): string | null {
  */
 export function cloudEmbeddingsUrl(): string {
   const override = usableEndpoint(process.env.CLAWBOX_AI_EMBEDDINGS_URL);
-  return override || `${CLAWBOX_AI_PROXY_URL.replace(/\/+$/, "")}/embeddings`;
+  if (override) return override;
+  // THE BUILT-IN ROUTE GOES THROUGH THE SAME GATE. `CLAWBOX_AI_PROXY_URL` is
+  // itself env-overridable, so exempting it would have left the one address
+  // every unconfigured box uses as the way round the rule above — a proxy
+  // override of `http://…` would have carried the bearer and the owner's
+  // documents in cleartext while the override beside it was refused for it.
+  // An empty string is the answer when even that cannot be used: it is not an
+  // address, so every caller fails closed on it ({@link embedEndpointAllowed}
+  // refuses it, the probe refuses it, and a switch to the cloud throws).
+  return usableEndpoint(`${CLAWBOX_AI_PROXY_URL.replace(/\/+$/, "")}/embeddings`) ?? "";
 }
 
 /** Has the owner (or a support engineer) switched the cloud embedder off here? */
@@ -340,6 +406,11 @@ async function askCloudEmbedder(endpoint: string): Promise<boolean> {
   try {
     const res = await fetch(target, {
       method: "POST",
+      // The same rule as the indexer's own request: `usableEndpoint` judged THIS
+      // address, and a followed 307/308 would re-send the POST — and this box's
+      // `claw_` bearer, which a same-site redirect keeps — somewhere it did not.
+      // Manual turns that answer into the `!res.ok` "the probe said no" below.
+      redirect: "manual",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ model: CLOUD_EMBEDDING_MODEL, input: "clawbox" }),
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),

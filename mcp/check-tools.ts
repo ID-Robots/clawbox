@@ -188,6 +188,13 @@ const PROBE_GATED_COMMON = [
   // is behind the same switch: a box whose coding agent is off has nothing the
   // assistant would be deploying.
   "coding_deploy_preview", "coding_deploy_production",
+  // Reading a project's Vercel state sits under the SAME two switches as the
+  // deploy tools: off, the route answers 409 `vercel_disabled` on every call.
+  "coding_vercel_status",
+  // Following every run, resuming one, and the project matrix: the same family
+  // and the same switch — a box whose coding agent is off has no run to list
+  // or resume, and its routes refuse the call anyway.
+  "coding_run_list", "coding_agent_resume", "coding_project_status",
   "coding_team_run", "coding_team_status", "coding_team_stop",
   "disk_cleanup", "disk_usage", "email_list", "email_read",
   "logs_tail", "screen_capture",
@@ -205,6 +212,24 @@ const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
   openclaw: PROBE_GATED_COMMON,
   hermes: PROBE_GATED_COMMON,
 };
+
+/**
+ * Tools that must be registered on BOTH editions whatever the box can do —
+ * present with every capability on AND with every capability off.
+ *
+ * The other half of the gate equality above. That one catches a family that
+ * GAINS a gate; this catches one that silently stops registering at all, which
+ * no other assertion here would see (a tool that exists nowhere is in neither
+ * posture, so `only(enabled, disabled)` cannot name it). Each of these answers
+ * every state the device can be in — "switched off", "not linked", "not
+ * installed" — as a plain answer, so none of them may be gated: the route never
+ * refuses, and the agent needs them precisely on the box where the feature is
+ * off, to say so.
+ */
+const UNGATED_COMMON = [
+  "clawbox_incidents_list", "clawbox_incident_report",
+  "memory_shard_status", "local_ai_status", "clawbox_ai_usage",
+];
 
 /** The gate that points the OTHER way: it exists where the box cannot draw. */
 const INVERSE_GATED_TOOLS: Record<Ed, readonly string[]> = {
@@ -412,6 +437,19 @@ async function check(): Promise<void> {
         `${edition}: tools that exist only where the capability is OFF — ${inverseDelta} — update `
         + `INVERSE_GATED_TOOLS.${edition}`,
       );
+    }
+
+    for (const name of UNGATED_COMMON) {
+      const missingFrom = [
+        enabled.some((t) => t.name === name) ? null : "every capability on",
+        disabled.some((t) => t.name === name) ? null : "every capability off",
+      ].filter(Boolean);
+      if (missingFrom.length) {
+        problems.push(
+          `${edition}: "${name}" must be registered on every box and is missing with ${missingFrom.join(" and ")} — `
+          + "it lost its registration or gained a gate; update UNGATED_COMMON only if that is deliberate",
+        );
+      }
     }
 
     // The run-only family, both ways round: present inside a run, and absent

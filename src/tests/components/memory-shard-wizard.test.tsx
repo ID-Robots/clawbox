@@ -251,7 +251,7 @@ describe("MemoryShardWizard", () => {
     // already indexing in the cloud onto the 640 MB model on this box: the
     // settings card has never allowed that (its own `blocked` exempts a box
     // already on the cloud) and Index now here would post the move.
-    const done = await atProvisionStep({ source: "cloud", cloudSupported: true, cloudAvailable: false, localInstalled: false });
+    const done = await atProvisionStep({ source: "cloud", recorded: true, cloudSupported: true, cloudAvailable: false, localInstalled: false });
     expect(screen.getByTestId("memory-shard-source-cloud")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("memory-shard-source-cloud")).not.toBeDisabled();
     expect(screen.queryByTestId("memory-shard-source-cloud-unavailable")).toBeNull();
@@ -259,11 +259,41 @@ describe("MemoryShardWizard", () => {
     fireEvent.click(screen.getByTestId("memory-shard-index-now"));
     await waitFor(() => expect(done).toHaveBeenCalled());
     expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeUndefined();
-    // …and no switch is asked for either: the index is already there, and the
-    // route's switch re-checks the very probe that just answered false, so
-    // posting it would turn a hiccup into a 409 over an index that was never
-    // going to move. The wizard finishes on what the box already has.
+    // …and no switch is asked for either: the choice is RECORDED, the index is
+    // already there, and the route's switch re-checks the very probe that just
+    // answered false — so posting it would turn a hiccup into a 409 over an
+    // index that was never going to move. The wizard finishes on what the box
+    // already has.
     expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBeUndefined();
+  });
+
+  it("STILL posts on a box that embeds in the cloud by DEFAULT, because nothing is written down", async () => {
+    // The whole of H-1. Since the owner's ruling of 2026-09-18 the GET answers
+    // `source: "cloud"` from an UNWRITTEN default — every freshly onboarded,
+    // subscribed box — so a wizard that read `source` alone as "nothing to do"
+    // finished without the pin and without the owner mark. The first pass then
+    // indexed the owner's whole Documents folder in the cloud, correctly and at
+    // their expense, and the very next web-server restart's automatic promotion
+    // saw an unrecorded box, wrote the pin and asked for a FULL rebuild: hours
+    // of re-embedding paid for twice, with memory search answering nothing
+    // throughout. The POST is what records the choice, so the cloud path takes
+    // it whenever `recorded` is false.
+    const done = await atProvisionStep({ source: "cloud", recorded: false, cloudSupported: true, cloudAvailable: true, localInstalled: false });
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "cloud" });
+    // And still no 639 MB download: the cloud model needs none.
+    expect(posts.find((p) => p.url === "/setup-api/embed/install")).toBeUndefined();
+  });
+
+  it("posts on a server too old to say whether anything is recorded", async () => {
+    // `parseEmbedderChoiceStatus` reads a missing `recorded` as false, which is
+    // the safe direction: posting a choice that was already made costs one
+    // idempotent write, skipping the one that records it costs a full reindex.
+    const done = await atProvisionStep({ source: "cloud", cloudSupported: true, cloudAvailable: true, localInstalled: false });
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "cloud" });
   });
 
   it("says WHY the cloud model cannot be picked and what makes it available, reason by reason", async () => {

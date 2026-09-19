@@ -50,6 +50,9 @@ const NAMES = [
   // Same switch, same harness: deploying what a run built is the other half of
   // handing it the task.
   "coding_deploy_preview", "coding_deploy_production",
+  // TASK-899: every run at a glance, resuming one, the project matrix, and the
+  // read half of Vercel (src/tests/unit/mcp-coding-agent-state-tools.test.ts).
+  "coding_run_list", "coding_agent_resume", "coding_project_status", "coding_vercel_status",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true, codingVercel = codingAgent) {

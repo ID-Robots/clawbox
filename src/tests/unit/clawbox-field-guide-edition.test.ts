@@ -39,7 +39,7 @@ vi.mock("../../../mcp/lib/api", () => ({
 
 import type { McpContext } from "../../../mcp/lib/context";
 import { captureRegistrar } from "../helpers/mcp-registrar";
-import { WEBAPP_STORAGE_GUIDE, fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
+import { BROWSER_GUIDE, WEBAPP_STORAGE_GUIDE, fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
 import { registerSystemTools } from "../../../mcp/tools/system";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import { registerSkillTools } from "../../../mcp/tools/skills";
@@ -145,11 +145,14 @@ describe("the field guide is fenced, and the fences are well formed", () => {
 
   it("stays inside the tool's own output cap on every box", () => {
     // The real budget: clawbox_context declares maxChars 24_000 and joins this
-    // text with WEBAPP_STORAGE_GUIDE and a "\n\n---\n\n" separator. capText
-    // truncates the TAIL, so an overrun eats Quick facts and the final brief.
+    // text with WEBAPP_STORAGE_GUIDE and BROWSER_GUIDE, each after a
+    // "\n\n---\n\n" separator. capText truncates the TAIL, so an overrun eats
+    // the browser guide first — the part that says whose screen is driven.
     const separator = "\n\n---\n\n".length;
     for (const [edition, install] of BOXES) {
-      expect(served(edition, install).length + separator + WEBAPP_STORAGE_GUIDE.length).toBeLessThan(24_000);
+      expect(
+        served(edition, install).length + separator + WEBAPP_STORAGE_GUIDE.length + separator + BROWSER_GUIDE.length,
+      ).toBeLessThan(24_000);
     }
   });
 });

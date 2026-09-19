@@ -103,6 +103,34 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes-gateway
 
+# clawbox-hermes-dashboard DELIBERATELY HAS NO GRANT, and this note is here
+# because the request for one keeps arriving with a real problem behind it.
+#
+# The problem is genuine: Hermes scans for plugins once per process, so a plugin
+# installed after boot never reaches the chat that dashboard serves, and Hermes'
+# own instruction is to restart. The assistant on a box hits this, reaches for
+# `sudo systemctl restart clawbox-hermes-dashboard`, and is refused.
+#
+# The answer is not a grant, for two reasons.
+#
+#   * IT IS NOT NEEDED. `bounceHermesDashboard()`
+#     (src/lib/hermes-dashboard-control.ts) already restarts this exact unit with
+#     no privilege at all: `hermes dashboard --stop` is upstream's own
+#     SIGTERM-grace-SIGKILL path over a process the clawbox user owns — the unit's
+#     own ExecStartPre runs the same command — and `Restart=always` brings it
+#     back. It then PROVES the restart: a new MainPID from systemd and :9119
+#     answering again. src/lib/hermes-plugin-reload.ts and
+#     /setup-api/hermes/plugins/reload are built on it and contain no sudo.
+#   * IT WOULD BE UNSAFE. `systemctl restart` STARTS a stopped unit, so this
+#     grant would let anything with clawbox-level access on an OPENCLAW box
+#     resurrect the Hermes dashboard that step_edition_foreign_teardown had just
+#     stopped and disabled — the state that had two harnesses long-polling one
+#     Telegram token and the box unable to receive a message for hours.
+#
+# install-foreign-edition-teardown.test.ts owns that invariant and
+# install-sudoers-migration.test.ts asserts it from the installed file
+# ("still grants nothing over a Hermes dashboard unit"). Both must stay.
+
 # Ollama, for Settings -> Local Models. Ollama is a system unit and it holds
 # real RAM on an 8 GB box, so the owner has to be able to stop it and have it
 # stay stopped; until this grant existed nothing in the UI could. `--now` is

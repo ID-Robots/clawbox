@@ -16,7 +16,7 @@ const bounceMock = vi.hoisted(() => vi.fn());
 const reloadMcpMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
-vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: bounceMock }));
+vi.mock("@/lib/hermes-bounce-claim", () => ({ bounceHermesDashboardShared: bounceMock }));
 // Only the ASK is faked. `reportMcpReloadRefused` is the real one, because the
 // rule it owns — an OpenClaw box has no dashboard and needs no repair, a Hermes
 // box that refused does — is part of what this file pins.

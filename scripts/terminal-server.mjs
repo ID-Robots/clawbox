@@ -1,8 +1,11 @@
 // @ts-check
 /**
  * Standalone WebSocket Terminal Server
- * Runs on port 3006, spawns a login PTY (/bin/bash) per connection and bridges
- * it over WebSocket.
+ * Runs on port 3006, spawns a login PTY per connection and bridges it over
+ * WebSocket. The shell is bash unless the connection asks for another one
+ * /etc/shells lists, and it starts in the home folder unless the connection
+ * names another folder that exists (`?shell=…&cwd=…`, the Terminal's
+ * settings — scripts/terminal-launch.mjs decides).
  *
  * Plain ESM JavaScript on purpose, NOT TypeScript. The boot hook
  * (src/instrumentation-node.ts) starts this with the Node that is already
@@ -16,10 +19,14 @@
  *   node scripts/terminal-server.mjs
  *
  * Protocol:
+ *   Connect: /?shell=/usr/bin/zsh&cwd=~/projects  — both optional
  *   Client → Server:
  *     { type: "input", data: string }       — raw keyboard input
  *     { type: "resize", cols: N, rows: N }  — terminal resize event
  *   Server → Client:
+ *     { type: "started", shell, cwd, shellRefused?, cwdRefused? }
+ *                                           — what was spawned, and which
+ *                                             request was not honoured
  *     { type: "output", data: string }      — raw PTY output
  *     { type: "exit", code: number }        — PTY exited
  */
@@ -28,6 +35,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
+import { readEtcShells, resolveCwd, resolveShell } from "./terminal-launch.mjs";
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // script is standalone ESM and cannot import the TypeScript helper: an integer
@@ -63,7 +71,12 @@ wss.on("connection", (ws, req) => {
   // historical clawbox/clawbox values as a final fallback.
   const targetUser = process.env.USER || process.env.LOGNAME || os.userInfo().username || "clawbox";
   const targetHome = process.env.HOME || os.homedir() || `/home/${targetUser}`;
-  const shell = "/bin/bash";
+  // What the Terminal's settings asked for, checked: a shell /etc/shells
+  // lists and that is installed, a folder that exists. Otherwise bash in the
+  // home folder, as it always was — and the client is told which it got.
+  const requested = new URL(req.url ?? "/", "http://terminal.invalid").searchParams;
+  const { shell, refused: shellRefused } = resolveShell(requested.get("shell"), readEtcShells());
+  const { cwd, refused: cwdRefused } = resolveCwd(requested.get("cwd"), targetHome);
   const cleanEnv = {
     HOME: targetHome,
     USER: targetUser,
@@ -88,11 +101,20 @@ wss.on("connection", (ws, req) => {
       name: "xterm-256color",
       cols: 80,
       rows: 24,
-      cwd: targetHome,
+      cwd,
       env: cleanEnv,
     });
 
     console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "started",
+        shell,
+        cwd,
+        ...(shellRefused ? { shellRefused } : {}),
+        ...(cwdRefused ? { cwdRefused } : {}),
+      }));
+    }
 
     // PTY → WebSocket
     term.onData((data) => {

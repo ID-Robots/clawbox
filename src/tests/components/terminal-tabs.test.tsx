@@ -151,21 +151,94 @@ describe("TerminalTabs", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(1);
   });
 
-  it("answers the shell's tab shortcuts", async () => {
+  it("answers the tab shortcuts, Ctrl+Shift and their Alt+Shift twins", async () => {
     render(<TerminalTabs />);
     await waitFor(() => expect(terms.length).toBe(1));
-    act(() => { terms[0].press({ altKey: true, shiftKey: true, key: "T" }); });
+    let handled: boolean | undefined;
+    act(() => { handled = terms[0].press({ ctrlKey: true, shiftKey: true, key: "T" }); });
+    // Claimed: the shell never sees it.
+    expect(handled).toBe(false);
     await waitFor(() => expect(screen.getByTestId("terminal-tab-2")).toHaveAttribute("aria-selected", "true"));
     await waitFor(() => expect(terms.length).toBe(2));
+    act(() => { terms[1].press({ ctrlKey: true, shiftKey: true, key: "Tab" }); });
+    expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("aria-selected", "true");
+    act(() => { terms[0].press({ ctrlKey: true, key: "Tab" }); });
+    expect(screen.getByTestId("terminal-tab-2")).toHaveAttribute("aria-selected", "true");
     act(() => { terms[1].press({ altKey: true, shiftKey: true, key: "PageUp" }); });
     expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("aria-selected", "true");
     act(() => { terms[0].press({ altKey: true, shiftKey: true, key: "PageDown" }); });
     expect(screen.getByTestId("terminal-tab-2")).toHaveAttribute("aria-selected", "true");
-    // The browser's own Ctrl+Shift+W (close the window) is never claimed.
-    expect(terms[1].press({ ctrlKey: true, shiftKey: true, key: "W" })).toBe(true);
-    act(() => { terms[1].press({ altKey: true, shiftKey: true, key: "W" }); });
+    act(() => { terms[1].press({ ctrlKey: true, shiftKey: true, key: "W" }); });
     await waitFor(() => expect(screen.queryByTestId("terminal-tab-2")).not.toBeInTheDocument());
     expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("aria-selected", "true");
+    act(() => { terms[0].press({ altKey: true, shiftKey: true, key: "T" }); });
+    await waitFor(() => expect(terms.length).toBe(3));
+    act(() => { terms[2].press({ altKey: true, shiftKey: true, key: "W" }); });
+    await waitFor(() => expect(screen.queryByTestId("terminal-tab-3")).not.toBeInTheDocument());
+  });
+
+  it("leaves the shell's own Ctrl keys to the shell", async () => {
+    render(<TerminalTabs />);
+    await waitFor(() => expect(terms.length).toBe(1));
+    // SIGINT, EOF, readline's delete-word and transpose, nano's next page.
+    for (const k of ["c", "d", "w", "t", "v"]) {
+      expect(terms[0].press({ ctrlKey: true, key: k }), `Ctrl+${k}`).toBe(true);
+    }
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+  });
+
+  it("renames a tab on a double click: Enter keeps the name, Escape drops it, an empty name goes back to the number", async () => {
+    render(<TerminalTabs />);
+    await waitFor(() => expect(terms.length).toBe(1));
+    fireEvent.doubleClick(screen.getByTestId("terminal-tab-1"));
+    const field = screen.getByTestId("terminal-tab-rename") as HTMLInputElement;
+    expect(document.activeElement).toBe(field);
+    fireEvent.change(field, { target: { value: "  build logs  " } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(screen.getByTestId("terminal-tab-1")).toHaveTextContent("build logs");
+
+    fireEvent.doubleClick(screen.getByTestId("terminal-tab-1"));
+    fireEvent.change(screen.getByTestId("terminal-tab-rename"), { target: { value: "discarded" } });
+    fireEvent.keyDown(screen.getByTestId("terminal-tab-rename"), { key: "Escape" });
+    expect(screen.getByTestId("terminal-tab-1")).toHaveTextContent("build logs");
+
+    fireEvent.doubleClick(screen.getByTestId("terminal-tab-1"));
+    fireEvent.change(screen.getByTestId("terminal-tab-rename"), { target: { value: "   " } });
+    fireEvent.blur(screen.getByTestId("terminal-tab-rename"));
+    expect(screen.getByTestId("terminal-tab-1")).not.toHaveTextContent("build logs");
+  });
+
+  it("renames and closes from the tab's right-click menu", async () => {
+    render(<TerminalTabs />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    fireEvent.click(screen.getByTestId("terminal-tab-new"));
+    await waitFor(() => expect(sockets.length).toBe(2));
+
+    fireEvent.contextMenu(screen.getByTestId("terminal-tab-1"), { clientX: 30, clientY: 20 });
+    fireEvent.click(screen.getByTestId("terminal-tab-menu-rename"));
+    // Renaming brings the tab to the front and opens its name field.
+    expect(screen.getByTestId("terminal-tab-rename")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("terminal-tab-rename"), { target: { value: "server" } });
+    fireEvent.keyDown(screen.getByTestId("terminal-tab-rename"), { key: "Enter" });
+    expect(screen.getByTestId("terminal-tab-1")).toHaveTextContent("server");
+    expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.contextMenu(screen.getByTestId("terminal-tab-1"), { clientX: 30, clientY: 20 });
+    fireEvent.click(screen.getByTestId("terminal-tab-menu-close-others"));
+    expect(screen.queryByTestId("terminal-tab-2")).not.toBeInTheDocument();
+    expect(sockets[1].readyState).toBe(3);
+  });
+
+  it("marks the tab in front, shows the close button on it, and keeps the others' for hover", async () => {
+    render(<TerminalTabs />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    fireEvent.click(screen.getByTestId("terminal-tab-new"));
+    await waitFor(() => expect(sockets.length).toBe(2));
+    expect(screen.getByTestId("terminal-tab-2")).toHaveAttribute("data-active", "true");
+    expect(screen.getByTestId("terminal-tab-1")).toHaveAttribute("data-active", "false");
+    expect(screen.getByTestId("terminal-tab-close-2").className).toContain("opacity-100");
+    expect(screen.getByTestId("terminal-tab-close-1").className).toContain("opacity-0");
+    expect(screen.getByTestId("terminal-tab-close-1").className).toContain("group-hover:opacity-100");
   });
 });
 
