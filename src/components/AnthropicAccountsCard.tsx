@@ -149,6 +149,9 @@ export default function AnthropicAccountsCard() {
   };
 
   const closePanel = () => {
+    // The panel's refusal goes with the panel: after Cancel it would sit over
+    // the list describing a key or a code that is no longer on screen.
+    setError(null);
     setPanel(null);
     setSignInOpened(false);
     setCode("");
@@ -258,6 +261,19 @@ export default function AnthropicAccountsCard() {
     return { text: t("settings.anthropicAccounts.statusReady"), cls: "text-[var(--text-secondary)] border-white/15", icon: "check" };
   };
 
+  /**
+   * Said where the owner is looking. While the connect panel is open the
+   * refusal belongs beside its Save/Connect button: at the top of the card it
+   * sat a whole list above that button — 926 px on a phone with eight
+   * accounts — so a refused key simply vanished from its field with no word
+   * on screen.
+   */
+  const errorAlert = error ? (
+    <div role="alert" className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-[11px] text-red-300" data-testid="anthropic-accounts-error">
+      {error}
+    </div>
+  ) : null;
+
   const iconButton = "inline-flex items-center justify-center w-7 h-7 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed";
   const field = "w-full min-w-0 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-base sm:text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--coral-bright)]/60";
   const primaryButton = "text-xs font-medium px-3 py-2 rounded-lg bg-[var(--coral-bright)] text-white hover:opacity-90 disabled:opacity-50 shrink-0";
@@ -289,11 +305,7 @@ export default function AnthropicAccountsCard() {
         {t("settings.anthropicAccounts.intro")}
       </p>
 
-      {error && (
-        <div role="alert" className="mb-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-[11px] text-red-300" data-testid="anthropic-accounts-error">
-          {error}
-        </div>
-      )}
+      {!panel && errorAlert && <div className="mb-3">{errorAlert}</div>}
       <div role="status" aria-live="polite" className={note ? "mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200" : ""}>
         {note ?? ""}
       </div>
@@ -491,6 +503,7 @@ export default function AnthropicAccountsCard() {
               </button>
             </div>
           )}
+          {errorAlert}
           <div className="flex flex-wrap items-center gap-3">
             {panel.mode === "connect" && (
               <button
