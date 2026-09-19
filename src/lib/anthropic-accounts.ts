@@ -47,6 +47,7 @@ import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store
 import { anthropicLoginEmail, hasAnthropicLogin } from "@/lib/claude-login";
 import { ANTHROPIC_API_KEY_CONFIG_KEY } from "@/lib/coding-provider";
 import { OAUTH_PROVIDERS } from "@/lib/oauth-config";
+import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
   deleteDeviceSecret,
   listDeviceSecretNames,
@@ -139,6 +140,11 @@ function cleanEmail(raw: unknown): string | null {
   return email.length > 3 && email.length <= 254 && /^[^\s@]+@[^\s@]+$/.test(email) ? email : null;
 }
 
+/** One Claude account, however the sign-in happened to case its email. */
+function sameEmail(a: string | null, b: string | null): boolean {
+  return a !== null && b !== null && a.toLowerCase() === b.toLowerCase();
+}
+
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /** One account off disk, or null — a hand-edited row the pool cannot trust is dropped, not guessed at. */
@@ -191,6 +197,7 @@ export type AnthropicAccountRefusal =
   | "invalid"
   | "full"
   | "duplicate"
+  | "wrong_account"
   | "store_unavailable";
 
 export class AnthropicAccountError extends Error {
@@ -422,7 +429,7 @@ export async function addOAuthAccount(input: { label?: unknown; email?: unknown;
   }
   const email = cleanEmail(input.email);
   return mutate(async (file, now) => {
-    const same = email ? file.accounts.find((a) => a.kind === "oauth" && a.email === email) : undefined;
+    const same = email ? file.accounts.find((a) => a.kind === "oauth" && sameEmail(a.email, email)) : undefined;
     if (same) {
       await storeCredential(same.id, oauthSecret(input.tokens));
       same.expiresAt = input.tokens.expires;
@@ -457,6 +464,14 @@ export async function addApiKeyAccount(input: { label?: unknown; key: string; fi
  * New credential, same account: the owner re-authenticated (OAuth) or pasted a
  * rotated key. Its place in the order and its limit stay — a limit belongs to
  * the ACCOUNT, and signing in again does not lift it.
+ *
+ * "Same account" is checked, not assumed, for a sign-in: the caller only names
+ * the ROW, and the sign-in is what says whose tokens these are. One for another
+ * Claude account (the browser was signed in as someone else) is refused —
+ * `wrong_account` against the row's own email, `duplicate` when it is another
+ * row's. Filing it here would turn "Work" into a second copy of "Personal",
+ * and a limited run would then "switch" onto the subscription that just ran
+ * out. Nothing is stored on a refusal.
  */
 export async function replaceCredential(id: unknown, credential: { kind: "oauth"; tokens: OAuthTokens; email?: unknown } | { kind: "api_key"; key: string }): Promise<AnthropicAccount> {
   return mutate(async (file) => {
@@ -467,9 +482,16 @@ export async function replaceCredential(id: unknown, credential: { kind: "oauth"
         : "That account was connected another way; re-authenticate it the same way it was added.");
     }
     if (credential.kind === "oauth") {
+      const email = cleanEmail(credential.email);
+      if (email && account.email && !sameEmail(email, account.email)) {
+        throw new AnthropicAccountError("wrong_account", `That sign-in is ${email}, not ${account.email}. Sign in as ${account.email} to renew "${account.label}", or connect ${email} as an account of its own.`);
+      }
+      const twin = email ? file.accounts.find((a) => a.id !== account.id && a.kind === "oauth" && sameEmail(a.email, email)) : undefined;
+      if (twin) {
+        throw new AnthropicAccountError("duplicate", `That sign-in is ${email}, which is already on the list as "${twin.label}".`);
+      }
       await storeCredential(account.id, oauthSecret(credential.tokens));
       account.expiresAt = credential.tokens.expires;
-      const email = cleanEmail(credential.email);
       if (email) account.email = email;
     } else {
       await storeCredential(account.id, credential.key.trim());
@@ -659,10 +681,43 @@ export async function refreshOAuthTokens(refresh: string, now: number = Date.now
 }
 
 /**
+ * One credential read-and-renew at a time PER ACCOUNT.
+ *
+ * Anthropic's refresh tokens are single-use: a renewal answers a new pair and
+ * retires the refresh token it was given. Two runs starting together (a coding
+ * team's workers, a limit moving several runs at once) would each read the same
+ * pair from the store and both spend its refresh token. The second is refused,
+ * and with a token that has ten minutes left or less, that refusal marked a
+ * healthy account `revoked`. Under the lock the second caller reads the store
+ * only AFTER the first has written the renewed pair, finds it good, and hands
+ * it out with no request of its own.
+ *
+ * In-process is enough: this server is the only thing that renews. The wrapper
+ * and the CLI are handed an access token and never see the refresh token. The
+ * lock never waits on the pool's own `mutate` chain while that chain waits on
+ * it, because nothing inside `mutate` reads a credential.
+ */
+const credentialLocks = new Map<string, SerialLock>();
+
+function credentialLock(id: string): SerialLock {
+  let lock = credentialLocks.get(id);
+  if (!lock) {
+    lock = createSerialLock();
+    credentialLocks.set(id, lock);
+  }
+  return lock;
+}
+
+/**
  * The credential for ONE account, renewed if it is an OAuth token near its end.
  * Null — with the account marked — when it cannot answer.
  */
-async function credentialFor(account: AnthropicAccount, now: number): Promise<AnthropicCredential | null> {
+function credentialFor(account: AnthropicAccount, now: number): Promise<AnthropicCredential | null> {
+  return credentialLock(account.id)(() => readCredential(account, now));
+}
+
+/** `credentialFor`'s body, run under that account's lock: every read of the store here is fresh. */
+async function readCredential(account: AnthropicAccount, now: number): Promise<AnthropicCredential | null> {
   if (account.kind === "login") {
     if (hasAnthropicLogin()) return { kind: "login", secret: null };
     await markCredentialProblem(account.id, "expired").catch(() => {});
@@ -941,6 +996,7 @@ export async function poolHasCredential(): Promise<{ any: boolean; hasKey: boole
 export function _resetAnthropicAccountsForTests(): void {
   snapshot = null;
   chain = Promise.resolve();
+  credentialLocks.clear();
   if (wakeTimer) clearTimeout(wakeTimer);
   wakeTimer = null;
   wakeAt = null;

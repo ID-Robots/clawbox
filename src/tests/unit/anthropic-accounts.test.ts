@@ -282,10 +282,66 @@ describe("OAuth accounts", () => {
   it("treats the same email again as the same account signing in again", async () => {
     const first = await pool.addOAuthAccount({ email: "same@example.com", tokens: tokens("a", 8 * 60 * 60_000) });
     await pool.markCredentialProblem(first.id, "revoked");
-    const again = await pool.addOAuthAccount({ email: "same@example.com", tokens: tokens("b", 8 * 60 * 60_000) });
+    const again = await pool.addOAuthAccount({ email: "Same@Example.com", tokens: tokens("b", 8 * 60 * 60_000) });
     expect(again.id).toBe(first.id);
     expect(again.status).toBe("ok");
     expect(await pool.readAccounts()).toHaveLength(1);
+  });
+
+  it("renews an account in place only with a sign-in that IS that account", async () => {
+    const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work-access", 8 * 60 * 60_000) });
+    await pool.markCredentialProblem(work.id, "revoked");
+    const renewed = await pool.replaceCredential(work.id, { kind: "oauth", tokens: tokens("work-again", 8 * 60 * 60_000), email: "WORK@example.com" });
+    expect(renewed).toMatchObject({ id: work.id, status: "ok", label: "Work" });
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "work-again" });
+  });
+
+  it("refuses to file another Claude account's sign-in under this one, and stores nothing", async () => {
+    const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work-access", 8 * 60 * 60_000) });
+    const personal = await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access", 8 * 60 * 60_000) });
+
+    // The browser was signed in as someone else entirely.
+    await expect(pool.replaceCredential(work.id, { kind: "oauth", tokens: tokens("stranger-access", 8 * 60 * 60_000), email: "stranger@example.com" }))
+      .rejects.toMatchObject({ code: "wrong_account" });
+    // …or as the OTHER account on this list.
+    await expect(pool.replaceCredential(work.id, { kind: "oauth", tokens: tokens("personal-again", 8 * 60 * 60_000), email: "me@example.com" }))
+      .rejects.toMatchObject({ code: "wrong_account" });
+
+    const accounts = await pool.readAccounts();
+    expect(accounts.map((a) => [a.label, a.email])).toEqual([["Work", "work@example.com"], ["Personal", "me@example.com"]]);
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "work-access" });
+    expect((await pool.prepareAccount({ exclude: new Set([work.id]) })).prepared).toMatchObject({ account: { id: personal.id }, credential: { secret: "personal-access" } });
+  });
+
+  it("refuses a sign-in that is another row's, even onto a row whose email the box never learned", async () => {
+    const unnamed = await pool.addOAuthAccount({ label: "Old", tokens: tokens("old-access", 8 * 60 * 60_000) });
+    await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access", 8 * 60 * 60_000) });
+    await expect(pool.replaceCredential(unnamed.id, { kind: "oauth", tokens: tokens("personal-again", 8 * 60 * 60_000), email: "me@example.com" }))
+      .rejects.toMatchObject({ code: "duplicate" });
+    // A new address for it is learned, as before.
+    const learned = await pool.replaceCredential(unnamed.id, { kind: "oauth", tokens: tokens("old-again", 8 * 60 * 60_000), email: "old@example.com" });
+    expect(learned.email).toBe("old@example.com");
+  });
+
+  it("spends a single-use refresh token once when several runs start together", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("old-access", 5 * 60_000) });
+    // Anthropic's rotation: the first renewal answers a new pair and retires
+    // `refresh-old-access`; spending it again is refused like a revoked grant.
+    const spent = new Set<string>();
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const { refresh_token } = JSON.parse(String(init.body)) as { refresh_token: string };
+      if (spent.has(refresh_token)) return new Response("{\"error\":\"invalid_grant\"}", { status: 400 });
+      spent.add(refresh_token);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return new Response(JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const results = await Promise.all([pool.prepareAccount(), pool.prepareAccount(), pool.prepareAccount()]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    for (const { prepared } of results) expect(prepared?.credential).toEqual({ kind: "oauth", secret: "new-access" });
+    expect((await pool.readAccounts()).find((a) => a.id === account.id)?.status).toBe("ok");
   });
 });
 

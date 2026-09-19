@@ -190,9 +190,41 @@ describe("changing the pool", () => {
     expect(pool.addOAuthAccount).not.toHaveBeenCalled();
   });
 
+  it("refuses a handoff that does not say it is Anthropic's — the device flow's older shape meant OpenAI", async () => {
+    handoff.readHandoffTokens.mockResolvedValueOnce({ ok: true, tokens: { provider: null, accessToken: "x", refreshToken: null, expiresIn: null, accountEmail: null, createdAt: Date.now() } });
+    const res = await post({ action: "connect_oauth" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("wrong_provider");
+    expect(pool.addOAuthAccount).not.toHaveBeenCalled();
+    expect(handoff.clearHandoffTokens).not.toHaveBeenCalled();
+  });
+
   it("re-authenticates an account in place", async () => {
     await post({ action: "reauth_oauth", id: "aaaaaaaa" });
     expect(pool.replaceCredential).toHaveBeenCalledWith("aaaaaaaa", { kind: "oauth", tokens: expect.objectContaining({ access: ACCESS }), email: "max2@example.com" });
+    expect(pool.addOAuthAccount).not.toHaveBeenCalled();
+    expect(handoff.clearHandoffTokens).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a sign-in for a DIFFERENT Claude account with 409, stores nothing, and keeps the handoff", async () => {
+    const { AnthropicAccountError } = await import("@/lib/anthropic-accounts");
+    pool.replaceCredential.mockRejectedValue(new AnthropicAccountError("wrong_account", "That sign-in is max2@example.com, not work@example.com."));
+    const res = await post({ action: "reauth_oauth", id: "aaaaaaaa" });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("wrong_account");
+    expect(pool.addOAuthAccount).not.toHaveBeenCalled();
+    expect(handoff.clearHandoffTokens).not.toHaveBeenCalled();
+  });
+
+  it("sends each key action to its own operation", async () => {
+    let res = await post({ action: "replace_key", id: "dddddddd", apiKey: KEY });
+    expect(res.status).toBe(200);
+    expect(pool.replaceCredential).toHaveBeenCalledWith("dddddddd", { kind: "api_key", key: KEY });
+    expect(pool.addApiKeyAccount).not.toHaveBeenCalled();
+    res = await post({ action: "add_key", apiKey: KEY });
+    expect(res.status).toBe(200);
+    expect(pool.addApiKeyAccount).toHaveBeenCalledTimes(1);
+    expect(pool.replaceCredential).toHaveBeenCalledTimes(1);
   });
 
   it("adds an API key only once it has the shape of one, and refuses one Anthropic rejects", async () => {

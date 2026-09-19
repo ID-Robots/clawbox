@@ -48,7 +48,9 @@ export const dynamic = "force-dynamic";
  *    `…/exchange`, which leaves the tokens in the 0600 handoff file) into the
  *    pool, at the end of the order. The same email again is the same account
  *    signing in again: its credential is replaced, its place kept.
- *  - `reauth_oauth` `{ id }` — the same, onto an account that is already there.
+ *  - `reauth_oauth` `{ id }` — the same, onto an account that is already there,
+ *    and only when the sign-in IS that account (by its email): a different
+ *    Claude account is refused, never filed under this one's label.
  *  - `add_key` `{ apiKey, label? }` / `replace_key` `{ id, apiKey }` — an API key,
  *    checked live the way the Coding Agent's key form checks it (only a
  *    definite 401/403 refuses; an offline box still stores it).
@@ -87,6 +89,7 @@ const REFUSAL_STATUS: Record<AnthropicAccountError["code"], number> = {
   invalid: 400,
   full: 409,
   duplicate: 409,
+  wrong_account: 409,
   store_unavailable: 503,
 };
 
@@ -124,7 +127,10 @@ async function readKey(body: Record<string, unknown>): Promise<{ key: string; ve
 async function takeHandoff(): Promise<{ tokens: OAuthTokens; email: string | null } | NextResponse> {
   const handoff = await readHandoffTokens();
   if (!handoff.ok) return refusal(handoff.error, "no_sign_in", 400);
-  if (handoff.tokens.provider && handoff.tokens.provider !== "anthropic") {
+  // Positively Anthropic's, not merely "not someone else's": every writer names
+  // its provider, and a handoff with none is the device flow's older shape,
+  // which meant OpenAI — its tokens must never be filed as a Claude account.
+  if (handoff.tokens.provider !== "anthropic") {
     return refusal("The sign-in that just completed was not an Anthropic one. Start it again from here.", "wrong_provider", 400);
   }
   const { accessToken, refreshToken, expiresIn, accountEmail } = handoff.tokens;
@@ -153,31 +159,51 @@ export async function POST(request: Request) {
 
   const extra: Record<string, unknown> = {};
   try {
+    // One fixed operation per action, each in its own case. The action only
+    // SELECTS among things the owner may do — who may do them was settled by
+    // the two checks above, which read the session and the request's origin,
+    // never the body — and no branch re-tests a body field to pick which
+    // credential write runs.
     switch (body.action) {
-      case "connect_oauth":
-      case "reauth_oauth": {
+      case "connect_oauth": {
         const taken = await takeHandoff();
         if (taken instanceof NextResponse) return taken;
-        const account = body.action === "reauth_oauth"
-          ? await replaceCredential(body.id, { kind: "oauth", tokens: taken.tokens, email: taken.email })
-          : await addOAuthAccount({ label: body.label, email: taken.email, tokens: taken.tokens });
+        const account = await addOAuthAccount({ label: body.label, email: taken.email, tokens: taken.tokens });
         // Consumed only once it is stored: a failure above leaves the handoff
         // for a retry inside its TTL rather than forcing a whole new sign-in.
         await clearHandoffTokens();
         extra.accountId = account.id;
-        console.error(`[anthropic-accounts] the owner ${body.action === "reauth_oauth" ? "re-authenticated" : "connected"} a Claude account (${account.id})`);
+        console.error(`[anthropic-accounts] the owner connected a Claude account (${account.id})`);
         break;
       }
-      case "add_key":
-      case "replace_key": {
+      case "reauth_oauth": {
+        const taken = await takeHandoff();
+        if (taken instanceof NextResponse) return taken;
+        // The pool refuses a sign-in that is a DIFFERENT Claude account from the
+        // one named here (`wrong_account`, `duplicate`): the id says which row,
+        // only the sign-in says whose tokens these are. Kept for a retry, as above.
+        const account = await replaceCredential(body.id, { kind: "oauth", tokens: taken.tokens, email: taken.email });
+        await clearHandoffTokens();
+        extra.accountId = account.id;
+        console.error(`[anthropic-accounts] the owner re-authenticated a Claude account (${account.id})`);
+        break;
+      }
+      case "add_key": {
         const checked = await readKey(body);
         if (checked instanceof NextResponse) return checked;
-        const account = body.action === "replace_key"
-          ? await replaceCredential(body.id, { kind: "api_key", key: checked.key })
-          : await addApiKeyAccount({ label: body.label, key: checked.key });
+        const account = await addApiKeyAccount({ label: body.label, key: checked.key });
         extra.accountId = account.id;
         extra.verified = checked.verified;
         console.error(`[anthropic-accounts] the owner saved an API-key account (${account.id}, checked: ${checked.verified})`);
+        break;
+      }
+      case "replace_key": {
+        const checked = await readKey(body);
+        if (checked instanceof NextResponse) return checked;
+        const account = await replaceCredential(body.id, { kind: "api_key", key: checked.key });
+        extra.accountId = account.id;
+        extra.verified = checked.verified;
+        console.error(`[anthropic-accounts] the owner replaced an API-key account's key (${account.id}, checked: ${checked.verified})`);
         break;
       }
       case "add_login":
