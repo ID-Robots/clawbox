@@ -368,7 +368,11 @@ describe("the portrait phone composer", () => {
     resetHarnessCache();
   });
 
-  it("reads attachment → field → Send on the input row, the microphone alone on its own row", async () => {
+  // TASK-1003: the microphone used to hold a centred row of its own under the
+  // input. On a 390px phone that row — plus the pickers under it — left the
+  // composer three rows tall and the conversation squeezed into what was left.
+  // The control did not change; only the row it sits on did.
+  it("reads attachment → field → microphone → Send on one input row", async () => {
     installFetch("hello");
     render(<ChatPopup isOpen onClose={() => {}} mobile />);
     const record = await readyToRecord();
@@ -376,31 +380,57 @@ describe("the portrait phone composer", () => {
     const primary = screen.getByTestId("chat-composer-primary");
     const buttons = Array.from(primary.children).filter((el) => el.tagName !== "TEXTAREA");
     expect(Array.from(primary.children).map((el) => el.getAttribute("data-testid") ?? el.tagName)).toEqual([
-      "chat-attach", "TEXTAREA", "chat-send",
+      "chat-attach", "TEXTAREA", "voice-record", "chat-send",
     ]);
-    expect(buttons).toHaveLength(2);
-    expect(primary).not.toContainElement(record);
+    expect(buttons).toHaveLength(3);
+    expect(primary).toContainElement(record);
 
-    // Its row holds that one control and nothing else.
-    const voiceRow = screen.getByTestId("chat-composer-voice-row");
-    expect(voiceRow).toHaveClass("chat-composer-voice-row");
-    expect(Array.from(voiceRow.children)).toEqual([record]);
+    // No row of its own anywhere, and the same large orange control as before.
+    expect(screen.queryByTestId("chat-composer-voice-row")).not.toBeInTheDocument();
     expect(record).toHaveAttribute("data-size", "large");
-    // Directly under the input row, ahead of the create/picker row.
-    expect(primary.nextElementSibling).toBe(voiceRow);
-    expect(voiceRow.nextElementSibling).toBe(screen.getByTestId("chat-composer-row"));
+    expect(record).toHaveClass("chat-voice-large");
+    // The pickers' row follows the input row directly — nothing in between.
+    expect(primary.nextElementSibling).toBe(screen.getByTestId("chat-composer-row"));
     expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
     expect(screen.getByTestId("chat-popup")).toHaveAttribute("data-chat-portrait", "true");
   });
 
-  it("keeps the microphone on its row while the owner types, Send enabling beside the field", async () => {
+  it("keeps the microphone beside Send while the owner types", async () => {
     installFetch("hello");
     render(<ChatPopup isOpen onClose={() => {}} mobile />);
     const record = await readyToRecord();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Typed" } });
+    const primary = screen.getByTestId("chat-composer-primary");
     expect(screen.getByTestId("chat-send")).toBeEnabled();
-    expect(screen.getByTestId("chat-composer-primary")).toContainElement(screen.getByTestId("chat-send"));
-    expect(screen.getByTestId("chat-composer-voice-row")).toContainElement(record);
+    expect(primary).toContainElement(screen.getByTestId("chat-send"));
+    // Portrait keeps BOTH: typing must not cost the owner the microphone, the
+    // way it does in landscape where the two share one slot.
+    expect(primary).toContainElement(record);
+  });
+
+  it("folds the pickers and Create behind one control, and says what they hold", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+
+    const toggle = screen.getByTestId("composer-options-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", "chat-composer-options");
+    // Folded: no pickers, no Create — but the choice is still on screen.
+    expect(screen.queryByTestId("chat-new-app-toggle")).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".chat-header-pills")).toHaveLength(0);
+    expect(screen.getByTestId("chat-pill-summary")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("chat-new-app-toggle")).toBeInTheDocument();
+    expect(document.querySelectorAll(".chat-header-pills")).toHaveLength(1);
+    // The summary steps aside once the pills themselves are readable.
+    expect(screen.queryByTestId("chat-pill-summary")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("chat-new-app-toggle")).not.toBeInTheDocument();
   });
 
   it("puts the red Stop in Send's slot beside the field while a reply runs", async () => {
@@ -415,25 +445,26 @@ describe("the portrait phone composer", () => {
     const stop = await screen.findByTestId("chat-stop");
     const primary = screen.getByTestId("chat-composer-primary");
     expect(primary.lastElementChild).toBe(stop);
-    expect(stop.previousElementSibling).toBe(input);
+    // The microphone sits between the field and Stop now, so it — not the
+    // textarea — is what Stop follows.
+    expect(stop.previousElementSibling).toBe(screen.getByTestId("voice-record"));
+    expect(screen.getByTestId("voice-record").previousElementSibling).toBe(input);
     expect(screen.queryByTestId("chat-send")).not.toBeInTheDocument();
-    // The microphone keeps its own row; nothing joins it.
-    const voiceRow = screen.getByTestId("chat-composer-voice-row");
-    expect(voiceRow.children).toHaveLength(1);
-    expect(voiceRow).not.toContainElement(stop);
+    expect(screen.queryByTestId("chat-composer-voice-row")).not.toBeInTheDocument();
   });
 
-  it("toggles recording with the one control on its row — never a second button", async () => {
+  it("toggles recording in place on the input row — never a second button", async () => {
     installFetch("hello from the car");
     render(<ChatPopup isOpen onClose={() => {}} mobile />);
     fireEvent.click(await readyToRecord());
     const stop = await screen.findByTestId("voice-stop");
-    const voiceRow = screen.getByTestId("chat-composer-voice-row");
-    expect(Array.from(voiceRow.children)).toEqual([stop]);
+    const primary = screen.getByTestId("chat-composer-primary");
+    expect(primary).toContainElement(stop);
     expect(screen.queryByTestId("voice-record")).not.toBeInTheDocument();
     fireEvent.click(stop);
     const record = await screen.findByTestId("voice-record");
-    expect(screen.getByTestId("chat-composer-voice-row")).toContainElement(record);
+    expect(screen.getByTestId("chat-composer-primary")).toContainElement(record);
+    expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
   });
 
   it("keeps the landscape phone composer and the desktop composer as they were", async () => {

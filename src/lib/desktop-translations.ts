@@ -321,6 +321,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.attachImage": "Attach image",
     "chat.takePhoto": "Take photo",
     "chat.messagePlaceholder": "Type a message...",
+    "chat.composer.options": "Chat options",
     "chat.slash.menuLabel": "Slash commands",
     "chat.slash.noMatches": "No matching commands",
     "chat.generatedImage": "Generated image",

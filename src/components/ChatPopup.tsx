@@ -908,10 +908,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
-  // A phone held upright gets its own composer: Send/Stop stays beside the
-  // text box and the microphone takes a centred row of its own under it, so
-  // it can never crowd the field. Landscape keeps the one-row composer.
+  // A phone held upright gets its own composer: attach, text, microphone and
+  // Send share one row, and the pickers below them fold behind a single
+  // control (TASK-1003). Landscape and desktop keep the one-row composer with
+  // everything on show.
   const portraitComposer = usePortrait(mobile) && mobile
+  // Folded by default: on a 390px screen three pickers and Create pushed the
+  // conversation up by a whole row for a choice that changes once a week.
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(false)
+  // Closing the chat, or rotating out of portrait, puts the pickers back where
+  // they belong — otherwise the row would come back open on the next visit,
+  // which is not what "folded by default" means.
+  useEffect(() => {
+    if (!isOpen || !portraitComposer) setComposerOptionsOpen(false)
+  }, [isOpen, portraitComposer])
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -6064,12 +6074,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
   )
   // Keep recording/transcription controls reachable even if a draft changes.
-  // Landscape only: in portrait the microphone has a row of its own and the
-  // slot beside the text box is always Send or Stop.
+  // Landscape only: portrait now carries the microphone in the primary row
+  // beside Send (TASK-1003), so the slot this decides is a landscape one.
   const mobileVoiceAction = !portraitComposer && caps.canTranscribe && (
     voice.state === 'recording' || voice.state === 'requesting' || voice.state === 'transcribing'
     || (!sending && !input.trim() && attachments.length === 0)
   )
+
+  // What the folded-away pills say, in one line: "ClawBox · Средно". A phone
+  // hides the pickers behind one control, and the answer to "which agent, and
+  // how hard is it thinking?" has to survive that — so it is built from the
+  // pills' own labels, and cannot drift from them.
+  const pillSummary = (() => {
+    const parts: string[] = []
+    if (harnessId === 'hermes') {
+      if (hermesProviderPill) parts.push(hermesProviderPill)
+      if (hermesReasoningOptions.length > 0) parts.push(hermesReasoningTriggerLabel(hermesEffectiveReasoning))
+    } else {
+      const activeId = chatModelState?.activeOptionId
+        ?? (chatModelState?.options[0]?.id ?? '')
+      const activeOption = chatModelState?.options.find(o => o.id === activeId)
+      if (activeOption) parts.push(getProviderPillText(activeOption))
+      else if (chatModelState && !chatModelState.activeOptionId) parts.push(t('chat.noChatModel'))
+      if (visibleThinkingLevels.length > 1) {
+        parts.push(tr(`chat.effort.${effectiveThinkingLevel}`, THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel))
+      }
+    }
+    return parts.filter(Boolean).join(' · ')
+  })()
+  // Everything in the settings row except the fold control itself. Folded on a
+  // portrait phone until asked for; always on show anywhere else.
+  const composerExtrasShown = !portraitComposer || composerOptionsOpen
   // Compact desktop mic; 44px in-flow phone target with shared recording feedback.
   const renderVoiceButton = (large: boolean) => {
     if (voice.state === 'recording') {
@@ -7364,6 +7399,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
+        {/* Portrait phone: the record control sits IN this row, between the
+            text and Send, rather than on a row of its own (TASK-1003 — the
+            lone centred mic cost a whole row of a phone screen and left dead
+            space above and below it). Same button and same orange as before;
+            `[data-chat-mobile] .chat-composer-primary > button` sizes it to
+            the 44px tap target every control in this row gets. */}
+        {portraitComposer && caps.canTranscribe && renderVoiceButton(true)}
         {mobile && (mobileVoiceAction ? renderVoiceButton(true) : renderSendButton())}
         {/* Portaled and fixed — this wrapper is `display: contents` on desktop
             and the chat window clips its content, so an in-flow popover here
@@ -7383,17 +7425,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           />
         )}
         </div>
-        {/* Portrait phone: the one record/stop toggle, alone and centred on a
-            row of its own across the chat's full width. */}
-        {portraitComposer && caps.canTranscribe && (
-          <div data-testid="chat-composer-voice-row" className="chat-composer-voice-row">
-            {renderVoiceButton(true)}
-          </div>
-        )}
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
             rule and a flex-basis — see the block there. */}
-        <div data-testid="chat-composer-row" className="chat-composer-row">
+        <div data-testid="chat-composer-row" className="chat-composer-row" id="chat-composer-options">
+        {/* Portrait phone: one control in front of the pickers, and beside it
+            the answer they would have given. Tapping it expands this same row
+            — the pickers are never rebuilt somewhere else, so their popovers,
+            handlers and order are exactly the ones every other viewport gets. */}
+        {portraitComposer && (
+          <>
+            <button
+              onClick={() => setComposerOptionsOpen(open => !open)}
+              title={tr('chat.composer.options', 'Chat options')}
+              aria-label={tr('chat.composer.options', 'Chat options')}
+              aria-expanded={composerOptionsOpen}
+              aria-controls="chat-composer-options"
+              data-testid="composer-options-toggle"
+              className="chat-composer-options-toggle"
+              style={{
+                background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+                color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+                <circle cx="16" cy="6" r="2" />
+                <circle cx="10" cy="12" r="2" />
+                <circle cx="16" cy="18" r="2" />
+              </svg>
+            </button>
+            {!composerOptionsOpen && pillSummary && (
+              <span data-testid="chat-pill-summary" className="chat-pill-summary">{pillSummary}</span>
+            )}
+          </>
+        )}
         {/* Shown only where a file staged here can actually reach the model.
             The alternative is worse than a missing button: the picture is drawn
             into the user's own bubble and then dropped, so the customer sees
@@ -7408,6 +7474,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
+        {composerExtrasShown && (
         <button
           onClick={toggleNewApp}
           title={t("codingAgent.createNewProject")}
@@ -7427,6 +7494,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 22 }}>add</span>
         </button>
+        )}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
@@ -7434,7 +7502,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             asks and the agent's own tool draws — a button there would be a
             second way to ask for something the chat already does, and the
             adapter refuses it outright. */}
-        {caps.imageGenerationTrigger === 'composer' && (
+        {caps.imageGenerationTrigger === 'composer' && composerExtrasShown && (
           <button
             onClick={() => { void generatePicture() }}
             // Disabled with nothing typed, because the composer's text IS the
@@ -7470,6 +7538,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               paperclip with the whole width empty beside it. Sharing one basis
               (the pills' plus the gap plus the button) makes the break happen
               in front of both or neither, at 3, 4 or 5 buttons. */}
+          {composerExtrasShown && (
           <div className="chat-composer-tail">
           <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
@@ -7768,6 +7837,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
         {!mobile && renderSendButton()}
         </div>
+        )}
         </div>
       </div>
 
