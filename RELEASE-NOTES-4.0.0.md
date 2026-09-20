@@ -141,7 +141,8 @@ you have told it so it can find it later. And it fits on a phone.
 - The CLI update path is refused on Hermes in favour of Settings, System
   Update, because re-running the OpenClaw installer would break the edition
   lock.
-- MCP tool counts differ by edition: 77 tools on OpenClaw, 66 on Hermes.
+- MCP tool counts differ by edition: up to 78 tools on OpenClaw and 67 on
+  Hermes, depending on what the box has configured.
 
 ### AI models
 

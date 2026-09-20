@@ -101,7 +101,7 @@ Full detail, and how to upgrade: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.
 |---------|-------------|
 | 🧙 **5-minute setup** | Guided wizard: WiFi → updates → password → AI provider → messaging → done |
 | 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, system tray and a desktop mascot |
-| 🤖 **AI-controlled OS** | 77 MCP tools on the OpenClaw edition (66 on Hermes) let the AI agent operate the entire device |
+| 🤖 **AI-controlled OS** | Up to 78 MCP tools on the OpenClaw edition (67 on Hermes) let the AI agent operate the entire device |
 | 🔒 **Local-first** | Your data stays on the box; no telemetry, no data collection. Cloud AI only if you opt in |
 | 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude / GPT / Gemini with **your own key or a subscription you already pay for**, OpenRouter, or models that run on the box |
 | 🔁 **Switch model mid-chat** | Provider, model and reasoning effort are pills under the composer, hot-applied with no gateway restart |
