@@ -5,42 +5,173 @@ summary: "What changed on your ClawBox recently, what it looks like on screen, a
 ---
 
 Everything below is on the current release. Open **Settings → System Update** to bring
-your box up to date — see [Updating ClawBox](/support/updating).
+your box up to date, see [Updating ClawBox](/support/updating).
 
 <Note>
 Some entries are specific to one [edition](/editions/overview). Where that is the case,
 the entry says so.
 </Note>
 
-Entries are newest first, grouped by the month they shipped in.
+Entries are grouped by release, newest first.
 
-## September 2026
+## ClawBox 4.0
+
+The fourth release turns the box from an assistant you talk to into one that also does
+the work: it writes code in your repositories and opens pull requests, it keeps one
+address you can reach from anywhere, it backs itself up, and it fits on a phone screen.
+
+### A coding agent that does the whole job
+
+**Coding Agent** on the desktop hands a whole task to Claude Code running on this box.
+Point it at a folder, describe the job, and it reads and writes files there, runs
+commands, and reports what it did. Each attempt is a **run**, kept with its own page:
+the task, the folder, who asked for it, how long it took, the files it touched, how
+many commands it ran, the models it used, and the final summary.
+
+The runs list keeps the recent runs in front of you and refreshes itself every few
+seconds while one is live. A finished run is never thrown away, so you can read back
+what happened days later.
+
+<Frame caption="The Coding Agent window: recent runs on the left, projects and the task box on the right">
+  <img src="/images/4.0/coding-agent-runs.png" alt="The Coding Agent app with a Recent Runs list down the left side, each run titled by its task, and the home page beside it offering a project to work in and a box to describe the next task." />
+</Frame>
+
+### Runs open pull requests, and review their own work
+
+With the auto-PR switch on, a run that changes files in a git repository pushes its own
+branch and opens a pull request for it. The run's page carries the pull request number,
+its title and its state, so you do not have to go looking on GitHub.
+
+With the review switch on, a completed run is followed by an **automatic review pass**:
+a second run that reads the first one's work and reports what is wrong with it. The
+review is a run of its own, linked to the one it reviewed. When a pull request comes
+back with comments, or its checks fail, the agent can work the feedback in rounds until
+the thread is clear.
+
+<Frame caption="A finished run: the pull request is merged, and a review pass links back to it">
+  <img src="/images/4.0/coding-agent-run-detail.png" alt="A coding run page marked Finished and Merged, with a chip reading Reviewed by run-7c8vn5tk, the agent's own summary of what it changed and how to verify it, and a column of counters for steps, files changed, duration and model." />
+</Frame>
+
+<Frame caption="The review pass itself, a run of its own that reads the work of the run before it">
+  <img src="/images/4.0/coding-agent-review-pass.png" alt="The run page for an automatic review pass, titled Automatic review pass of run-9f3kd1pz, with the finding it made and the file it changed in response." />
+</Frame>
 
 ### More than one Anthropic account for coding runs
 
-**Settings → Providers → Anthropic accounts** now holds several Claude Pro/Max accounts and
-API keys, in the order you choose. When the account a coding run is using hits its usage
-limit, the run moves to the next account and continues in the same session. Your first
-account takes over again as soon as its limit resets. If every account is limited, the run
-waits and resumes by itself at the first reset. See
+**Settings → Providers → Anthropic accounts** now holds several Claude Pro/Max accounts
+and API keys, in the order you choose. When the account a coding run is using hits its
+usage limit, the run moves to the next account and continues in the same session. Your
+first account takes over again as soon as its limit resets. If every account is limited,
+the run waits and resumes by itself at the first reset. Every move is recorded on the
+run's page, so you can see which account paid for which part of the work. See
 [Multiple Anthropic Accounts](/guides/anthropic-accounts).
+
+<Frame caption="Settings → Providers → Anthropic accounts, with one account set aside until its limit resets">
+  <img src="/images/4.0/settings-anthropic-accounts.png" alt="The Anthropic accounts card badged 2 of 3 ready, listing a Claude Max account marked In use, a Claude Pro account marked Limited until a time later today, and an API key marked Ready." />
+</Frame>
+
+### Watch a long task from the chat
+
+A task that takes a while now shows a **progress card** in the chat, pinned between the
+conversation and the message box. It names the step the assistant is on, counts the
+steps that are done against the total, says when it last moved, and carries the
+assistant's own note about what it is doing. Fold it away and it stays folded, on every
+chat surface, until you open it again.
+
+### A terminal on the box
+
+**Terminal** is a real terminal, not a log viewer. It connects to a shell on the box, so
+you can type commands, run a build, and watch it work. It has tabs, copy and paste, a
+right-click menu, and settings for the font and the colours. On a high-density screen it
+renders through the GPU, so the text stays sharp.
+
+<Frame caption="The Terminal app, with its own tabs and a shell on the box">
+  <img src="/images/4.0/terminal.png" alt="The Terminal window showing a tab bar reading Terminal 1, a plus button for a new tab, a settings button, and a shell prompt waiting for a command." />
+</Frame>
+
+### Steer a run while it is running
+
+The assistant can now drive the coding agent through its own tools: start a run, read
+its state, resume it, list the projects it knows about, and send a message into a run
+that is already going. So you can change your mind mid-task from the chat, or from
+Telegram, without stopping the run and starting again. The same tool set reads Memory
+Shard, Local AI, Vercel deployments and your ClawBox AI usage.
+
+### Your box keeps one address
+
+A box linked to your portal account gets a permanent address of its own, of the form
+`<your-box>.clawbox.tech`, and runs a named Cloudflare tunnel to serve it. The address
+does not change when the box reboots, when the tunnel restarts, or when your home IP
+moves, so a bookmark keeps working and the address is worth writing down.
+
+The old quick tunnel is still there as the fallback, with its long random
+`trycloudflare.com` address, for a box that has no named tunnel yet. Both live in
+**Settings → Remote Control**. See [Networking](/technical/networking).
+
+<Frame caption="Settings → Remote Control, where the box's address is turned on and off">
+  <img src="/images/4.0/settings-remote-access.png" alt="The Remote Control settings panel, explaining that the box can be exposed through a Cloudflare tunnel and reached from the portal account, with the switch that starts it." />
+</Frame>
 
 ### Switch your box between OpenClaw and Hermes
 
 A box that shipped as one edition can now be re-made as the other from
 **Settings → Harness**, without a reflash and without a second box. The button installs
-the other agent, re-bakes the edition lock, carries your ClawBox AI sign-in and your
-Telegram bot across, and reloads the desktop. The same button swaps back.
+the other agent, re-bakes the edition lock, carries your ClawBox AI sign-in, your
+Telegram bot and your memory folders across, and reloads the desktop. The same button
+swaps back.
 
-It needs the **Max** plan, an internet connection and about 3 GB of free disk.
-Staying on the harness your box already runs costs nothing.
+It needs the **Max** plan, an internet connection and about 3 GB of free disk. Staying on
+the harness your box already runs costs nothing.
 See [Switching editions](/editions/switching).
+
+<Frame caption="Settings → Harness: the engine the box runs, and the button that swaps it">
+  <img src="/images/4.0/settings-harness.png" alt="The Harness settings panel, describing the agent harness as the engine that runs your agent with one shared identity, and showing OpenClaw as the harness this box is locked to." />
+</Frame>
+
+### ClawBox AI runs on DeepSeek V4
+
+ClawBox AI has two models and your plan picks one. **Free/Pro Tier** is DeepSeek V4
+Flash, the default and the faster of the two. **Max Tier** is the 1.6T frontier model and
+needs the Max plan. Both take a one-million-token context window and both are text in,
+text out. You do not have to choose a model on ClawBox AI: the chat names the provider
+and the plan decides the rest. See [ClawBox AI](/guides/clawbox-ai).
+
+### ClawKeep backs the box up
+
+**ClawKeep** on the desktop takes your agent's state, its configuration, its credentials
+and its saved conversations, and keeps them off the box. Pair it once with your account
+and it can back up on a schedule or when you press the button, hold several snapshots,
+and restore any of them onto this box or a replacement. The archive can be encrypted with
+a passphrase only you hold. Its card says when the last backup ran, how much cloud space
+you are using, and how many snapshots you have.
+
+<Frame caption="ClawKeep before it is paired: one button links the box to your account">
+  <img src="/images/4.0/clawkeep-backups.png" alt="The ClawKeep window marked Not paired, explaining that pairing links this OpenClaw to your portal account so every backup lands in your own private storage, with a Pair with portal button." />
+</Frame>
+
+### The chat opens first on a phone
+
+On a phone the box opens the chat, not the desktop: below 768 pixels wide, the chat is
+the landing surface, with a thumb-sized microphone, a composer that fits a portrait
+screen, and a Back button that walks up one level at a time instead of dumping you at the
+start. An installed home-screen app with a touch pointer gets the same treatment.
+
+### Gemma 4 E2B runs on the box
+
+The on-device agent model is **Gemma 4 E2B Q4/INT4**, Google's own quantisation-aware
+release, running under llama.cpp. It is a 3.1 GB download and holds about 3.3 GB of
+memory on an 8 GB Jetson, which leaves room for the rest of the box to work. Install it
+from **Settings → Local AI**. See [Local AI](/guides/local-ai).
+
+<Frame caption="Settings → Local AI: every model that can run on the box, and what each one is doing">
+  <img src="/images/4.0/settings-local-ai.png" alt="The Local AI settings panel listing the AI agent model as Gemma 4, not installed, above the rows for the other on-device models." />
+</Frame>
 
 ### Change model without restarting anything
 
-Provider, model and reasoning effort are three pills beneath the chat panel's message box. Picking
-a different one applies to the running agent — nothing is restarted and there is no
-30-second reconnect between you and the next message. See [Chat](/guides/chat).
+Provider, model and reasoning effort are three pills beneath the chat panel's message
+box. Picking a different one applies to the running agent: nothing is restarted and there
+is no 30-second reconnect between you and the next message. See [Chat](/guides/chat).
 
 ### A failed message tells you what the provider said
 
@@ -56,8 +187,8 @@ itself, so it includes the commands your skills and plugins added. Both editions
 
 ### The assistant can ask you a question
 
-When the agent needs a decision, it shows a card with the options it is choosing between —
-each with the consequence spelled out — plus a box for an answer of your own. Nothing
+When the agent needs a decision, it shows a card with the options it is choosing between,
+each with the consequence spelled out, plus a box for an answer of your own. Nothing
 happens until you send one.
 
 ### Spoken replies
@@ -69,16 +200,16 @@ plan speaks with the ClawBox AI cloud voice; any box can install a voice of its 
 ### ClawBox AI: usage, credits and plans in one card
 
 **Settings → Providers** now shows your weekly chat allowance, the 5-hour burst window,
-the images, speech and memory-indexing meters, and your credit balance — read from your
+the images, speech and memory-indexing meters, and your credit balance, read from your
 account rather than guessed on the device. See [ClawBox AI](/guides/clawbox-ai).
 
 ### Voice, transcription and memory indexing use your plan's cloud
 
-On a box connected to ClawBox AI — on every edition — speech-to-text, text-to-speech and
+On a box connected to ClawBox AI, on every edition, speech-to-text, text-to-speech and
 the memory index default to the cloud your plan covers instead of running engines on the
-box. The engines
-on the box stay the fallback, and stay selectable. A choice you make yourself is never
-overwritten. See [ClawBox AI → What your plan powers](/guides/clawbox-ai#what-your-plan-powers).
+box. The engines on the box stay the fallback, and stay selectable. A choice you make
+yourself is never overwritten.
+See [ClawBox AI → What your plan powers](/guides/clawbox-ai#what-your-plan-powers).
 
 ### Nothing heavy is installed behind your back
 
@@ -90,8 +221,8 @@ See [Local AI](/guides/local-ai).
 
 ### Local AI is one inventory
 
-**Settings → Local AI** lists every model that can run on the box — the agent model, the
-voice, speech-to-text and memory search — with Install, Uninstall, Enable and Disable on
+**Settings → Local AI** lists every model that can run on the box, the agent model, the
+voice, speech-to-text and memory search, with Install, Uninstall, Enable and Disable on
 each row and what each one is doing right now. On the **OpenClaw and dual** editions, once
 the box's own model is primary or fallback, a **Local-only mode** switch appears there and
 routes everything to the box, switching every cloud provider off. The Hermes edition has
@@ -100,13 +231,13 @@ no equivalent.
 ### A Hermes plugin you install now reaches the chat
 
 Hermes looks for plugins once, when the assistant starts, so a plugin installed or enabled
-after that was invisible to every chat — new conversations included — however healthy it
+after that was invisible to every chat, new conversations included, however healthy it
 looked from the command line. The box now handles it: when your plugins change, the
 assistant restarts itself so it picks them up, and the desktop shows a notice naming the
 plugin and telling you to open a new chat. The assistant can ask for the same restart
 itself, right after it installs something for you.
 
-The restart closes the chat window you have open. That is what the notice is for — open a
+The restart closes the chat window you have open. That is what the notice is for: open a
 new chat and the plugin is there. **Hermes edition.**
 See [Hermes Edition](/editions/hermes#plugins-and-when-the-assistant-restarts).
 
@@ -118,12 +249,16 @@ settings let you choose where the index is embedded: the ClawBox AI cloud, or th
 on the box.
 
 Since this release the **cloud is the default on every edition** wherever your plan covers
-it — a Pro or Max box that is connected indexes there without choosing anything, so there
+it. A Pro or Max box that is connected indexes there without choosing anything, so there
 is no 640 MB model to download before your first index. **On this box** is the opt-in and
 is never overridden once you pick it, and a box that could not reach the cloud moves there
 by itself, with the rebuild that move needs, once a plan that covers it is linked.
 Memory Shard needs a Pro or Max plan.
 See [Memory Shard](/guides/memory-shard#where-the-index-is-built).
+
+<Frame caption="Memory Shard before its first index is built">
+  <img src="/images/4.0/memory-shard.png" alt="The Memory Shard window headed Memory index, everything you keep condensed, with the setup card explaining that it reads what the box already remembers and turns it into something the assistant can search." />
+</Frame>
 
 ### Discord: paste the token, and that is all
 
@@ -147,9 +282,9 @@ Every edition. See [Desktop & appearance](/guides/appearance).
 
 ### Installing on your own x64 machine
 
-`install-x64.sh` checks the host before it changes anything — ports already in use,
-services it would replace, desktop services it would take over — and lets you choose the
-web, gateway and terminal ports. It can leave existing desktop services alone.
+`install-x64.sh` checks the host before it changes anything: ports already in use,
+services it would replace, desktop services it would take over, and it lets you choose
+the web, gateway and terminal ports. It can leave existing desktop services alone.
 
 ### Smaller things
 
@@ -160,3 +295,7 @@ web, gateway and terminal ports. It can leave existing desktop services alone.
 - The assistant's own tools grew: it can read and send email you have approved, generate
   pictures and audio, drive the coding agent, and search Memory Shard on the Hermes
   edition. See [Agent Interface](/technical/agent-interface).
+- A box reached on a name that is not its own is refused on port 80, which closes a
+  DNS-rebinding gap.
+- An update that dies half way through now resumes instead of leaving the box in a state
+  nobody can describe.
