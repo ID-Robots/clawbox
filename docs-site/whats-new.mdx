@@ -25,16 +25,13 @@ address you can reach from anywhere, it backs itself up, and it fits on a phone 
 **Coding Agent** on the desktop hands a whole task to Claude Code running on this box.
 Point it at a folder, describe the job, and it reads and writes files there, runs
 commands, and reports what it did. Each attempt is a **run**, kept with its own page:
-the task, the folder, who asked for it, how long it took, the files it touched, how
-many commands it ran, the models it used, and the final summary.
+the task, the folder, who asked for it, how long it took, how many steps it took, the
+files it touched, the models it used, and the final summary.
 
 The runs list keeps the recent runs in front of you and refreshes itself every few
-seconds while one is live. A finished run is never thrown away, so you can read back
-what happened days later.
-
-<Frame caption="The Coding Agent window: recent runs on the left, projects and the task box on the right">
-  <img src="/images/4.0/coding-agent-runs.png" alt="The Coding Agent app with a Recent Runs list down the left side, each run titled by its task, and the home page beside it offering a project to work in and a box to describe the next task." />
-</Frame>
+seconds while one is live. The box keeps the last 30 runs: a run that is live, paused or
+drafted is never dropped, and once there are more than 30 the oldest finished one falls
+off the end.
 
 ### Runs open pull requests, and review their own work
 
@@ -82,8 +79,9 @@ chat surface, until you open it again.
 
 **Terminal** is a real terminal, not a log viewer. It connects to a shell on the box, so
 you can type commands, run a build, and watch it work. It has tabs, copy and paste, a
-right-click menu, and settings for the font and the colours. On a high-density screen it
-renders through the GPU, so the text stays sharp.
+right-click menu, and settings for the font and the colours. Where the browser offers
+WebGL it draws through the GPU, so the text stays sharp on a high-density screen, and
+where it does not the terminal falls back to drawing in the page.
 
 <Frame caption="The Terminal app, with its own tabs and a shell on the box">
   <img src="/images/4.0/terminal.png" alt="The Terminal window showing a tab bar reading Terminal 1, a plus button for a new tab, a settings button, and a shell prompt waiting for a command." />
