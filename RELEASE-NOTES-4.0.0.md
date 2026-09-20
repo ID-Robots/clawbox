@@ -111,11 +111,14 @@ you have told it so it can find it later. And it fits on a phone.
 - Hostnames are validated as exactly one label under `clawbox.tech`, and tokens
   against a base64url pattern, so neither can carry shell metacharacters.
 - Remote Control is opt-in and is not gated on a plan.
-- The inbound firewall defaults to deny. Only 22, 80, 443, 18789 and 8090 are
-  reachable, and on IPv4 only from private ranges. Ports 3006, 18800, 5900,
-  6080, 11434, 8081 and 631 keep working over loopback and are unreachable from
-  the network. `rpcbind` is disabled and masked unless an NFS or NIS package is
-  installed.
+- The inbound firewall defaults to deny. The TCP service ports it leaves
+  reachable are 22, 80, 443, 18789 and 8090, and on IPv4 only from private
+  ranges. Three UDP exceptions keep the box usable: 5353 for mDNS, so
+  `clawbox.local` keeps resolving; port 67 on the hotspot interface for DHCP;
+  and port 53 from the setup hotspot's own subnets for captive-portal DNS,
+  allowed over TCP there as well. Ports 3006, 18800, 5900, 6080, 11434, 8081
+  and 631 keep working over loopback and are unreachable from the network.
+  `rpcbind` is disabled and masked unless an NFS or NIS package is installed.
 
 ### Editions
 
