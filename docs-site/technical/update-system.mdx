@@ -6,6 +6,10 @@ summary: "How ClawBox updates work: release tags, the update pipeline, channels,
 
 ClawBox updates are **git-based**: the device tracks the [ID-Robots/clawbox](https://github.com/ID-Robots/clawbox) repository, and a release is a `vX.Y.Z` tag on the `main` branch. The updater hard-syncs the code to the release and rebuilds in place.
 
+<Frame caption="Settings → System Update, the same pipeline seen from the settings panel">
+  <img src="/images/4.0/settings-update.png" alt="The System Update section of Settings, reporting what the device has installed and whether an update is waiting." />
+</Frame>
+
 ## How the device decides an update exists
 
 1. Fetch tags from origin.

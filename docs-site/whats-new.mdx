@@ -32,6 +32,10 @@ The runs list keeps the recent runs in front of you and refreshes itself every f
 seconds while one is live. A finished run is never thrown away, so you can read back
 what happened days later.
 
+<Frame caption="The Coding Agent window: recent runs on the left, projects and the task box on the right">
+  <img src="/images/4.0/coding-agent-runs.png" alt="The Coding Agent app with a Recent Runs list down the left side, each run titled by its task, and the home page beside it offering a project to work in and a box to describe the next task." />
+</Frame>
+
 ### Runs open pull requests, and review their own work
 
 With the auto-PR switch on, a run that changes files in a git repository pushes its own
@@ -44,6 +48,14 @@ review is a run of its own, linked to the one it reviewed. When a pull request c
 back with comments, or its checks fail, the agent can work the feedback in rounds until
 the thread is clear.
 
+<Frame caption="A finished run: the pull request is merged, and a review pass links back to it">
+  <img src="/images/4.0/coding-agent-run-detail.png" alt="A coding run page marked Finished and Merged, with a chip reading Reviewed by run-7c8vn5tk, the agent's own summary of what it changed and how to verify it, and a column of counters for steps, files changed, duration and model." />
+</Frame>
+
+<Frame caption="The review pass itself, a run of its own that reads the work of the run before it">
+  <img src="/images/4.0/coding-agent-review-pass.png" alt="The run page for an automatic review pass, titled Automatic review pass of run-9f3kd1pz, with the finding it made and the file it changed in response." />
+</Frame>
+
 ### More than one Anthropic account for coding runs
 
 **Settings → Providers → Anthropic accounts** now holds several Claude Pro/Max accounts
@@ -53,6 +65,10 @@ first account takes over again as soon as its limit resets. If every account is 
 the run waits and resumes by itself at the first reset. Every move is recorded on the
 run's page, so you can see which account paid for which part of the work. See
 [Multiple Anthropic Accounts](/guides/anthropic-accounts).
+
+<Frame caption="Settings → Providers → Anthropic accounts, with one account set aside until its limit resets">
+  <img src="/images/4.0/settings-anthropic-accounts.png" alt="The Anthropic accounts card badged 2 of 3 ready, listing a Claude Max account marked In use, a Claude Pro account marked Limited until a time later today, and an API key marked Ready." />
+</Frame>
 
 ### Watch a long task from the chat
 
@@ -68,6 +84,10 @@ chat surface, until you open it again.
 you can type commands, run a build, and watch it work. It has tabs, copy and paste, a
 right-click menu, and settings for the font and the colours. On a high-density screen it
 renders through the GPU, so the text stays sharp.
+
+<Frame caption="The Terminal app, with its own tabs and a shell on the box">
+  <img src="/images/4.0/terminal.png" alt="The Terminal window showing a tab bar reading Terminal 1, a plus button for a new tab, a settings button, and a shell prompt waiting for a command." />
+</Frame>
 
 ### Steer a run while it is running
 
@@ -88,6 +108,10 @@ The old quick tunnel is still there as the fallback, with its long random
 `trycloudflare.com` address, for a box that has no named tunnel yet. Both live in
 **Settings → Remote Control**. See [Networking](/technical/networking).
 
+<Frame caption="Settings → Remote Control, where the box's address is turned on and off">
+  <img src="/images/4.0/settings-remote-access.png" alt="The Remote Control settings panel, explaining that the box can be exposed through a Cloudflare tunnel and reached from the portal account, with the switch that starts it." />
+</Frame>
+
 ### Switch your box between OpenClaw and Hermes
 
 A box that shipped as one edition can now be re-made as the other from
@@ -99,6 +123,10 @@ swaps back.
 It needs the **Max** plan, an internet connection and about 3 GB of free disk. Staying on
 the harness your box already runs costs nothing.
 See [Switching editions](/editions/switching).
+
+<Frame caption="Settings → Harness: the engine the box runs, and the button that swaps it">
+  <img src="/images/4.0/settings-harness.png" alt="The Harness settings panel, describing the agent harness as the engine that runs your agent with one shared identity, and showing OpenClaw as the harness this box is locked to." />
+</Frame>
 
 ### ClawBox AI runs on DeepSeek V4
 
@@ -117,6 +145,10 @@ and restore any of them onto this box or a replacement. The archive can be encry
 a passphrase only you hold. Its card says when the last backup ran, how much cloud space
 you are using, and how many snapshots you have.
 
+<Frame caption="ClawKeep before it is paired: one button links the box to your account">
+  <img src="/images/4.0/clawkeep-backups.png" alt="The ClawKeep window marked Not paired, explaining that pairing links this OpenClaw to your portal account so every backup lands in your own private storage, with a Pair with portal button." />
+</Frame>
+
 ### The chat opens first on a phone
 
 On a phone the box opens the chat, not the desktop: below 768 pixels wide, the chat is
@@ -130,6 +162,10 @@ The on-device agent model is **Gemma 4 E2B Q4/INT4**, Google's own quantisation-
 release, running under llama.cpp. It is a 3.1 GB download and holds about 3.3 GB of
 memory on an 8 GB Jetson, which leaves room for the rest of the box to work. Install it
 from **Settings → Local AI**. See [Local AI](/guides/local-ai).
+
+<Frame caption="Settings → Local AI: every model that can run on the box, and what each one is doing">
+  <img src="/images/4.0/settings-local-ai.png" alt="The Local AI settings panel listing the AI agent model as Gemma 4, not installed, above the rows for the other on-device models." />
+</Frame>
 
 ### Change model without restarting anything
 
@@ -219,6 +255,10 @@ is never overridden once you pick it, and a box that could not reach the cloud m
 by itself, with the rebuild that move needs, once a plan that covers it is linked.
 Memory Shard needs a Pro or Max plan.
 See [Memory Shard](/guides/memory-shard#where-the-index-is-built).
+
+<Frame caption="Memory Shard before its first index is built">
+  <img src="/images/4.0/memory-shard.png" alt="The Memory Shard window headed Memory index, everything you keep condensed, with the setup card explaining that it reads what the box already remembers and turns it into something the assistant can search." />
+</Frame>
 
 ### Discord: paste the token, and that is all
 
