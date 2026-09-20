@@ -486,6 +486,32 @@ h6 {
   min-width: 0;
 }
 
+/* The control a portrait phone's pickers fold behind, and the line that keeps
+ * their answer readable while they are folded (TASK-1003). Both only ever
+ * render on a portrait phone; the row is untouched anywhere else. */
+.chat-composer-options-toggle {
+  border: none;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.chat-pill-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  color: rgba(255, 255, 255, 0.72);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .chat-header-pills {
   display: flex;
   align-items: center;
@@ -2290,6 +2316,15 @@ input[type="range"].appearance-none::-moz-range-track {
 [data-chat-mobile] .chat-composer-row > button {
   width: 36px !important;
   height: 40px !important;
+  border-radius: 12px !important;
+}
+/* The fold control is the one button in this row a thumb hits every session,
+ * so it gets the full 44px target the primary row's buttons get rather than
+ * the 36x40 the settings row uses. More specific than the rule above, so the
+ * !important widths there do not win. */
+[data-chat-mobile] .chat-composer-row > button.chat-composer-options-toggle {
+  width: 44px !important;
+  height: 44px !important;
   border-radius: 12px !important;
 }
 [data-chat-mobile] .chat-composer-tail { flex: 1 1 0; min-width: 0; }
