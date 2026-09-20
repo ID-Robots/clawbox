@@ -6,6 +6,10 @@ summary: "Symptom-first fixes for ClawBox issues — connection, login, updates,
 
 Find your symptom below. Each section starts with the fastest checks and escalates to deeper fixes — run them in order. Commands marked **over SSH** are typed after connecting with `ssh clawbox@YOUR_BOX_IP` (your box password).
 
+<Frame caption="Settings → System, the first place to look when the box is behaving oddly">
+  <img src="/images/4.0/settings-system.png" alt="The System settings panel: device uptime, hostname, operating system, kernel and architecture, with CPU, memory and disk meters below." />
+</Frame>
+
 <Tip>
 **Fast triage:** Is the box reachable at all? → [Can't reach the ClawBox](#i-cant-reach-the-clawbox). Reachable but login fails? → [Browser rejects my password](#the-browser-rejects-my-password-but-ssh-accepts-it). Logged in but AI errors? → [AI provider errors](#ai-provider-errors-401-incorrect-api-key). Update problems? → [Updates](#updates-say-up-to-date-but-the-version-is-old).
 </Tip>
@@ -101,7 +105,7 @@ There is **no separate admin password** — the browser login uses the same syst
 
 ## Updates say "up to date" but the version is old
 
-The updater only offers a release when the device's code history matches the official release line. A box whose code was modified locally (committed changes — e.g. by an on-box agent or manual edits) **silently stops seeing updates** on v3.1.4 and earlier.
+The updater only offers a release when the device's code history matches the official release line. A box whose code was modified locally (committed changes, for example by an on-box agent or by hand) **stops seeing updates** until that divergence is resolved.
 
 <AccordionGroup>
   <Accordion title="Check whether the device has diverged (over SSH)">
