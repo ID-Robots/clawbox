@@ -67,13 +67,41 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 <p align="center"><sub><em>A real session on a box: the assistant says what it can do here, with the provider, model and reasoning-effort pills under the composer — change any of them mid-conversation, no restart.</em></sub></p>
 
+---
+
+## ✨ New in 4.0
+
+| | |
+|---|---|
+| 💻 **Coding Agent** | Hand a whole task to a headless Claude Code run on the box. It works in a git worktree copy of your project, opens a **pull request** with `gh`, then runs an **automatic adversarial review pass** over its own diff. Runs keep going in the background and you can **steer one mid-flight** by sending it a message. Needs a Pro or Max plan. |
+| 🔑 **Several Anthropic accounts** | **Settings → Providers → Anthropic accounts** holds several Claude Pro/Max sign-ins and API keys in the order you choose. When a coding run hits one account's usage limit it moves to the next and carries on in the same session; if all are limited it waits and resumes at the first reset. |
+| 🌐 **A hostname that stays** | A provisioned box runs a **named** Cloudflare tunnel at `<boxHandle>.clawbox.tech` — the same address every time, instead of a fresh random URL per restart. No Cloudflare account needed; the credential arrives over the portal heartbeat, and a quick `*.trycloudflare.com` tunnel is still the fallback. |
+| 🧠 **Memory Shard** | Your notes, past conversations and folders of your own documents, indexed and searchable by the assistant. Its own desktop app now, on **both** editions, and the index is built in the ClawBox AI cloud by default. Needs a Pro or Max plan. |
+| 📱 **Chat that fits a phone** | A phone opens straight into the chat, with a thumb-sized microphone beside the text box and the provider, model and reasoning pickers folded behind one control so the composer stays one row. |
+| 📊 **Progress card in chat** | A long task reports its steps in the chat as it goes — what is done, what is running, and the agent's own note on the current step. |
+| 🔁 **Switch model mid-chat** | Provider, model and reasoning effort are pills under the message box. Picking another applies to the running agent, with nothing restarted. |
+| 🖥️ **Local AI is one inventory** | **Settings → Local AI** lists every model that can run on the box with Install, Enable and Uninstall on each row. On OpenClaw and dual, **Local-only mode** routes everything to the box and switches every cloud provider off. |
+
+<p align="center">
+  <img src="docs-site/images/4.0/coding-agent-run.png" alt="A Coding Agent run on the ClawBox desktop, showing its progress, changed files and the pull request it opened" width="920" />
+</p>
+
+<p align="center">
+  <img src="docs-site/images/4.0/remote-access.png" alt="Settings, Remote Control: the box's persistent clawbox.tech hostname and the tunnel state" width="440" />
+  <img src="docs-site/images/4.0/mobile-chat.png" alt="ClawBox chat on a phone, with the thumb-sized microphone beside the text box" width="440" />
+</p>
+
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
+
+---
+
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
 | 🧙 **5-minute setup** | Guided wizard: WiFi → updates → password → AI provider → messaging → done |
 | 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, system tray and a desktop mascot |
-| 🤖 **AI-controlled OS** | 80+ MCP tools let the AI agent operate the entire device |
+| 🤖 **AI-controlled OS** | 77 MCP tools on the OpenClaw edition (66 on Hermes) let the AI agent operate the entire device |
 | 🔒 **Local-first** | Your data stays on the box; no telemetry, no data collection. Cloud AI only if you opt in |
 | 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude / GPT / Gemini with **your own key or a subscription you already pay for**, OpenRouter, or models that run on the box |
 | 🔁 **Switch model mid-chat** | Provider, model and reasoning effort are pills under the composer, hot-applied with no gateway restart |
@@ -81,8 +109,10 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
 | 💬 **Multi-platform** | Telegram, Discord, WhatsApp and email — all guided in Settings — plus the built-in web chat |
 | 🗣️ **Voice in and out** | Speak to it, and have replies read back; the voice runs in the cloud or on the box |
-| 💻 **Built-in apps** | Terminal, file manager, remote desktop, app store or Hermes Skills, AI chat, Memory Shard, ClawKeep backups |
-| 🛠️ **Code assistant** | AI builds and deploys desktop webapps through iterative coding |
+| 💻 **Built-in apps** | Terminal, Coding Agent, file manager, remote desktop, app store or Hermes Skills, AI chat, Memory Shard, ClawKeep backups |
+| 🛠️ **Coding Agent** | Delegate a whole task to a headless Claude Code run: it works in a copy of your project, opens a pull request and reviews its own diff |
+| 🌐 **Reachable from anywhere** | A named Cloudflare tunnel gives the box a persistent `<boxHandle>.clawbox.tech` address, with a quick tunnel as fallback |
+| 🗄️ **Backups** | ClawKeep encrypts a snapshot on the device and uploads it to Cloudflare R2 on a daily timer, with restore from the UI |
 | ⚡ **Always-on** | 7–15 W power. Runs 24/7 for ~€39/year in electricity |
 
 <table>
@@ -268,9 +298,19 @@ Full documentation: **[editions](https://docs.clawbox.com/editions/overview)** �
 
 **Layer 3 — Desktop environment.** A Chrome OS-style desktop served from the device — the built-in apps above in draggable windows, with taskbar, system tray, a desktop mascot that opens the chat panel, and a responsive mobile layout. The terminal is xterm.js over a WebSocket PTY; remote desktop is noVNC.
 
-**Layer 4 — AI agent integration.** The agent operates the device through MCP tools — shell, files, real-browser control, app installs, system power, preferences, email drafts you approve, picture and audio generation, and a code assistant that builds and deploys desktop webapps. The `clawbox-cli.ts` wrapper (run through Bun) exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.com/technical/agent-interface).**
+**Layer 4 — AI agent integration.** The agent operates the device through MCP tools — shell, files, real-browser control, app installs, system power, preferences, email drafts you approve, picture and audio generation, and a code assistant that builds and deploys desktop webapps. It can also hand a whole coding task to the **Coding Agent** and steer that run while it works (`coding_agent_run`, `coding_run_message`). The `clawbox-cli.ts` wrapper (run through Bun) exposes the same surface to shell users. **Full catalog: [Agent Interface](https://docs.clawbox.com/technical/agent-interface).**
 
 **Layer 5 — The cloud your plan covers.** On a box linked to ClawBox AI, speech-to-text, spoken replies and memory embeddings default to the service the plan already pays for instead of engines on the device — on **every** edition; the engines stay the fallback and stay selectable, and a choice made by hand is never overwritten. On the edition where ClawBox owns the memory index itself, the index talks to two addresses only, checked per request: the loopback embedder proxy on the device, or this box's own ClawBox AI endpoint. The matrix is in [AI Providers](https://docs.clawbox.com/technical/ai-providers).
+
+**Layer 6 — Reaching the box from outside.** **Settings → Remote Control** starts
+`clawbox-tunnel.service`. A provisioned box runs a **named** Cloudflare tunnel and
+answers on the same `<boxHandle>.clawbox.tech` address every time; the credential
+arrives over the portal heartbeat and is written to `data/cloudflared/named-tunnel`
+with mode `0600`. With no credential, a refused token, or a named run that dies
+inside 60 seconds, it falls back to a Cloudflare **quick** tunnel and a random
+`*.trycloudflare.com` URL. `data/cloudflared/tunnel.mode` records which one is
+running. On your own network `clawbox.local`, the bare hostname, a Tailscale
+`.ts.net` name or a private LAN IP all work without any tunnel.
 
 ---
 
@@ -286,13 +326,16 @@ Browser (http://<box-ip>)
   │     ├── /setup          → Setup wizard (React SPA)
   │     ├── /login          → Authentication
   │     ├── /               → Desktop environment (post-setup)
-  │     ├── /setup-api/*    → 200+ API routes (system, files, code, browser, …)
+  │     ├── /setup-api/*    → 217 API routes (system, files, coding agent, browser, …)
   │     ├── /api/*          → Proxy to OpenClaw gateway
-  │     └── WebSocket       → Proxy to gateway + terminal PTY
+  │     └── WebSocket       → Proxy to gateway + terminal PTY + noVNC
   │
   ├── Port 3006: Terminal WebSocket PTY server                   ← closed to the LAN;
   │        unauthenticated if reached directly, so it is only served through the
   │        session-gated /terminal-ws proxy on port 80
+  │
+  ├── Port 6080: noVNC WebSocket (remote desktop)                ← closed to the LAN;
+  │        reached through the /novnc-ws proxy on port 80
   │
   ├── Port 18789: OpenClaw Gateway (token-gated)                 ← open on the LAN;
   │        all user traffic still goes through port 80
@@ -327,8 +370,11 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 | **Language** | TypeScript 5 |
 | **Runtime & tooling** | Node.js 24 (production), Bun (dev/build/packages) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) or [Hermes Agent](https://nousresearch.com), via MCP |
-| **Local Models** | llama.cpp (Gemma 4 ships preinstalled) + Ollama · Kokoro TTS · faster-whisper STT · Qwen3 embeddings |
-| **Networking** | NetworkManager (WiFi AP), Avahi (mDNS) |
+| **ClawBox AI** | DeepSeek V4 Flash by default (`deepseek-v4-flash`), V4 Pro on the Max plan |
+| **Local Models** | llama.cpp (Gemma 4 E2B ships preinstalled) + Ollama · Kokoro TTS · faster-whisper STT · Qwen3 embeddings |
+| **Coding Agent** | Headless Claude Code (`claude-ds`) in a git worktree, `gh` for pull requests |
+| **Backups** | ClawKeep (Python) → Cloudflare R2 |
+| **Networking** | NetworkManager (WiFi AP), Avahi (mDNS), cloudflared (named + quick tunnels) |
 | **Testing** | Vitest + Playwright |
 
 Full runtime topology in the [Architecture reference](https://docs.clawbox.com/technical/architecture).
@@ -336,19 +382,26 @@ Full runtime topology in the [Architecture reference](https://docs.clawbox.com/t
 ## 📁 Project Structure
 
 ```text
+├── bench/                  Model benchmark harness (suite, runner, pricing)
+├── clawkeep/               Backup agent (Python) + its systemd units
 ├── config/                 Systemd services, captive-portal DNS
+├── docs/                   Internal specs, benchmarks and handoff notes
 ├── docs-site/              docs.clawbox.com source (Mintlify)
+├── e2e/                    Playwright end-to-end specs
+├── e2e-install/            Full-install end-to-end suite (Docker)
 ├── mcp/                    MCP server + CLI (AI agent interface to the OS)
-├── scripts/                WiFi AP, terminal server, voice/TTS, Jetson tuning
+├── public/                 Static assets (icons, wallpapers, manifest)
+├── scripts/                WiFi AP, terminal server, voice/TTS, tunnels, firewall, Jetson tuning
 ├── src/
-│   ├── app/                Next.js App Router (pages + 200+ API routes)
-│   │   └── setup-api/      WiFi, AI models, local AI, memory, pets, channels, files, browser, code, system
+│   ├── app/                Next.js App Router (pages + 217 API routes)
+│   │   └── setup-api/      WiFi, AI models, local AI, memory, coding agent, pets,
+│   │                       channels, files, browser, portal/tunnel, update, system
 │   ├── components/         Setup wizard, desktop environment, built-in apps
 │   ├── hooks/              Window manager, local model management
-│   ├── lib/                Config, network, auth, OAuth, i18n, updater, chat, harness, code-projects
+│   ├── lib/                Config, network, auth, OAuth, i18n, updater, chat, harness,
+│   │                       coding agent, named tunnel, memory shard, code-projects
 │   ├── tests/              Unit, component and API route tests
 │   └── middleware.ts       Captive portal detection + session auth
-├── clawkeep/               Backup agent
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
 ├── install-x64.sh          x86_64 installer (host preflight, configurable ports)
 └── install.sh              Full system installer (idempotent)
@@ -364,7 +417,9 @@ bun run dev              # Port 3000
 bun run dev:privileged   # Port 80 (requires root)
 bun run build
 bun run lint
-bun run test             # Unit tests (Vitest)
+bun run test             # Unit + component tests (Vitest)
+bun run test:e2e         # End-to-end tests (Playwright)
+bun run check:mcp-tools  # Assert the MCP tool matrix matches mcp/README.md
 ```
 
 ### Environment Variables
@@ -373,11 +428,15 @@ bun run test             # Unit tests (Vitest)
 |---|---|---|
 | `PORT` | `80` | Web server port |
 | `GATEWAY_PORT` | `18789` | OpenClaw gateway port |
+| `TERMINAL_WS_PORT` | `3006` | Terminal WebSocket PTY port |
+| `NOVNC_WS_PORT` | `6080` | noVNC WebSocket port (remote desktop) |
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
 | `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
 | `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Trusted hostnames |
-| `SESSION_SECRET` | Auto-generated | Session cookie signing key |
+| `SESSION_SECRET` | Auto-generated | Session cookie signing key, persisted in `data/.session-secret` |
+| `CLAWBOX_MCP_TOKEN` | Auto-generated | Bearer token the MCP server uses on `/setup-api`, persisted in `data/.mcp-token` |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
+| `LLAMACPP_MODEL` | `gemma4-e2b-it-q4_0` | Bundled local model served by llama.cpp |
 | `CLAWBOX_ROOT` | `/home/clawbox/clawbox` | Project root directory |
 | `CLAWBOX_CONTROL_UI_ORIGINS_FILE` | `/home/clawbox/clawbox/data/control-ui-origins.json` | Extra trusted control UI origins (see below) |
 
@@ -432,7 +491,16 @@ ClawBox is made by **ID Robots Ltd.**, a robotics and AI company based in Plovdi
 No. The hardware is a **one-time purchase (€749)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop, Memory Shard, the Coding Agent and priority support — and you can instead bring your own Claude, GPT, Gemini or OpenRouter key, sign in with a subscription you already pay for, or run entirely on local models with no external account at all.
 
 **Does ClawBox work without internet?**
-Yes, for local models. Gemma 4 ships preinstalled on the box's own llama.cpp, and on the OpenClaw and dual editions **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
+Yes, for local models. **Gemma 4 E2B** (`gemma4-e2b-it-q4_0`, a 3.1 GB Q4_0 build) ships preinstalled on the box's own llama.cpp, and on the OpenClaw and dual editions **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
+
+**Which AI model answers by default?**
+On ClawBox AI it is **DeepSeek V4 Flash** (`deepseek-v4-flash`), with a 1M-token context window. The Max plan adds **DeepSeek V4 Pro** (`deepseek-v4-pro`). You can instead use your own Anthropic, OpenAI, Google or OpenRouter key, sign in with a Claude Pro/Max, ChatGPT Plus/Pro or Google One AI Premium subscription you already pay for, or stay entirely on the box.
+
+**What is the Coding Agent?**
+A headless Claude Code run you hand a whole task to. It works in a git worktree copy of your project (`<project>/.clawbox/worktrees/<runId>`) so it never edits your checkout under you, opens a pull request with `gh`, and then runs an automatic review pass that adversarially reviews its own diff. Runs continue in the background, several can run at once, and you can send a message to one mid-flight to steer it. It needs a Pro or Max plan. Each run keeps its screenshots, test output and a `report.md` in its own evidence folder.
+
+**How do I reach my box from outside my network?**
+Turn on **Settings → Remote Control**. A provisioned box gets a persistent `<boxHandle>.clawbox.tech` address over a named Cloudflare tunnel, so it is the same URL every time. No Cloudflare account is needed. If the named credential is missing or refused, the box falls back to a quick tunnel with a random `*.trycloudflare.com` URL.
 
 **Where do I buy a ClawBox?**
 Only from **[clawbox.com](https://clawbox.com)**. ID Robots ships to 108 countries via DHL Express. Products sold elsewhere under a similar name are not ClawBox and are not covered by our warranty or support.
