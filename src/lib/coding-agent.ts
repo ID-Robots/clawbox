@@ -1328,7 +1328,6 @@ export interface CodingRun {
    */
   reviewRound: number | null;
   /**
-  /**
    * The DELIVERY PIPELINE this run is the build stage of, when it has one.
    *
    * The owner's ask of 2026-09-13: "From prompt -> coding agent -> review ->

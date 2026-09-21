@@ -42,6 +42,19 @@ d("the production build's type-check", () => {
       cwd: REPO,
       encoding: "utf-8",
       maxBuffer: 32 * 1024 * 1024,
+      // HEAP HEADROOM. Checking the WHOLE program is what makes this gate worth
+      // having (see above) and it is also what makes it expensive: tsc peaks
+      // around 2.2 GB of old space on this tree. V8's default ceiling sits
+      // under that, so tsc died on "Ineffective mark-compacts near heap limit"
+      // — SIGABRT, `status` null, no error lines to read — after 42 s, on a box
+      // with 19 GB free. The gate went red without having reported on a single
+      // type, which is the same failure as a gate that is green without
+      // running: it is not measuring types, it is measuring the default heap.
+      // Raised rather than removed, so a genuine runaway still stops.
+      env: {
+        ...process.env,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --max-old-space-size=4096`.trim(),
+      },
     });
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
 
@@ -50,6 +63,13 @@ d("the production build's type-check", () => {
     // in `error` and leaves `status` null — and an empty `output` then has no
     // error lines in it to find.
     expect(result.error).toBeUndefined();
+    // Killed by a signal is the third way to not-run, and the one that actually
+    // happens (OOM). Named here because `status` alone fails as "expected null
+    // not to be null", which says nothing about why.
+    expect(
+      result.signal,
+      `tsc was killed by ${result.signal}; last output: ${output.slice(-400)}`,
+    ).toBeNull();
     expect(result.status).not.toBeNull();
 
     const productErrors = output

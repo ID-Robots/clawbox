@@ -354,12 +354,20 @@ describe("the v4 wallpaper defaults", () => {
       await expect(runBootMigrations([unreadable], s)).resolves.toEqual([]);
       expect(s.values[BOOT_MIGRATIONS_KEY]).toBeUndefined();
 
+      // The same question on the WRITE side, and it needs the same answer: a
+      // migration whose own write failed changed nothing, so marking it done
+      // would strand the box on the old picture for good. The store is held in
+      // a variable here rather than built inline — passing `store()` straight
+      // in left nothing to read the marker back off, so this half of the test
+      // asserted only the return value and never the property in its name.
+      const unwritableStore = store();
       const unwritable = openclawWallpaperDefaultMigration({
         get: async () => PRE_BRAND_WALLPAPER_ID,
         set: async (key: string) => { if (key === WALLPAPER_STORE_KEY) throw new Error("read-only"); },
         harness: device("openclaw"),
       });
-      await expect(runBootMigrations([unwritable], store())).resolves.toEqual([]);
+      await expect(runBootMigrations([unwritable], unwritableStore)).resolves.toEqual([]);
+      expect(unwritableStore.values[BOOT_MIGRATIONS_KEY]).toBeUndefined();
     } finally {
       errors.mockRestore();
     }
