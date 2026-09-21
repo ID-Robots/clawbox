@@ -32,6 +32,44 @@ function sizeInBillions(size: string): number {
   return m[2].toLowerCase() === "m" ? n / 1000 : n;
 }
 
+/** A single HTML tag. Global, so `.replace` takes every one it can see in a pass. */
+const TAG_RE = /<[^>]+>/g;
+/**
+ * Passes before the loop below gives up and takes the delimiters instead.
+ * Each pass that changes the string also shortens it, so a description of any
+ * realistic length converges in one or two; this is a stop, not a budget.
+ */
+const MAX_STRIP_PASSES = 8;
+
+/**
+ * Strip HTML tags from scraped markup until none are left.
+ *
+ * ONE pass is not enough, and the gap is not theoretical: `<<b>p onerror=x>`
+ * has no whole tag at its edges, so a single `.replace(TAG_RE, "")` takes the
+ * inner `<b>` and leaves `<p onerror=x>` — a tag the sanitiser BUILT out of
+ * the pieces either side of the one it removed. That is exactly what
+ * `js/incomplete-multi-character-sanitization` describes. Repeating to a fixed
+ * point is what makes the postcondition "no tags remain" instead of "no tags
+ * that were already whole remain".
+ *
+ * Only the DESCRIPTION goes through here. The pull-count extraction below
+ * replaces tags with a SPACE rather than nothing, on purpose — it needs the
+ * word boundary between `3.9M` and `Pulls` — and a space between the pieces
+ * is itself what stops them rejoining, so that one pass is complete.
+ */
+function stripTags(html: string): string {
+  let out = html;
+  for (let pass = 0; pass < MAX_STRIP_PASSES; pass += 1) {
+    const next = out.replace(TAG_RE, "");
+    if (next === out) return out;
+    out = next;
+  }
+  // Still finding tags after the cap — a pathological input. Take the
+  // delimiters themselves, so nothing that could be read as markup leaves
+  // this function whatever the shape was.
+  return out.replace(/[<>]/g, "");
+}
+
 // WARNING: This function scrapes HTML from ollama.com. It is inherently fragile
 // and may break if Ollama changes their page structure. Any field extraction
 // (description, pulls, tags, sizes) should fail gracefully — only the model
@@ -61,9 +99,7 @@ function parseSearchResults(html: string): SearchResult[] {
 
     try {
       const descMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
-      description = descMatch
-        ? descMatch[1].replace(/<[^>]+>/g, "").trim()
-        : "";
+      description = descMatch ? stripTags(descMatch[1]).trim() : "";
     } catch { /* keep default */ }
 
     try {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { logSafe } from "@/lib/log-safe";
 import { bodyWouldEnable } from "@/lib/paid-plan-gate";
 import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
 import {
@@ -326,15 +327,22 @@ export async function POST(request: Request) {
     }
     if (hasCompletionAttempts) {
       const saved = await setCompletionAttempts(fields.completionAttempts);
-      console.error(`[coding-agent] attempts at a run's deliverable set to ${saved} by the owner`);
+      // `saved` is a whole number the setter validated, so it can carry no line
+      // break — but it is the REQUEST's value that decided it, and the log
+      // sanitiser is what says so at the point the record is written.
+      console.error(`[coding-agent] attempts at a run's deliverable set to ${logSafe(String(saved))} by the owner`);
     }
     if (hasMaxParallelRuns) {
       await setMaxParallelRuns(fields.maxParallelRuns);
       // The number is deliberately NOT in the line. It is a whole number
       // between 1 and 4 by the time it is saved — the setter throws `invalid`
-      // for anything else — but CodeQL cannot see that, and it does not
-      // recognise `logSafe` as a sanitiser either, so `js/log-injection`
-      // stands over any shape that carries the request's value into the log.
+      // for anything else — but CodeQL could not see that, and at the time
+      // this was written it did not read `logSafe` as a sanitiser either, so
+      // `js/log-injection` stood over any shape that carried the request's
+      // value into the log. (TASK-1014 gave `logSafe` one literal pass per
+      // line break, which the scanner CAN read, so the line above this block
+      // now sanitises rather than omits; this one is left as it is because the
+      // saved number adds nothing the re-read status does not already carry.)
       // The answer this route returns is the re-read status, which says the
       // saved number, and `data/config.json` holds it; the log line is here to
       // record that the owner changed it, which it still does.

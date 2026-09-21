@@ -3,6 +3,7 @@ import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { cancelDeviceLogin, pollDeviceLogin, startDeviceLogin } from "@/lib/coding-github";
 import { noteGitHubAccountChanged } from "@/lib/project-import";
+import { logSafe } from "@/lib/log-safe";
 
 export const dynamic = "force-dynamic";
 
@@ -42,18 +43,34 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const action = typeof body === "object" && body !== null && !Array.isArray(body)
+  const requested = typeof body === "object" && body !== null && !Array.isArray(body)
     ? (body as { action?: unknown }).action
     : undefined;
 
+  // The verb is drawn from the ALLOW-LIST, not compared against it.
+  //
+  // Each of the three arms below starts, advances or cancels a device flow
+  // that ends in this box holding somebody's GitHub credential, so the value
+  // that chooses between them must be one of three known literals and not
+  // whatever the body carried. Deciding that once, here, also means an
+  // unknown verb is refused before any of them runs rather than after two
+  // failed comparisons — and `verb` from this point on is a literal of this
+  // module's own, which is what makes the dispatch below readable as a closed
+  // set by a person and by the scanner (`js/user-controlled-bypass`).
+  const ACTIONS = ["start", "poll", "cancel"] as const;
+  const verb = ACTIONS.find((candidate) => candidate === requested);
+  if (!verb) {
+    return NextResponse.json({ error: `Unknown action: ${logSafe(String(requested))}` }, { status: 400 });
+  }
+
   try {
-    if (action === "start") {
+    if (verb === "start") {
       const out = await startDeviceLogin();
       if ("error" in out) return NextResponse.json(out, { status: 503 });
       console.error("[coding-agent] GitHub device login started by the owner");
       return NextResponse.json(out);
     }
-    if (action === "poll") {
+    if (verb === "poll") {
       const out = await pollDeviceLogin();
       if (out.status === "connected") {
         // A listing that is out right now was started for whoever WAS signed
@@ -63,11 +80,8 @@ export async function POST(request: Request) {
       }
       return NextResponse.json(out);
     }
-    if (action === "cancel") {
-      cancelDeviceLogin();
-      return NextResponse.json({ ok: true });
-    }
-    return NextResponse.json({ error: `Unknown action: ${String(action)}` }, { status: 400 });
+    cancelDeviceLogin();
+    return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "The GitHub login failed" },

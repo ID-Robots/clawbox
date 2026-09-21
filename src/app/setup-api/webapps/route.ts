@@ -16,6 +16,7 @@ import {
 import { listenerOwnedBy, listenerRefusal, projectFolderFor, registerServerApp, serverAppStubHtml } from "@/lib/app-proxy";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { createSerialLock } from "@/lib/serial-lock";
+import { isReservedAppId } from "@/lib/webapp-registry";
 import { WEBAPP_DOCUMENT_CSP } from "@/lib/webapp-sandbox";
 
 /**
@@ -210,7 +211,12 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { appId, html, name, color, icon } = body;
 
-    if (!appId || !APP_ID_RE.test(appId)) {
+    // `APP_ID_RE` admits `__proto__` — every character of it is in
+    // `[A-Za-z0-9_-]` — and the id becomes an object KEY in the desktop
+    // registry. The registry refuses it at its own door, by throwing; asking
+    // here turns that into the 400 it is, rather than the 500 a throw would
+    // reach the handler below as.
+    if (!appId || !APP_ID_RE.test(appId) || isReservedAppId(appId)) {
       return NextResponse.json({ error: "Invalid app ID" }, { status: 400 });
     }
     if (!html || typeof html !== "string") {

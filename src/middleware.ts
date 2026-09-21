@@ -51,10 +51,29 @@ function publicWebappIds(installedMeta: unknown): ReadonlySet<string> {
 let configCache: ConfigSnapshot | null = null;
 
 function readConfigCached(): ConfigSnapshot {
+  // ONE descriptor for the mtime AND the bytes.
+  //
+  // This used to be `statSync(CONFIG_PATH)` followed by a separate
+  // `readFileSync(CONFIG_PATH)` — two lookups of the same NAME, with the
+  // cache key taken from the first and the contents from the second. The
+  // config store writes a temp file and renames it over this path, so a
+  // rename landing between the two calls gives the OLD file's mtime with the
+  // NEW file's contents, and the pair is then cached under that key: the
+  // snapshot stays wrong until some later write moves the mtime again. On a
+  // file that decides `setup_complete`, `password_configured` and the session
+  // generation, a stale cached answer is an auth decision made on the wrong
+  // data. `fstat` on an open handle describes the very inode the bytes are
+  // read from, so the two can no longer disagree.
+  //
+  // Costs open+fstat+close instead of one stat in the steady state — a few
+  // microseconds per request, which is worth a snapshot that cannot be
+  // internally inconsistent.
+  let fd: number | undefined;
   try {
-    const stat = fs.statSync(CONFIG_PATH);
+    fd = fs.openSync(CONFIG_PATH, "r");
+    const stat = fs.fstatSync(fd);
     if (configCache && configCache.mtimeMs === stat.mtimeMs) return configCache;
-    const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+    const raw = fs.readFileSync(fd, "utf-8");
     const parsed = JSON.parse(raw) as {
       setup_complete?: unknown;
       password_configured?: unknown;
@@ -97,6 +116,19 @@ function readConfigCached(): ConfigSnapshot {
       publicWebapps: NO_PUBLIC_WEBAPPS,
     };
     return configCache;
+  } finally {
+    // Every branch above RETURNS — the cache hit, the parsed snapshot, the
+    // failure — so the close belongs here and nowhere else. This runs on the
+    // per-request path: a descriptor left on any one of them exhausts the
+    // process within minutes of ordinary browsing.
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Nothing useful to do about a close that fails, and a middleware that
+        // threw here would 500 every request over it.
+      }
+    }
   }
 }
 
