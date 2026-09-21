@@ -461,13 +461,18 @@ function installDownloadCapture(page: DownloadablePage, ownerRunId?: string | nu
     downloadCounter += 1;
     const target = path.join(ensureArtifactsDir(runId), `download-${String(downloadCounter).padStart(3, "0")}-${safe}`);
     download.saveAs(target)
-      // Both values are already narrow — `runId` matched the run-id pattern and
-      // `safe` was rebuilt out of [A-Za-z0-9._-] on the line above — but the
-      // FILENAME half of `target` came off the wire (a server chooses
-      // `suggestedFilename`), so the value that reaches a log record is passed
-      // through the box's log sanitiser rather than trusted to a rebuild two
-      // lines up. One value, one line.
-      .then(() => console.log(`[Browser] download saved for ${logSafe(runId)}: ${logSafe(target)}`))
+      // `target` says everything this record needs to say, the run included:
+      // the folder in it IS the run, and `artifactsDir` built that folder from
+      // an id REBUILT out of its alphabet by `safeRunId`, not from the
+      // caller's own string. It still goes through the box's log sanitiser,
+      // because the FILENAME half came off the wire — a server chooses
+      // `suggestedFilename`. One value, one line.
+      //
+      // The id is deliberately NOT logged a second time beside it. It said
+      // nothing the path does not, and as the caller's string rather than the
+      // rebuilt one it was the single value at this sink that CodeQL still
+      // traced back to `req.json()` (alert 566, js/log-injection).
+      .then(() => console.log(`[Browser] download saved to ${logSafe(target)}`))
       .catch((err: unknown) => console.warn("[Browser] download not saved:", err instanceof Error ? err.message : err));
   });
 }

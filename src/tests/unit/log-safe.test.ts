@@ -78,10 +78,15 @@ describe("logSafe", () => {
  * straight through both passes.
  *
  * What the scanner does read is one line break per literal, inline at the
- * call. That changes no output — the cases below pin that — and because
+ * call: 567 went to `fixed` on it. (566 did not, and was answered at its own
+ * call site instead — src/app/setup-api/browser/route.ts no longer repeats
+ * the caller's run id beside the rebuilt path it logs.)
+ *
+ * The shape changes no output — the cases below pin that — and because
  * nothing observable distinguishes it from the shapes that failed, it is
  * pinned as source too: folding the pair back into a constant or a class
- * would re-open both alerts while every behavioural test stayed green.
+ * would re-open the alert it retired while every behavioural test stayed
+ * green.
  */
 describe("the line-break pass", () => {
   it("still replaces CR and LF exactly as the control class did", () => {

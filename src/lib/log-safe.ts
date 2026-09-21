@@ -44,10 +44,18 @@ export const LOG_FIELD_MAX_LENGTH = 200;
 // TASK-1014's first attempt spelled the pair as one character class,
 // `/[\r\n]/g`, behind a named constant. That reads to a human exactly like the
 // two passes below and to the scanner like nothing at all — a class is not a
-// constant either — so alerts 566 and 567 stayed open, their taint path
-// stepping straight through both `.replace()` calls. One break per literal is
-// the shape the scanner actually resolves, which is why the pattern is not
-// folded back into a constant or a class however much tidier that would look.
+// constant either — so alerts 566 and 567 both stayed open, their taint path
+// stepping straight through the call. One break per literal, written inline,
+// is a shape the scanner does read: 567 went to `fixed` on it. Hence the
+// pattern is not folded back into a constant or a class, however much tidier
+// that would look.
+//
+// It is not, however, a licence to stop thinking at the call site. The same
+// run left 566 standing over a line that passed BOTH of its values through
+// here, and that one had to be answered where it was written — the browser
+// route now logs the rebuilt path it saved to, instead of repeating the
+// caller's own run id beside it. This helper is the floor for a log record,
+// not the proof of one.
 export function logSafe(value: string, maxLength: number = LOG_FIELD_MAX_LENGTH): string {
   if (value.length <= maxLength) {
     return value
