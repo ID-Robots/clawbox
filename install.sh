@@ -2706,11 +2706,6 @@ run_next_build() {
   return "$rc"
 }
 
-# Stop the setup service, free memory, reinstall, and rebuild — without ever
-# leaving the box with no build at all.
-# `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
-# that a reboot comes next, which decides one thing only: whether the engines
-# freed for the build are started again here or left to systemd.
 # Did the kernel's OOM killer actually take something recently?
 #
 # A SIGKILL on its own does NOT prove it. `systemctl stop`'s timeout,
@@ -2718,11 +2713,23 @@ run_next_build() {
 # — exit 137 — and a sentence that ASSERTS "the device ran out of memory" over
 # any of those sends the owner after a problem they do not have. The kernel
 # says so itself when it was memory, so ask it rather than inferring it.
+#
+# ONE awk, never `grep -q`: grep exits on its FIRST match and SIGPIPEs the
+# producer, and under this script's `pipefail` (line 22) the pipeline then
+# takes the producer's 141 and reads as "no OOM" — precisely when the kill IS
+# in the log and sits early in it, which on a box with a busy kernel log is the
+# normal case. Measured: the grep form loses a match placed ahead of 2,000,000
+# following lines. The same trap run_next_build documents above.
 oom_killer_in_kernel_log() {
   { journalctl -k --since "-15min" --no-pager 2>/dev/null || dmesg 2>/dev/null; } \
-    | grep -qiE 'out of memory: killed process|oom-kill:'
+    | awk 'tolower($0) ~ /out of memory: killed process|oom-kill:/ { hit = 1 } END { exit hit ? 0 : 1 }'
 }
 
+# Stop the setup service, free memory, reinstall, and rebuild — without ever
+# leaving the box with no build at all.
+# `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
+# that a reboot comes next, which decides one thing only: whether the engines
+# freed for the build are started again here or left to systemd.
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"

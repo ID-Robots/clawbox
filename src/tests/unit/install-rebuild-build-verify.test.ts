@@ -623,6 +623,59 @@ describe("do_rebuild verifies the build it produced", () => {
   });
 });
 
+/**
+ * The evidence half of the failure sentence, run for real.
+ *
+ * Everywhere else in this file `oom_killer_in_kernel_log` is STUBBED, so the
+ * shipped body had no coverage at all — and it shipped broken: `grep -q` exits
+ * on its first match and SIGPIPEs the producer, which under install.sh's
+ * `pipefail` makes the pipeline non-zero and reads as "no OOM kill". The match
+ * being EARLY in a long log is what triggers it, which is the normal shape of a
+ * kernel log on a box that went on running afterwards.
+ */
+describe("oom_killer_in_kernel_log does not lose an early match", () => {
+  /** Run the shipped body with the kernel log stubbed to `text`. */
+  function ask(text: string): number | null {
+    const script = [
+      // install.sh's own options — pipefail is the whole point of these cases.
+      "set -euo pipefail",
+      `journalctl() { cat ${JSON.stringify(path.join(sandbox, "kernel.log"))}; }`,
+      "dmesg() { return 1; }",
+      shellFunction("oom_killer_in_kernel_log"),
+      "oom_killer_in_kernel_log",
+    ].join("\n");
+    writeFileSync(path.join(sandbox, "kernel.log"), text, "utf-8");
+    return spawnSync("bash", ["-c", script], { encoding: "utf-8" }).status;
+  }
+
+  const MANY_LINES = Array.from({ length: 50_000 }, (_, i) => `kernel: line ${i}`).join("\n");
+
+  it("finds an OOM record that sits EARLY in a long kernel log", () => {
+    // The regression: a match at the top, with plenty of log after it.
+    expect(ask(`oom-kill: constraint=CONSTRAINT_NONE,nodemask=(null)\n${MANY_LINES}\n`)).toBe(0);
+  });
+
+  it("finds the kernel's other wording too, and at the END of the log", () => {
+    expect(ask(`${MANY_LINES}\nOut of memory: Killed process 4242 (next-build)\n`)).toBe(0);
+  });
+
+  it("answers no for a log that records no OOM kill", () => {
+    // The honest negative is what stops the sentence inventing a cause.
+    expect(ask(`${MANY_LINES}\n`)).toBe(1);
+  });
+
+  it("answers no when the kernel log cannot be read at all", () => {
+    const script = [
+      "set -euo pipefail",
+      "journalctl() { return 1; }",
+      "dmesg() { return 1; }",
+      shellFunction("oom_killer_in_kernel_log"),
+      "oom_killer_in_kernel_log",
+    ].join("\n");
+    expect(spawnSync("bash", ["-c", script], { encoding: "utf-8" }).status).not.toBe(0);
+  });
+});
+
 describe("do_rebuild keeps the box serving when the build fails", () => {
   const restarted = (r: Run) =>
     r.systemctl.filter((l) => /^systemctl (start|restart) clawbox-setup\.service$/.test(l));
