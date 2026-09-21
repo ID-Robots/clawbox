@@ -83,12 +83,12 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🖥️ **Local AI is one inventory** | **Settings → Local AI** lists every model that can run on the box with Install, Enable and Uninstall on each row. On OpenClaw and dual, **Local-only mode** routes everything to the box and switches every cloud provider off. |
 
 <p align="center">
-  <img src="docs-site/images/4.0/coding-agent-run.png" alt="A Coding Agent run on the ClawBox desktop, showing its progress, changed files and the pull request it opened" width="920" />
+  <img src="docs-site/images/4.0/coding-agent-run-detail.png" alt="A Coding Agent run on the ClawBox desktop, showing its progress, changed files and the pull request it opened" width="920" />
 </p>
 
 <p align="center">
-  <img src="docs-site/images/4.0/remote-access.png" alt="Settings, Remote Control: the box's persistent clawbox.tech hostname and the tunnel state" width="440" />
-  <img src="docs-site/images/4.0/mobile-chat.png" alt="ClawBox chat on a phone, with the thumb-sized microphone beside the text box" width="440" />
+  <img src="docs-site/images/4.0/settings-remote-access.png" alt="Settings, Remote Control: the box's persistent clawbox.tech hostname and the tunnel state" width="440" />
+  <img src="docs-site/images/4.0/chat-mobile-portrait.png" alt="ClawBox chat on a phone, with the thumb-sized microphone beside the text box" width="440" />
 </p>
 
 Full detail, and how to upgrade: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.

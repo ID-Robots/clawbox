@@ -38,6 +38,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Ahead of the toolchain, because it needs none of it: a broken image
+      # path is a `test -f` over the docs tree. It is HERE rather than in
+      # docs-deploy.yml because that workflow only runs on push to main — it
+      # publishes, it does not gate — so a PR that repoints an <img> at a name
+      # that does not exist gets no verdict until the images are already broken
+      # on github.com. Three 4.0 screenshots in the README sat that way across
+      # main and beta (TASK-1023). Seconds, and its failure is a list of paths
+      # to fix rather than something a reviewer has to interpret.
+      - name: Doc image paths
+        run: ./scripts/check-doc-images.sh
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.10"
