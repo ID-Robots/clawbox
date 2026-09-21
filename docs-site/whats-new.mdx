@@ -37,8 +37,8 @@ seconds while one is live. The box keeps the last 30 runs: a run that is live, p
 drafted is never dropped, and once there are more than 30 the oldest finished one falls
 off the end.
 
-<Frame caption="Coding Agent on a box that has not set it up yet: it wants a plan on your account first">
-  <img src="/images/4.0/install/coding-agent-setup.png" alt="The Coding Agent window with its switch off, headed Set up the coding agent and explaining that the coding agent hands a whole task to Claude Code running on this box, where it reads and writes files in one folder, runs commands there and reports back. A card below it, Connect your ClawBox account, says the feature needs a ClawBox Pro or Max plan and offers a Connect ClawBox AI button." />
+<Frame caption="A run in progress: the task, the timeline of every file it touches, and what it has spent so far">
+  <img src="/images/4.0/coding-agent-run-live.webp" alt="The Coding Agent window on a run marked Running, titled Build Leads — a full-stack lead tracker with an Apple Notes-style UI. A Tell the agent box takes a correction mid-run, with Pause, Stop and Add to desktop beneath it. A Timeline tab lists each file as it is read, written and edited with a timestamp, beside counters for steps, files changed, duration and tokens, and the model the run is using." />
 </Frame>
 
 ### Runs open pull requests, and review their own work
@@ -83,6 +83,10 @@ steps that are done against the total, says when it last moved, and carries the
 assistant's own note about what it is doing. Fold it away and it stays folded, on every
 chat surface, until you open it again.
 
+<Frame caption="The card a long task keeps in the chat: the step it is on, and what it has spent getting there">
+  <img src="/images/4.0/chat-progress-card.webp" alt="A card in the chat headed Build Leads — a full-stack lead tracker, marked Coding agent working with a token count and an elapsed time, and a View button. Under Live work it shows the command it just ran and the assistant's own notes about checking the page, with the count of tokens, thinking tokens and files touched along the bottom and two screenshots it took." />
+</Frame>
+
 ### A terminal on the box
 
 **Terminal** is a real terminal, not a log viewer. It connects to a shell on the box, so
@@ -91,8 +95,8 @@ right-click menu, and settings for the font and the colours. Where the browser o
 WebGL it draws through the GPU, so the text stays sharp on a high-density screen, and
 where it does not the terminal falls back to drawing in the page.
 
-<Frame caption="The Terminal app, with its own tabs and a shell on the box">
-  <img src="/images/4.0/terminal.png" alt="The Terminal window showing a tab bar reading Terminal 1, a plus button for a new tab, a settings button, and a shell prompt waiting for a command." />
+<Frame caption="The same shell under a coding run: every command it types, and Open in Terminal to take over">
+  <img src="/images/4.0/coding-agent-live-terminal.webp" alt="The Live terminal tab of a coding run, printing the agent's thinking and each command it runs — grep and sed over the framework's own files, then reads and writes in the project folder — with an Open in Terminal button above it and counters for steps, files changed, duration and tokens alongside." />
 </Frame>
 
 ### Steer a run while it is running
@@ -102,6 +106,10 @@ its state, resume it, list the projects it knows about, and send a message into 
 that is already going. So you can change your mind mid-task from the chat, or from
 Telegram, without stopping the run and starting again. The same tool set reads Memory
 Shard, Local AI and your ClawBox AI usage.
+
+<Frame caption="One desktop, one conversation: the chat briefs the run, the Coding Agent window shows it happening">
+  <img src="/images/4.0/desktop-coding-agent-chat.webp" alt="The ClawBox desktop with the Coding Agent window open on a running build, app icons down the left for Settings, Chat, Terminal, Files, ClawKeep, Browser, OpenClaw, Store, Coding Agent and Memory Shard, and the crab mascot on the wallpaper. The chat panel on the right carries the brief the assistant was given, a live card of the files the run is writing, and a task progress list with two steps ticked off." />
+</Frame>
 
 ### Your box keeps one address
 
@@ -166,8 +174,8 @@ the landing surface, with a thumb-sized microphone, a composer that fits a portr
 screen, and a Back button that walks up one level at a time instead of dumping you at the
 start. An installed home-screen app with a touch pointer gets the same treatment.
 
-<Frame caption="The chat in portrait: one composer row, with the pills folded behind a single control">
-  <img src="/images/4.0/chat-mobile-portrait.png" alt="The chat on a phone held upright: the message box, a microphone and a send button on one row, and below them a single control that folds the pickers away beside the line ClawBox · Medium." />
+<Frame caption="The chat in portrait: a run followed from the phone, on one composer row">
+  <img src="/images/4.0/chat-mobile-portrait.webp" alt="The chat open in a phone browser on the box's address: the assistant's replies fill the screen, a Task progress card below them counts five of six steps done with a tick beside each one, and the composer sits on one row — attach, message box, a thumb-sized microphone and send — above a single control that folds the pickers away beside the line ClawBox · Medium." />
 </Frame>
 
 ### Gemma 4 E2B runs on the box
@@ -274,8 +282,8 @@ by itself, with the rebuild that move needs, once a plan that covers it is linke
 Memory Shard needs a Pro or Max plan.
 See [Memory Shard](/guides/memory-shard#where-the-index-is-built).
 
-<Frame caption="Memory Shard before its first index is built">
-  <img src="/images/4.0/memory-shard.png" alt="The Memory Shard window headed Memory index, everything you keep condensed, with the setup card explaining that it reads what the box already remembers and turns it into something the assistant can search." />
+<Frame caption="The memory index on a connected box: embedded in the cloud, rebuilt nightly">
+  <img src="/images/4.0/memory-shard-index.webp" alt="The Memory index card badged Cloud and Healthy, embedding with text-embedding-3-large. Counters read two files, seven chunks, two sources, nothing pending, nothing failed and an index of 14.4 MB, with the last run finished an hour ago by hand in nine seconds. Index now and Full reindex sit above an Automatic indexing switch set to Daily at three in the morning, device-local." />
 </Frame>
 
 ### Discord: paste the token, and that is all
@@ -297,23 +305,3 @@ sign in from the panel again, with the link and the code shown on screen.
 **Settings → Appearance → Mascot Pet** offers the ClawBox crab, which ships with the box
 and works offline, plus a gallery of community pets that download when you pick one.
 Every edition. See [Desktop & appearance](/guides/appearance).
-
-### Installing on your own x64 machine
-
-`install-x64.sh` checks the host before it changes anything: ports already in use,
-services it would replace, desktop services it would take over, and it lets you choose
-the web, gateway and terminal ports. It can leave existing desktop services alone.
-
-### Smaller things
-
-- ClawBox AI chat has no model to choose, so it names the provider and shows no model pill
-  beside it. Its reasoning control starts at **Medium**.
-- A sign-in that restarts the agent now re-points the chats you already have open, so an
-  open conversation cannot keep running on the old model while the pills name the new one.
-- The assistant's own tools grew: it can read and send email you have approved, generate
-  pictures and audio, drive the coding agent, and search Memory Shard on the Hermes
-  edition. See [Agent Interface](/technical/agent-interface).
-- A box reached on a name that is not its own is refused on port 80, which closes a
-  DNS-rebinding gap.
-- An update that dies half way through now resumes instead of leaving the box in a state
-  nobody can describe.
