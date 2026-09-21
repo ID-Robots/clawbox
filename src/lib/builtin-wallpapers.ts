@@ -100,8 +100,19 @@ export const LOBSTER_ORBITAL_WALLPAPER: BuiltinWallpaper = {
   defaultOpacity: 50,
 };
 
+/**
+ * The picture every box started on before either edition had a brand of its
+ * own. Exported as an id because a box that has never chosen since is still
+ * holding it in `wp_id` — see the boot migrations in src/lib/boot-migrations.ts,
+ * which must name it without carrying a second copy of the spelling.
+ */
+export const CLAWBOX_WALLPAPER_ID = "clawbox";
+
+/** The Hermes edition's default, and its brand on every edition that offers it. */
+export const HERMES_WALLPAPER_ID = "hermes";
+
 const CLAWBOX_WALLPAPER: BuiltinWallpaper = {
-  id: "clawbox",
+  id: CLAWBOX_WALLPAPER_ID,
   name: "ClawBox",
   image: "/clawbox-wallpaper.jpeg",
   gradient: "",
@@ -110,7 +121,7 @@ const CLAWBOX_WALLPAPER: BuiltinWallpaper = {
 };
 
 const HERMES_WALLPAPER: BuiltinWallpaper = {
-  id: "hermes",
+  id: HERMES_WALLPAPER_ID,
   name: "Hermes",
   image: "/hermes-wallpaper.jpeg",
   gradient: "",
