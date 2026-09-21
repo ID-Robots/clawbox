@@ -83,6 +83,21 @@ every cloud provider off.
 See [Local AI](/guides/local-ai) for the full inventory, and
 [Hardware](/hardware/clawbox-connect) for what each model can run.
 
+## Reasoning effort
+
+You can control how hard the model thinks before answering, per conversation, from the brain icon in the chat header. More thinking gives better answers on hard problems, and costs more time and tokens.
+
+The picker offers the same four levels on every cloud provider — **Off**, **Low**, **Medium**, **High** — so it works the same way whichever model you choose.
+
+- Every cloud provider — **ClawBox AI, Claude, GPT, Gemini and OpenRouter** — starts at **Medium**, so a fresh session thinks before it answers and you turn the dial *down* rather than up.
+- The **on-device local model** has no reasoning control, so the brain icon does not appear when it is selected.
+
+Your choice is remembered per provider. If you switch to a provider that does not offer your current level, it falls back to that provider's default.
+
+<Note>
+For the technical detail of how model reasoning capability is configured — and why it is set in code rather than by hand — see [AI Providers → Reasoning effort](/technical/ai-providers#reasoning-effort).
+</Note>
+
 ## Switching later
 
 Change provider any time from **Settings → Providers**. Nothing needs restarting and no
