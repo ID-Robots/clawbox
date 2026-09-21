@@ -171,3 +171,62 @@ describe("the report file", () => {
     }
   });
 });
+
+/**
+ * TASK-1014 / CodeQL alert 533 (js/path-injection, ensureArtifactsDir →
+ * fs.mkdirSync).
+ *
+ * The run id is what turns into a directory name, so it is REBUILT out of the
+ * alphabet rather than tested and passed through — the same discipline
+ * safeAppId and safeTranscriptKey apply — and artifactsDir then asserts the
+ * folder it built sits under the evidence root. These pin both halves: a
+ * malicious id never reaches the filesystem, and an ordinary one still does.
+ */
+describe("run id containment", () => {
+  it("rebuilds an ordinary run id unchanged", () => {
+    expect(lib.safeRunId(RUN_ID)).toBe(RUN_ID);
+    expect(lib.safeRunId("run-00000000")).toBe("run-00000000");
+  });
+
+  it.each([
+    ["parent traversal", "run-../../etc"],
+    ["absolute path", "/etc/passwd"],
+    ["separator inside the suffix", "run-ab/cd123"],
+    ["trailing traversal", "run-abc12345/.."],
+    ["a dot segment", "run-....1234"],
+    ["uppercase outside the alphabet", "run-ABC12345"],
+    ["too short", "run-abc1234"],
+    ["too long", "run-abc123456"],
+    ["no prefix", "abc12345"],
+    ["empty", ""],
+    ["a NUL byte", `run-abc1234${String.fromCharCode(0)}`],
+  ])("refuses %s", (_label, bad) => {
+    expect(lib.safeRunId(bad)).toBeNull();
+    expect(() => lib.artifactsDir(bad)).toThrow();
+  });
+
+  it.each([
+    ["a non-string", 12345678],
+    ["null", null],
+    ["an object with a toString", { toString: () => "run-abc12345" }],
+  ])("refuses %s without coercing it", (_label, bad) => {
+    expect(lib.safeRunId(bad)).toBeNull();
+  });
+
+  it("keeps a traversal id out of the filesystem entirely", () => {
+    const escaped = path.join(base, "escaped");
+    expect(() => lib.ensureArtifactsDir(`run-..${path.sep}escaped`)).toThrow();
+    expect(fs.existsSync(escaped)).toBe(false);
+    // …and the normal path still creates the folder, at the mode the store owns.
+    const made = lib.ensureArtifactsDir(RUN_ID);
+    expect(fs.existsSync(made)).toBe(true);
+    expect(made).toBe(path.join(lib.artifactsRoot(), RUN_ID));
+    expect(fs.statSync(made).mode & 0o777).toBe(0o700);
+  });
+
+  it("resolves a good id to a folder under the evidence root and nowhere else", () => {
+    const dir = lib.artifactsDir(RUN_ID);
+    expect(dir.startsWith(path.resolve(lib.artifactsRoot()) + path.sep)).toBe(true);
+    expect(path.basename(dir)).toBe(RUN_ID);
+  });
+});

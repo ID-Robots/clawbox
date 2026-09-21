@@ -14,7 +14,13 @@ vi.mock("@/lib/config-store", () => ({
 // The icon is fire-and-forget and takes 5-15 s against ClawBox AI; this suite is
 // about the preference write. Stubbed so nothing reaches the network, and so a
 // pending generation cannot outlive the test that started it.
-vi.mock("@/lib/webapp-icon", () => ({
+//
+// Only `ensureWebappIcon` is replaced. `safeAppId` — the alphabet rebuild the
+// registry now runs every id through — comes from the REAL module, because a
+// stub of it would be the test asserting against its own copy of the rule
+// rather than the one that ships.
+vi.mock("@/lib/webapp-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/webapp-icon")>()),
   ensureWebappIcon: vi.fn(async () => "skipped" as const),
 }));
 
@@ -139,4 +145,64 @@ describe("registerWebappInPreferences", () => {
     expect(order).toEqual(["read", "write", "read", "write"]);
   });
 
+});
+
+/**
+ * TASK-1014 / CodeQL alert 511 (js/remote-property-injection,
+ * webapp-registry.ts:73).
+ *
+ * The app id is written as an object KEY and read back as one. `safeAppId`
+ * rebuilds it from `[A-Za-z0-9_-]`, which keeps it out of a path — but every
+ * character of `__proto__` is in that alphabet, so the rebuild alone does
+ * nothing to keep it out of a slot on `Object.prototype`. These pin the
+ * refusal, and pin that an ordinary id is still registered unchanged.
+ */
+describe("app id containment", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSetMany.mockResolvedValue(undefined);
+    mockGetAll.mockResolvedValue({
+      "pref:installed_apps": [],
+      "pref:installed_meta": {},
+      "pref:hidden_installed": [],
+    });
+  });
+
+  it.each(["__proto__", "constructor", "prototype"])(
+    "refuses %s, which the alphabet alone would admit",
+    async (reserved) => {
+      await expect(registerWebappInPreferences(reserved, "Nice Try")).rejects.toThrow(/Invalid app id/);
+      // Nothing was written, and nothing was drawn for it either.
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(vi.mocked(ensureWebappIcon)).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["a traversal", "../../etc/passwd"],
+    ["a separator", "apps/evil"],
+    ["an empty id", ""],
+    ["a character outside the alphabet", "app$evil"],
+  ])("refuses %s", async (_label, bad) => {
+    await expect(registerWebappInPreferences(bad, "Nice Try")).rejects.toThrow(/Invalid app id/);
+    expect(mockSetMany).not.toHaveBeenCalled();
+  });
+
+  it("leaves the prototype of the registry untouched after a refusal", async () => {
+    await expect(registerWebappInPreferences("__proto__", "Nice Try")).rejects.toThrow();
+    expect(({} as Record<string, unknown>).name).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "color")).toBe(false);
+  });
+
+  it("still registers an ordinary id, and one using the whole alphabet", async () => {
+    await registerWebappInPreferences("todo-list_2", "Todo");
+    expect(mockSetMany).toHaveBeenCalledTimes(1);
+    const arg = mockSetMany.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg["pref:installed_apps"]).toEqual(["todo-list_2"]);
+    const meta = arg["pref:installed_meta"] as Record<string, { name: string; webappUrl: string }>;
+    // An OWN property under the id, and the default URL still names it.
+    expect(Object.prototype.hasOwnProperty.call(meta, "todo-list_2")).toBe(true);
+    expect(meta["todo-list_2"].name).toBe("Todo");
+    expect(meta["todo-list_2"].webappUrl).toBe("/setup-api/webapps?app=todo-list_2");
+  });
 });

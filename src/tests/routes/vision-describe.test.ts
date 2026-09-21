@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   activeRunId: vi.fn<() => string | null>(() => null),
   activeRunDirectory: vi.fn<() => string | null>(() => null),
   artifactsDir: vi.fn<(id: string) => string>(),
+  getRun: vi.fn<(id: string) => { status: string; directory: string } | undefined>(() => undefined),
 }));
 vi.mock("@/lib/vision-describe", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/vision-describe")>()),
@@ -35,6 +36,7 @@ vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: mocks.hasOwnerSession }
 vi.mock("@/lib/coding-agent", () => ({
   activeRunId: mocks.activeRunId,
   activeRunDirectory: mocks.activeRunDirectory,
+  getRun: mocks.getRun,
 }));
 vi.mock("@/lib/coding-agent-artifacts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent-artifacts")>()),
@@ -71,6 +73,7 @@ beforeEach(async () => {
   mocks.activeRunId.mockReturnValue(null);
   mocks.activeRunDirectory.mockReturnValue(null);
   mocks.artifactsDir.mockImplementation((id) => path.join(base, "artifacts", id));
+  mocks.getRun.mockReturnValue(undefined);
   vi.resetModules();
   POST = (await import("@/app/setup-api/vision/describe/route")).POST;
 });
@@ -226,5 +229,105 @@ describe("the fence", () => {
     mocks.activeRunId.mockReturnValue("run-abc12345");
     mocks.activeRunDirectory.mockReturnValue(path.join(base, "work"));
     expect((await POST(req({ path: png("elsewhere", "photo.png") }))).status).toBe(200);
+  });
+});
+
+/**
+ * TASK-1014 / CodeQL alert 532 (js/path-injection,
+ * vision/describe/route.ts:49).
+ *
+ * `codingRunId` comes off the wire and decides TWO roots the route then
+ * realpaths and grants reads under: the run's working directory, looked up by
+ * that id, and its evidence folder, whose name IS that id. The id was tested
+ * with a regex and the caller's own string passed on; it is REBUILT from the
+ * alphabet now (safeRunId), the same discipline the icon route's safeAppId and
+ * the transcript store's safeTranscriptKey apply — so what reaches `getRun`
+ * and `artifactsDir` is made of the alphabet's characters rather than merely
+ * having matched them.
+ */
+describe("the coding run id that chooses the roots", () => {
+  const RUN_ID = "run-abc12345";
+  let runDir: string;
+
+  beforeEach(() => {
+    // The bearer's fence, not the owner's wide contract: only then is the id
+    // what decides the roots.
+    mocks.hasOwnerSession.mockResolvedValue(false);
+    runDir = path.join(base, "runs", RUN_ID);
+    fs.mkdirSync(runDir, { recursive: true });
+    mocks.getRun.mockImplementation((id) =>
+      id === RUN_ID ? { status: "running", directory: runDir } : undefined,
+    );
+  });
+
+  it("describes a picture inside the named run's working folder", async () => {
+    const img = path.join(runDir, "shot.png");
+    fs.writeFileSync(img, Buffer.from([0x89]));
+    const res = await POST(req({ path: img, codingRunId: RUN_ID }));
+    expect(res.status).toBe(200);
+    expect(mocks.describeImage).toHaveBeenCalled();
+    // The rebuilt id, byte for byte, is what the two root lookups were given.
+    expect(mocks.getRun).toHaveBeenCalledWith(RUN_ID);
+    expect(mocks.artifactsDir).toHaveBeenCalledWith(RUN_ID);
+  });
+
+  it("describes a picture in that run's evidence folder too", async () => {
+    const shot = path.join(base, "artifacts", RUN_ID, "shot-001.png");
+    fs.mkdirSync(path.dirname(shot), { recursive: true });
+    fs.writeFileSync(shot, Buffer.from([0x89]));
+    expect((await POST(req({ path: shot, codingRunId: RUN_ID }))).status).toBe(200);
+  });
+
+  it.each([
+    ["a parent traversal", "run-../../etc"],
+    ["an absolute path", "/etc"],
+    ["a separator in the suffix", "run-ab/cd123"],
+    ["a trailing dot segment", "run-abc12345/.."],
+    ["the wrong case", "run-ABC12345"],
+    ["too short", "run-abc1234"],
+    ["no prefix at all", "../../../etc/passwd"],
+    ["an empty id", ""],
+  ])("refuses %s without letting it reach a lookup or the filesystem", async (_label, bad) => {
+    const res = await POST(req({ path: png("shot.png"), codingRunId: bad }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Coding run is not active" });
+    // Neither root was ever asked for using the caller's string.
+    expect(mocks.getRun).not.toHaveBeenCalled();
+    expect(mocks.artifactsDir).not.toHaveBeenCalled();
+    expect(mocks.describeImage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a number", 12345678],
+    ["an object", { toString: () => "run-abc12345" }],
+    ["an array", ["run-abc12345"]],
+    ["null", null],
+  ])("refuses %s rather than coercing it to an id", async (_label, bad) => {
+    const res = await POST(req({ path: png("shot.png"), codingRunId: bad }));
+    expect(res.status).toBe(400);
+    expect(mocks.getRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a well-formed id whose run is not running", async () => {
+    mocks.getRun.mockReturnValue({ status: "finished", directory: runDir });
+    const res = await POST(req({ path: png("shot.png"), codingRunId: RUN_ID }));
+    expect(res.status).toBe(400);
+    expect(mocks.describeImage).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a file outside the named run's two folders", async () => {
+    const outside = path.join(base, "elsewhere.png");
+    fs.writeFileSync(outside, Buffer.from([0x89]));
+    const res = await POST(req({ path: outside, codingRunId: RUN_ID }));
+    expect(res.status).toBe(403);
+    expect(mocks.describeImage).not.toHaveBeenCalled();
+  });
+
+  it("leaves the owner's wide contract alone", async () => {
+    // A signed-in person at the desktop reads under the Files tree whatever
+    // the body says about runs, so the id must not narrow them by accident.
+    mocks.hasOwnerSession.mockResolvedValue(true);
+    const res = await POST(req({ path: png("anywhere.png"), codingRunId: RUN_ID }));
+    expect(res.status).toBe(200);
   });
 });

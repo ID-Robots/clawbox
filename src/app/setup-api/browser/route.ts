@@ -17,6 +17,7 @@ import { isInside } from "@/lib/file-guard";
 import { isPrivateIp, lookupWithTimeout } from "@/lib/private-address";
 import { chromiumSandboxArgs } from "@/lib/chromium-sandbox";
 import { ensureArtifactsDir } from "@/lib/coding-agent-artifacts";
+import { logSafe } from "@/lib/log-safe";
 import { describeImage } from "@/lib/vision-describe";
 
 const exec = promisify(execFile);
@@ -460,7 +461,13 @@ function installDownloadCapture(page: DownloadablePage, ownerRunId?: string | nu
     downloadCounter += 1;
     const target = path.join(ensureArtifactsDir(runId), `download-${String(downloadCounter).padStart(3, "0")}-${safe}`);
     download.saveAs(target)
-      .then(() => console.log(`[Browser] download saved for ${runId}: ${target}`))
+      // Both values are already narrow — `runId` matched the run-id pattern and
+      // `safe` was rebuilt out of [A-Za-z0-9._-] on the line above — but the
+      // FILENAME half of `target` came off the wire (a server chooses
+      // `suggestedFilename`), so the value that reaches a log record is passed
+      // through the box's log sanitiser rather than trusted to a rebuild two
+      // lines up. One value, one line.
+      .then(() => console.log(`[Browser] download saved for ${logSafe(runId)}: ${logSafe(target)}`))
       .catch((err: unknown) => console.warn("[Browser] download not saved:", err instanceof Error ? err.message : err));
   });
 }

@@ -5,7 +5,7 @@ import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 import { activeRunDirectory, activeRunId, getRun } from "@/lib/coding-agent";
-import { artifactsDir, INLINE_IMAGE_MIME } from "@/lib/coding-agent-artifacts";
+import { artifactsDir, INLINE_IMAGE_MIME, safeRunId } from "@/lib/coding-agent-artifacts";
 import { describeImage, isVisionImageMime, type VisionImageMime } from "@/lib/vision-describe";
 
 export const dynamic = "force-dynamic";
@@ -78,9 +78,19 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  const requestedRunId = body.codingRunId;
-  if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !/^run-[a-z0-9]{8}$/.test(requestedRunId) || getRun(requestedRunId)?.status !== "running")) {
-    return NextResponse.json({ error: "Coding run is not active" }, { status: 400 });
+  // The id is REBUILT from the alphabet (safeRunId, coding-agent-artifacts.ts)
+  // rather than tested with a regex and passed through. Both values it decides
+  // — the run's working directory, from `getRun`, and its evidence folder, from
+  // `artifactsDir` — are realpath'd as roots below, so what reaches the
+  // filesystem must be made of the alphabet's own characters and not the
+  // caller's string. Same discipline as the icon route's `safeAppId`.
+  let requestedRunId: string | undefined;
+  if (body.codingRunId !== undefined) {
+    const safe = safeRunId(body.codingRunId);
+    if (safe === null || getRun(safe)?.status !== "running") {
+      return NextResponse.json({ error: "Coding run is not active" }, { status: 400 });
+    }
+    requestedRunId = safe;
   }
   const given = typeof body.path === "string" ? body.path.trim() : "";
   if (!given || !path.isAbsolute(given)) {
@@ -96,7 +106,7 @@ export async function POST(request: Request) {
   // as typed, before anything touches the disk; the second is on the real
   // file after symlinks are resolved, so a link planted under a root cannot
   // lead out of it. A root itself is a folder, never an image.
-  const { roots, refusal } = await allowedRoots(request, requestedRunId as string | undefined);
+  const { roots, refusal } = await allowedRoots(request, requestedRunId);
   const resolved = path.resolve(given);
   let typed: string | null = null;
   for (const root of roots) {

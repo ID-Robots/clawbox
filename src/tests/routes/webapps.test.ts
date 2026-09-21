@@ -181,6 +181,25 @@ describe("/setup-api/webapps", () => {
       expect(res.status).toBe(400);
     });
 
+    /**
+     * TASK-1014 / CodeQL alert 511 — a reserved id is bad INPUT, not a crash.
+     *
+     * `APP_ID_RE` admits `__proto__`: every character of it is in
+     * `[A-Za-z0-9_-]`. The desktop registry refuses it at its own door by
+     * throwing, which this route's generic handler would turn into a 500, so
+     * the route asks first and answers the 400 that describes what happened.
+     */
+    it.each(["__proto__", "constructor", "prototype"])("refuses the reserved id %s with a 400", async (appId) => {
+      const req = new NextRequest(new URL("http://localhost/setup-api/webapps"), {
+        method: "POST",
+        body: JSON.stringify({ appId, html: "<html></html>", name: "Nice Try" }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Invalid app ID");
+      expect(vi.mocked(deployWebapp)).not.toHaveBeenCalled();
+    });
+
     it("updates an existing webapp when no name is sent", async () => {
       mockStat.mockResolvedValue({} as never);
       const req = new NextRequest(new URL("http://localhost/setup-api/webapps"), {
