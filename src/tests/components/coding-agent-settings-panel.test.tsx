@@ -159,12 +159,6 @@ function stubFetch(
     if (url.startsWith("/setup-api/coding-agent/projects")) {
       return json({ directory: null, projects: [] });
     }
-      return json({
-        mode: "off", repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
-        maxIssuesPerDay: 5, remainingToday: 5,
-        github: { installed: true, connected: false, login: null }, incidents: [],
-      });
-    }
     if (url.startsWith("/setup-api/coding-agent/git")) {
       if (opts.gitThrows) throw new TypeError("Failed to fetch");
       if (opts.gitStatus && opts.gitStatus !== 200) return json({ error: "gh fell over" }, opts.gitStatus);

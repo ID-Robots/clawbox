@@ -112,17 +112,6 @@ function stubDevice(
         loginCommand: "gh auth login",
       });
     }
-        improvementMode = body.mode;
-        improvementAnswered = true;
-      } else if (opts.holdImprovementRead) {
-        await opts.holdImprovementRead;
-      }
-      return json({
-        mode: improvementMode, answered: improvementAnswered, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
-        maxIssuesPerDay: 5, remainingToday: 5,
-        github: { installed: true, connected: false, login: null }, incidents: [],
-      });
-    }
     if (url === "/setup-api/coding-agent/enable") {
       if (opts.settingFails && body && "realBrowser" in body) {
         return json({ error: "Changing the coding agent settings needs a signed-in browser session." }, 403);

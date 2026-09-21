@@ -117,7 +117,6 @@ function stubFetch(
   } = {},
 ) {
   let runs = runsArg;
-  let improvementMode = "off";
   posts = [];
   gitReads = [];
   const projects = {
@@ -225,6 +224,12 @@ function stubFetch(
     }
     if (url === "/setup-api/coding-agent/git" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as { action?: string };
+      posts.push({ url, body });
+      // Create PR: the branch's pull request, opened on GitHub.
+      if (body.action === "pr") return json({ number: 12, url: "https://github.com/yalexx/site/pull/12", existing: false, branch: "clawbox/run-1", base: "master" });
+      // A backup: the folder is pushed, private, to a repo named after it.
+      return json({ repo: "owner/site", created: true });
+    }
     if (url === "/setup-api/coding-agent/git") {
       return json(opts.github ?? { installed: false, connected: false, login: null, loginCommand: "gh auth login" });
     }
@@ -288,17 +293,6 @@ function stubFetch(
       if ("defaultDirectory" in body) directoryPosted = body.defaultDirectory as string | null;
       // The route answers the whole status, re-read after the change.
       return json(payload());
-    }
-      if (init?.method === "POST") {
-        const body = JSON.parse(String(init.body)) as { mode: string };
-        posts.push({ url, body });
-        improvementMode = body.mode;
-      }
-      return json({
-        mode: improvementMode, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
-        maxIssuesPerDay: 5, remainingToday: 5,
-        github: { installed: false, connected: false, login: null }, incidents: [],
-      });
     }
     if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });

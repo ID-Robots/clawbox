@@ -246,9 +246,11 @@ describe("a project that may go", () => {
     await screen.findByTestId("coding-agent-delete-facts");
     fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
     fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
-    // "No secrets went" would otherwise read as "there were none".
+    // "No secrets went" would otherwise read as "there were none". With the
+    // Vercel integration gone there is no link left to name alongside them, so
+    // the dialog has one sentence here and it is about the secrets alone.
     expect((await screen.findByTestId("coding-agent-delete-metadata-kept")).textContent)
-      .toBe(t("codingAgent.delete.metadataKept"));
+      .toBe(t("codingAgent.delete.metadataKeptSecrets"));
   });
 
   it("reports afterwards what the count bound actually took", async () => {
