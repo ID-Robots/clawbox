@@ -214,6 +214,33 @@ export default function PetPicker() {
       <div className="flex items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>pets</span>
         <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t('settings.mascot.pets')}</h3>
+        {/* Where the rest of the pets are.
+
+            It OPENS Petdex rather than installing from it, and the label says
+            so, because "install any of the 4,600" is not a thing this box may
+            do: `pet-curated.ts` is the standing decision — Petdex art carries
+            no blanket licence, ~2,297 of the entries are recognisable fan art
+            of other people's characters, and ClawBox therefore offers the
+            `/curated/` namespace and links out for the rest instead of
+            mirroring the gallery in-product. A button that quietly widened
+            `installPetDirect` past `curatedPet()` would reverse that ruling,
+            not implement a button.
+
+            So this is the same destination the attribution line below already
+            credits, promoted to an affordance an owner can actually find: a
+            real control beside the grid rather than a word inside a paragraph.
+            It adds no outbound service of its own — the browser makes the
+            request, not the box. */}
+        <a
+          href={gallery.galleryUrl || 'https://petdex.dev'}
+          target="_blank"
+          rel="noreferrer noopener"
+          data-testid="pet-more-on-petdex"
+          className="ml-auto flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 transition-colors shrink-0 no-underline"
+        >
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>open_in_new</span>
+          {t('settings.mascot.petMoreOnPetdex')}
+        </a>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-4">{t('settings.mascot.petHint')}</p>
 

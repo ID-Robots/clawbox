@@ -75,7 +75,7 @@ describe("Settings exposes a heading structure and a landmark", () => {
   function serve(harness: "openclaw" | "hermes" = "openclaw") {
     vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined) => {
       const url = String(input ?? "");
-      if (url === "/setup-api/system/stats") return jsonResponse(STATS);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(STATS);
       if (url === "/setup-api/wifi/status") return jsonResponse({ connected: false, ssid: null });
       if (url === "/setup-api/system/hotspot") return jsonResponse({ enabled: false, ssid: null });
       if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });

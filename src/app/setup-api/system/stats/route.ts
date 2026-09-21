@@ -276,8 +276,46 @@ function getSwapUsage(): { used: number; total: number; percent: number } {
   }
 }
 
-export async function GET() {
+/**
+ * GET /setup-api/system/stats
+ *
+ * `?processes=0` and `?perCore=0` leave the busiest-processes lists and the
+ * per-core row out of the answer.
+ *
+ * OPT-OUT, deliberately, not opt-in: every existing reader — the System app,
+ * About, the MCP tools — asks for no parameters and must keep getting the whole
+ * payload it always got. Only the caller that knows it is not going to draw
+ * something says so.
+ *
+ * It exists because Settings → System now keeps both of those blocks behind
+ * their own buttons, collapsed by default, and a collapsed block must not be
+ * paid for every three seconds: `ps aux` is 91% of this route's cost (28.5 ms
+ * on an Orin Nano against 2.8 ms for `df`), and it was being spawned twice a
+ * second across the two panels that poll here for a table nobody had opened.
+ *
+ * The keys are OMITTED rather than sent empty. `processes: []` is a claim — "we
+ * looked and the box is idle" — and this route already uses the empty list to
+ * mean exactly that (a `ps` that failed). Absent means "not asked for", which
+ * is a different fact, and readers already tolerate it: `processesByMemory` has
+ * been optional since it was added.
+ */
+export async function GET(request?: Request) {
   try {
+    // Optional, and read defensively, because this parameter is an
+    // OPTIMISATION and never a requirement: a caller with no readable URL —
+    // a direct `GET()` from a test, anything that invokes the handler without
+    // a Request — must get the whole payload rather than a 500. "Could not
+    // read the query string" can only ever mean "send everything".
+    let wantProcesses = true;
+    let wantPerCore = true;
+    try {
+      const params = new URL(request!.url).searchParams;
+      wantProcesses = params.get("processes") !== "0";
+      wantPerCore = params.get("perCore") !== "0";
+    } catch {
+      // Defaults above stand.
+    }
+
     const cpus = os.cpus();
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
@@ -288,12 +326,17 @@ export async function GET() {
     // promisified execFile shells) so it stays in one Promise.all.
     const cpuUsage = getCpuUsage();
     // Per core, from the same /proc/stat read discipline — no sleep, no spawn.
-    const cpuCores = getCpuCoreUsage();
+    // Skipped entirely when the caller is not drawing it: cheap is not free,
+    // and its delta baseline is its own (`lastCoreSamples`), so not calling it
+    // simply means the first request after the panel is opened has nothing to
+    // diff and answers empty — which is the state this route already documents
+    // and the reader already draws as "no row yet, real figures in 3 s".
+    const cpuCores = wantPerCore ? getCpuCoreUsage() : null;
     const [temp, gpuUsage, storage, processes] = await Promise.all([
       getTemperature(),
       getGpuUsage(),
       getDiskUsage(),
-      getTopProcesses(),
+      wantProcesses ? getTopProcesses() : Promise.resolve(null),
     ]);
 
     const stats = {
@@ -322,7 +365,11 @@ export async function GET() {
         // the box is idle, and never a partly-carried row. Readers draw no
         // per-core row on an empty list; a polling one has real figures on its
         // next 3 s request.
-        perCore: cpuCores,
+        //
+        // `undefined` when the caller asked for no per-core reading, which
+        // JSON.stringify drops — the key is absent rather than an empty row
+        // claiming there was nothing to measure.
+        ...(cpuCores ? { perCore: cpuCores } : {}),
       },
       memory: {
         total: totalMem,
@@ -336,9 +383,11 @@ export async function GET() {
       storage,
       network: getNetworkInterfaces(),
       // `processes` stays the by-CPU list it has always been, so every existing
-      // reader is untouched; the memory ordering arrives beside it.
-      processes: processes.byCpu,
-      processesByMemory: processes.byMemory,
+      // reader is untouched; the memory ordering arrives beside it. Both keys
+      // are absent — not empty — for a caller that asked for neither.
+      ...(processes
+        ? { processes: processes.byCpu, processesByMemory: processes.byMemory }
+        : {}),
       timestamp: Date.now(),
     };
 

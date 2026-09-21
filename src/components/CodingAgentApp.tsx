@@ -1874,7 +1874,12 @@ export default function CodingAgentApp() {
             navLabel={t("codingAgent.breadcrumbLabel")}
             backTestId="coding-agent-settings-back"
           />
-          <div className="mt-3" data-testid="coding-agent-embedded-settings">
+          {/* pb-6 for the same reason coding-agent-run-page carries it: the
+              owner tools are the last thing on this face, and the wrapper's
+              own py-4 left Reset / Test harness / Clear history sitting on
+              the bottom edge of the scroll area. Same scale as the run page,
+              not a new one. */}
+          <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
             <CodingAgentSettingsPanel />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
