@@ -211,9 +211,16 @@ export default function PetPicker() {
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-      <div className="flex items-center gap-2 mb-1">
+      {/* Wraps, and the heading does not. With the link taking the end of this
+          row, a long translated title had nowhere to go but onto two lines:
+          German's "Maskottchen-Begleiter" broke at its own hyphen and left
+          "BEGLEITER" sitting under the button (measured at 430 px). The row
+          gives way instead — the link drops to its own line and the title
+          stays one line — which is what the provider rows already do when
+          their controls stop fitting beside the name. */}
+      <div className="flex flex-wrap items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>pets</span>
-        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t('settings.mascot.pets')}</h3>
+        <h3 className="whitespace-nowrap text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t('settings.mascot.pets')}</h3>
         {/* Where the rest of the pets are.
 
             It OPENS Petdex rather than installing from it, and the label says
