@@ -397,6 +397,40 @@ describe("transcript store — single-descriptor repair and trim", () => {
     expect(rows[rows.length - 1].text.startsWith("39:")).toBe(true);
   });
 
+  /**
+   * The RECORD cap, on a file this process has never counted.
+   *
+   * The count is what decides the trim here — the file is far under the byte
+   * cap — and it used to be derived by opening the path a SECOND time while
+   * the handle that measured the size was still open. A trim renaming the file
+   * between the two answered with one inode's count and another's size, and
+   * then cached that count for every later append.
+   *
+   * It is derived from the open handle now, which also means the trim has one
+   * buffer to work from: `readFile` on a handle carries on from the offset it
+   * left, so a second call would answer "" and rewrite the conversation away
+   * to a single record. That is what the length assertion below would catch.
+   */
+  it("counts a file it has never seen off the handle it measured, and trims on the record cap", async () => {
+    const cap = store.TRANSCRIPT_LIMITS.MAX_RECORDS;
+    // Straight to disk, so no append taught this process the count.
+    fs.mkdirSync(dir(), { recursive: true });
+    const seeded = Array.from({ length: cap + 100 }, (_, i) =>
+      JSON.stringify({ role: "user", text: `seeded ${i}`, timestamp: i }),
+    );
+    fs.writeFileSync(file(), `${seeded.join("\n")}\n`);
+    expect(fs.statSync(file()).size).toBeLessThan(store.TRANSCRIPT_LIMITS.MAX_BYTES);
+
+    await store.appendTranscript({ role: "user", text: "newest", timestamp: 9999 });
+
+    expect(lines().length).toBe(cap);
+    for (const line of lines()) expect(() => JSON.parse(line)).not.toThrow();
+    const rows = await store.readTranscript(cap);
+    // Newest kept, oldest dropped from the front, nothing in between lost.
+    expect(rows[rows.length - 1].text).toBe("newest");
+    expect(rows[0].text).toBe(`seeded ${seeded.length - cap + 1}`);
+  });
+
   it("keeps the record count right across a trim, so the next append still lands", async () => {
     const chunk = "z".repeat(60_000);
     for (let i = 0; i < 40; i++) {

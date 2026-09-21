@@ -346,18 +346,29 @@ async function trimIfOversized(file: string): Promise<void> {
     // process has not seen the file before.
     let records = recordCounts.get(file);
     if (records === undefined) {
-      records = await countRecords(file);
+      // Off the SAME descriptor as the size and the bytes. This used to call
+      // `countRecords(file)`, which opened the path a second time — the very
+      // second lookup of a name this function exists to stop making. A trim
+      // renaming the file between the two answered with a count from one
+      // inode and a size from another, and then CACHED that count for every
+      // later append to reuse. `fstat` does not move the handle's offset, so
+      // this still reads the whole file.
+      raw = await handle.readFile("utf8");
+      records = recordsIn(raw).length;
       recordCounts.set(file, records);
     }
     if (stat.size <= MAX_BYTES && records <= MAX_RECORDS) return;
-    raw = await handle.readFile("utf8");
+    // `readFile` on a handle carries on from the offset it left, so asking a
+    // second time would answer "". Only a cache HIT reaches here still needing
+    // the bytes; the branch above already holds them.
+    if (raw === null) raw = await handle.readFile("utf8");
   } catch {
     return;
   } finally {
     await handle?.close().catch(() => {});
   }
   if (raw === null) return;
-  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+  const lines = recordsIn(raw);
   const kept = lines.slice(-MAX_RECORDS);
   // Newest-last, so dropping from the FRONT is what keeps the recent
   // conversation. Trim by bytes too — 500 records of 64 KB each would still be
@@ -377,11 +388,16 @@ async function trimIfOversized(file: string): Promise<void> {
   recordCounts.set(file, kept.length);
 }
 
-/** Records currently in a transcript, counted off the disk. */
-async function countRecords(file: string): Promise<number> {
-  const raw = await fsp.readFile(file, "utf8").catch(() => null);
-  if (raw === null) return 0;
-  return raw.split("\n").filter((line) => line.trim().length > 0).length;
+/**
+ * A transcript's records: the non-blank lines of its text, oldest first.
+ *
+ * Takes the TEXT, not the path, so the caller decides which descriptor it came
+ * from. That is the whole point: counting the records and trimming them now
+ * share one buffer, and it is the buffer the `fstat` that decided the trim
+ * described.
+ */
+function recordsIn(raw: string): string[] {
+  return raw.split("\n").filter((line) => line.trim().length > 0);
 }
 
 /**
