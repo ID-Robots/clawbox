@@ -302,3 +302,41 @@ describe("PetPicker", () => {
     expect(container.textContent).toContain("settings.mascot.petBuiltin");
   });
 });
+
+/**
+ * Where the rest of the pets are.
+ *
+ * It OPENS Petdex rather than installing from it, and that is the feature, not
+ * a shortfall: `pet-curated.ts` is the standing decision that ClawBox offers
+ * the `/curated/` namespace and links out for everything else, because Petdex
+ * art carries no blanket licence and a large share of the ~4,600 entries are
+ * recognisable fan art. So what is pinned here is that the control is a LINK to
+ * petdex.dev — it must never quietly become a POST that widens the install
+ * path past `curatedPet()`.
+ */
+describe("PetPicker — more pets on Petdex", () => {
+  it("opens the gallery the box was told about, in a new tab, and posts nothing", async () => {
+    stubFetch(galleryPayload());
+    const { getByTestId } = render(<PetPicker />);
+
+    const link = await waitFor(() => getByTestId("pet-more-on-petdex"));
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "https://petdex.dev");
+    expect(link).toHaveAttribute("target", "_blank");
+    // `noopener` matters on a target=_blank to an outside site.
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(link.textContent).toContain("settings.mascot.petMoreOnPetdex");
+
+    // Clicking it installs nothing: no select POST, no widened install path.
+    fireEvent.click(link);
+    expect(selectCalls).toEqual([]);
+  });
+
+  it("falls back to petdex.dev when the box named no gallery", async () => {
+    stubFetch(galleryPayload({ galleryUrl: undefined }));
+    const { getByTestId } = render(<PetPicker />);
+
+    const link = await waitFor(() => getByTestId("pet-more-on-petdex"));
+    expect(link).toHaveAttribute("href", "https://petdex.dev");
+  });
+});

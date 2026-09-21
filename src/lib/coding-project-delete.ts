@@ -78,9 +78,8 @@ import { DATA_DIR } from "@/lib/config-store";
 import { gitIn, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import type { ChildResult } from "@/lib/child-run";
 import { isLive } from "@/lib/coding-agent-status";
-import { getDefaultDirectory, listRuns, projectDirectoryOf, readVercelEnabled, type CodingProjectKind, type CodingRun } from "@/lib/coding-agent";
+import { getDefaultDirectory, listRuns, projectDirectoryOf, type CodingProjectKind, type CodingRun } from "@/lib/coding-agent";
 import { beginProjectRemoval, runStartingIn } from "@/lib/coding-project-removal-lock";
-import { deleteVercelLink, readVercelLink } from "@/lib/vercel-link";
 import { deleteSecretsForScope, listSecrets } from "@/lib/project-secrets";
 
 // ─── What may go wrong ───────────────────────────────────────────────────────
@@ -957,14 +956,6 @@ export interface ProjectDeletePreview {
   size: DirectorySize;
   unsaved: UnsavedWork;
   liveRuns: LiveRunInProject[];
-  /**
-   * Whether this project has a Vercel link that would go with it — and that the
-   * owner can be TOLD about: `false` while the box-wide Vercel integration is
-   * off, whatever is on disk, because the feature is not on that box and no
-   * surface may mention it. The link still goes with the folder (see
-   * `vercelLinkRemoved`).
-   */
-  vercelLinked: boolean;
   /** The names of the project-scoped secrets that would go with it. */
   secretNames: string[];
   /** How many runs in the history worked here. They are KEPT — this is a count, not a warning. */
@@ -1003,12 +994,10 @@ export async function previewProjectDelete(input: { folder: unknown; kind?: unkn
   const roots = await projectRoots();
   const target = await resolveProjectTarget(input, roots);
 
-  const [size, unsaved, secretNames, vercelLink, vercelOn] = await Promise.all([
+  const [size, unsaved, secretNames] = await Promise.all([
     directorySize(target.real),
     unsavedWorkIn(target.real),
     projectSecretNames(target.folder),
-    readLink(target.folder),
-    readVercelEnabled().catch(() => false),
   ]);
   const liveRuns = liveRunsInProject(target);
   const runCount = listRuns().filter((run) => belongsToProject(run, target)).length;
@@ -1021,7 +1010,6 @@ export async function previewProjectDelete(input: { folder: unknown; kind?: unkn
     size,
     unsaved,
     liveRuns,
-    vercelLinked: vercelOn && vercelLink,
     secretNames,
     runCount,
     retentionDays: TRASH_RETENTION_DAYS,
@@ -1058,22 +1046,14 @@ export interface ProjectDeleteOutcome {
   retentionDays: number;
   /** The count bound. See `ProjectDeletePreview.retentionMax`. */
   retentionMax: number;
-  /**
-   * Was a Vercel link the owner was shown taken down with it? `false` while the
-   * box-wide Vercel integration is off — the stored link is still cleared then,
-   * as housekeeping (a link left behind is what a later project of the same
-   * name would inherit the day the flag is switched on), but the preview said
-   * nothing about it and neither does the answer.
-   */
-  vercelLinkRemoved: boolean;
   /** The project-scoped secrets that went with it, by name. */
   secretsRemoved: string[];
   /**
    * The path of a project that still answers to the same scope, when one does —
-   * in which case the secrets and the Vercel link were deliberately LEFT.
+   * in which case the secrets were deliberately LEFT.
    *
    * Null in the ordinary case. When it is not null, `secretsRemoved` is empty
-   * and `vercelLinkRemoved` false because another project is still using them,
+   * because another project is still using them,
    * not because there were none.
    */
   metadataKeptFor: string | null;
@@ -1162,16 +1142,11 @@ export async function deleteProject(input: {
     // complete; the answer then says what did NOT go, rather than claiming it did.
     //
     // AND NOT AT ALL when another project still answers to the same scope: a
-    // folder project and a code project may share a name, the secret store and
-    // the Vercel link are keyed by that name alone, and clearing them here took
+    // folder project and a code project may share a name, the secret store
+    // is keyed by that name alone, and clearing it here took
     // the credentials of a project that is still on disk and possibly mid-run.
     // Moving the removed folder back would not bring them back either.
     const sharedWith = await otherProjectWithSameScope(target, roots);
-    const linkRemoved = sharedWith ? false : await deleteVercelLink(target.folder).catch(() => false);
-    // Reported only where the owner could have seen the link: while the Vercel
-    // integration is off the removal above is housekeeping the answer does not
-    // mention, the same silence the preview kept.
-    const vercelLinkRemoved = linkRemoved && await readVercelEnabled().catch(() => false);
     const secretsRemoved = sharedWith ? [] : await deleteSecretsForScope(target.folder).catch(() => [] as string[]);
     const pruned = await pruneProjectTrash(roots, deletedAt)
       .catch(() => ({ removed: [] as string[], expired: [] as string[], early: [] as string[] }));
@@ -1187,7 +1162,6 @@ export async function deleteProject(input: {
       keptUntil: deletedAt + TRASH_RETENTION_MS,
       retentionDays: TRASH_RETENTION_DAYS,
       retentionMax: MAX_TRASH_ENTRIES,
-      vercelLinkRemoved,
       secretsRemoved,
       metadataKeptFor: sharedWith,
       pruned: pruned.removed,
@@ -1233,8 +1207,8 @@ function assertNobodyWorkingIn(target: ProjectTarget): void {
  * The OTHER project that answers to the same secret scope, if there is one.
  *
  * A folder project and a code project may both be called `shop`, and
- * `projectScopeFor` resolves both to `"shop"` — so the secret store and the
- * Vercel link cannot tell them apart. Answers that project's path, so the
+ * `projectScopeFor` resolves both to `"shop"` — so the secret store cannot
+ * tell them apart. Answers that project's path, so the
  * removal can say WHY it left the credentials alone.
  */
 async function otherProjectWithSameScope(target: ProjectTarget, roots: ProjectRoots): Promise<string | null> {
@@ -1297,7 +1271,7 @@ function belongsToProject(run: CodingRun, target: Pick<ProjectTarget, "folder" |
  * The project-scoped secret NAMES, for the dialog's "what goes with it" list.
  *
  * Names only — that is all the store ever answers with, and all a dialog needs
- * in order to say "your VERCEL_TOKEN for this project goes too". A store this
+ * in order to say "your DEPLOY_TOKEN for this project goes too". A store this
  * box cannot read answers with none rather than taking the preview down: the
  * dialog's job is to describe the FOLDER, and it can still do that.
  */
@@ -1307,6 +1281,3 @@ async function projectSecretNames(folder: string): Promise<string[]> {
     .catch(() => []);
 }
 
-async function readLink(folder: string): Promise<boolean> {
-  return readVercelLink(folder).then((link) => link !== null).catch(() => false);
-}

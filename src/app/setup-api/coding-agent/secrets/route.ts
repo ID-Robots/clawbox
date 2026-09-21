@@ -124,7 +124,7 @@ const TOO_LONG = "That request is larger than one secret can be.";
  * past the owner gate could have made this appliance hold and parse an
  * arbitrary body before the value-length check downstream ever looked at it
  * (found in review). `readJsonObject` (src/lib/bounded-json.ts) is that fix,
- * shared since the Vercel routes needed the same thing: it checks the declared
+ * shared since the other coding-agent routes needed the same thing: it checks the declared
  * length AND meters what actually arrives, which is what a chunked body needs.
  *
  * Answers `"too_long"` rather than null for an oversized body, so the caller

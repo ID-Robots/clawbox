@@ -24,7 +24,6 @@ const setEffort = vi.hoisted(() => vi.fn());
 const setGenerateImages = vi.hoisted(() => vi.fn());
 const setGenerateAudio = vi.hoisted(() => vi.fn());
 const setRealBrowser = vi.hoisted(() => vi.fn());
-const setVercelEnabled = vi.hoisted(() => vi.fn());
 const clearHarnessFault = vi.hoisted(() => vi.fn());
 const setAutoMerge = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
@@ -35,7 +34,6 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   setGenerateImages,
   setGenerateAudio,
   setRealBrowser,
-  setVercelEnabled,
   clearHarnessFault,
   // setReviewRounds is deliberately left REAL: its range refusal is the thing
   // under test below, and a mock would pin the route's plumbing instead.
@@ -94,7 +92,6 @@ beforeEach(async () => {
   setGenerateImages.mockResolvedValue(false);
   setGenerateAudio.mockResolvedValue(false);
   setRealBrowser.mockResolvedValue(false);
-  setVercelEnabled.mockResolvedValue(false);
   clearHarnessFault.mockResolvedValue(undefined);
   const route = await import("@/app/setup-api/coding-agent/enable/route");
   POST = route.POST;
@@ -135,19 +132,6 @@ describe("who may flip the switch", () => {
     expect(setEnabled).toHaveBeenCalledWith(false);
   });
 
-  it("takes { vercelEnabled } from the owner and refuses it to the agent", async () => {
-    // The box-wide Vercel integration. Same fence as every other switch here:
-    // a tool that could turn it on would make the owner's answer temporary.
-    const refused = await POST(request({ bearer: "any-valid-looking-token-value", body: { vercelEnabled: true } }));
-    expect(refused.status).toBe(403);
-    expect(setVercelEnabled).not.toHaveBeenCalled();
-
-    for (const on of [true, false]) {
-      const res = await POST(request({ cookie: ownerCookie(), body: { vercelEnabled: on } }));
-      expect(res.status).toBe(200);
-      expect(setVercelEnabled).toHaveBeenLastCalledWith(on);
-    }
-  });
 });
 
 describe("the body", () => {
@@ -417,12 +401,6 @@ describe("telling the running agent", () => {
       .mockResolvedValueOnce({ ...STATUS, ready: after });
   }
 
-  /** The same, for the box-wide Vercel switch: it gates the two deploy tools. */
-  function vercelGoes(before: boolean, after: boolean): void {
-    getStatus
-      .mockResolvedValueOnce({ ...STATUS, vercelEnabled: before })
-      .mockResolvedValueOnce({ ...STATUS, vercelEnabled: after });
-  }
 
   it("reloads the MCP servers when the switch makes the family available", async () => {
     readyGoes(false, true);
@@ -488,37 +466,6 @@ describe("telling the running agent", () => {
     // siblings exist whichever Chromium answers them.
     await POST(request({ cookie: ownerCookie(), body: { realBrowser: false } }));
     expect(reloadMcp).not.toHaveBeenCalled();
-  });
-
-  it("reloads when the Vercel switch makes the deploy tools appear, and when it takes them away", async () => {
-    // coding_deploy_preview and coding_deploy_production are registered behind
-    // the same one-shot startup probe, so this switch has to reach the running
-    // child exactly as the agent's own does.
-    vercelGoes(false, true);
-    expect((await POST(request({ cookie: ownerCookie(), body: { vercelEnabled: true } }))).status).toBe(200);
-    expect(reloadMcp).toHaveBeenCalledTimes(1);
-
-    reloadMcp.mockClear();
-    vercelGoes(true, false);
-    expect((await POST(request({ cookie: ownerCookie(), body: { vercelEnabled: false } }))).status).toBe(200);
-    expect(reloadMcp).toHaveBeenCalledTimes(1);
-  });
-
-  it("does NOT reload when the Vercel switch was written to the value it already had", async () => {
-    vercelGoes(true, true);
-    expect((await POST(request({ cookie: ownerCookie(), body: { vercelEnabled: true } }))).status).toBe(200);
-    expect(reloadMcp).not.toHaveBeenCalled();
-  });
-
-  it("pays for ONE reload when a request moves both facts at once", async () => {
-    // A reload rebuilds every family's tool list, so the switch and the Vercel
-    // integration moving together must not cost two prompt-cache invalidations.
-    getStatus
-      .mockResolvedValueOnce({ ...STATUS, ready: false, vercelEnabled: false })
-      .mockResolvedValueOnce({ ...STATUS, ready: true, vercelEnabled: true });
-    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true, vercelEnabled: true } }));
-    expect(res.status).toBe(200);
-    expect(reloadMcp).toHaveBeenCalledTimes(1);
   });
 
   it("still saves the switch when the reload is refused", async () => {

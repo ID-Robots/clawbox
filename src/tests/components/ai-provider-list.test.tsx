@@ -35,14 +35,25 @@ const ROWS = [
 ];
 
 let posts: { url: string; body: unknown }[] = [];
+/** How many times the ClawBox AI usage card has asked the portal for figures.
+ *  Zero is the contract while its panel is shut. */
+let usageCalls = 0;
 
 /** The box's answers to every call this list makes, in one stub. */
 function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[]; unrunnable?: string[] } = {}) {
   posts = [];
+  usageCalls = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    // The usage card's own read, now that it hangs off the ClawBox AI row.
+    // Answered as unreachable: this suite is about the disclosure, not about
+    // the meters, which `clawbox-ai-usage-card.test.tsx` owns.
+    if (url.startsWith("/setup-api/ai-models/usage")) {
+      usageCalls += 1;
+      return json({ available: false, reason: "unreachable" });
+    }
     // The I18nProvider's one read: which language the owner picked.
     if (url.startsWith("/setup-api/preferences")) {
       return json(opts.locale ? { ui_language: opts.locale } : {});
@@ -515,5 +526,88 @@ describe("a provider the box can run no model from", () => {
 
     await waitFor(() => expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument());
     expect(screen.getByTestId("ai-provider-anthropic")).toBeInTheDocument();
+  });
+});
+
+/**
+ * The ClawBox AI allowances, which used to be a card of their own further down
+ * Settings → Providers, always open, polling the portal every minute for
+ * anyone who opened the page for any reason at all. They now hang off the
+ * ClawBox AI row behind a button, shut until asked for (owner's ask).
+ *
+ * Shut means UNMOUNTED, not hidden: the card's poll lives in its own effect, so
+ * the only thing that actually stops it is not rendering it. That is what
+ * `usageCalls` pins.
+ */
+describe("AiProviderList — the ClawBox AI usage disclosure", () => {
+  it("offers the button on the ClawBox AI row and on no other", async () => {
+    stubFetch();
+    renderList();
+
+    await screen.findByTestId("ai-provider-clawai");
+    const toggle = screen.getByTestId("clawai-usage-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // Inside that row's own control cluster, not floating in the card.
+    expect(screen.getByTestId("ai-provider-controls-clawai")).toContainElement(toggle);
+    expect(screen.getByTestId("ai-provider-controls-openai")).not.toContainElement(toggle);
+  });
+
+  it("is shut on arrival, and the portal is not asked while it is", async () => {
+    stubFetch();
+    renderList();
+
+    await screen.findByTestId("ai-provider-clawai");
+    expect(screen.queryByTestId("clawai-usage-panel")).not.toBeInTheDocument();
+    // The assertion the button exists for.
+    expect(usageCalls).toBe(0);
+  });
+
+  it("mounts the card when opened and drops it again when shut", async () => {
+    stubFetch();
+    renderList();
+
+    const toggle = await screen.findByTestId("clawai-usage-toggle");
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(screen.getByTestId("clawai-usage-panel")).toBeInTheDocument());
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    // The button names the region it opened.
+    expect(toggle).toHaveAttribute("aria-controls", "clawai-usage-panel");
+    await waitFor(() => expect(usageCalls).toBeGreaterThan(0));
+    const asked = usageCalls;
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.queryByTestId("clawai-usage-panel")).not.toBeInTheDocument());
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // Unmounted, so the minute-poll went with it — no further reads.
+    await act(async () => { await Promise.resolve(); });
+    expect(usageCalls).toBe(asked);
+  });
+
+  it("shows neither the row nor the button for a ClawBox AI that is switched off", async () => {
+    // A provider the owner switched off is not being spent, so an allowance
+    // meter beside it would describe a budget nothing is drawing on. The row
+    // is still listed (it holds a credential) and says so; the button is not.
+    stubFetch([
+      { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: false, section: "ai", enabled: false },
+      { id: "openai", label: "OpenAI", state: "connected", isDefault: true, section: "ai", enabled: true },
+    ]);
+    renderList();
+
+    await screen.findByTestId("ai-provider-clawai");
+    expect(screen.queryByTestId("clawai-usage-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clawai-usage-panel")).not.toBeInTheDocument();
+    expect(usageCalls).toBe(0);
+  });
+
+  it("shows neither on a box that holds no ClawBox AI credential at all", async () => {
+    stubFetch([
+      { id: "openai", label: "OpenAI", state: "connected", isDefault: true, section: "ai", enabled: true },
+    ]);
+    renderList();
+
+    await screen.findByTestId("ai-provider-openai");
+    expect(screen.queryByTestId("ai-provider-clawai")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clawai-usage-toggle")).not.toBeInTheDocument();
   });
 });

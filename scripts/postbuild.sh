@@ -37,7 +37,7 @@
 # Why the parked build is in there at all: `src/instrumentation-node.ts:154`
 # resolves `path.join(CONFIG_ROOT, 'scripts', 'terminal-server.mjs')`, and
 # CONFIG_ROOT is read from the environment (`src/lib/config-store.ts:4`), so
-# @vercel/nft cannot resolve it and emits the whole project directory as an
+# Next's dependency tracer cannot resolve it and emits the whole project directory as an
 # asset directory. Reproduced locally on Next 16.3.3: with a build parked
 # beside it, `.next/server/instrumentation.js.nft.json` lists 6186 files of
 # which 4202 are `../../.next-old/**`. `outputFileTracingExcludes` does not

@@ -55,8 +55,8 @@ Two ways to publish:
    branch auto-deploy. (Custom domain / removing Mintlify branding may require a paid
    plan — confirm current Mintlify pricing.)
 
-2. **Self-host the static build.** Run `mint build` and deploy the output to Vercel (the
-   same place clawbox.com lives) behind a `docs.clawbox.com` subdomain. No SaaS fee.
+2. **Self-host the static build.** Run `mint build` and deploy the output to the same
+   static host clawbox.com lives on, behind a `docs.clawbox.com` subdomain. No SaaS fee.
 
 > Decision pending: which hosting path. The content/config is identical either way.
 

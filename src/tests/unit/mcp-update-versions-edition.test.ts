@@ -43,7 +43,6 @@ const ctx = (edition: "openclaw" | "hermes", install: Install = edition): McpCon
   providers: [],
   emailCanRead: false,
   codingAgent: false,
-  codingVercel: false,
   canGenerateImages: true,
 });
 

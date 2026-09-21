@@ -6,7 +6,7 @@
  * It lives here rather than in the browser route because there are now three
  * of them: the window on the owner's screen, the route's own headless one, and
  * the one the delivery pipeline opens to photograph a deployment
- * (./coding-pipeline-verify). The route's own comment already said the point —
+ * (the pipeline's verification). The route's own comment already said the point —
  * "so the two Chromiums on this box are not hardened differently by accident" —
  * and a third copy of the test is how that sentence stops being true.
  *

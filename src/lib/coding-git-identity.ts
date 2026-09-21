@@ -11,8 +11,8 @@
  *
  *     ClawBox Coding Agent <coding-agent@clawbox.local>
  *
- * On a project wired to the Vercel GitHub integration that address fails the
- * deployment check with "Git author must have access to the project on Vercel
+ * On a project wired to a host's GitHub deployment integration that address
+ * fails the deployment check with "Git author must have access to the project
  * to create deployments". The agent's own bookkeeping commits then block the
  * very pull requests it opened — nothing wrong with the code, and no way to
  * make the check pass from the desk.
@@ -112,7 +112,7 @@ export const PROJECT_IMPORT_PLACEHOLDER: CodingGitIdentity = Object.freeze({
  * Every address this box has ever written into a repository's own config on
  * its own initiative — as opposed to one the owner chose.
  *
- * Both belong to nobody, and neither can pass a Vercel deployment check. The
+ * Both belong to nobody, and neither can pass a host's deployment check. The
  * distinction they encode is the whole point of the fallback chain: a value
  * the BOX put in `.git/config` must not be read back as "the project's own
  * identity" and outrank the setting the owner filled in to replace it.

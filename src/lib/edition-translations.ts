@@ -6,7 +6,6 @@ import { localModelsEn } from "./edition-translations/en-local-models";
 import { systemProfileEn } from "./edition-translations/en-system-profile";
 import { codingAgentEn } from "./edition-translations/en-coding-agent";
 import { shellScanEn } from "./edition-translations/en-shell-scan";
-import { improvementEn } from "./edition-translations/en-improvement";
 import { paidGateEn } from "./edition-translations/en-paid-gate";
 import { clawaiUsageEn } from "./edition-translations/en-clawai-usage";
 import { clawaiPitchEn } from "./edition-translations/en-clawai-pitch";
@@ -60,7 +59,6 @@ export const editionEn: Record<string, string> = {
   ...systemProfileEn,
   ...codingAgentEn,
   ...shellScanEn,
-  ...improvementEn,
   ...paidGateEn,
   ...clawaiUsageEn,
   ...clawaiPitchEn,

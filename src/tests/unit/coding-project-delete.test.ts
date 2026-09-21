@@ -18,9 +18,6 @@ vi.mock("@/lib/coding-agent", () => ({
   listRuns,
   getDefaultDirectory,
   projectDirectoryOf: (run: { directory: string; worktree?: { project: string } | null }) => run.worktree?.project ?? run.directory,
-  // The box-wide Vercel switch: ON here, so the link half of the preview and
-  // the answer is exercised; the route suite pins the OFF reading.
-  readVercelEnabled: async () => true,
 }));
 
 type Lib = typeof import("@/lib/coding-project-delete");

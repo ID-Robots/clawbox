@@ -188,19 +188,6 @@ export interface McpContext {
    */
   codingAgent: boolean;
   /**
-   * Whether the owner has the box-wide Vercel integration switched on
-   * (`coding_vercel_enabled`). The two `coding_deploy_*` tools exist only
-   * then, and for the reason `codingAgent` gates its own family: with the
-   * switch off the routes answer 409 on every call, a tool that can only ever
-   * fail opens Hermes' per-server breaker, and that takes EVERY ClawBox tool
-   * offline — not just the two.
-   *
-   * A box that already has a Vercel link is migrated to `true` by the device
-   * (src/lib/coding-agent.ts `migrateVercelEnabled`), so this reads `true`
-   * there without anyone having pressed anything.
-   */
-  codingVercel: boolean;
-  /**
    * Whether this box can actually make a picture — the agent has an image
    * backend, or the box itself has a credential and a route to spend it on.
    *
@@ -289,16 +276,6 @@ async function probeEmailRead(): Promise<boolean> {
 
 interface CodingAgentStatusPayload {
   enabled?: boolean;
-  /**
-   * The owner's box-wide Vercel switch. Absent on a server that predates it,
-   * where the honest answer is FALSE: the two deploy tools would be registered
-   * against routes that know nothing about a switch — which is the old
-   * behaviour — but reading an absent field as `true` is the one direction
-   * that could turn a box the owner never asked into one with the tools. The
-   * device migrates a box that was already deploying, so nothing that worked
-   * stops working.
-   */
-  vercelEnabled?: boolean;
   /** enabled AND installed AND connected — the device's own verdict. */
   ready?: boolean;
   readiness?: {
@@ -320,23 +297,14 @@ interface CodingAgentStatusPayload {
  * Same shape as the email probe: an unreachable or older device answers null
  * and the family stays unregistered.
  */
-async function probeCodingAgent(): Promise<{ agent: boolean; vercel: boolean }> {
+async function probeCodingAgent(): Promise<boolean> {
   const status = await apiTry<CodingAgentStatusPayload>("/setup-api/coding-agent/status", { timeoutMs: 3_000 });
-  // ONE read for both facts. They come off the same payload and the server is
-  // the same one; asking twice would double a startup round trip to learn
-  // something it already said.
-  const vercel = status?.vercelEnabled === true;
-  if (status?.enabled !== true) return { agent: false, vercel: false };
+  if (status?.enabled !== true) return false;
   // The switch is the owner's consent and is checked first. What follows is
   // "can this box run at all" — ANY provider where the device answers that,
   // the default's verdict on a server that does not.
   const any = status.readiness?.anyProviderReady;
-  const agent = typeof any === "boolean" ? any : status.ready === true;
-  // The deploy tools sit UNDER the coding agent's own switch: they are part of
-  // that family, they are registered by its registrar, and a box whose owner
-  // has switched the agent off has not asked for tools that push its code to
-  // the internet.
-  return { agent, vercel: agent && vercel };
+  return typeof any === "boolean" ? any : status.ready === true;
 }
 
 interface ChatCapabilitiesBody {
@@ -395,8 +363,7 @@ export async function buildContext(
     probeCodingAgent(),
     probeImageGeneration(),
   ]);
-  const codingAgent = coding.agent;
-  const codingVercel = coding.vercel;
+  const codingAgent = coding;
 
   let providers: string[] = [];
   if (edition === "hermes") {
@@ -424,7 +391,6 @@ export async function buildContext(
     providers,
     emailCanRead,
     codingAgent,
-    codingVercel,
     canGenerateImages,
   };
 }

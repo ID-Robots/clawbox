@@ -14,13 +14,13 @@
  * stage strip, the MCP server imports it to report a stage, and the driver in
  * ./coding-agent imports it to decide what happens next — three consumers that
  * must agree exactly about what "improvement failed" means. The side-effecting
- * halves are ./coding-pipeline-verify (the looking) and the driver (the doing),
+ * halves are the verification (the looking) and the driver (the doing),
  * split the way ./coding-deliverable and ./coding-deliverable-check are split,
  * for the same reason: a client component that imported `fs` fails the build.
  *
  * THE ONE RULE THE WHOLE THING EXISTS FOR. A pipeline is `complete` only when
  * the last verification PASSED. Not when a model said it was done, not when
- * Vercel answered `READY`, and not when a stage could not be checked. Every
+ * a host answered `READY`, and not when a stage could not be checked. Every
  * transition below is written so that the only path to `complete` runs through
  * a verification this box made itself.
  */
@@ -77,8 +77,8 @@ export function isPipelineStageState(value: unknown): value is PipelineStageStat
  * The pipeline as a whole.
  *
  * `blocked` is its own ending and not a kind of `failed`: it means the box
- * could not run a stage because something is not set up (no Vercel project
- * attached, a token it cannot open, no way to check a page), which is the
+ * could not run a stage because something is not set up (no way to deploy the
+ * work, no way to check a page), which is the
  * owner's to fix and says nothing about the work. `failed` means a stage ran
  * and did not pass.
  */
@@ -141,7 +141,7 @@ export interface PipelineStep {
  *
  * `expect` is the hard half: literal strings that must appear in what the
  * deployed page answered. When the caller named none, the screenshot's written
- * description is judged against the task instead (see ./coding-pipeline-verify)
+ * description is judged against the task instead
  * — weaker, and the record says which of the two decided, because "the page
  * contains the word Invoice" and "a model thought the page looked right" are
  * not the same claim and must never be drawn as one.
@@ -161,7 +161,7 @@ export const MAX_VERIFY_PATH_CHARS = 512;
 /**
  * What a verification SAW — the types, here in the pure half.
  *
- * The looking itself is ./coding-pipeline-verify, which cannot be imported by a
+ * The looking itself lives server-side, and cannot be imported by a
  * client component (it reaches for `fs` and Playwright). The run page draws
  * this, so the shape has to live where the page can read it — the same split
  * ./coding-deliverable and ./coding-deliverable-check are written with.
@@ -185,11 +185,11 @@ export interface PipelineVerification {
   reason: string | null;
   /**
    * True when the page could not be CHECKED at all because something is gating
-   * it — today, Vercel's own Deployment Protection login wall.
+   * it — a login wall in front of the deployment, say.
    *
    * Its own fact and not a kind of failure, because the two need opposite
    * things done: a page that is wrong goes back for improvement, while a page
-   * nobody may see is a setting in the owner's Vercel account that no amount of
+   * nobody may see is a setting at the owner's host that no amount of
    * editing this folder fixes. Optional so a record written before this field
    * existed reads as "not blocked", which is what it was.
    */
@@ -303,7 +303,7 @@ export interface PipelineState {
  * How long a pipeline may run, wall clock, from the moment it started.
  *
  * Six hours: a build, a review pass, up to a few improvement laps and two
- * deployments on a Jetson, with room for a slow Vercel queue — and short
+ * deployments on a Jetson, with room for a slow build queue — and short
  * enough that a pipeline whose stage somehow never settles is over by the end
  * of the day rather than polling for a week. Checked at EVERY transition, so a
  * pipeline cannot pass it by standing still.
@@ -429,7 +429,7 @@ export function addEvidence(
  *
  * Written as ONE function taking the current state and an outcome, so every
  * path to an ending is visible in one place and the unit tests can walk them
- * without a run, a deployment or a Vercel account.
+ * without a run, a deployment or an account anywhere.
  *
  * THE ROUTING, AND THE ONE ASYMMETRY IN IT. A preview that will not build, or
  * one that builds and does not show what was asked for, goes back to
@@ -568,10 +568,10 @@ function next(pipeline: PipelineState, stage: PipelineStage, now: number): Pipel
  * outcome — so the pipeline's status stayed `running` for ever, with the run
  * settled and nothing left to move it.
  *
- * Nothing reached it until the box-wide Vercel switch: the only skip the
+ * Nothing reached it until the deploy stages began skipping: the only skip the
  * machine could produce was the review stage's, and review is followed by
- * `deploy_preview`. With the integration off the last four stages skip, and
- * `verify_production` is followed by exactly `complete`.
+ * `deploy_preview`. With no deployment integration the last four stages skip,
+ * and `verify_production` is followed by exactly `complete`.
  */
 function advance(pipeline: PipelineState, stage: PipelineStage, now: number): PipelineTransition {
   const after = afterPass(pipeline, stage);
@@ -927,8 +927,8 @@ export function improvementNudge(input: {
     "",
     "Fix the cause in this folder and commit it. This is your own session: do not start the task over,",
     "and do not redo work that already landed.",
-    "Do not try to deploy, promote or call Vercel yourself — this ClawBox deploys and checks again by itself once you finish.",
-    "If it is not something you can fix from this folder (a missing environment variable on Vercel, a paid feature,",
+    "Do not try to deploy or promote anything yourself — this ClawBox checks again by itself once you finish.",
+    "If it is not something you can fix from this folder (a missing environment variable, a paid feature,",
     "a wrong project setting), do not guess: say exactly what is missing and finish.",
     `This is improvement round ${input.round} of ${input.maxRounds}.`,
   );

@@ -30,8 +30,8 @@ beforeEach(() => _resetRunSecretsForTests());
 
 describe("redactSecrets", () => {
   it("replaces the value with its NAME, which is what the owner can act on", () => {
-    expect(redactSecrets(`VERCEL_TOKEN=${TOKEN}`, [{ name: "VERCEL_TOKEN", value: TOKEN }]))
-      .toBe("VERCEL_TOKEN=<secret:VERCEL_TOKEN>");
+    expect(redactSecrets(`DEPLOY_TOKEN=${TOKEN}`, [{ name: "DEPLOY_TOKEN", value: TOKEN }]))
+      .toBe("DEPLOY_TOKEN=<secret:DEPLOY_TOKEN>");
   });
 
   it("replaces every occurrence, not only the first", () => {

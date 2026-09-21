@@ -104,7 +104,7 @@ These tools are registered when your session starts, and only if the owner had t
 | `coding_agent_resume` | Carry on a paused or gave-up run you started, when the user asks; `message` tells it what it missed. |
 | `coding_agent_stop` | End a run early, only on the user's word. Its files stay. |
 
-Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself. Merging a run's branch home (a run that worked in place has none to merge), pausing, and the Vercel, production and pipeline switches are the owner's, on the run's or project's page — and so is anything about a run the owner started.
+Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself. Merging a run's branch home (a run that worked in place has none to merge), pausing, and the production and pipeline switches are the owner's, on the run's or project's page — and so is anything about a run the owner started.
 
 A switch turned off mid-session can leave the tools listed until they are rebuilt, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same app.
 

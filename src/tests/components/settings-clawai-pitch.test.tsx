@@ -85,7 +85,7 @@ function serve(clawaiConfigured: boolean, edition: "openclaw" | "hermes" = "open
     if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: true });
     if (url.startsWith("/setup-api/local-models")) return jsonResponse({ models: [], unavailable: [] });
     if (url.startsWith("/setup-api/local-ai/exclusive")) return jsonResponse({ enabled: false });
-    if (url === "/setup-api/system/stats") return jsonResponse({ overview: {} });
+    if (url.startsWith("/setup-api/system/stats")) return jsonResponse({ overview: {} });
     if (url === "/setup-api/wifi/status") return jsonResponse({ connected: false, ssid: null });
     return jsonResponse({});
   }));

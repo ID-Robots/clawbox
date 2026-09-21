@@ -107,7 +107,7 @@ describe("SettingsApp factory reset overlay", () => {
       const url = input.toString();
 
       if (url === "/setup-api/preferences" && init?.method === "POST") return jsonResponse({ ok: true });
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
       if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
       if (url === "/setup-api/update/versions") {
         return jsonResponse({
@@ -538,7 +538,7 @@ describe("SettingsApp desktop nav overflow contract", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
       const url = input.toString();
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
       return jsonResponse({});
     }));
   });
@@ -612,7 +612,7 @@ describe("SettingsApp — the AI section never doubles the provider hero", () =>
         if (url === "/setup-api/harness/active") {
           return jsonResponse({ active: edition, edition });
         }
-        if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+        if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
         if (url === "/setup-api/setup/status") {
           return jsonResponse({ setup_complete: true, ai_model_configured: true });
         }
@@ -705,7 +705,7 @@ describe("SettingsApp messaging channels hub", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
       const url = input.toString();
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
       return jsonResponse({});
     }));
   });
@@ -775,7 +775,7 @@ describe("SettingsApp providers and Local AI pages", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
       const url = input.toString();
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
       if (url.startsWith("/setup-api/providers/status")) {
         return jsonResponse({ harness: "openclaw", providers: [], defaultProvider: null, degraded: false });
       }
@@ -930,7 +930,7 @@ describe("SettingsApp Telegram progress streaming — saved but not live yet", (
   function stubFetch(streamingPost: () => Response) {
     vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
       const url = input.toString();
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
       if (url === "/setup-api/telegram/status") {
         return jsonResponse({ configured: true, username: "clawbot", firstName: "Claw", link: "https://t.me/clawbot" });
       }

@@ -96,7 +96,7 @@ describe("the strip", () => {
     const step = p.steps.find((s) => s.stage === "verify_preview")!;
     step.detail = "The page is up but does not contain \"Invoice\".";
     step.evidence = [
-      { kind: "url", ref: "https://shop-abc.vercel.app/", detail: "checked", at: 1 },
+      { kind: "url", ref: "https://shop-abc.example.com/", detail: "checked", at: 1 },
       { kind: "screenshot", ref: "verify-1.png", detail: "a blank page", at: 2 },
     ];
     render(
@@ -108,7 +108,7 @@ describe("the strip", () => {
       />,
     );
     expect(screen.getByTestId("coding-agent-pipeline-detail-verify_preview").textContent).toContain("does not contain");
-    expect(screen.getByText("https://shop-abc.vercel.app/")).toHaveAttribute("href", "https://shop-abc.vercel.app/");
+    expect(screen.getByText("https://shop-abc.example.com/")).toHaveAttribute("href", "https://shop-abc.example.com/");
     expect(screen.getByTestId("coding-agent-pipeline-screenshot"))
       .toHaveAttribute("href", "/setup-api/coding-agent/artifacts?runId=run-1&name=verify-1.png");
   });
@@ -225,7 +225,7 @@ describe("a pipeline that stopped", () => {
   it("draws `blocked` as something not set up, not as the work failing", () => {
     render(<CodingRunPipelineCard runId="run-1" pipeline={state({
       status: "blocked",
-      failure: { stage: "deploy_preview", reason: "No Vercel project is attached to this project." },
+      failure: { stage: "deploy_preview", reason: "This ClawBox has no deployment integration." },
     })} t={t} />);
     const status = screen.getByTestId("coding-agent-pipeline-status");
     expect(status.textContent).toBe(t("codingAgent.pipelineBlocked"));

@@ -48,7 +48,7 @@ const SESSION_SECRET = "a".repeat(64);
 const MCP_TOKEN = "c".repeat(48);
 const TOKEN = "vrc_live_9Q3k2Zx7pLmN4tR8sW1yB6dF0hJ5aC";
 const VIEW = {
-  name: "VERCEL_TOKEN",
+  name: "DEPLOY_TOKEN",
   scope: BOX_SCOPE,
   createdAt: 1_700_000_000_000,
   updatedAt: 1_700_000_000_000,
@@ -110,7 +110,7 @@ describe("who may read and change the store", () => {
     for (const [name, call] of [
       ["GET", () => route.GET(request({ bearer: MCP_TOKEN }))],
       ["POST", () => route.POST(request({ method: "POST", bearer: MCP_TOKEN }))],
-      ["DELETE", () => route.DELETE(request({ method: "DELETE", bearer: MCP_TOKEN, query: "?name=VERCEL_TOKEN" }))],
+      ["DELETE", () => route.DELETE(request({ method: "DELETE", bearer: MCP_TOKEN, query: "?name=DEPLOY_TOKEN" }))],
     ] as const) {
       const res = await call();
       expect(res.status, name).toBe(403);
@@ -137,7 +137,7 @@ describe("who may read and change the store", () => {
   it("refuses a WRITE from another origin, even with the owner's own cookie", async () => {
     for (const [name, call] of [
       ["POST", () => route.POST(request({ method: "POST", cookie: ownerCookie(), origin: "http://evil.example" }))],
-      ["DELETE", () => route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), origin: "http://evil.example", query: "?name=VERCEL_TOKEN" }))],
+      ["DELETE", () => route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), origin: "http://evil.example", query: "?name=DEPLOY_TOKEN" }))],
     ] as const) {
       const res = await call();
       expect(res.status, name).toBe(403);
@@ -172,14 +172,14 @@ describe("no verb answers with a value", () => {
   });
 
   it("does not echo the value it has just been given", async () => {
-    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { name: "VERCEL_TOKEN", value: TOKEN } }));
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { name: "DEPLOY_TOKEN", value: TOKEN } }));
     expect(res.status).toBe(200);
     expect(JSON.stringify(await res.json())).not.toContain(TOKEN);
   });
 
   it("does not put the value in a refusal either", async () => {
     setSecret.mockRejectedValue(new SecretStoreError("invalid_value", "A secret needs a value."));
-    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { name: "VERCEL_TOKEN", value: TOKEN } }));
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { name: "DEPLOY_TOKEN", value: TOKEN } }));
     expect(res.status).toBe(400);
     expect(JSON.stringify(await res.json())).not.toContain(TOKEN);
   });
@@ -229,17 +229,17 @@ describe("the two writes", () => {
     const res = await route.POST(request({
       method: "POST",
       cookie: ownerCookie(),
-      body: { name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: false },
+      body: { name: "DEPLOY_TOKEN", scope: BOX_SCOPE, inject: false },
     }));
     expect(res.status).toBe(200);
     // The route passes the scope through verbatim; the STORE is what maps an
     // absent one onto the box scope, and what refuses a label it does not know.
-    expect(setSecretInject).toHaveBeenCalledWith({ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: false });
+    expect(setSecretInject).toHaveBeenCalledWith({ name: "DEPLOY_TOKEN", scope: BOX_SCOPE, inject: false });
     expect(setSecret).not.toHaveBeenCalled();
   });
 
   it("refuses a body that is neither, rather than guessing", async () => {
-    for (const body of [{ name: "VERCEL_TOKEN" }, {}]) {
+    for (const body of [{ name: "DEPLOY_TOKEN" }, {}]) {
       const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body }));
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("malformed");
@@ -307,7 +307,7 @@ describe("the two writes", () => {
     // anything there — but a declared length is free to check, and a request
     // announcing megabytes has no business being answered.
     const res = await route.DELETE(new Request(
-      "http://clawbox.local/setup-api/coding-agent/secrets?name=VERCEL_TOKEN",
+      "http://clawbox.local/setup-api/coding-agent/secrets?name=DEPLOY_TOKEN",
       {
         method: "DELETE",
         headers: {
@@ -334,12 +334,12 @@ describe("the two writes", () => {
   });
 
   it("reads an absent ?scope= as the whole box, not as an empty label", async () => {
-    await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), query: "?name=VERCEL_TOKEN" }));
-    expect(deleteSecret).toHaveBeenCalledWith({ name: "VERCEL_TOKEN", scope: undefined });
+    await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), query: "?name=DEPLOY_TOKEN" }));
+    expect(deleteSecret).toHaveBeenCalledWith({ name: "DEPLOY_TOKEN", scope: undefined });
   });
 
   it("answers with the whole re-read payload, so the card shows the box's own list", async () => {
-    const res = await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), query: "?name=VERCEL_TOKEN" }));
+    const res = await route.DELETE(request({ method: "DELETE", cookie: ownerCookie(), query: "?name=DEPLOY_TOKEN" }));
     const body = await res.json();
     // The list comes from listSecrets, re-read after the write — not from
     // whatever deleteSecret happened to return.
@@ -392,7 +392,7 @@ describe("secrets/names — the agent's own narrower door", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.names).toEqual([
-      { name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true },
+      { name: "DEPLOY_TOKEN", scope: BOX_SCOPE, inject: true, readable: true },
       { name: "SHOP_TOKEN", scope: "shop", inject: false, readable: true },
       { name: "OLD_TOKEN", scope: BOX_SCOPE, inject: true, readable: false },
     ]);

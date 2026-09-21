@@ -27,7 +27,6 @@ startup from the device's edition lock.
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own |
 | Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Coding agent (`coding_*`) | only while you have it switched on in the Coding Agent app | same |
-| Vercel tools (`coding_deploy_*`, `coding_vercel_status`) | only while the coding agent **and** the Vercel integration are on | same |
 | Memory Shard status, Local AI, ClawBox AI usage | yes | yes |
 | Field guide (`clawbox_context`) | the OpenClaw sections of `Clawbox.md` | the Hermes sections — identity, its own skills and model, its dashboard |
 | Everything else | yes | yes |
@@ -150,7 +149,7 @@ Hermes ships its own equivalents, so ClawBox does not add a second set.
 
 ### Coding agent
 Registered only while you have the coding agent switched on in the **Coding Agent** app (and the
-harness is ready); the Vercel tools additionally need the Vercel integration switched on.
+harness is ready).
 
 | Tool | Purpose |
 |---|---|
@@ -161,8 +160,6 @@ harness is ready); the Vercel tools additionally need the Vercel integration swi
 | `coding_agent_stop` | Stop a running run; close a paused one for good; end a server a finished run left running (only when you ask) |
 | `coding_project_status` | Your projects in one table: how to name each to a run, last commit, desktop or server app, latest run, and how many runs are working, waiting, unmerged or left running |
 | `coding_team_run` / `coding_team_status` / `coding_team_stop` | The same for a team of runs |
-| `coding_deploy_preview` / `coding_deploy_production` | Deploy what a run produced |
-| `coding_vercel_status` | A project's Vercel state: attached or not, latest deployment and its address, production domain, whether you allowed the assistant to ship it to production |
 | `coding_secret_list` | Which secrets a run may use — names only |
 
 A typical exchange: the agent checks `coding_project_status`, starts `coding_agent_run`, tells you
@@ -172,8 +169,8 @@ than stopping the run; when you ask how it went it calls `coding_run_list` or
 only after the allowance is back.
 
 <Note>
-**What stays yours.** The agent cannot switch the coding agent or the Vercel integration on,
-attach a Vercel project, allow production deploys, change a project's pipeline default, merge a
+**What stays yours.** The agent cannot switch the coding agent on,
+change a project's pipeline default, merge a
 run's branch home, or pause, resume or stop a run **you** started. Those routes only accept your
 own signed-in browser session, so the agent points you at the button instead.
 </Note>
@@ -233,17 +230,6 @@ off resume by themselves then, and `coding_agent_run` refuses a new Anthropic ru
 time. The answer never carries an email or a credential. Adding, ordering and removing
 accounts is yours to do, in Settings. See
 [Multiple Anthropic Accounts](/guides/anthropic-accounts).
-
-### Reporting a problem — both editions
-`clawbox_incidents_list` lists errors ClawBox's own software hit on this device — a failed
-coding run, a failed update step, a route that threw. `clawbox_incident_report` files one
-with the developers as a public issue, and only after you have said yes to that specific
-incident.
-
-The **Improvement Program** decides what is possible: *off* sends nothing and the tool
-refuses, *ask* means the agent may offer and you decide, *automatic* captures on its own.
-It is set in the Coding Agent's settings, and **no tool can change it** — every message is
-stripped of secrets, addresses, hostnames and home paths on the device as it is captured.
 
 ## Safety rails
 

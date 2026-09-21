@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
  *
  * WHY THIS EXISTS BESIDE THE OWNER-ONLY LIST. The agent has a legitimate need
  * for exactly one fact from this store: what a run can expect to find in its
- * environment, so it can say "the deploy will work, VERCEL_TOKEN is set" rather
+ * environment, so it can say "the deploy will work, DEPLOY_TOKEN is set" rather
  * than guessing, and so it can tell the owner which name is missing when a run
  * fails for the want of one. That is a name. It is not the shape of the whole
  * store, which is why the owner's own list

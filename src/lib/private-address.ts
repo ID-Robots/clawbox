@@ -4,7 +4,7 @@
  * Lifted out of the browser route, which has always had to answer it before
  * sending Chromium anywhere, because a second caller now needs exactly the same
  * answer: the delivery pipeline fetches and screenshots a deployment's URL
- * (./coding-pipeline-verify), and that URL comes back from Vercel rather than
+ * (the delivery pipeline), and that URL comes back from the host rather than
  * from this box. Two copies of a private-range table is precisely the shape of
  * a rule that is right in one place and a year stale in the other.
  *

@@ -93,8 +93,8 @@ export async function installedOpenclawCoreGeneration(): Promise<OpenclawCoreGen
  * Exported from here rather than read a fourth time elsewhere: this module
  * already owns `coreManifestPath()` and the reason for reading the manifest
  * instead of spawning `openclaw --version` (~53 ms against ~8 s on a shipped
- * Orin). The Improvement Program puts this in every issue it files, so a
- * report says which core the box was on.
+ * Orin). A report about the box names it, so a
+ * reader can tell which core the box was on.
  *
  * Never throws: a box with no OpenClaw at all — the hermes SKU — answers null,
  * which is an answer.

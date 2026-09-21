@@ -45,7 +45,7 @@ describe("installing the ClawBox AI image backend", () => {
   /**
    * On a box the source of this plugin is the CHECKOUT, and the production
    * server's cwd is not the checkout: Next's standalone `server.js` chdirs into
-   * `.next/standalone`. Reading it from the cwd installed whatever @vercel/nft
+   * `.next/standalone`. Reading it from the cwd installed whatever Next's tracer
    * had traced into the build output — a copy that only refreshes on a full
    * rebuild, so an update that shipped a fixed plugin could install the old one.
    *

@@ -47,17 +47,14 @@ import { capText } from "../../../mcp/lib/guard";
 // RUN will find in its environment, and it answers names alone.
 const NAMES = [
   "coding_agent_run", "coding_agent_status", "coding_agent_stop", "coding_run_message", "coding_secret_list",
-  // Same switch, same harness: deploying what a run built is the other half of
-  // handing it the task.
-  "coding_deploy_preview", "coding_deploy_production",
   // TASK-899: every run at a glance, resuming one, the project matrix, and the
-  // read half of Vercel (src/tests/unit/mcp-coding-agent-state-tools.test.ts).
-  "coding_run_list", "coding_agent_resume", "coding_project_status", "coding_vercel_status",
+  // project matrix (src/tests/unit/mcp-coding-agent-state-tools.test.ts).
+  "coding_run_list", "coding_agent_resume", "coding_project_status",
 ];
 
-function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true, codingVercel = codingAgent) {
+function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
   const h = captureRegistrar(edition);
-  registerCodingAgentTools(h.reg, { codingAgent, codingVercel });
+  registerCodingAgentTools(h.reg, { codingAgent });
   return h;
 }
 
@@ -327,38 +324,6 @@ describe("coding_agent_status", () => {
     if (out.isError) return;
     expect(out.text).toMatch(/^Run run-k3x9q2ab: draft \(not started\)/);
     expect(out.text).not.toMatch(/draft after/);
-  });
-
-  it("describes a run's deployment only on a box whose Vercel integration is ON", async () => {
-    // The record still carries the deployment made while the integration was
-    // on; the status is what the assistant relays, and on a box whose owner
-    // has the beta flag OFF a line naming a Vercel build would have it offer a
-    // feature the box does not have. The pipeline's own line stays — its review
-    // laps run either way — with Vercel left out of its wording.
-    const deployed = {
-      ...RUN,
-      vercel: { phase: "ready", projectId: "prj_1", url: "https://site-abc.vercel.app", detail: null, fixRunId: null, promotion: null },
-      pipeline: {
-        stage: "review", status: "failed", round: 1, maxRounds: 2, production: false,
-        failure: { stage: "review", reason: "The review found a broken link." },
-        steps: [{ stage: "build", state: "passed" }],
-        lastVerification: null,
-      },
-    };
-    apiGet.mockResolvedValue({ run: deployed });
-
-    const on = await harness("openclaw", true, true).call("coding_agent_status", { run_id: RUN.id });
-    expect(on.isError).toBe(false);
-    if (on.isError) return;
-    expect(on.text).toMatch(/Vercel project prj_1/);
-    expect(on.text).toMatch(/delivery pipeline/);
-
-    const off = await harness("openclaw", true, false).call("coding_agent_status", { run_id: RUN.id });
-    expect(off.isError).toBe(false);
-    if (off.isError) return;
-    expect(off.text).not.toMatch(/vercel/i);
-    expect(off.text).toMatch(/delivery pipeline/);
-    expect(off.text).toMatch(/The review found a broken link/);
   });
 
   it("names the run an automatic review pass belongs to, in the description and the listing", async () => {
@@ -838,7 +803,7 @@ describe("coding_secret_list", () => {
   it("answers the name, the scope and whether a run gets it — and no value", async () => {
     apiGet.mockResolvedValue({
       names: [
-        { name: "VERCEL_TOKEN", scope: "box", inject: true, readable: true },
+        { name: "DEPLOY_TOKEN", scope: "box", inject: true, readable: true },
         { name: "SHOP_TOKEN", scope: "shop", inject: false, readable: true },
         { name: "OLD_TOKEN", scope: "box", inject: true, readable: false },
       ],
@@ -847,7 +812,7 @@ describe("coding_secret_list", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     const rows = JSON.parse(out.text) as Record<string, unknown>[];
-    expect(rows[0]).toEqual({ name: "VERCEL_TOKEN", scope: "box", given_to_runs: true });
+    expect(rows[0]).toEqual({ name: "DEPLOY_TOKEN", scope: "box", given_to_runs: true });
     expect(rows[1]).toEqual({ name: "SHOP_TOKEN", scope: "shop", given_to_runs: false });
     // `unreadable` only when it is a problem: a readable entry is the normal
     // case and a field saying so on every row is noise a small model reads.

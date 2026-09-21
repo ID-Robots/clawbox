@@ -27,7 +27,6 @@ const CLEAN: ProjectDeletePreview = {
   size: { bytes: 4096, files: 12, truncated: false },
   unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
   liveRuns: [],
-  vercelLinked: false,
   secretNames: [],
   runCount: 0,
   retentionDays: 30,
@@ -42,8 +41,7 @@ const OUTCOME = {
   trashPath: "/home/clawbox/clawbox/data/deleted-projects/shop--20260913T120000Z",
   retentionDays: 30,
   retentionMax: 10,
-  vercelLinkRemoved: true,
-  secretsRemoved: ["VERCEL_TOKEN"],
+  secretsRemoved: ["DEPLOY_TOKEN"],
   metadataKeptFor: null,
   prunedEarly: [],
   runsKept: 3,
@@ -75,9 +73,6 @@ function open(props: Partial<Parameters<typeof CodingProjectDeleteDialog>[0]> = 
       name="My Shop"
       onClose={props.onClose ?? (() => {})}
       onDeleted={props.onDeleted ?? (() => {})}
-      // Absent means OFF, as on every Vercel surface; the cases that read the
-      // link lines say so explicitly.
-      vercelEnabled={props.vercelEnabled}
     />,
   );
 }
@@ -97,14 +92,13 @@ describe("the dialog while it is reading the folder", () => {
 
 describe("a project that may go", () => {
   it("states its size and what goes with it, and asks for the name", async () => {
-    stubFetch({ ...CLEAN, vercelLinked: true, secretNames: ["VERCEL_TOKEN"], runCount: 3 });
-    open({ vercelEnabled: true });
+    stubFetch({ ...CLEAN, secretNames: ["DEPLOY_TOKEN"], runCount: 3 });
+    open();
 
     const facts = await screen.findByTestId("coding-agent-delete-facts");
     expect(facts.textContent).toContain(t("codingAgent.delete.whatIsThere", { size: "4.0 KB", files: 12 }));
     expect(facts.textContent).toContain(t("codingAgent.delete.willMove", { days: 30, max: 10 }));
-    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveVercel"));
-    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
+    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "DEPLOY_TOKEN" }));
     // The runs are KEPT, and the dialog says so rather than leaving it to be
     // discovered afterwards.
     expect(facts.textContent).toContain(t("codingAgent.delete.willKeepRuns", { n: 3 }));
@@ -130,7 +124,7 @@ describe("a project that may go", () => {
   it("sends the folder twice and reports where it went", async () => {
     const onDeleted = vi.fn();
     stubFetch(CLEAN);
-    open({ onDeleted, vercelEnabled: true });
+    open({ onDeleted });
     await screen.findByTestId("coding-agent-delete-facts");
     fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
     fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
@@ -139,7 +133,6 @@ describe("a project that may go", () => {
     expect(deletes).toEqual([{ body: { folder: "shop", kind: "folder", confirm: "shop", force: false, purgeOldest: false } }]);
     expect(screen.getByTestId("coding-agent-delete-trash-path").textContent).toBe(OUTCOME.trashPath);
     expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.retention", { days: 30, max: 10 }));
-    expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.vercelRemoved"));
     expect(screen.getByTestId("coding-agent-delete-done").textContent).toContain(t("codingAgent.delete.runsKept", { n: 3 }));
     expect(onDeleted).toHaveBeenCalledWith(OUTCOME);
   });
@@ -247,39 +240,17 @@ describe("a project that may go", () => {
   it("says when the secrets stayed because another project shares the name", async () => {
     stubFetch(CLEAN, {
       ok: true,
-      body: { ...OUTCOME, vercelLinkRemoved: false, secretsRemoved: [], metadataKeptFor: "/home/clawbox/clawbox/data/code-projects/shop" },
+      body: { ...OUTCOME, secretsRemoved: [], metadataKeptFor: "/home/clawbox/clawbox/data/code-projects/shop" },
     });
-    open({ vercelEnabled: true });
+    open();
     await screen.findByTestId("coding-agent-delete-facts");
     fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
     fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
-    // "No secrets went" would otherwise read as "there were none".
+    // "No secrets went" would otherwise read as "there were none". With the
+    // Vercel integration gone there is no link left to name alongside them, so
+    // the dialog has one sentence here and it is about the secrets alone.
     expect((await screen.findByTestId("coding-agent-delete-metadata-kept")).textContent)
-      .toBe(t("codingAgent.delete.metadataKept"));
-  });
-
-  it("names Vercel nowhere while the integration is OFF, whatever the route claims", async () => {
-    // The integration is a BETA flag, off by default (and off when the host
-    // says nothing). The route answers `vercelLinked: false` for such a box
-    // itself; this pins the dialog's own silence against a server that does
-    // not — the link line in the preview, the "taken down" line afterwards,
-    // and the metadata-kept sentence, which then speaks of the secrets alone.
-    stubFetch({ ...CLEAN, vercelLinked: true, secretNames: ["VERCEL_TOKEN"] }, {
-      ok: true,
-      body: { ...OUTCOME, vercelLinkRemoved: true, secretsRemoved: [], metadataKeptFor: "/home/clawbox/clawbox/data/code-projects/shop" },
-    });
-    open();
-    const facts = await screen.findByTestId("coding-agent-delete-facts");
-    expect(facts.textContent).not.toContain(t("codingAgent.delete.willRemoveVercel"));
-    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
-    fireEvent.change(screen.getByTestId("coding-agent-delete-name"), { target: { value: "shop" } });
-    fireEvent.click(screen.getByTestId("coding-agent-delete-confirm"));
-    const done = await screen.findByTestId("coding-agent-delete-done");
-    expect(done.textContent).not.toContain(t("codingAgent.delete.vercelRemoved"));
-    expect(screen.getByTestId("coding-agent-delete-metadata-kept").textContent)
       .toBe(t("codingAgent.delete.metadataKeptSecrets"));
-    expect(t("codingAgent.delete.metadataKeptSecrets")).not.toMatch(/vercel/i);
-    expect(screen.getByRole("dialog").textContent).not.toMatch(/vercel link/i);
   });
 
   it("reports afterwards what the count bound actually took", async () => {

@@ -4,7 +4,7 @@
  * Everything below runs against a REAL temp CLAWBOX_ROOT with REAL git
  * repositories in it: the refusals this route exists for are statements about a
  * filesystem and a working tree, and a mocked `fs` would only assert the test's
- * own idea of them. The run store, the secret store and the Vercel links are
+ * own idea of them. The run store and the secret store are
  * mocked, because those are the collaborators whose CALLS are what is being
  * checked.
  */
@@ -23,18 +23,13 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const listRuns = vi.hoisted(() => vi.fn(() => [] as unknown[]));
 const getDefaultDirectory = vi.hoisted(() => vi.fn(async () => null as string | null));
 const listProjects = vi.hoisted(() => vi.fn(async () => ({ directory: null as string | null, projects: [] as unknown[] })));
-const readVercelEnabled = vi.hoisted(() => vi.fn(async () => true));
 vi.mock("@/lib/coding-agent", () => ({
   listRuns,
   getDefaultDirectory,
   listProjects,
   projectDirectoryOf: (run: { directory: string; worktree?: { project: string } | null }) => run.worktree?.project ?? run.directory,
-  readVercelEnabled,
 }));
 
-const deleteVercelLink = vi.hoisted(() => vi.fn(async () => false));
-const readVercelLink = vi.hoisted(() => vi.fn(async () => null as unknown));
-vi.mock("@/lib/vercel-link", () => ({ deleteVercelLink, readVercelLink }));
 
 const deleteSecretsForScope = vi.hoisted(() => vi.fn(async () => [] as string[]));
 const listSecrets = vi.hoisted(() => vi.fn(async () => [] as { name: string; scope: string }[]));
@@ -106,9 +101,6 @@ beforeEach(async () => {
   listRuns.mockReturnValue([]);
   getDefaultDirectory.mockResolvedValue(owner);
   listProjects.mockResolvedValue({ directory: owner, projects: [] });
-  deleteVercelLink.mockResolvedValue(false);
-  readVercelLink.mockResolvedValue(null);
-  readVercelEnabled.mockResolvedValue(true);
   deleteSecretsForScope.mockResolvedValue([]);
   listSecrets.mockResolvedValue([]);
 
@@ -481,10 +473,8 @@ describe("a run that starts while the removal is in flight", () => {
 describe("the success path", () => {
   it("moves a clean project into the trash and says where it went", async () => {
     const project = repo("shop", { pushed: true });
-    readVercelLink.mockResolvedValue({ projectId: "prj_1" });
-    listSecrets.mockResolvedValue([{ name: "VERCEL_TOKEN", scope: "shop" }, { name: "OTHER", scope: "@box" }]);
-    deleteVercelLink.mockResolvedValue(true);
-    deleteSecretsForScope.mockResolvedValue(["VERCEL_TOKEN"]);
+    listSecrets.mockResolvedValue([{ name: "DEPLOY_TOKEN", scope: "shop" }, { name: "OTHER", scope: "@box" }]);
+    deleteSecretsForScope.mockResolvedValue(["DEPLOY_TOKEN"]);
     listProjects.mockResolvedValue({ directory: owner, projects: [] });
 
     const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
@@ -492,8 +482,7 @@ describe("the success path", () => {
       folder: "shop",
       kind: "folder",
       refusal: null,
-      vercelLinked: true,
-      secretNames: ["VERCEL_TOKEN"],
+      secretNames: ["DEPLOY_TOKEN"],
       retentionDays: 30,
       retentionMax: 10,
       trashCount: 0,
@@ -508,8 +497,7 @@ describe("the success path", () => {
     expect(body).toMatchObject({
       ok: true,
       folder: "shop",
-      vercelLinkRemoved: true,
-      secretsRemoved: ["VERCEL_TOKEN"],
+      secretsRemoved: ["DEPLOY_TOKEN"],
       forced: false,
       retentionDays: 30,
       retentionMax: 10,
@@ -523,7 +511,6 @@ describe("the success path", () => {
     expect(body.keptUntil - body.deletedAt).toBe(30 * 24 * 60 * 60_000);
 
     // The references went with it, and the re-read listing travels with the answer.
-    expect(deleteVercelLink).toHaveBeenCalledWith("shop");
     expect(deleteSecretsForScope).toHaveBeenCalledWith("shop");
     expect(body.projects).toEqual([]);
     // The two roots are said APART: `directory` is the folder that was removed,
@@ -531,31 +518,6 @@ describe("the success path", () => {
     // root as `directory` is the bug this pins.
     expect(body.directory).toBe(project);
     expect(body.projectsDirectory).toBe(owner);
-  });
-
-  it("says nothing about the Vercel link while the integration is OFF, and still clears it", async () => {
-    // The integration is a BETA flag, off by default, and off means the
-    // feature is not on the box: the preview does not offer "its link is
-    // taken down" and the answer does not report it — whatever is on disk.
-    // The stored link still goes with the folder, as housekeeping: left
-    // behind, it is what a later project of the same name would inherit the
-    // day the flag is switched on.
-    repo("shop", { pushed: true });
-    readVercelEnabled.mockResolvedValue(false);
-    readVercelLink.mockResolvedValue({ projectId: "prj_1" });
-    deleteVercelLink.mockResolvedValue(true);
-    listSecrets.mockResolvedValue([{ name: "VERCEL_TOKEN", scope: "shop" }]);
-    deleteSecretsForScope.mockResolvedValue(["VERCEL_TOKEN"]);
-    listProjects.mockResolvedValue({ directory: owner, projects: [] });
-
-    const preview = await (await GET(get({ folder: "shop" }, owned()))).json();
-    expect(preview).toMatchObject({ folder: "shop", refusal: null, vercelLinked: false, secretNames: ["VERCEL_TOKEN"] });
-
-    const res = await DELETE(del({ folder: "shop", confirm: "shop" }, owned()));
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toMatchObject({ ok: true, folder: "shop", vercelLinkRemoved: false, secretsRemoved: ["VERCEL_TOKEN"] });
-    expect(deleteVercelLink).toHaveBeenCalledWith("shop");
   });
 
   it("removes a code project by its id", async () => {
@@ -684,7 +646,7 @@ describe("the success path", () => {
     expect(fs.existsSync(path.join(trash, oldest))).toBe(false);
   });
 
-  it("leaves the secrets and the Vercel link alone when another project shares the name", async () => {
+  it("leaves the secrets alone when another project shares the name", async () => {
     // A folder project and a code project may both be called `shop`, and the
     // secret store is keyed by that name alone — so clearing it here took the
     // credentials of a project that is still on disk and possibly mid-run.
@@ -695,9 +657,7 @@ describe("the success path", () => {
     expect(body.ok).toBe(true);
     expect(body.metadataKeptFor).toBe(path.join(session.root, "data", "code-projects", "shop"));
     expect(deleteSecretsForScope).not.toHaveBeenCalled();
-    expect(deleteVercelLink).not.toHaveBeenCalled();
     expect(body.secretsRemoved).toEqual([]);
-    expect(body.vercelLinkRemoved).toBe(false);
     // The other project is untouched.
     expect(fs.existsSync(path.join(session.root, "data", "code-projects", "shop"))).toBe(true);
   });
@@ -707,7 +667,6 @@ describe("the success path", () => {
     const body = await (await DELETE(del({ folder: "shop", confirm: "shop" }, owned()))).json();
     expect(body.metadataKeptFor).toBeNull();
     expect(deleteSecretsForScope).toHaveBeenCalledWith("shop");
-    expect(deleteVercelLink).toHaveBeenCalledWith("shop");
   });
 
   it("reads the folder from the query when the caller sends no body", async () => {

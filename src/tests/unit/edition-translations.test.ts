@@ -8,7 +8,6 @@ import { localModelsEn } from "@/lib/edition-translations/en-local-models";
 import { systemProfileEn } from "@/lib/edition-translations/en-system-profile";
 import { codingAgentEn } from "@/lib/edition-translations/en-coding-agent";
 import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
-import { improvementEn } from "@/lib/edition-translations/en-improvement";
 import { paidGateEn } from "@/lib/edition-translations/en-paid-gate";
 import { clawaiUsageEn } from "@/lib/edition-translations/en-clawai-usage";
 import { clawaiPitchEn } from "@/lib/edition-translations/en-clawai-pitch";
@@ -59,9 +58,6 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // Pre-exec shell scanning notice (HERMES-08) — the box's only statement that
   // a security control is off. An owner who cannot read it is not warned.
   { name: "Shell scanning notice", matches: (k) => k.startsWith("shellScan.") },
-  // ClawBox Improvement Program. The card IS the consent — an owner who cannot
-  // read what is sent and what never is has not been asked anything.
-  { name: "Improvement Program card", matches: (k) => k.startsWith("improvement.") },
   // The ClawBox AI pitch an unlinked box shows on Settings → Providers. It is
   // the only thing on the device that offers the subscription in words, and
   // the only thing that points an owner who wants to stay local at the tab
@@ -101,9 +97,6 @@ const BRAND_ONLY = new Set([
   "Ultracode",
   // A loanword that is genuinely identical in several languages.
   "tokens",
-  // The Coding Agent's Vercel switch wears this badge; the word is the same
-  // in German, Spanish, Italian and Swedish (French and Dutch accent it).
-  "Beta",
   // A filesystem path shown as a placeholder. Translating it would invent a
   // folder that does not exist on the box.
   "/home/clawbox/Projects",
@@ -114,7 +107,7 @@ const BRAND_ONLY = new Set([
   // An environment variable name, shown as the secrets card's placeholder. The
   // store's names ARE shell variable names — capitals, digits, underscores —
   // and a translated one would be a variable no service ever reads.
-  "VERCEL_TOKEN",
+  "DEPLOY_TOKEN",
   // A sample e-mail address, shown as the commit-author placeholder. `example.com`
   // is the reserved documentation domain (RFC 2606) and the local part is not a
   // word to translate — a localised sample would look like a real address that
@@ -145,7 +138,6 @@ describe("edition-translations (TASK-458)", () => {
       ["systemProfileEn", systemProfileEn, (k) => k.startsWith("systemProfile.")],
       ["codingAgentEn", codingAgentEn, (k) => k.startsWith("codingAgent.")],
       ["shellScanEn", shellScanEn, (k) => k.startsWith("shellScan.")],
-      ["improvementEn", improvementEn, (k) => k.startsWith("improvement.")],
       ["paidGateEn", paidGateEn, (k) => k.startsWith("paidGate.")],
       // The usage card, and the chat's sentence for the same allowances.
       ["clawaiUsageEn", clawaiUsageEn, (k) => k.startsWith("clawaiUsage.") || k.startsWith("chat.allowance")],

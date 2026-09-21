@@ -4,7 +4,7 @@
  * The property that matters, and the one the header check alone does NOT give:
  * a request that declares no `Content-Length` — which is every chunked request
  * — is still cut at the cap. Three routes rely on this (`coding-agent/secrets`
- * and the two Vercel ones), and each of them was header-only before, which
+ * and the deploy ones), and each of them was header-only before, which
  * bounded exactly the callers that were never the problem.
  *
  * Below that: "too long" and "not JSON" stay different answers, because the
@@ -82,9 +82,9 @@ describe("readJsonObject", () => {
   });
 
   it("lets a chunked body UNDER the cap through", async () => {
-    expect(await readJsonObject(chunked('{"name":"VERCEL_TOKEN"}'), LIMIT)).toEqual({
+    expect(await readJsonObject(chunked('{"name":"DEPLOY_TOKEN"}'), LIMIT)).toEqual({
       ok: true,
-      body: { name: "VERCEL_TOKEN" },
+      body: { name: "DEPLOY_TOKEN" },
     });
   });
 

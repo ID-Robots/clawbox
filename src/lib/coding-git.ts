@@ -61,8 +61,8 @@ const GIT_TIMEOUT_MS = 30_000;
  * WHO that is, is no longer a constant: `resolveCodingGitIdentity` answers it
  * per project (the folder's own git config, then the owner's setting, then the
  * placeholder). The placeholder e-mail belongs to nobody, and on a project
- * wired to the Vercel GitHub integration a commit authored by it fails the
- * deployment check — which is how the agent's own bookkeeping commits came to
+ * wired to a host's GitHub deployment integration a commit authored by it fails
+ * the deployment check — which is how the agent's own bookkeeping commits came to
  * block the pull requests it opened.
  */
 

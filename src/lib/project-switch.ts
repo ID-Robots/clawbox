@@ -3,7 +3,7 @@
  *
  * Two of these now exist and they must behave identically: the owner's
  * "the assistant may ship this project to production"
- * (`coding_vercel_auto_production`) and "every run in this project goes through
+ * (the per-project production permission) and "every run in this project goes through
  * the delivery pipeline" (`coding_pipeline_projects`). Both are standing
  * permissions for something that happens while nobody is watching, so both have
  * to fail the same way — towards OFF, on every unreadable value — and both have
@@ -14,14 +14,14 @@
  *
  *  - Only an explicit `true` for THAT project is on. An unreadable value, a
  *    map that is not a map, a key that is not there: all off. The reasoning
- *    `clawbox_improvement_program` is written with — every failure of the read
+ *    every other stored consent on this box is written with — every failure of the read
  *    must fail towards the box doing LESS unasked.
  *  - Only the trues are stored. An "off" is the absence of a row, so a box
  *    whose owner has toggled twenty projects keeps at most the ones that are on.
  *  - The map has NO PROTOTYPE. A project scope is `[A-Za-z0-9_-]`, which spells
  *    `__proto__`, and assigning that key on an object literal writes the
- *    accumulator's prototype instead of a row (the reason ./vercel-link's
- *    `emptyLinks` is written the way it is).
+ *    accumulator's prototype instead of a row (the reason a link map's
+ *    empty value is written the way it is).
  *  - Writes are queued per KEY, because a read-modify-write across an await is
  *    not a write: two switches flipped together would each store the map the
  *    other started from.

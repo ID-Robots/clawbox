@@ -89,7 +89,7 @@ describe("Settings → System figures under a German desktop", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined) => {
       const url = String(input ?? "");
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
       if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
       if (url.startsWith("/setup-api/update/versions")) {
         return jsonResponse({ clawbox: { current: "v1.0.0", target: null }, openclaw: { current: "1.0.0", target: null } });

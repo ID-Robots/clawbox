@@ -1,8 +1,8 @@
 /**
- * What may leave the box in an Improvement Program report.
+ * What may leave the box in a report about its own errors.
  *
- * The ClawBox Improvement Program files a GitHub issue about a crash or an
- * error in ClawBox's own code. A GitHub issue is PUBLIC and permanent, so the
+ * A report about a crash or an error in ClawBox's own code may be read by
+ * somebody other than the owner, so the
  * rule here is not "scrub what looks secret" but "everything that reaches the
  * wire has been through this function". It is pure and has no I/O precisely so
  * it can be tested exhaustively and called from anywhere without a device.
@@ -222,7 +222,7 @@ function escapeLiteral(value: string): string {
  * provider's own sentence goes through it before a chat bubble is offered the
  * text. That caller passes an EMPTY replacement, because its sentence has to
  * still read as a sentence afterwards — "[redacted]" mid-clause is noise to a
- * customer — where an Improvement Program issue wants the placeholder so a
+ * customer — where a written report wants the placeholder so a
  * reader can see something was taken out.
  *
  * Named rules first and shapes second, for the reason in `sanitizeText`'s own

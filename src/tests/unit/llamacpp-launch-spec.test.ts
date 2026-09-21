@@ -9,7 +9,7 @@ import path from "path";
  * standalone `server.js` does `process.chdir(__dirname)` and
  * `config/clawbox-setup.service` starts `production-server.js`, which requires
  * that file — so the launcher was read out of the build output rather than out
- * of the checkout. It worked only because @vercel/nft happened to trace the
+ * of the checkout. It worked only because Next's dependency tracer happened to trace the
  * script into that tree; nothing copies `scripts/` there on purpose, and the
  * copy that is there only refreshes on a full rebuild.
  *

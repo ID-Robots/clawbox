@@ -136,7 +136,6 @@ describe("clawbox_context on whose screen the browser is", () => {
     providers: [],
     emailCanRead: false,
     codingAgent: false,
-    codingVercel: false,
     canGenerateImages: true,
   });
 

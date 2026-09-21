@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { Fragment, useCallback, useState } from "react";
 import { useT } from "@/lib/i18n";
 import AIProviderIcon from "./AIProviderIcon";
+import ClawboxAiUsageCard from "./ClawboxAiUsageCard";
 import PluginRepairNotice from "./PluginRepairNotice";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
+import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
 import { notifyProvidersChanged } from "@/lib/ui-events";
 import type { ProviderStatusRow } from "@/lib/provider-status";
@@ -30,6 +32,15 @@ export default function AiProviderList() {
   const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
+  /**
+   * Whether the ClawBox AI allowances are open. COLLAPSED BY DEFAULT, and not
+   * persisted: the card polls the portal every minute for as long as it is
+   * mounted, so "open" is a thing the owner is doing right now and not a
+   * setting that quietly keeps a minute-poll running on every future visit to
+   * this page. Collapsed means UNMOUNTED, which is what stops the poll — there
+   * is no hidden-but-rendered state here.
+   */
+  const [usageOpen, setUsageOpen] = useState(false);
 
   const setEnabled = useCallback(async (row: ProviderStatusRow, enabled: boolean) => {
     setToggling(row.id);
@@ -170,14 +181,27 @@ export default function AiProviderList() {
           {rows.map((row) => {
             const busy = toggling === row.id || settingDefault === row.id;
             const canMakeDefault = row.enabled && row.state === "connected" && !row.isDefault;
+            // The ClawBox AI allowances belong to ONE row and hang off it here
+            // rather than standing as a card of their own further down the page
+            // (where they used to sit, always open, polling the portal for
+            // anyone who opened Providers for any reason at all).
+            //
+            // Gated on `row.enabled`, not merely on the row existing: a
+            // provider the owner has switched off is not being spent, so an
+            // allowance meter beside it would be describing a budget nothing is
+            // drawing on. And the row itself is only ever here for a provider
+            // that holds a sign-in — so on a box with no ClawBox AI credential
+            // there is no row, and therefore no button either.
+            const hasUsage = row.id === "clawai" && row.enabled;
             return (
-              /* Stacked below `sm:`, one line above it. At 390 px the row had
-                 an icon, a name, a Default pill, a Make-default button and a
-                 44 px switch competing for ~290 px, so the only thing that
-                 could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
-                 The controls go under the name at phone widths instead, and
-                 the name is allowed to wrap there rather than be clipped. */
-              <li key={row.id} className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
+              <Fragment key={row.id}>
+              {/* Stacked below `sm:`, one line above it. At 390 px the row had
+                  an icon, a name, a Default pill, a Make-default button and a
+                  44 px switch competing for ~290 px, so the only thing that
+                  could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
+                  The controls go under the name at phone widths instead, and
+                  the name is allowed to wrap there rather than be clipped. */}
+              <li className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
                 <span className="flex items-center gap-3 min-w-0 @md:flex-1">
                   <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
                     <AIProviderIcon provider={row.id} size={20} />
@@ -237,6 +261,20 @@ export default function AiProviderList() {
                 </span>
 
                 <span className="flex items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
+                  {hasUsage && (
+                    <SettingsDisclosureButton
+                      open={usageOpen}
+                      onToggle={() => setUsageOpen((open) => !open)}
+                      // The block's own name, so the button says exactly what it
+                      // reveals. Already translated into all ten locales as the
+                      // card's heading — the disclosure needs no word of its own.
+                      label={t("clawaiUsage.title")}
+                      controls="clawai-usage-panel"
+                      variant="inline"
+                      testId="clawai-usage-toggle"
+                    />
+                  )}
+
                   {canMakeDefault && (
                     <button
                       type="button"
@@ -269,6 +307,18 @@ export default function AiProviderList() {
                   </button>
                 </span>
               </li>
+
+              {/* Mounted only while open, which is the whole mechanism: the
+                  card's minute-poll of `/setup-api/ai-models/usage` lives in
+                  its own effect, so a collapsed panel is not a hidden one —
+                  it does not exist and cannot fetch. Its `id` is what the
+                  button's `aria-controls` names. */}
+              {hasUsage && usageOpen && (
+                <li className="p-3 bg-black/10" id="clawai-usage-panel" data-testid="clawai-usage-panel">
+                  <ClawboxAiUsageCard />
+                </li>
+              )}
+              </Fragment>
             );
           })}
           {rows.length === 0 && (

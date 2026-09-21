@@ -26,7 +26,6 @@ import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
 import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { type RunWorktreeView } from "./CodingRunWorktreeCard";
 import type { RunMessage } from "@/lib/coding-run-messages";
-import type { VercelState } from "@/lib/vercel-state";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -35,11 +34,8 @@ import { formatBytes } from "@/lib/format-bytes";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import AnimatedNumber from "./AnimatedNumber";
 import CodingRunSummary from "./CodingRunSummary";
-import CodingRunVercelCard from "./CodingRunVercelCard";
 import CodingRunPipelineCard from "./CodingRunPipelineCard";
 import type { PipelineState } from "@/lib/coding-pipeline";
-import VercelProjectCard from "./VercelProjectCard";
-import VercelDeployPanel from "./VercelDeployPanel";
 import CodingRunTeamMembers from "./CodingRunTeamMembers";
 import CodingTeamTree from "./CodingTeamTree";
 import CodingAgentRosterRow from "./CodingAgentRosterRow";
@@ -165,11 +161,6 @@ interface Run {
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
-  /** What the run's push became on Vercel, once the owner has attached a Vercel
-   *  project to this project. Absent on a run recorded before the feature, and
-   *  null for ever on a project with no link — which reads the same way: the
-   *  box never asked Vercel anything about it. */
-  vercel?: VercelState | null;
   /** The delivery pipeline this run is the build stage of. Absent on a run
    *  without one, and on a server that predates the feature. */
   pipeline?: PipelineState | null;
@@ -596,25 +587,6 @@ export default function CodingAgentApp() {
   // chat, which that page does not mount, so a message dispatched from it
   // would reach nothing while the card said "handed to the assistant".
   const [standalone] = useState(onStandaloneAppPage);
-  /**
-   * Is the Vercel integration part of this box at all?
-   *
-   * The box-wide switch (`vercelEnabled`, Settings in this app), read off the
-   * same status poll as everything else here. OFF when the field is absent —
-   * `?? false`, not `?? true` — because a server that predates the switch is
-   * handled on the DEVICE: it migrates a box that already has a Vercel link to
-   * `true` before answering, so the only box that lands here with no field is
-   * one running an older build, and drawing Deploy buttons against routes we
-   * cannot ask about is the guess worth not making.
-   *
-   * Every Vercel surface in this file hangs off it: the project page's link
-   * card, a run's deployment card, the compact Deploy buttons on a run, the
-   * delete dialog's two "its Vercel link" lines, and the delivery pipeline's
-   * strip — which goes too, rather than showing four greyed-out deploy stages,
-   * since the pipeline IS the delivery flow and a strip advertising it is
-   * exactly what the owner switched off. It is a BETA flag, off by default.
-   */
-  const vercelOn = status?.vercelEnabled ?? false;
   const [projects, setProjects] = useState<Project[]>([]);
   /** The project folder the list was read from; null until one is set. */
   const [projectsDir, setProjectsDir] = useState<string | null>(null);
@@ -969,36 +941,6 @@ export default function CodingAgentApp() {
       setError(err instanceof Error ? err.message : t("codingAgent.prFailed"));
     } finally {
       setBusy(null);
-    }
-  };
-
-  /**
-   * Put one deployment in front of the project's users.
-   *
-   * The card asks the question; this sends the answer, with `confirm: true` on
-   * the wire so the button and the route agree about what the gesture is.
-   *
-   * It answers the REASON rather than throwing — the card draws it in its own
-   * line beside the deployment, because a promotion that was refused is about
-   * that one build and not about the page. The reason ALONE, not a finished
-   * sentence: the card wraps it in `deployPromoteFailed`, and returning the
-   * whole sentence here had the owner read the prefix twice ("Could not
-   * promote: Could not promote: 500"), found in review.
-   */
-  const promoteDeployment = async (runId: string, deploymentId: string): Promise<string | null> => {
-    try {
-      const res = await fetch("/setup-api/coding-agent/vercel/promote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId, deploymentId, confirm: true }),
-      });
-      if (!res.ok) return await readError(res, String(res.status));
-      // The record now carries the promotion; nothing else would make the page
-      // look again inside the poll interval.
-      await load();
-      return null;
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err);
     }
   };
 
@@ -1932,7 +1874,12 @@ export default function CodingAgentApp() {
             navLabel={t("codingAgent.breadcrumbLabel")}
             backTestId="coding-agent-settings-back"
           />
-          <div className="mt-3" data-testid="coding-agent-embedded-settings">
+          {/* pb-6 for the same reason coding-agent-run-page carries it: the
+              owner tools are the last thing on this face, and the wrapper's
+              own py-4 left Reset / Test harness / Clear history sitting on
+              the bottom edge of the scroll area. Same scale as the run page,
+              not a new one. */}
+          <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
             <CodingAgentSettingsPanel />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
@@ -2644,7 +2591,7 @@ export default function CodingAgentApp() {
                   buttons are left off — it has no project context and a
                   production deploy is not something to offer from a page
                   opened in a tab with nothing else on it. */}
-              {run.pipeline && vercelOn && (
+              {run.pipeline && (
                 <CodingRunPipelineCard
                   runId={run.id}
                   pipeline={run.pipeline}
@@ -2652,32 +2599,6 @@ export default function CodingAgentApp() {
                   artifactUrl={(name) => artifactUrl(run.id, name)}
                   onApproveProduction={standalone ? undefined : () => steerPipeline(run.id, "approve_production")}
                   onStopPipeline={standalone ? undefined : () => steerPipeline(run.id, "stop")}
-                />
-              )}
-              {run.vercel && vercelOn && (
-                <CodingRunVercelCard
-                  runId={run.id}
-                  vercel={run.vercel}
-                  t={t}
-                  onPromote={(deploymentId) => promoteDeployment(run.id, deploymentId)}
-                  onOpenRun={showRun}
-                />
-              )}
-              {/* Deploy what this run built. The panel draws nothing at all on
-                  a project with no Vercel project attached, so a run in a
-                  folder nobody deploys is unchanged; the owner's own page is
-                  where the link and the settings live. Not on the standalone
-                  page, which has no project context to send the deploy to. */}
-              {!standalone && vercelOn && (
-                <VercelDeployPanel
-                  key={`deploy-${run.id}`}
-                  query={run.projectId
-                    ? `projectId=${encodeURIComponent(run.projectId)}`
-                    : `directory=${encodeURIComponent(run.worktree?.project ?? run.directory)}`}
-                  t={t}
-                  runId={run.id}
-                  compact
-                  onDeployed={() => void load()}
                 />
               )}
 
@@ -3128,19 +3049,6 @@ export default function CodingAgentApp() {
                   )}
                 </span>
               </div>
-              {/* Where this project's runs deploy to, and the token that is
-                  used — the settings belong beside the thing they govern, and
-                  the card draws nothing at all on a project no link can be
-                  attached to. */}
-              {/* Keyed by the project the card is about, which is the card's
-                  own contract (VercelProjectCard.tsx: it holds no state across
-                  projects because the host keys it) — PREFIXED, because the
-                  workspace below is keyed by the same project and two SIBLINGS
-                  under one parent with the same key are not reconciled: the
-                  first of them is neither matched nor deleted, so switching
-                  projects from the sidebar left its node on the page and
-                  mounted a second card beside it. */}
-              {vercelOn && <VercelProjectCard key={`vercel-${projectQuery}`} query={projectQuery} t={t} />}
               {/* Four tabs, each with the whole width: the folder, what changed,
                   the runs, the team. The runs sat in a 22rem rail before and
                   their rows wrapped three deep. */}
@@ -3184,7 +3092,6 @@ export default function CodingAgentApp() {
           folder={deleteTarget.folder}
           kind={deleteTarget.kind}
           name={deleteTarget.name}
-          vercelEnabled={vercelOn}
           onClose={() => setDeleteTarget(null)}
           onDeleted={(outcome) => {
             setRemovedProject({ folder: outcome.folder, trashPath: outcome.trashPath });

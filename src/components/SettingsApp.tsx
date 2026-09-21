@@ -11,12 +11,12 @@ import AIProviderIcon from "./AIProviderIcon";
 import AiProviderList from "./AiProviderList";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
+import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { useTr } from "@/lib/i18n-floor";
 import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
-import ClawboxAiUsageCard from "./ClawboxAiUsageCard";
 import AnthropicAccountsCard from "./AnthropicAccountsCard";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -216,7 +216,13 @@ interface SystemStats {
   gpu?: { usage: number };
   storage: DiskMount[];
   network: NetworkIface[];
-  processes: ProcessEntry[];
+  /**
+   * Absent when this page asked for no process lists — the busiest-processes
+   * block is collapsed, so the route is told not to spawn `ps` for it. Also
+   * absent on a server that predates the parameter? No: such a server ignores
+   * the query string and sends the list, which is exactly the fallback we want.
+   */
+  processes?: ProcessEntry[];
   /** The same processes ordered by memory. Absent on a server that predates it. */
   processesByMemory?: ProcessEntry[];
   timestamp: number;
@@ -762,6 +768,18 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
    * following them around a week later.
    */
   const [processOrder, setProcessOrder] = useState<"cpu" | "mem">("cpu");
+  /**
+   * The two blocks on this page that are drawn only when asked for, COLLAPSED
+   * BY DEFAULT. Not persisted, for the same reason the ordering above is not:
+   * they are ways of looking at a live box, and an owner who opened the process
+   * table once to find what was eating the memory should not be spawning `ps`
+   * every three seconds a week later.
+   *
+   * These are not merely display flags — they are what the poll below asks the
+   * server for, so a collapsed block is not computed on the box either.
+   */
+  const [perCoreOpen, setPerCoreOpen] = useState(false);
+  const [processesOpen, setProcessesOpen] = useState(false);
   // Which commit this box is really running, and whether that agrees with the
   // code on its disk. Fetched only where it is shown (About + System).
   const buildIdentity = useBuildIdentity(section === "system" || section === "about");
@@ -770,12 +788,22 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
   useEffect(() => {
     if (section !== "system" && section !== "about") return;
-    const poll = () => fetch("/setup-api/system/stats", { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
+    // Ask only for what is on screen. About draws neither block, and on System
+    // each one is behind its own button — so a collapsed panel costs no `ps`
+    // and no /proc/stat diff on the box, not merely a hidden <div> here.
+    // Re-running on each toggle is deliberate: expanding fetches at once rather
+    // than showing an empty card until the next 3 s tick.
+    const query = new URLSearchParams({
+      processes: section === "system" && processesOpen ? "1" : "0",
+      perCore: section === "system" && perCoreOpen ? "1" : "0",
+    });
+    const url = `/setup-api/system/stats?${query}`;
+    const poll = () => fetch(url, { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
     poll();
     if (section !== "system") return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
-  }, [section]);
+  }, [section, processesOpen, perCoreOpen]);
 
   /* ── Versions, for About's rows and the sidebar subtitles. The update
      itself — its run, the beta channel, the branch pin, the force — is the
@@ -4082,11 +4110,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               }}
             /></I18nProvider>
 
-            {/* The ClawBox AI allowances — only for a box that holds a
-                credential the portal still accepts; a refused sign-in is the
-                panel above's to fix, and a usage card under it would only
-                repeat that nothing can be read. */}
-            {aiProvider?.clawaiConfigured && !aiProvider.clawaiTokenRejected && <ClawboxAiUsageCard />}
+            {/* The ClawBox AI allowances are no longer a card of their own down
+                here. They now hang off the ClawBox AI row in the list above,
+                behind a button, collapsed by default — the owner's ask: the
+                block was always open, and the card polls the portal every
+                minute for as long as it is on screen, which everyone who opened
+                Providers for any other reason was paying for. The row is only
+                ever drawn for a provider that holds a sign-in, so the condition
+                that used to live here (a credential the portal still accepts)
+                is the list's own filter now, and a switched-off ClawBox AI
+                shows neither the meter nor the button. */}
 
             {/* The Anthropic accounts coding runs spend, in the owner's order,
                 with the one a usage limit set aside and when it is back
@@ -6143,16 +6176,30 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     request after a restart. Either way the row is absent until
                     the next 3 s poll, never a row of zeros claiming an idle
                     machine. */}
-                {stats.cpu.perCore && stats.cpu.perCore.length > 0 && (
-                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-per-core">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>view_module</span>
-                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.perCore")}</h3>
+                {/* The CARD is unconditional now, and only its BODY waits on
+                    data: the button has to exist before there is anything to
+                    show, or a collapsed block — which asks the server for no
+                    per-core reading at all — would have no way back open. */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-per-core">
+                  <div className="flex items-center gap-2">
+                    <SettingsDisclosureButton
+                      open={perCoreOpen}
+                      onToggle={() => setPerCoreOpen(open => !open)}
+                      label={t("settings.perCore")}
+                      controls="settings-per-core-panel"
+                      icon="view_module"
+                      testId="settings-per-core-toggle"
+                    />
+                    {/* The load average belongs to this card, so it comes and
+                        goes with it rather than sitting over a closed one. */}
+                    {perCoreOpen && (
                       <span className="ml-auto text-[10px] font-mono text-[var(--text-muted)] opacity-60">
                         {t("settings.load")} {stats.cpu.loadAvg.map(v => formatLoad(v, locale)).join(" · ")}
                       </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
+                    )}
+                  </div>
+                  {perCoreOpen && stats.cpu.perCore && stats.cpu.perCore.length > 0 && (
+                    <div id="settings-per-core-panel" className="grid grid-cols-2 gap-x-4 gap-y-2.5 mt-4">
                       {stats.cpu.perCore.map((busy, n) => (
                         <div key={n} className="flex items-center gap-2">
                           <span className="text-[10px] font-mono text-[var(--text-muted)] opacity-50 w-6 shrink-0">{n}</span>
@@ -6163,34 +6210,58 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
+                  )}
+                  {/* Open, but the reading is not in yet. The first poll after
+                      the button is pressed has nothing to diff `/proc/stat`
+                      against — the route stopped sampling while this was shut —
+                      so it answers empty and the real bars arrive on the next
+                      3 s tick. Say that, rather than leaving a card that looks
+                      broken or a row of zeros claiming an idle box. */}
+                  {perCoreOpen && !(stats.cpu.perCore && stats.cpu.perCore.length > 0) && (
+                    <p id="settings-per-core-panel" className="mt-4 text-[11px] text-[var(--text-muted)]" role="status">
+                      {t("settings.checking")}
+                    </p>
+                  )}
+                </div>
 
-                {processRows.length > 0 && (
-                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-processes">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>list_alt</span>
-                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.busiestProcesses")}</h3>
-                      {/* The ordering matters as much as the list: CPU is what a
-                          slow desktop looks like, memory is what an OOM-killed
-                          update looks like. The toggle is only offered when the
-                          server actually sent the second ordering. */}
-                      {stats.processesByMemory && (
-                        <div className="ml-auto flex rounded-lg bg-white/[0.06] p-0.5" role="group">
-                          {(["cpu", "mem"] as const).map(by => (
-                            <button
-                              key={by}
-                              type="button"
-                              onClick={() => setProcessOrder(by)}
-                              aria-pressed={processOrder === by}
-                              className={`px-2.5 py-1 text-[10px] rounded-md border-none cursor-pointer transition-colors ${processOrder === by ? "bg-white/[0.12] text-[var(--text-primary)]" : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]"}`}
-                            >
-                              {by === "cpu" ? t("settings.byCpu") : t("settings.byMemory")}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-processes">
+                  <div className="flex items-center gap-2">
+                    <SettingsDisclosureButton
+                      open={processesOpen}
+                      onToggle={() => setProcessesOpen(open => !open)}
+                      label={t("settings.busiestProcesses")}
+                      controls="settings-processes-panel"
+                      icon="list_alt"
+                      testId="settings-processes-toggle"
+                    />
+                    {/* The ordering matters as much as the list: CPU is what a
+                        slow desktop looks like, memory is what an OOM-killed
+                        update looks like. The toggle is only offered when the
+                        server actually sent the second ordering — and only
+                        while the table it reorders is on screen. */}
+                    {processesOpen && stats.processesByMemory && (
+                      <div className="ml-auto flex rounded-lg bg-white/[0.06] p-0.5" role="group">
+                        {(["cpu", "mem"] as const).map(by => (
+                          <button
+                            key={by}
+                            type="button"
+                            onClick={() => setProcessOrder(by)}
+                            aria-pressed={processOrder === by}
+                            className={`px-2.5 py-1 text-[10px] rounded-md border-none cursor-pointer transition-colors ${processOrder === by ? "bg-white/[0.12] text-[var(--text-primary)]" : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]"}`}
+                          >
+                            {by === "cpu" ? t("settings.byCpu") : t("settings.byMemory")}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {processesOpen && processRows.length === 0 && (
+                    <p id="settings-processes-panel" className="mt-4 text-[11px] text-[var(--text-muted)]" role="status">
+                      {t("settings.checking")}
+                    </p>
+                  )}
+                  {processesOpen && processRows.length > 0 && (
+                    <div id="settings-processes-panel" className="mt-4">
                     {/* A real table, because the figures are meaningless
                         without their column: two grids of divs read out as
                         "1201 llama-server 42.5 3.1", with nothing saying which
@@ -6225,8 +6296,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         ))}
                       </tbody>
                     </table>
-                  </div>
-                )}
+                    </div>
+                  )}
+                </div>
 
               </>
             ) : (

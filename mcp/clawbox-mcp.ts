@@ -60,7 +60,6 @@ import {
   watchEmailReadability,
   type EmailReadabilityWatchOptions,
 } from "./tools/email";
-import { registerImprovementTools } from "./tools/improvement";
 import { registerLocalAiTools } from "./tools/local-ai";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
@@ -213,7 +212,6 @@ export async function buildServer(
   registerCodingTools(reg);
   registerCodingAgentTools(reg, ctx);
   registerCodingTeamTools(reg, ctx);
-  registerImprovementTools(reg);
 
   // LAST. It takes over tools/call so that argument-validation failures come
   // back as the { error, code, message, next } envelope instead of the SDK's

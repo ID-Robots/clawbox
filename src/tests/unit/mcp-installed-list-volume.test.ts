@@ -88,7 +88,6 @@ const ctx: McpContext = {
   providers: [],
   emailCanRead: false,
   codingAgent: false,
-  codingVercel: false,
   canGenerateImages: true,
 };
 

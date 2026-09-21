@@ -62,7 +62,6 @@ function stubFetch(
     autoMerge?: boolean;
     completionAttempts?: number;
     maxParallelRuns?: number;
-    vercelEnabled?: boolean;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
   },
@@ -88,9 +87,6 @@ function stubFetch(
     /** A server from before worktrees: no runs-at-once field, so that control
      *  must not be drawn either. */
     noMaxParallelRuns?: boolean;
-    /** A server from before the box-wide Vercel switch: no field at all, which
-     *  the panel must read as OFF — it is a consent, not a preference. */
-    noVercelEnabled?: boolean;
     /** A server from before the commit-author setting: no fields at all, so the
      *  two inputs must not be drawn — their Save would post a body it refuses. */
     noGitAuthor?: boolean;
@@ -113,7 +109,6 @@ function stubFetch(
   let completionAttempts = status.completionAttempts ?? 3;
   let maxParallelRuns = status.maxParallelRuns ?? 2;
   // OFF when the device has never stored it, unlike the media switches above.
-  let vercelEnabled = status.vercelEnabled ?? false;
   // Both halves unset means "use the project's own git identity", which is
   // what every box did before the setting existed.
   let gitAuthorName: string | null = status.gitAuthorName ?? null;
@@ -141,7 +136,6 @@ function stubFetch(
     ...(opts.noReviewLoop ? {} : { reviewRounds, minReviewRounds: 0, maxReviewRounds: 6, autoMerge }),
     ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
-    ...(opts.noVercelEnabled ? {} : { vercelEnabled }),
     ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -164,16 +158,6 @@ function stubFetch(
     }
     if (url.startsWith("/setup-api/coding-agent/projects")) {
       return json({ directory: null, projects: [] });
-    }
-    // And for ImprovementProgramCard, mounted under the GitHub card: its own
-    // read, answered so the card draws its real face rather than its "could
-    // not read" message.
-    if (url === "/setup-api/improvement-program") {
-      return json({
-        mode: "off", repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
-        maxIssuesPerDay: 5, remainingToday: 5,
-        github: { installed: true, connected: false, login: null }, incidents: [],
-      });
     }
     if (url.startsWith("/setup-api/coding-agent/git")) {
       if (opts.gitThrows) throw new TypeError("Failed to fetch");
@@ -208,7 +192,6 @@ function stubFetch(
       if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
       if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
       if (typeof body.realBrowser === "boolean") realBrowser = body.realBrowser;
-      if (typeof body.vercelEnabled === "boolean") vercelEnabled = body.vercelEnabled;
       if (typeof body.reviewRounds === "number") {
         if (opts.rejectRounds) {
           return json({ error: "The number of review rounds must be between 0 and 6.", kind: "invalid" }, 400);
@@ -382,12 +365,9 @@ describe("the commit author", () => {
     render(<CodingAgentSettingsPanel />);
     await waitFor(() => expect(screen.getByTestId("coding-agent-author-name")).toHaveValue("Ada Lovelace"));
     expect(screen.getByTestId("coding-agent-author-email")).toHaveValue("ada@example.com");
-    // The hint itself, by its whole string: the card's Vercel switch names
-    // Vercel too, so a /Vercel/ matcher here finds two elements and pins
-    // neither. This one has to say what the e-mail is FOR.
     const hint = translations.en["codingAgent.commitAuthorHint"];
     expect(screen.getByText(hint)).toBeInTheDocument();
-    expect(hint).toContain("Vercel");
+    expect(hint).toContain("deploy");
   });
 
   it("saves both halves in ONE request, because the device uses them as a pair", async () => {
@@ -602,63 +582,6 @@ describe("the browser a run verifies its work in", () => {
   });
 });
 
-describe("the box-wide Vercel integration", () => {
-  const VERCEL = translations.en["codingAgent.vercelEnabledLabel"];
-
-  it("renders OFF for a device that answers with no such field", async () => {
-    // The opposite fallback to the media and browser switches above, and
-    // deliberately: this is standing consent for pushing the owner's code to
-    // another company's account, so "the device never said" reads as no. A box
-    // that was already deploying is switched on by the DEVICE before it
-    // answers, so it never lands here.
-    stubFetch({ enabled: true, readiness: READY }, { noVercelEnabled: true });
-    render(<CodingAgentSettingsPanel />);
-    expect(await screen.findByRole("switch", { name: VERCEL })).toHaveAttribute("aria-checked", "false");
-  });
-
-  it("posts the field the route reads and renders what it answers", async () => {
-    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false });
-    render(<CodingAgentSettingsPanel />);
-    const toggle = await screen.findByRole("switch", { name: VERCEL });
-    expect(toggle).toHaveAttribute("data-testid", "coding-agent-vercel-enabled");
-    fireEvent.click(toggle);
-    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { vercelEnabled: true } }]));
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
-  });
-
-  it("shows what the device has stored, and keeps its hint one tap away", async () => {
-    stubFetch({ enabled: true, readiness: READY, vercelEnabled: true });
-    render(<CodingAgentSettingsPanel />);
-    expect(await screen.findByRole("switch", { name: VERCEL })).toHaveAttribute("aria-checked", "true");
-    expect(screen.queryByText(translations.en["codingAgent.vercelEnabledHint"])).toBeNull();
-    fireEvent.click(screen.getByTestId("coding-agent-vercel-enabled-help"));
-    expect(screen.getByText(translations.en["codingAgent.vercelEnabledHint"])).toBeInTheDocument();
-  });
-
-  it("wears a BETA badge and says, in plain sight, that it is experimental and off by default", async () => {
-    // The badge and the line are VISIBLE, not behind the help tip: "this is
-    // experimental and off by default" is what an owner needs before reaching
-    // for the switch, and this row is the only place on the box the
-    // integration is offered at all (the setup wizard never mentions it).
-    // Whatever the switch's state — the badge is about the feature, not the
-    // answer.
-    for (const vercelEnabled of [false, true]) {
-      stubFetch({ enabled: true, readiness: READY, vercelEnabled });
-      const view = render(<CodingAgentSettingsPanel />);
-      const toggle = await screen.findByRole("switch", { name: VERCEL });
-      expect(toggle).toHaveAttribute("aria-checked", String(vercelEnabled));
-      const badge = screen.getByTestId("coding-agent-vercel-beta");
-      expect(badge.textContent).toBe(translations.en["codingAgent.vercelBetaBadge"]);
-      // Beside the label, in the same row as the switch.
-      expect(badge.closest("div")?.textContent).toContain(VERCEL);
-      expect(screen.getByTestId("coding-agent-vercel-beta-hint").textContent)
-        .toBe(translations.en["codingAgent.vercelBetaHint"]);
-      expect(translations.en["codingAgent.vercelBetaHint"]).toMatch(/off by default/i);
-      view.unmount();
-    }
-  });
-});
-
 describe("the automatic review pass", () => {
   const REVIEW = translations.en["codingAgent.reviewPassLabel"];
 
@@ -689,25 +612,6 @@ describe("the automatic review pass", () => {
     stubFetch({ enabled: true, readiness: READY, reviewPass: true });
     render(<CodingAgentSettingsPanel />);
     expect(await screen.findByRole("switch", { name: REVIEW })).toHaveAttribute("aria-checked", "true");
-  });
-});
-
-describe("the Improvement Program card", () => {
-  it("is mounted directly under the GitHub card, whose credential its reports go out on", async () => {
-    stubFetch({ enabled: true, readiness: READY });
-    render(<CodingAgentSettingsPanel />);
-    const card = await screen.findByTestId("improvement-program-card");
-    // Right after GitHub in the DOM, not merely somewhere on the page: the
-    // two are one story, and the card used to live in Settings → System.
-    expect(screen.getByTestId("coding-agent-github-card").nextElementSibling).toBe(card);
-    expect(screen.getByTestId("improvement-mode-off")).toHaveAttribute("aria-checked", "true");
-  });
-
-  it("is drawn even when gh is not on the box, since the choice is the owner's either way", async () => {
-    stubFetch({ enabled: true, readiness: READY }, { github: { installed: false, connected: false, login: null } });
-    render(<CodingAgentSettingsPanel />);
-    expect(await screen.findByTestId("improvement-program-card")).toBeInTheDocument();
-    expect(screen.queryByTestId("coding-agent-github-card")).toBeNull();
   });
 });
 

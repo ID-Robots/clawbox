@@ -176,7 +176,7 @@ describe("importFolder", () => {
     // repository the owner commits to by hand carries the identity they want —
     // so the box's own mark outranked the Commit author setting for the life of
     // the project, and every commit the agent made in an imported folder was
-    // authored by an address no GitHub account owns and failed the Vercel
+    // authored by an address no GitHub account owns and failed the host's
     // deployment check.
     storeConfig({
       [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",

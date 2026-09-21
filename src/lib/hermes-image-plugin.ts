@@ -95,7 +95,7 @@ export const HERMES_IMAGE_TOKEN_ENV = "CLAWBOX_AI_TOKEN";
  * The install, NOT the cwd. The production server does not run from the repo
  * root: Next's standalone `server.js` does `process.chdir(__dirname)`, so in
  * production the cwd is `.next/standalone`, and this read the plugin out of the
- * build output. That worked only because @vercel/nft happened to trace
+ * build output. That worked only because Next's dependency tracer happened to trace
  * `scripts/` into that tree — a copy that refreshes on a full rebuild and not
  * before, so an update shipping a fixed plugin could install the stale one.
  *

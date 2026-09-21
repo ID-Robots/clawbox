@@ -25,7 +25,6 @@ import {
   setGenerateImages,
   setRealBrowser,
   setReviewPass,
-  setVercelEnabled,
   setReviewRounds,
   setSetupComplete,
   setTokenLimit,
@@ -75,14 +74,6 @@ function forbidden() {
  * POST { realBrowser: boolean } → does a run verify its work in the Chromium
  * on the owner's screen, or in a headless one nobody sees? ON when absent, for
  * the same reason as the media switches.
- * POST { vercelEnabled: boolean } → is the Vercel integration part of this box
- * at all: the link card, the Deploy buttons, the run's deployment card, the
- * pipeline's deploy-and-check stages, the two `coding_deploy_*` MCP tools and
- * the routes behind them. OFF when absent — it is standing consent for the box
- * to push the owner's code to another company's account, not a preference — so
- * a box that has never been asked has the feature hidden. The one exception is
- * a box that already HAS a Vercel link, which answered this by attaching one
- * (see `migrateVercelEnabled` in @/lib/coding-agent).
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
@@ -171,7 +162,6 @@ export async function POST(request: Request) {
     generateImages?: unknown;
     generateAudio?: unknown;
     realBrowser?: unknown;
-    vercelEnabled?: unknown;
     setupComplete?: unknown;
     clearHarnessFault?: unknown;
     provider?: unknown;
@@ -189,7 +179,6 @@ export async function POST(request: Request) {
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
-  const hasVercelEnabled = typeof fields.vercelEnabled === "boolean";
   // Only `true`. `false` is not the other half of a switch here — it would
   // mean "record a fault", and nothing outside the runner may do that.
   const clearsFault = fields.clearHarnessFault === true;
@@ -210,7 +199,7 @@ export async function POST(request: Request) {
     && (typeof fields.gitAuthorName === "string" || fields.gitAuthorName === null);
   const hasGitAuthorEmail = "gitAuthorEmail" in fields
     && (typeof fields.gitAuthorEmail === "string" || fields.gitAuthorEmail === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasVercelEnabled && !hasGitAuthorName && !hasGitAuthorEmail && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasGitAuthorName && !hasGitAuthorEmail && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -218,7 +207,7 @@ export async function POST(request: Request) {
           + "{ effort: string }, { provider: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
-          + "{ realBrowser: boolean }, { vercelEnabled: boolean }, "
+          + "{ realBrowser: boolean }, "
           + "{ reviewRounds: number }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
           + "{ maxParallelRuns: number }, "
@@ -284,11 +273,7 @@ export async function POST(request: Request) {
     // tools plus the DEFAULT provider's credential, so switching to an account
     // nobody has connected takes the family away exactly as switching the
     // agent off does.
-    // And the VERCEL switch for the fourth time: the two `coding_deploy_*`
-    // tools are registered behind the same one-shot probe, so switching the
-    // integration off leaves a live agent holding tools whose routes now
-    // answer 409 — the circuit-breaker shape the reload exists to avoid.
-    const before = hasEnabled || clearsFault || hasProvider || hasVercelEnabled
+    const before = hasEnabled || clearsFault || hasProvider
       ? await getCodingAgentStatus()
       : null;
     if (hasDirectory) {
@@ -367,10 +352,6 @@ export async function POST(request: Request) {
       const saved = await setRealBrowser(fields.realBrowser);
       console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
     }
-    if (hasVercelEnabled) {
-      const saved = await setVercelEnabled(fields.vercelEnabled);
-      console.error(`[coding-agent] the Vercel integration was switched ${saved ? "on" : "off"} by the owner`);
-    }
     if (clearsFault) {
       await clearHarnessFault();
       console.error("[coding-agent] recorded harness fault cleared by the owner");
@@ -400,10 +381,7 @@ export async function POST(request: Request) {
     // catches up at the next restart. A floating promise here would outlive the
     // response with nothing watching it.
     if (before) {
-      await refreshCodingAgentToolsIfChanged(
-        { ready: before.ready, vercelEnabled: before.vercelEnabled },
-        { ready: status.ready, vercelEnabled: status.vercelEnabled },
-      );
+      await refreshCodingAgentToolsIfChanged({ ready: before.ready }, { ready: status.ready });
     }
     return NextResponse.json(status);
   } catch (err) {

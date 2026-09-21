@@ -11,11 +11,10 @@
  * the two states that need a person (waiting for the production button, and a
  * pipeline that stopped) are the two that get words.
  *
- * IT IMPORTS ONLY ./coding-pipeline, never ./coding-pipeline-verify: this is a
+ * IT IMPORTS ONLY ./coding-pipeline, never the server-side verification: this is a
  * client component, and the module that does the looking reaches `fs`, Playwright
  * and the vision proxy. Pulling that into the browser bundle does not resolve
- * and the build fails outright — the same reason ./coding-pr-state and
- * ./vercel-state exist.
+ * and the build fails outright — the same reason ./coding-pr-state exists.
  */
 
 import { useState } from "react";

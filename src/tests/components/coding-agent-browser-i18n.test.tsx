@@ -77,7 +77,7 @@ describe("the coding agent's browser copy renders translated", () => {
     expect(copy["codingAgent.wizardBrowserTitle"]).toBe("Läufe dürfen den Browser dieser Box nutzen");
     expect(copy["codingAgent.wizardBrowserSkip"]).toBe("Überspringen — unsichtbar browsen");
     // The step count is part of the wizard's promise: the browser step made it
-    // four and nine locale files still said three; the Improvement Program
+    // four and nine locale files still said three; a step added earlier
     // step made it five.
     expect(copy["codingAgent.wizardIntro"]).toContain("fünf Schritte");
     // One register throughout the card — the block is Sie, and the two media

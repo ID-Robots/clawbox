@@ -1,13 +1,13 @@
 /**
  * The Coding Agent's first-run wizard (src/components/CodingAgentSetupWizard.tsx),
- * and in particular the two steps it grew: GitHub, the IMPROVEMENT PROGRAM,
+ * and in particular the steps it grew: GitHub,
  * the project folder, WHICH BROWSER a run verifies its work in, then the
  * offered test run.
  *
  * What is pinned here is the step's promise. Enable records the owner's answer
  * and then makes it true — installing Chromium only when the device says it is
  * missing, and opening the window — while Skip records the other answer. And
- * neither button may strand the owner: this is a five-step flow whose last
+ * neither button may strand the owner: this is a four-step flow whose last
  * step is only reachable from this one, so a failure that left both buttons
  * refusing would mean closing the window and starting again.
  *
@@ -79,14 +79,6 @@ function stubDevice(
     openFails?: boolean;
     /** The coding-agent route refuses the preference write itself. */
     settingFails?: boolean;
-    /** The Improvement Program route refuses the mode write. */
-    improvementFails?: boolean;
-    /** The mode the box already holds; `off` is its stored default. */
-    improvementMode?: "off" | "ask" | "auto";
-    /** Whether the box holds an ANSWER; defaults to true for ask/auto, false otherwise. */
-    answered?: boolean;
-    /** Holds the Improvement Program GET until it settles — a read that lands late. */
-    holdImprovementRead?: Promise<void>;
     /** Whether step 1 actually connected GitHub; skipping it is the default. */
     githubConnected?: boolean;
     /**
@@ -99,8 +91,6 @@ function stubDevice(
 ) {
   calls = [];
   let installed = opts.chromiumInstalled ?? true;
-  let improvementMode: string = opts.improvementMode ?? "off";
-  let improvementAnswered = opts.answered ?? (opts.improvementMode === "ask" || opts.improvementMode === "auto");
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -120,24 +110,6 @@ function stubDevice(
         connected,
         login: connected ? "octocat" : null,
         loginCommand: "gh auth login",
-      });
-    }
-    // The Improvement Program: read on mount for the daily cap and any answer
-    // the box already holds, written once on the step's Next.
-    if (url === "/setup-api/improvement-program") {
-      if (init?.method === "POST") {
-        if (opts.improvementFails) {
-          return json({ error: "Changing the Improvement Program needs a signed-in browser session.", code: "owner_only" }, 403);
-        }
-        improvementMode = body.mode;
-        improvementAnswered = true;
-      } else if (opts.holdImprovementRead) {
-        await opts.holdImprovementRead;
-      }
-      return json({
-        mode: improvementMode, answered: improvementAnswered, repo: "ID-Robots/clawbox", pending: 0, reported: 0, total: 0,
-        maxIssuesPerDay: 5, remainingToday: 5,
-        github: { installed: true, connected: false, login: null }, incidents: [],
       });
     }
     if (url === "/setup-api/coding-agent/enable") {
@@ -168,9 +140,6 @@ function stubDevice(
 const browserActions = () =>
   calls.filter((c) => c.url === "/setup-api/browser/manage").map((c) => (c.body as { action: string }).action);
 
-/** What the wizard wrote to the Improvement Program, if anything. */
-const improvementWrites = () =>
-  calls.filter((c) => c.url === "/setup-api/improvement-program").map((c) => c.body);
 
 /** What the wizard wrote about the browser, if anything. */
 const browserSettings = () =>
@@ -178,8 +147,9 @@ const browserSettings = () =>
     .filter((c) => c.url === "/setup-api/coding-agent/enable" && c.body !== undefined && "realBrowser" in (c.body as object))
     .map((c) => c.body);
 
-/** Walk the wizard as an owner does, up to the improvement step. */
-async function reachImprovementStep() {
+
+/** Walk the wizard as an owner does, up to the browser step. */
+async function reachBrowserStep() {
   render(<CodingAgentSetupWizard status={STATUS} onDone={vi.fn()} />);
   // The first step is behind the paid-plan gate, and the gate's own poll has
   // to answer before the button is anything but disabled — the hook starts
@@ -188,13 +158,6 @@ async function reachImprovementStep() {
   await waitFor(() => expect(enable).not.toBeDisabled());
   fireEvent.click(enable);
   fireEvent.click(await screen.findByTestId("coding-agent-wizard-next"));
-  await screen.findByTestId("coding-agent-wizard-improvement-next");
-}
-
-/** ...and on to the browser step, past the programme and the folder. */
-async function reachBrowserStep() {
-  await reachImprovementStep();
-  fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
   fireEvent.click(await screen.findByTestId("coding-agent-wizard-next-harness"));
   await screen.findByTestId("coding-agent-wizard-browser-enable");
 }
@@ -202,192 +165,11 @@ async function reachBrowserStep() {
 beforeEach(() => { calls = []; });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-describe("the improvement step", () => {
-  it("sits between GitHub and the project folder, as the second of five, with Automatic proposed", async () => {
-    stubDevice();
-    await reachImprovementStep();
-    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 2, total: 5 }))).toBeInTheDocument();
-    expect(screen.getByText(translations.en["codingAgent.wizardImprovementTitle"])).toBeInTheDocument();
-    // The consent is the two lists, in the settings card's own words.
-    expect(screen.getByText(translations.en["improvement.sends1"])).toBeInTheDocument();
-    expect(screen.getByText(translations.en["improvement.never3"])).toBeInTheDocument();
-    // Automatic is the WIZARD's proposal; the stored default is still off.
-    expect(screen.getByTestId("coding-agent-wizard-improvement-auto")).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByTestId("coding-agent-wizard-improvement-ask")).toHaveAttribute("aria-checked", "false");
-    expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "false");
-    // The daily cap the box enforces is the number the hint names.
-    expect(screen.getByText(t("improvement.modeAutoHint", { n: 5 }))).toBeInTheDocument();
-  });
-
-  // Step 1 is SKIPPABLE, so the framing here may not describe a connection the
-  // owner does not have. Saying reports go out "using the account you just
-  // connected" to someone who pressed Skip names a credential that is not
-  // there and hides the one thing they would have to do about it.
-  it("does not name an account the owner skipped past", async () => {
-    stubDevice();
-    await reachImprovementStep();
-    const hint = screen.getByTestId("coding-agent-wizard-improvement-hint");
-    expect(hint).toHaveTextContent(translations.en["codingAgent.wizardImprovementHintNoGithub"]);
-    // It says where the account is connected instead of assuming one.
-    expect(hint).toHaveTextContent("needs a GitHub account connected in Settings");
-    expect(hint).not.toHaveTextContent("the account you just connected");
-  });
-
-  it("names the account the owner did connect", async () => {
-    stubDevice({ githubConnected: true });
-    await reachImprovementStep();
-    await waitFor(() =>
-      expect(screen.getByTestId("coding-agent-wizard-improvement-hint")).toHaveTextContent(
-        translations.en["codingAgent.wizardImprovementHint"],
-      ),
-    );
-    expect(
-      screen.getByTestId("coding-agent-wizard-improvement-hint"),
-    ).not.toHaveTextContent("needs a GitHub account connected in Settings");
-    // Nothing is written by arriving here, and there is no Skip: Next with
-    // Off chosen is the way to decline.
-    expect(improvementWrites()).toEqual([]);
-    expect(screen.queryByText(translations.en["codingAgent.wizardSkip"])).toBeNull();
-  });
-
-  it("writes Automatic on Next and moves on to the project folder", async () => {
-    stubDevice();
-    await reachImprovementStep();
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-
-    await waitFor(() => expect(improvementWrites()).toEqual([{ mode: "auto" }]));
-    expect(await screen.findByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
-    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 3, total: 5 }))).toBeInTheDocument();
-  });
-
-  it("declines by writing Off explicitly, rather than by writing nothing", async () => {
-    stubDevice();
-    await reachImprovementStep();
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-off"));
-    expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-
-    await waitFor(() => expect(improvementWrites()).toEqual([{ mode: "off" }]));
-    expect(await screen.findByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
-  });
-
-  it("goes back to GitHub without writing, and is where the folder step's Back lands", async () => {
-    stubDevice();
-    await reachImprovementStep();
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-back"));
-    expect(await screen.findByTestId("coding-agent-wizard-next")).toBeInTheDocument();
-    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 1, total: 5 }))).toBeInTheDocument();
-    expect(improvementWrites()).toEqual([]);
-
-    // Forward again, through the step, then Back from the folder.
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-    fireEvent.click(await screen.findByTestId("coding-agent-wizard-improvement-next"));
-    await screen.findByTestId("coding-agent-wizard-folder");
-    fireEvent.click(screen.getByText(translations.en["codingAgent.wizardBack"]));
-    expect(await screen.findByTestId("coding-agent-wizard-improvement-next")).toBeInTheDocument();
-    // Only Next writes: coming back does not.
-    expect(improvementWrites()).toEqual([{ mode: "auto" }]);
-  });
-
-  it("stays put and shows the route's own words when the write is refused", async () => {
-    stubDevice({ improvementFails: true });
-    await reachImprovementStep();
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-
-    expect(await screen.findByText(/signed-in browser session/)).toBeInTheDocument();
-    // Still on the step, its buttons live again — not on the folder: an
-    // answer the box did not record is not an answer.
-    expect(screen.getByTestId("coding-agent-wizard-improvement-next")).toBeEnabled();
-    expect(screen.queryByTestId("coding-agent-wizard-folder")).toBeNull();
-  });
-
-  it("keeps an answer the box already holds, proposing Automatic only over the stored default", async () => {
-    // Start over runs this wizard again; an owner who chose "ask me" must not
-    // find it quietly widened to Automatic on Next.
-    stubDevice({ improvementMode: "ask" });
-    await reachImprovementStep();
-    await waitFor(() =>
-      expect(screen.getByTestId("coding-agent-wizard-improvement-ask")).toHaveAttribute("aria-checked", "true"),
-    );
-  });
-
-  it("keeps an explicit earlier Off rather than proposing Automatic over a decline", async () => {
-    stubDevice({ improvementMode: "off", answered: true });
-    await reachImprovementStep();
-    await waitFor(() =>
-      expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "true"),
-    );
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-    await waitFor(() => expect(improvementWrites()).toEqual([{ mode: "off" }]));
-  });
-
-  it("lets the owner's pick win over a read that lands after it", async () => {
-    let release: () => void = () => {};
-    const hold = new Promise<void>((resolve) => { release = resolve; });
-    stubDevice({ improvementMode: "ask", holdImprovementRead: hold });
-    await reachImprovementStep();
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-off"));
-    release();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(screen.getByTestId("coding-agent-wizard-improvement-off")).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-    await waitFor(() => expect(improvementWrites()).toEqual([{ mode: "off" }]));
-  });
-
-  it("says GitHub is missing beside an answer that would send, and not beside Off", async () => {
-    stubDevice();
-    await reachImprovementStep();
-    expect(screen.getByTestId("coding-agent-wizard-improvement-github").textContent)
-      .toBe(translations.en["improvement.githubMissing"]);
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-off"));
-    expect(screen.queryByTestId("coding-agent-wizard-improvement-github")).toBeNull();
-  });
-});
-
-describe("what the wizard never offers", () => {
-  it("never mentions Vercel, on any step", async () => {
-    // The Vercel integration is a BETA flag, off by default, offered in ONE
-    // place — Coding Agent → Settings, behind a Beta badge — and never as part
-    // of setup. Every step's rendered text is read, case-insensitively, so a
-    // deploy step added to this flow fails here rather than on a new owner's
-    // screen.
-    stubDevice();
-    const mentions = () => expect(document.body.textContent ?? "").not.toMatch(/vercel/i);
-
-    render(<CodingAgentSetupWizard status={STATUS} onDone={vi.fn()} />);
-    const enable = screen.getByTestId("coding-agent-wizard-enable");
-    await waitFor(() => expect(enable).not.toBeDisabled());
-    mentions(); // intro
-
-    fireEvent.click(enable);
-    await screen.findByTestId("coding-agent-wizard-next");
-    mentions(); // github
-
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-    await screen.findByTestId("coding-agent-wizard-improvement-next");
-    mentions(); // the Improvement Program
-
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-    await screen.findByTestId("coding-agent-wizard-next-harness");
-    mentions(); // project folder
-
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
-    await screen.findByTestId("coding-agent-wizard-browser-enable");
-    mentions(); // browser
-
-    fireEvent.click(screen.getByTestId("coding-agent-wizard-browser-skip"));
-    await screen.findByTestId("coding-agent-wizard-harness-run");
-    mentions(); // harness, the last step
-    // And the wizard wrote nothing about the integration on the way through.
-    expect(calls.filter((c) => c.body !== undefined && "vercelEnabled" in (c.body as object))).toEqual([]);
-  });
-});
-
 describe("the browser step", () => {
-  it("sits between the project folder and the test run, as one of five", async () => {
+  it("sits between the project folder and the test run, as one of four", async () => {
     stubDevice();
     await reachBrowserStep();
-    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 4, total: 5 }))).toBeInTheDocument();
+    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 3, total: 4 }))).toBeInTheDocument();
     expect(screen.getByText(translations.en["codingAgent.wizardBrowserTitle"])).toBeInTheDocument();
     // The step says what the owner will SEE, which is the whole difference
     // between the two answers.
@@ -406,7 +188,7 @@ describe("the browser step", () => {
     await waitFor(() => expect(browserActions()).toEqual(["open-browser"]));
     // And on to the last step, which is where the flow ends.
     expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
-    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 5, total: 5 }))).toBeInTheDocument();
+    expect(screen.getByText(t("codingAgent.wizardStepOf", { n: 4, total: 4 }))).toBeInTheDocument();
   });
 
   it("installs Chromium only when the box answers that it has none", async () => {

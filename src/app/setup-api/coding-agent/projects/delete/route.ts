@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
  * whole of its design follows from that:
  *
  *  - OWNER ONLY, AND SAME ORIGIN, for BOTH verbs. The MCP bearer is refused
- *    outright, exactly as `vercel/promote` and `secrets` refuse it, and for the
+ *    outright, exactly as `secrets` refuses it, and for the
  *    sharpest version of the same reason: middleware admits every /setup-api/*
  *    call on that bearer and the agent holds it, so a DELETE it could reach
  *    would let a prompt-injected run remove the folder it was asked to work in

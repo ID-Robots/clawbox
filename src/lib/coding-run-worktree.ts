@@ -58,8 +58,8 @@ const out = (r: ChildResult) => r.stdout.trim();
  *
  * It used to be a constant — the placeholder address that belongs to nobody —
  * and `commitRunWork` used the same one. It is now RESOLVED per project
- * (coding-git-identity.ts), because on a project wired to the Vercel GitHub
- * integration that placeholder fails the deployment check and the box's own
+ * (coding-git-identity.ts), because on a project wired to a host's GitHub
+ * deployment integration that placeholder fails the check and the box's own
  * bookkeeping commits blocked the pull requests it opened. Still the same
  * identity `commitRunWork` uses, by the same resolver.
  *

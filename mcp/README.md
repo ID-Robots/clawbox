@@ -87,14 +87,11 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
-| Deploying to Vercel (`coding_deploy_preview/production`) | when the coding agent is on AND the owner switched the Vercel integration on | same |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
-| Vercel status (`coding_vercel_status`) | with the deploy tools: coding agent on AND the Vercel integration on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
-| Improvement Program (`clawbox_incidents_list`, `clawbox_incident_report`) | yes | yes |
 | Everything else | yes | yes |
 
 ## Tools
@@ -660,8 +657,7 @@ tells the run to link them and ship them.
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
 `coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
-`coding_project_status` · `coding_secret_list` · `coding_deploy_preview` ·
-`coding_deploy_production` · `coding_vercel_status`
+`coding_project_status` · `coding_secret_list`
 
 | Tool | What it does |
 |---|---|
@@ -671,10 +667,8 @@ tells the run to link them and ship them.
 | `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`. Filter by `status` / `project`. |
 | `coding_agent_resume` | The Resume button, for a `paused` or `gave_up` run the AGENT started — optionally telling it something first (`message`). |
 | `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. |
-| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs, pipeline default and deployment. |
+| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs and pipeline default. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
-| `coding_deploy_preview` / `coding_deploy_production` | Deploy a project to Vercel (production only where the owner allowed it for that project). |
-| `coding_vercel_status` | Read one project's Vercel link, latest deployment, production domain, production permission and hourly allowance, and pipeline default. |
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
@@ -720,56 +714,6 @@ switch either, for the reason `browser_auto_open` has none: handing an
 unattended shell the owner's credentials is a consent, and a tool that could
 turn it back on would make their "no" temporary.
 
-`coding_deploy_preview` and `coding_deploy_production` deploy a coding-agent
-project to Vercel (`src/lib/vercel-deploy.ts`). They are TWO tools rather than
-one with a `target`, because the two are different acts and a model choosing
-between two values of one argument treats them as the same act with a knob on
-it: a preview is a throwaway address nobody has, production is the project's
-real domain in front of whoever uses it.
-
-BOTH ARE ABSENT unless the owner has the box-wide Vercel integration switched
-on (`coding_vercel_enabled`, Settings in the Coding Agent app; off on a box that
-has never been asked, and on for one that already had a Vercel project
-attached, which the device migrates for itself). Not registered rather than
-registered-and-refusing, the same rule the coding-agent family above them
-follows: with the integration off every deploy route answers 409
-`vercel_disabled`, and a tool that can only ever fail opens Hermes'
-per-server circuit breaker — which takes every ClawBox tool offline, not just
-these two. The device asks the harness to rebuild its tool list when the owner
-moves the switch, so the change reaches a live agent rather than waiting for a
-restart. `delivery_pipeline` on `coding_agent_run` stays available and says so:
-with the integration off a pipeline runs its review and improvement laps and
-SKIPS its four deploy-and-check stages.
-
-NEITHER can name a Vercel project. Both take a CODING project — `project_id`,
-`directory`, or the `run_id` of the run that built it — and the device looks up
-the Vercel project the OWNER attached to it, with the token from the owner's
-own secret store. There is no argument anywhere on this surface for a Vercel
-project, a team or a token, so a prompt-injected agent cannot deploy the
-owner's code to an account it chose, and the token never reaches this process.
-
-A preview is the agent's to make. PRODUCTION is refused (403,
-`auto_production_off`) unless the owner has turned it on for THAT project —
-`coding_vercel_auto_production`, off when absent, per project so that "the
-assistant may ship the toy site by itself" does not also mean "and the shop".
-With it on the agent may deploy that one project to production without asking
-again, which is the automatic flow this was asked for. Production deploys are
-additionally rate limited per project and the refusal (`rate_limited`) is a
-thing to tell the user rather than retry. There is deliberately no tool for the
-switch, for the reason there is none for the secret store's: one that could
-turn it on would make the owner's answer temporary.
-
-`coding_vercel_status` is the READ half and sits under the same two switches,
-for the same circuit-breaker reason (off, `GET …/vercel/deploy` answers 409
-`vercel_disabled`). It reads that route with `domain=1` — the project's name and
-production domain, one call to Vercel, and a pending deployment is refreshed on
-the way — plus `GET …/pipeline` for the project's pipeline default. There is
-deliberately no WRITE half, and "Vercel toggle" is answered by saying where the
-owner's switches are: the box-wide integration (`POST …/enable`
-`vercelEnabled`), a project's link (`POST …/vercel`), its standing production
-permission (`PUT …/vercel/deploy`) and its pipeline default (`PUT …/pipeline`)
-all require the owner's own browser session on this box's origin, and a tool
-could only be refused by them.
 
 The run lives in the web server (`src/lib/coding-agent.ts`,
 `/setup-api/coding-agent/*`), not in this process: OpenClaw reaps the MCP
@@ -971,42 +915,6 @@ not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
 to the approved senders (`src/lib/coding-agent-notify.ts`).
 
-### ClawBox Improvement Program (both editions)
-
-`clawbox_incidents_list` · `clawbox_incident_report`
-
-What broke in **ClawBox's own software** on this box — a failed coding run, a
-harness that is not usable, a failed update step, a route that threw — kept in
-`data/incidents.json` and, only if the owner opted in, filed on
-`ID-Robots/clawbox` as an issue labelled `improvement-program` / `auto-report`.
-
-The owner's switch (Coding Agent → Settings, under the GitHub card; the
-first-run wizard asks it once as its second step) has three values and is the
-whole design:
-
-| | what the box does | what these tools do |
-|---|---|---|
-| `off` (default) | records locally, sends nothing | `list` says so and tells the agent not to offer; `report` is refused 409 |
-| `ask` | sends nothing by itself | the agent may offer, and files on the user's yes — this is what the pair exists for |
-| `auto` | files on capture, inside the daily limit | nothing to offer; `report` still works if the user asks |
-
-**There is deliberately no tool for the switch.** `POST /setup-api/improvement-program`
-refuses this server's bearer (403 `owner_only`) and any other origin: opting a
-box into publishing its diagnostics is a consent, and a tool that could grant it
-would make the owner's answer temporary — the same rule as `coding-agent/enable`
-and `coding-agent/permissions`.
-
-**Nothing here composes a report.** `clawbox_incident_report` names a STORED
-incident by id; the body is a fixed template over text the device sanitized when
-it captured it (credentials by shape and by the box's own config values, emails,
-IP addresses, hostnames that are not localhost, home paths, query strings), and
-no transcript, prompt, file content or environment value is ever captured in the
-first place. Dedupe searches the body marker `<!-- cbip:<fingerprint> -->` and
-comments once a day instead of opening a second issue; a search that FAILED
-refuses the send rather than risking a duplicate. At most 5 new issues per box
-per UTC day. The recorded message is labelled to the model as information, not
-instructions, like every other text a subsystem wrote.
-
 ### Memory Shard
 
 `memory_shard_status` (both editions) · `memory_shard_search` (Hermes only)
@@ -1104,12 +1012,12 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Owner's only | Route(s) | Why |
 |---|---|---|
 | Coding agent switch and settings, secrets, permissions, Anthropic/GitHub sign-in, reset | `coding-agent/enable`, `secrets`, `permissions`, `anthropic`, `github-login`, `reset` | consent to a delegated shell and to the owner's credentials |
-| Vercel link, production permission, pipeline default, promote | `coding-agent/vercel`, `PUT …/vercel/deploy`, `POST/PUT …/pipeline`, `…/vercel/promote` | a switch a tool could flip would make the owner's answer temporary |
+| Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
 | Bringing a run's branch home, the file tree's writes, project import/delete | `coding-agent/merge`, `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
 | Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |
-| Improvement Program mode, MCP switch, background jobs | `improvement-program` POST, `harness/mcp`, `background-jobs` | consent |
+| MCP switch, background jobs | `harness/mcp`, `background-jobs` | consent |
 
 ### Examples and refusal shapes
 
@@ -1141,12 +1049,6 @@ the agent does instead. Success bodies are shortened here.
     "on_desktop": true, "app": "server app on port 4230, opened at /apps/site/", "latest_run": "run-k3x9q2ab (completed)",
     "runs_working": 0, "runs_waiting": 1, "branches_not_merged": 1, "left_running": 0 } ] }
 
-// coding_vercel_status {"directory": "site"}
-"A Vercel project (site) is attached; production is site.example.com.
-The latest preview deployment is ready at https://site-abc.vercel.app.
-You may NOT deploy this project to production: the owner has not allowed it. Offer coding_deploy_preview; …"
-// … with the integration switched off under a live server:
-{ "error": true, "code": "NOT_SUPPORTED_HERE", "message": "This ClawBox has the Vercel integration switched off.", "next": "Tell the user it can be turned on in the Coding Agent app, under Settings, as \"Vercel integration\". …" }
 
 // memory_shard_status {} during a reindex
 { "switched_on": true, "health": "healthy", "files_indexed": 120, "chunks": 3400,

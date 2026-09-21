@@ -52,7 +52,7 @@ describe("Settings → System Update", () => {
       }
       if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
       if (url === "/setup-api/system/update-branch") return jsonResponse({ branch: "" });
-      if (url === "/setup-api/system/stats") return jsonResponse({ overview: { hostname: "clawbox", os: "Linux", kernel: "5.15", arch: "arm64", platform: "linux", uptime: "1h" } });
+      if (url.startsWith("/setup-api/system/stats")) return jsonResponse({ overview: { hostname: "clawbox", os: "Linux", kernel: "5.15", arch: "arm64", platform: "linux", uptime: "1h" } });
       if (url === "/setup-api/wifi/status") return jsonResponse({ connected: false, ssid: null });
       if (url === "/setup-api/system/hotspot") return jsonResponse({ enabled: true, ssid: "ClawBox-Setup" });
       if (url === "/setup-api/ai-models/status") return jsonResponse({ connected: false, provider: null, providerLabel: null, mode: null, model: null });

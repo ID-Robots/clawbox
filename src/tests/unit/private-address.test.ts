@@ -2,7 +2,7 @@
  * Is this address one of OURS?
  *
  * Lifted out of the browser route so the delivery pipeline's verification can
- * ask the same question about an address VERCEL handed back — which is exactly
+ * ask the same question about an address a HOST handed back — which is exactly
  * why it is worth a suite of its own now: two callers, one table, and the
  * failure mode is a box fetching and screenshotting its own internal services
  * because a third party's JSON said `127.0.0.1`.
