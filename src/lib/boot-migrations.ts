@@ -27,8 +27,19 @@
  *
  * Its dependencies are handed in rather than imported, the way
  * `seedProcessTimeZone` takes its readers: the register is then walkable in a
- * unit test without a config store on disk.
+ * unit test without a config store on disk. The two imports below are the
+ * exception that proves it — a wallpaper id and the fail-closed edition rule
+ * are constants, not readers: nothing on disk answers them, and copying them
+ * here is exactly the drift `builtin-wallpapers.ts` exists to prevent.
  */
+
+import {
+  brandingHarness,
+  CLAWBOX_WALLPAPER_ID,
+  HERMES_WALLPAPER_ID,
+  LOBSTER_ORBITAL_WALLPAPER,
+} from "@/lib/builtin-wallpapers";
+import { PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 
 /** Where the ids of the migrations this box has already run are kept. */
 export const BOOT_MIGRATIONS_KEY = "clawbox_boot_migrations";
@@ -141,4 +152,142 @@ export function dropRemovedConsentMigration(deps: {
       return changed;
     },
   };
+}
+
+/**
+ * The box-wide wallpaper selection, spelled the way the STORE holds it.
+ *
+ * `wp_id` is a preference, and a preference wears the `pref:` prefix that
+ * POST /setup-api/preferences puts on it before `config-store` ever sees it
+ * (src/lib/preference-schema.ts). A migration reading the bare `wp_id` would
+ * find nothing on every box in the world, answer "nothing to do", and be
+ * marked done — silently, once, for ever.
+ */
+export const WALLPAPER_STORE_KEY = `${PREFERENCE_KEY_PREFIX}wp_id`;
+
+/**
+ * The one value the wallpaper migrations move a box OFF, and the reason they
+ * are safe.
+ *
+ * Both editions opened on the ClawBox crab before either had a brand of its
+ * own — Hermes until 2026-08-11 (`3af5726c`), OpenClaw until 2026-09-15
+ * (`bf96c228`) — and the desktop of the day PERSISTED whatever it opened on:
+ * the harness probe seeded `wp_id` and the next appearance write sent it to
+ * the box-wide store. So this id in `wp_id` is what "was updated before the
+ * brand landed, and has never chosen since" looks like from here.
+ *
+ * Nothing else is touched. Not an absent key (that box already PAINTS the new
+ * default — `renderedWallpaperId(null, …)` — so there is nothing to move), not
+ * a `custom-<n>` the owner uploaded, not `deep-space`, not the other edition's
+ * art, not the new default itself, and not a value this build cannot read.
+ * The migration asks one question and acts on one answer.
+ */
+export const PRE_BRAND_WALLPAPER_ID = CLAWBOX_WALLPAPER_ID;
+
+export interface WallpaperDefaultMigrationDeps {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown) => Promise<void>;
+  /**
+   * The DEVICE's own answer to which edition it is, in the shape
+   * `/setup-api/harness/active` gives the browser — `active` plus the
+   * `activeKnown` that says whether `active` is a fact or the "openclaw"
+   * fallback. Handed in, and read through {@link brandingHarness}, so the
+   * one fail-closed rule the desktop paints by is the one this writes by.
+   */
+  harness: () => Promise<{ active?: string | null; activeKnown?: boolean } | null>;
+}
+
+/**
+ * Move a box that is still wearing the pre-brand default onto the wallpaper
+ * this edition has shipped as its default since.
+ *
+ * WHY IT IS SAFE TO RUN AT ALL. The desktop only ever paints a default; the
+ * value in `wp_id` was written by a build that did not yet draw that line, and
+ * a box on the old picture today has no way back to its edition's own art short
+ * of somebody opening Settings. That is the whole of the repair.
+ *
+ * WHY IT MAY REFUSE TO ANSWER. `brandingHarness` gives null for every state
+ * that means NOBODY HAS SAID YET — the edition lock unreadable, a licensed
+ * `dual` box whose config store could not be read — and that null is not
+ * permission to guess: both of those reads fall back to "openclaw", so a guess
+ * taken here writes ClawBox art across a Hermes customer's screen, box-wide and
+ * permanently. It is also not a reason to record the question as asked, because
+ * the boot that hits it is not a rare one: `install.sh` truncates and rewrites
+ * the edition lock on EVERY update, and the update's second half holds the
+ * config store open under post_update — so the first boot carrying this change
+ * is exactly the boot most likely to land in the gap. So it THROWS, which is
+ * the register's one channel for "ask me again": {@link runBootMigrations}
+ * logs it, leaves it unmarked, runs the rest, and the next boot tries again.
+ * Nothing escapes to the boot — that guarantee lives in the runner, not here.
+ *
+ * A store that will not answer takes the same path and for the same reason: a
+ * migration marked done against a store that could not be read is a box left on
+ * the old picture with no second chance.
+ *
+ * EVERY OTHER ANSWER IS FINAL. The other edition, an absent key, an uploaded
+ * picture, a deliberate `deep-space`, a box already on the new default — all of
+ * them are "asked and answered", recorded, and never asked again. The marker
+ * records the QUESTION, which is the only thing that stops the next boot
+ * undoing a choice the owner makes tomorrow.
+ */
+function wallpaperDefaultMigration(
+  spec: { id: string; label: string; edition: string; to: string },
+  deps: WallpaperDefaultMigrationDeps,
+): BootMigration {
+  return {
+    id: spec.id,
+    label: spec.label,
+    run: async () => {
+      const harness = brandingHarness(await deps.harness());
+      if (harness === null) {
+        throw new Error(
+          "the device has named no edition, so its branding would be a guess; asking again at the next boot",
+        );
+      }
+      // Not this edition's box. A real answer, so it is recorded: the question
+      // is settled and re-asking it at every boot for the life of the device
+      // buys nothing.
+      if (harness !== spec.edition) return false;
+      const saved = await deps.get(WALLPAPER_STORE_KEY);
+      if (saved !== PRE_BRAND_WALLPAPER_ID) return false;
+      await deps.set(WALLPAPER_STORE_KEY, spec.to);
+      return true;
+    },
+  };
+}
+
+/** OpenClaw: the crab picture a pre-2026-09-15 box still holds → Lobster Orbital. */
+export function openclawWallpaperDefaultMigration(deps: WallpaperDefaultMigrationDeps): BootMigration {
+  return wallpaperDefaultMigration(
+    {
+      id: "wallpaper-default-openclaw",
+      label: `moved this box off the wallpaper it was updated with onto the OpenClaw default (${LOBSTER_ORBITAL_WALLPAPER.id})`,
+      edition: "openclaw",
+      to: LOBSTER_ORBITAL_WALLPAPER.id,
+    },
+    deps,
+  );
+}
+
+/**
+ * Hermes: the same, to the Hermes art.
+ *
+ * A Hermes box holding the crab has been PAINTING the Hermes picture since the
+ * built-in list was scoped to the edition (`d0d96507`) — the other product's
+ * art is not in its list, so `renderedWallpaperId` already falls back. What is
+ * repaired here is the store still naming artwork the owner's 2026-09-06 ruling
+ * says a Hermes device must not carry: a selection that matches nothing in its
+ * own Appearance grid, and the picture the box would wear again the moment
+ * anything widened that list.
+ */
+export function hermesWallpaperDefaultMigration(deps: WallpaperDefaultMigrationDeps): BootMigration {
+  return wallpaperDefaultMigration(
+    {
+      id: "wallpaper-default-hermes",
+      label: `moved this box off the wallpaper it was updated with onto the Hermes default (${HERMES_WALLPAPER_ID})`,
+      edition: "hermes",
+      to: HERMES_WALLPAPER_ID,
+    },
+    deps,
+  );
 }

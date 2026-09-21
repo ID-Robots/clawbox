@@ -260,9 +260,11 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration } = require('./lib/boot-migrations')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DATA_DIR, get, set } = require('./lib/config-store')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getActiveHarnessSource } = require('./lib/harness')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fsp = require('fs').promises
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -278,7 +280,36 @@ export async function register() {
         throw err
       }
     }
-    const ran = await runBootMigrations([dropRemovedConsentMigration({ set, removeFile: removeDataFile })], { get, set })
+    // Which edition this device is, in the shape `/setup-api/harness/active`
+    // hands the browser — `activeKnown` is that route's own inverted
+    // `defaulted`, so the two wallpaper migrations below apply the very rule
+    // (`brandingHarness`) the desktop paints by.
+    //
+    // ASKED ONCE for the whole boot, and the promise shared: `install.sh`
+    // truncates and rewrites the edition lock during an update, so two reads a
+    // moment apart can disagree, and two migrations that disagree about which
+    // box this is would each act on half an answer. One answer, both migrations
+    // — and if it cannot be had, both defer together and the next boot asks.
+    let harnessAnswer: Promise<{ active: string; activeKnown: boolean }> | null = null
+    const harness = () => {
+      if (!harnessAnswer) {
+        harnessAnswer = getActiveHarnessSource().then(
+          ({ active, defaulted }: { active: string; defaulted: boolean }) => ({ active, activeKnown: !defaulted }),
+        )
+      }
+      return harnessAnswer
+    }
+    const ran = await runBootMigrations(
+      [
+        dropRemovedConsentMigration({ set, removeFile: removeDataFile }),
+        // The v4 wallpaper defaults. A box updated before its edition's own
+        // brand landed still holds the picture it opened on back then, and
+        // nothing but an owner opening Settings would ever move it.
+        openclawWallpaperDefaultMigration({ get, set, harness }),
+        hermesWallpaperDefaultMigration({ get, set, harness }),
+      ],
+      { get, set },
+    )
     if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
   } catch (err) {
     console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
