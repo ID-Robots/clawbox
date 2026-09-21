@@ -487,8 +487,17 @@ function describePipeline(pipeline: RunPayload["pipeline"]): string | null {
 function pipelineSentence(pipeline: NonNullable<RunPayload["pipeline"]>, stage: string): string {
   switch (pipeline.status) {
     case "complete":
-      return "Finished. This ClawBox fetched what it deployed and found what the task asked for on the page.";
+      // What the box ACTUALLY did. With no deployment integration on this
+      // build, decidePipeline skips all four deploy-and-verify stages and
+      // advances straight to `complete` — so the old sentence ("fetched what
+      // it deployed and found what the task asked for on the page") would have
+      // the assistant tell the owner their work was deployed and checked when
+      // nothing was fetched and no page was looked at. Same rule as everywhere
+      // else here: the box does not claim work it did not do.
+      return "Finished the review and improvement laps. This ClawBox cannot deploy, so the deploy and check stages were SKIPPED — nothing was published and no deployed page was looked at. Do not tell the user their work is live.";
     case "waiting_owner":
+      // Kept for a record written before the integration was removed: the
+      // status cannot be reached on this build, but an old run still carries it.
       return "Waiting for the USER to approve the production deployment. Tell them; there is no tool for it and you must not claim to have done it.";
     case "running":
       return `Still going, at the ${stage} stage. Do not wait for it — the device shows its progress and tells the user when it ends.`;

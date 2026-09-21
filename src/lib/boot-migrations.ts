@@ -125,9 +125,18 @@ export const REMOVED_INCIDENTS_FILE = "incidents.json";
 /**
  * Take the removed programme's leftovers off a box that updated past it.
  *
- * Both halves are best-effort and independent: a store that will not give up
- * the key must not keep the log file on disk, and a log file that cannot be
- * removed must not leave the consent behind.
+ * Both halves are independent: a store that will not give up the key must not
+ * keep the log file on disk, and a log file that cannot be removed must not
+ * leave the consent behind. So both are ATTEMPTED whatever the other does.
+ *
+ * Independent is not the same as best-effort, though. `runBootMigrations`
+ * marks a migration done the moment `run()` resolves, and a done migration is
+ * never offered again — so swallowing a failure here would leave the consent
+ * key, or the log file, on the box for the rest of its life. Whichever half
+ * failed, the migration REJECTS once both have had their turn, which is this
+ * register's channel for "ask me again at the next boot" (the wallpaper
+ * migrations use it for an edition they cannot read). The half that succeeded
+ * is idempotent, so the retry costs nothing.
  */
 export function dropRemovedConsentMigration(deps: {
   set: (key: string, value: unknown) => Promise<void>;
@@ -138,17 +147,24 @@ export function dropRemovedConsentMigration(deps: {
     label: "removed the stored consent and error log of a feature this build no longer has",
     run: async () => {
       let changed = false;
+      // The first failure, kept so the second half still gets its turn before
+      // the migration rejects. `??=` rather than reassignment: the first cause
+      // is the more useful one to print.
+      let failure: unknown;
       try {
         await deps.set(REMOVED_CONSENT_KEY, undefined);
         changed = true;
       } catch (err) {
         console.error("[boot-migrations] Could not drop the removed feature's consent:", err instanceof Error ? err.message : err);
+        failure ??= err;
       }
       try {
         if (await deps.removeFile(REMOVED_INCIDENTS_FILE)) changed = true;
       } catch (err) {
         console.error("[boot-migrations] Could not remove the incident log:", err instanceof Error ? err.message : err);
+        failure ??= err;
       }
+      if (failure !== undefined) throw failure;
       return changed;
     },
   };

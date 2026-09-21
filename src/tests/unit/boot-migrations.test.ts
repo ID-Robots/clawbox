@@ -135,18 +135,48 @@ describe("the removed feature cleanup", () => {
   it("still drops the key when the log file cannot be removed, and the other way round", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
+      // Each half gets its turn whatever the other did — and the half that
+      // could not run makes the migration REJECT, so the next boot retries it.
       const s = store({ [REMOVED_CONSENT_KEY]: "ask" });
-      await dropRemovedConsentMigration({
+      await expect(dropRemovedConsentMigration({
         set: s.set,
         removeFile: async () => { throw new Error("read-only"); },
-      }).run();
+      }).run()).rejects.toThrow("read-only");
       expect(REMOVED_CONSENT_KEY in s.values).toBe(false);
 
       const removeFile = vi.fn(async () => true);
-      await dropRemovedConsentMigration({
+      await expect(dropRemovedConsentMigration({
         set: async () => { throw new Error("unwritable"); },
         removeFile,
-      }).run();
+      }).run()).rejects.toThrow("unwritable");
+      expect(removeFile).toHaveBeenCalledWith(REMOVED_INCIDENTS_FILE);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("is not marked done while half of it keeps failing, and is marked once it lands", async () => {
+    // The point of the rejection: `runBootMigrations` records a migration the
+    // moment run() RESOLVES, and a recorded migration is never offered again.
+    // Swallowing the failure would leave the consent key on the box for good.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const s = store({ [REMOVED_CONSENT_KEY]: "auto" });
+      const failing = dropRemovedConsentMigration({
+        set: s.set,
+        removeFile: async () => { throw new Error("read-only"); },
+      });
+      await runBootMigrations([failing], { get: s.get, set: s.set });
+      expect(parseRanMigrations(s.values[BOOT_MIGRATIONS_KEY])).not.toContain("drop-removed-consent");
+
+      // The next boot, with the disk writable again.
+      const removeFile = vi.fn(async () => true);
+      const ran = await runBootMigrations(
+        [dropRemovedConsentMigration({ set: s.set, removeFile })],
+        { get: s.get, set: s.set },
+      );
+      expect(ran).toContain("drop-removed-consent");
+      expect(parseRanMigrations(s.values[BOOT_MIGRATIONS_KEY])).toContain("drop-removed-consent");
       expect(removeFile).toHaveBeenCalledWith(REMOVED_INCIDENTS_FILE);
     } finally {
       errors.mockRestore();

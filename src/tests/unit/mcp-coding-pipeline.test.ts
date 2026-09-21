@@ -147,10 +147,22 @@ describe("starting one", () => {
 });
 
 describe("reading one back", () => {
-  it("says FINISHED only for what it means: the box looked at the page", async () => {
+  it("says FINISHED only for what it means: nothing was published and no page was looked at", async () => {
+    // This test has always been about the box not claiming work it did not do.
+    // It used to hold FINISHED to "the box looked at the page", because the
+    // pipeline ended in a deploy the box then fetched. With no deployment
+    // integration, decidePipeline skips all four deploy-and-verify stages and
+    // goes straight to `complete` — so the same rule now demands the OPPOSITE
+    // sentence, and demands it loudly: an assistant that read the old wording
+    // would tell the owner their work is live.
     const text = await status(pipeline());
     expect(text).toContain("[delivery pipeline]");
-    expect(text).toContain("fetched what it deployed");
+    expect(text).toContain("SKIPPED");
+    expect(text).toContain("nothing was published");
+    expect(text).toMatch(/Do not tell the user their work is live/);
+    expect(text).not.toContain("fetched what it deployed");
+    // The verification line a stored record still carries is still read back
+    // honestly — this run has one from before the stages went.
     expect(text).toContain("judged by the strings it had to contain");
   });
 
