@@ -135,7 +135,13 @@ describe("starting one", () => {
     const described = String(shape.delivery_pipeline.description);
     expect(described).toMatch(/review/i);
     expect(described).toMatch(/improvement/i);
-    expect(described).toMatch(/production/i);
+    // It used to have to say "production", because the flow ended in a
+    // production deploy. With no deployment integration on the box there is no
+    // production to name — so the description owes the caller the OTHER half
+    // of the truth instead: that the deploy-and-check stages are skipped. A
+    // model told only "run the delivery flow" would switch this on expecting a
+    // deployed page, which is the mistake this test exists to catch.
+    expect(described).toMatch(/skipped/i);
     expect(described).toMatch(/Leave it off/i);
   });
 });

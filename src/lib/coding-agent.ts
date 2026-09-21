@@ -8328,13 +8328,6 @@ function advancePipeline(runId: string, work: () => Promise<void>): void {
   trackSettleWork(queuePipelineWork(runId, work));
 }
 
-/** The project this pipeline belongs to — never the run's own worktree copy. */
-async function pipelineProject(run: CodingRun): Promise<{ scope: string; directory: string } | null> {
-  const directory = projectDirectoryOf(run);
-  const scope = await projectScopeFor({ projectId: run.projectId, directory });
-  return scope ? { scope, directory } : null;
-}
-
 /**
  * Can this box run the whole pipeline at all?
  *
