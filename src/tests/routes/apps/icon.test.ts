@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("fs/promises", () => ({
   default: {
+    open: vi.fn(),
     stat: vi.fn(),
     readFile: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
@@ -24,15 +25,31 @@ vi.stubGlobal("fetch", mockFetch);
 import fs from "fs/promises";
 import { getAll } from "@/lib/config-store";
 
-/** A local icon on disk, as `fs.stat` would describe it. */
+/**
+ * A local icon on disk, as the route reads one: ONE descriptor — `open`, then
+ * `fstat` for the validator and `readFile` on that same handle for the body
+ * (TASK-1014, CodeQL js/file-system-race). It used to `stat(path)` and then
+ * `readFile(path)`, two lookups of the same name.
+ *
+ * The handle DELEGATES to the `stat` and `readFile` mocks rather than closing
+ * over this call's values, so re-arming the pair mid-test still changes what
+ * the route sees, and `fs.readFile`'s call count still counts the reads the
+ * route actually made.
+ */
 function localIcon(size: number, mtimeMs: number) {
   vi.mocked(fs.stat).mockResolvedValue({ size, mtimeMs } as never);
   vi.mocked(fs.readFile).mockResolvedValue(Buffer.from("PNG") as never);
+  vi.mocked(fs.open).mockResolvedValue({
+    stat: () => fs.stat(""),
+    readFile: () => fs.readFile(""),
+    close: () => Promise.resolve(),
+  } as never);
 }
 
 function noLocalIcon() {
   vi.mocked(fs.stat).mockRejectedValue(new Error("ENOENT"));
   vi.mocked(fs.readFile).mockRejectedValue(new Error("ENOENT"));
+  vi.mocked(fs.open).mockRejectedValue(new Error("ENOENT"));
 }
 
 /** Let the fire-and-forget disk write (or its absence) settle. */

@@ -27,7 +27,15 @@ async function listen(): Promise<{ port: number; close: () => Promise<void> }> {
 const pushed = vi.hoisted(() => [] as Record<string, unknown>[]);
 vi.mock("@/lib/pending-actions", () => ({ pushPendingAction: async (a: Record<string, unknown>) => { pushed.push(a); return a; } }));
 // The registry draws an icon for every app that reaches the desktop; not here.
-vi.mock("@/lib/webapp-icon", () => ({ ensureWebappIcon: async () => undefined }));
+// Only `ensureWebappIcon` is stubbed — the rest of the module is the real one,
+// because `registerWebappInPreferences` also rebuilds the id through the real
+// `safeAppId` (TASK-1014), and that guard is part of what these tests prove. A
+// bare factory silently dropped it and the registration failed on the missing
+// export instead.
+vi.mock("@/lib/webapp-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/webapp-icon")>()),
+  ensureWebappIcon: async () => undefined,
+}));
 
 let lib: typeof import("@/lib/app-proxy");
 let base: string;
